@@ -14,9 +14,13 @@ repository.workspace = true
 ash = "0.38.0"
 bytemuck = { version = "1.25.0", features = ["derive", "extern_crate_alloc"] }
 exr = "1.74.0"
+glam = { version = "0.33.2", features = ["bytemuck"] }
 gpu-allocator = "0.28.0"
 log = "0.4.33"
 thiserror = "2.0.18"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+env_logger = "0.11.11"

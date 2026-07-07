@@ -124,3 +124,17 @@ Discovered during step 3: Mesa's lavapipe (llvmpipe) genuinely implements
 lavapipe in a GPU-less environment would make golden tests and perf numbers lie.
 *Noted trade-off:* this forgoes running real render tests on CI runners via lavapipe;
 if that ever becomes attractive, it needs its own decision entry reversing this one.
+
+---
+
+## 2026-07-07 — acceleration structures
+
+### D-017: Geometric normals via buffer fetch, not `VK_KHR_ray_tracing_position_fetch`
+The scene keeps every mesh's vertex/index buffers GPU-resident; the primary kernel
+looks up the hit triangle's corners through buffer device addresses and computes the
+geometric normal itself. The position-fetch extension would return hit-triangle
+vertices directly, but adopting it would grow the device baseline beyond the D-015
+set for a convenience — and it only covers *positions*: the moment shading needs UVs
+or vertex normals (M2), resident geometry buffers are required anyway, so this is
+the shape the renderer ends up with regardless. *Trade-off:* slightly more kernel
+code and memory traffic in M0.

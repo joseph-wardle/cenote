@@ -3,8 +3,8 @@
 //! [`Context`] owns instance→device bring-up: validation wiring, physical
 //! device selection against the ray-tracing baseline, one compute queue, and
 //! the memory allocator. Code outside `gpu` never touches raw `vk` handles
-//! or writes `unsafe`. Buffers, one-shot submits, and compute pipelines live
-//! in submodules; acceleration structures join in m0-plan step 6.
+//! or writes `unsafe`. Buffers, one-shot submits, compute pipelines, and
+//! acceleration structures live in submodules.
 //!
 //! There is no backend abstraction here and there never will be (charter
 //! non-goal): a reader who knows Vulkan should be reading Vulkan.
@@ -18,10 +18,12 @@ use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 
 use crate::error::{Error, Result};
 
+mod accel;
 mod buffer;
 mod pipeline;
 mod submit;
 
+pub use accel::{AccelerationStructure, TlasInstance};
 pub use buffer::{Buffer, MemoryLocation};
 pub use pipeline::ComputePipeline;
 
@@ -53,6 +55,9 @@ pub struct Context {
     // Context (checked with a strong-count log in Drop).
     allocator: ManuallyDrop<Arc<Mutex<Allocator>>>,
     device: ash::Device,
+    // Extension function table for VK_KHR_acceleration_structure; plain
+    // function pointers, nothing to destroy.
+    accel: ash::khr::acceleration_structure::Device,
     queue: vk::Queue,
     queue_family_index: u32,
     physical_device: vk::PhysicalDevice,
@@ -120,6 +125,7 @@ impl Context {
         log::info!("selected {summary}");
 
         let device = create_device(instance, physical_device, queue_family_index)?;
+        let accel = ash::khr::acceleration_structure::Device::new(instance, &device);
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
 
         let allocator = Allocator::new(&AllocatorCreateDesc {
@@ -141,6 +147,7 @@ impl Context {
         Ok(Self {
             allocator: ManuallyDrop::new(Arc::new(Mutex::new(allocator))),
             device,
+            accel,
             queue,
             queue_family_index,
             physical_device,
@@ -534,6 +541,9 @@ fn describe_device(
 /// everywhere else, so plain `cargo test` works on GPU-less CI.
 #[cfg(test)]
 pub(crate) fn test_context() -> Option<Context> {
+    // Surface validation-messenger output in tests: run e.g.
+    // `RUST_LOG=warn cargo test -- --nocapture` to see it.
+    let _ = env_logger::builder().is_test(true).try_init();
     match Context::new() {
         Ok(context) => Some(context),
         Err(err) => {
