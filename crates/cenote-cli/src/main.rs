@@ -30,7 +30,8 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     let gpu = cenote::gpu::Context::new()?;
-    let pixels = cenote::render::render(&gpu, args.width, args.height)?;
+    let scene = cenote::scene::Scene::demo(&gpu)?;
+    let pixels = cenote::render::render(&gpu, &scene, args.width, args.height)?;
     cenote::output::write_exr(&args.out, args.width, args.height, &pixels)?;
 
     println!(

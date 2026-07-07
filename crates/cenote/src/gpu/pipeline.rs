@@ -1,22 +1,28 @@
 //! Compute pipelines and blocking dispatch.
 //!
 //! Pipelines follow the BDA-first binding model (D-006): kernels reach every
-//! buffer through device addresses in a single push-constant struct, so M0
-//! pipelines carry no descriptor sets at all. The TLAS descriptor set — the
-//! one resource that cannot be an address — joins in m0-plan step 7.
+//! buffer through device addresses in a single push-constant struct. The one
+//! resource that cannot be an address is the scene TLAS, so every pipeline
+//! carries the binding model's single descriptor set — set 0, binding 0 —
+//! and [`Context::dispatch`] writes the TLAS into it.
 
 use std::ffi::CStr;
+use std::slice;
 
 use ash::vk;
 
 use crate::error::Result;
-use crate::gpu::Context;
+use crate::gpu::{AccelerationStructure, Context};
 
-/// A compute pipeline plus its layout, destroyed on drop (before the
-/// [`Context`], like every `gpu` resource).
+/// A compute pipeline plus its layout and TLAS descriptor set, destroyed on
+/// drop (before the [`Context`], like every `gpu` resource).
 pub struct ComputePipeline {
     handle: vk::Pipeline,
     layout: vk::PipelineLayout,
+    set_layout: vk::DescriptorSetLayout,
+    pool: vk::DescriptorPool,
+    /// The binding model's one descriptor set; freed with `pool`.
+    set: vk::DescriptorSet,
     push_constant_size: u32,
     device: ash::Device,
 }
@@ -26,8 +32,20 @@ impl Drop for ComputePipeline {
         unsafe {
             self.device.destroy_pipeline(self.handle, None);
             self.device.destroy_pipeline_layout(self.layout, None);
+            self.device.destroy_descriptor_pool(self.pool, None);
+            self.device
+                .destroy_descriptor_set_layout(self.set_layout, None);
         }
     }
+}
+
+/// The TLAS descriptor set under construction: layout, pool, and the one
+/// allocated set. Plain handles — ownership passes to the [`ComputePipeline`]
+/// on success, back to the caller's cleanup on failure.
+struct TlasDescriptors {
+    set_layout: vk::DescriptorSetLayout,
+    pool: vk::DescriptorPool,
+    set: vk::DescriptorSet,
 }
 
 impl Context {
@@ -38,8 +56,8 @@ impl Context {
     ///
     /// # Errors
     ///
-    /// [`crate::Error::Vulkan`] if shader-module, layout, or pipeline
-    /// creation fails.
+    /// [`crate::Error::Vulkan`] if shader-module, descriptor, layout, or
+    /// pipeline creation fails.
     ///
     /// # Panics
     ///
@@ -76,12 +94,83 @@ impl Context {
         entry: &CStr,
         push_constant_size: u32,
     ) -> Result<ComputePipeline> {
+        let descriptors = self.create_tlas_descriptors()?;
+        // From here every failure must destroy the descriptor objects:
+        // funnel through one exit point.
+        match self.create_with_descriptors(module, entry, push_constant_size, &descriptors) {
+            Ok(pipeline) => Ok(pipeline),
+            Err(err) => {
+                let device = self.device();
+                unsafe {
+                    device.destroy_descriptor_pool(descriptors.pool, None);
+                    device.destroy_descriptor_set_layout(descriptors.set_layout, None);
+                }
+                Err(err)
+            }
+        }
+    }
+
+    /// Create the single descriptor set of the binding model (D-006):
+    /// binding 0 = the scene TLAS. Its contents are written at dispatch time.
+    fn create_tlas_descriptors(&self) -> Result<TlasDescriptors> {
+        let device = self.device();
+        let binding = vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE);
+        let layout_info =
+            vk::DescriptorSetLayoutCreateInfo::default().bindings(slice::from_ref(&binding));
+        let set_layout = unsafe { device.create_descriptor_set_layout(&layout_info, None)? };
+
+        let pool_size = vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+            .descriptor_count(1);
+        let pool_info = vk::DescriptorPoolCreateInfo::default()
+            .max_sets(1)
+            .pool_sizes(slice::from_ref(&pool_size));
+        let pool = unsafe { device.create_descriptor_pool(&pool_info, None) };
+        let pool = match pool {
+            Ok(pool) => pool,
+            Err(err) => {
+                unsafe { device.destroy_descriptor_set_layout(set_layout, None) };
+                return Err(err.into());
+            }
+        };
+
+        let alloc_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(pool)
+            .set_layouts(slice::from_ref(&set_layout));
+        match unsafe { device.allocate_descriptor_sets(&alloc_info) } {
+            Ok(sets) => Ok(TlasDescriptors {
+                set_layout,
+                pool,
+                set: sets[0],
+            }),
+            Err(err) => {
+                unsafe {
+                    device.destroy_descriptor_pool(pool, None);
+                    device.destroy_descriptor_set_layout(set_layout, None);
+                }
+                Err(err.into())
+            }
+        }
+    }
+
+    fn create_with_descriptors(
+        &self,
+        module: vk::ShaderModule,
+        entry: &CStr,
+        push_constant_size: u32,
+        descriptors: &TlasDescriptors,
+    ) -> Result<ComputePipeline> {
         let device = self.device();
         let range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
             .size(push_constant_size);
         let layout_info = vk::PipelineLayoutCreateInfo::default()
-            .push_constant_ranges(std::slice::from_ref(&range));
+            .set_layouts(slice::from_ref(&descriptors.set_layout))
+            .push_constant_ranges(slice::from_ref(&range));
         let layout = unsafe { device.create_pipeline_layout(&layout_info, None)? };
 
         let stage = vk::PipelineShaderStageCreateInfo::default()
@@ -92,17 +181,16 @@ impl Context {
             .stage(stage)
             .layout(layout);
         let pipelines = unsafe {
-            device.create_compute_pipelines(
-                vk::PipelineCache::null(),
-                std::slice::from_ref(&info),
-                None,
-            )
+            device.create_compute_pipelines(vk::PipelineCache::null(), slice::from_ref(&info), None)
         };
 
         match pipelines {
             Ok(pipelines) => Ok(ComputePipeline {
                 handle: pipelines[0],
                 layout,
+                set_layout: descriptors.set_layout,
+                pool: descriptors.pool,
+                set: descriptors.set,
                 push_constant_size,
                 device: device.clone(),
             }),
@@ -118,10 +206,11 @@ impl Context {
         }
     }
 
-    /// Bind `pipeline`, set its push constants, dispatch `group_counts`
-    /// workgroups, and block until the GPU finishes (D-007). The fence wait
-    /// makes the kernel's writes available, so a subsequent
-    /// [`Context::download_buffer`] needs no barrier.
+    /// Bind `pipeline` with `tlas` in its descriptor set, set the push
+    /// constants, dispatch `group_counts` workgroups, and block until the
+    /// GPU finishes (D-007). The fence wait makes the kernel's writes
+    /// available, so a subsequent [`Context::download_buffer`] needs no
+    /// barrier.
     ///
     /// # Errors
     ///
@@ -135,6 +224,7 @@ impl Context {
     pub fn dispatch(
         &self,
         pipeline: &ComputePipeline,
+        tlas: &AccelerationStructure,
         push_constants: &[u8],
         group_counts: [u32; 3],
     ) -> Result<()> {
@@ -143,8 +233,34 @@ impl Context {
             pipeline.push_constant_size,
             "push constants don't match the pipeline's declared size"
         );
+        // (Re)writing the set before recording is safe: blocking submits
+        // (D-007) mean it is never in flight here.
+        let handles = [tlas.handle()];
+        let mut tlas_write = vk::WriteDescriptorSetAccelerationStructureKHR::default()
+            .acceleration_structures(&handles);
+        let write = vk::WriteDescriptorSet::default()
+            .dst_set(pipeline.set)
+            .dst_binding(0)
+            .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+            // Not inferred from the extension struct: without this the write
+            // is a zero-descriptor no-op.
+            .descriptor_count(1)
+            .push_next(&mut tlas_write);
+        unsafe {
+            self.device()
+                .update_descriptor_sets(slice::from_ref(&write), &[]);
+        }
+
         self.submit_once(|device, cmd| unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline.handle);
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                pipeline.layout,
+                0,
+                slice::from_ref(&pipeline.set),
+                &[],
+            );
             device.cmd_push_constants(
                 cmd,
                 pipeline.layout,

@@ -1,12 +1,13 @@
 //! The procedural M0 scene (decision D-008): a subdivided icosphere resting
-//! on a ground plane — two BLASes, one TLAS with two instances, zero file
-//! I/O (real scene formats are M2's job). The sphere is deliberately faceted:
-//! geometric normals rendered as color (step 7) make winding or handedness
-//! mistakes instantly visible.
+//! on a ground plane — two BLASes, one TLAS with two instances, a fixed
+//! pinhole camera, zero file I/O (real scene formats are M2's job). The
+//! sphere is deliberately faceted: geometric normals rendered as color make
+//! winding or handedness mistakes instantly visible.
 
 use std::collections::HashMap;
 
 use ash::vk;
+use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 
 use crate::error::Result;
@@ -25,10 +26,18 @@ pub struct Mesh {
 /// them to compute geometric normals (D-017).
 struct GpuMesh {
     blas: AccelerationStructure,
-    #[expect(dead_code, reason = "read via the geometry table from step 7")]
     vertices: Buffer,
-    #[expect(dead_code, reason = "read via the geometry table from step 7")]
     indices: Buffer,
+}
+
+/// One entry of the geometry lookup table, indexed by instance custom index.
+/// Mirrors `struct GeometryRecord` in `shaders/primary.slang` — the kernel
+/// follows these addresses to fetch the hit triangle's corners (D-017).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GeometryRecord {
+    positions: vk::DeviceAddress,
+    indices: vk::DeviceAddress,
 }
 
 /// The scene, resident on the GPU and ready to trace against.
@@ -36,11 +45,14 @@ pub struct Scene {
     // Declared before `meshes`: the TLAS dies before the BLASes its
     // instances reference.
     tlas: AccelerationStructure,
+    /// One [`GeometryRecord`] per instance custom index.
+    geometry: Buffer,
     #[expect(
         dead_code,
-        reason = "GPU residency; the geometry table reads it from step 7"
+        reason = "GPU residency: the BLASes and the buffers `geometry` points into"
     )]
     meshes: Vec<GpuMesh>,
+    camera: Camera,
 }
 
 impl Scene {
@@ -70,13 +82,101 @@ impl Scene {
             },
         ];
         let tlas = gpu.build_tlas("scene.tlas", &instances)?;
-        Ok(Self { tlas, meshes })
+
+        let records: Vec<GeometryRecord> = meshes
+            .iter()
+            .map(|mesh| GeometryRecord {
+                positions: mesh.vertices.device_address(),
+                indices: mesh.indices.device_address(),
+            })
+            .collect();
+        let geometry = gpu.upload_buffer(
+            "scene.geometry",
+            bytemuck::cast_slice(&records),
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+        )?;
+
+        // Slightly above and behind the sphere (center (0, 1, 0)), looking
+        // down at it so the ground plane fills the lower frame.
+        let camera = Camera {
+            position: Vec3::new(0.0, 1.8, 5.0),
+            look_at: Vec3::new(0.0, 1.0, 0.0),
+            vfov_degrees: 40.0,
+        };
+
+        Ok(Self {
+            tlas,
+            geometry,
+            meshes,
+            camera,
+        })
     }
 
     /// The scene's TLAS, ready to bind for ray queries.
     #[must_use]
     pub fn tlas(&self) -> &AccelerationStructure {
         &self.tlas
+    }
+
+    /// The geometry lookup table: one `{positions, indices}` address pair
+    /// per instance custom index (D-017).
+    #[must_use]
+    pub fn geometry(&self) -> &Buffer {
+        &self.geometry
+    }
+
+    /// The scene's camera.
+    #[must_use]
+    pub fn camera(&self) -> &Camera {
+        &self.camera
+    }
+}
+
+/// A pinhole camera, described by where it sits and what it looks at.
+/// World up is +Y (crate convention); the view axis must not be vertical.
+pub struct Camera {
+    /// Eye position, meters.
+    pub position: Vec3,
+    /// The point the view axis passes through.
+    pub look_at: Vec3,
+    /// Vertical field of view, degrees.
+    pub vfov_degrees: f32,
+}
+
+/// A camera's ray-generation basis: the kernel builds each pixel's ray as
+/// `normalize(forward + ndc.x · right + ndc.y · up)` with NDC in [-1, 1],
+/// +y up. `forward` is unit length; `right` and `up` are scaled by the
+/// field of view and aspect ratio.
+pub struct RayBasis {
+    /// Screen-right, scaled by `tan(vfov/2) · aspect`.
+    pub right: Vec3,
+    /// Screen-up, scaled by `tan(vfov/2)`.
+    pub up: Vec3,
+    /// Unit view direction.
+    pub forward: Vec3,
+}
+
+impl Camera {
+    /// The ray-generation basis for a target with the given aspect ratio
+    /// (width / height).
+    ///
+    /// # Panics
+    ///
+    /// On a degenerate camera — `position == look_at`, or a view axis
+    /// parallel to world up. Both are programmer bugs (D-010).
+    #[must_use]
+    pub fn basis(&self, aspect: f32) -> RayBasis {
+        let forward = (self.look_at - self.position).normalize();
+        assert!(forward.is_finite(), "camera position and look_at coincide");
+        let right = forward.cross(Vec3::Y).normalize();
+        assert!(right.is_finite(), "camera view axis is vertical");
+        let up = right.cross(forward);
+        let half_height = (self.vfov_degrees.to_radians() / 2.0).tan();
+        RayBasis {
+            right: right * half_height * aspect,
+            up: up * half_height,
+            forward,
+        }
     }
 }
 
@@ -255,6 +355,28 @@ mod tests {
             );
             assert!((b - a).cross(c - a).y > 0.0);
         }
+    }
+
+    /// The ray basis must be orthogonal, oriented (up skyward, right = +X
+    /// when looking down −Z), and scaled by fov and aspect — the kernel
+    /// trusts it blindly.
+    #[test]
+    fn camera_basis_is_orthogonal_and_fov_scaled() {
+        let camera = Camera {
+            position: Vec3::new(0.0, 2.0, 5.0),
+            look_at: Vec3::new(0.0, 1.0, 0.0),
+            vfov_degrees: 90.0,
+        };
+        let basis = camera.basis(2.0);
+        assert!((basis.forward.length() - 1.0).abs() < 1e-6);
+        assert!(basis.forward.dot(basis.right).abs() < 1e-6);
+        assert!(basis.forward.dot(basis.up).abs() < 1e-6);
+        assert!(basis.right.dot(basis.up).abs() < 1e-6);
+        // tan(90° / 2) = 1, so |up| = 1 and |right| = aspect.
+        assert!((basis.up.length() - 1.0).abs() < 1e-6);
+        assert!((basis.right.length() - 2.0).abs() < 1e-6);
+        assert!(basis.up.y > 0.0);
+        assert!(basis.right.x > 0.0);
     }
 
     #[test]

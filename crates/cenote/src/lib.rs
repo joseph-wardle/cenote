@@ -13,8 +13,8 @@
 //! |-----------|------|--------|
 //! | `gpu`     | Unsafe-Vulkan quarantine: device context, buffers, submits, pipelines, acceleration structures. Code outside this module does not touch raw `vk` handles. | done |
 //! | `shaders` | Embedded SPIR-V registry, `slangc` runtime recompile, hot-reload watching | embedding done; reload lands step 8 |
-//! | `scene`   | Procedural test geometry and camera (real scene I/O arrives in M2) | sphere + plane GPU-resident; camera step 7 |
-//! | `render`  | Frame orchestration: dispatch the primary kernel, read pixels back | fill kernel renders; ray query step 7 |
+//! | `scene`   | Procedural test geometry and camera (real scene I/O arrives in M2) | done |
+//! | `render`  | Frame orchestration: dispatch the primary kernel against the scene, read pixels back | done; progressive accumulation is M1 |
 //! | `output`  | EXR writing | done |
 //! | `error`   | The crate-wide [`enum@Error`] | done |
 //!

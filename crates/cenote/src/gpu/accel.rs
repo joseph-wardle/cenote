@@ -26,6 +26,15 @@ pub struct AccelerationStructure {
     loader: ash::khr::acceleration_structure::Device,
 }
 
+impl AccelerationStructure {
+    /// The raw handle, for the TLAS descriptor write in
+    /// [`Context::dispatch`] — the one binding that isn't a device address
+    /// (D-006). Stays inside `gpu`: the quarantine boundary (D-005).
+    pub(super) fn handle(&self) -> vk::AccelerationStructureKHR {
+        self.handle
+    }
+}
+
 impl Drop for AccelerationStructure {
     fn drop(&mut self) {
         unsafe {
