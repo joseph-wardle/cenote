@@ -1,8 +1,9 @@
 # Lean CI (decision D-012): format, lint, build, non-GPU tests.
 # Rendering needs a GPU that runners don't have — golden-image tests detect
 # this and skip; they run locally as the documented pre-push ritual.
-# A pinned-slangc shader-compile job joins this file with the first shader
-# (m0-plan §4 step 2), so kernel breakage fails CI without a GPU.
+# cargo build runs slangc over every kernel (crates/cenote/build.rs), so
+# shader breakage fails CI even without a GPU. The slangc version is pinned
+# below; bump it deliberately, together with the local install.
 
 name: CI
 
@@ -17,12 +18,21 @@ env:
 jobs:
   check:
     runs-on: ubuntu-latest
+    env:
+      SLANG_VERSION: "2026.9.1"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install slangc (pinned)
+        run: |
+          curl -fsSL -o /tmp/slang.tar.gz \
+            "https://github.com/shader-slang/slang/releases/download/v${SLANG_VERSION}/slang-${SLANG_VERSION}-linux-x86_64.tar.gz"
+          mkdir -p "$HOME/.slang"
+          tar -xzf /tmp/slang.tar.gz -C "$HOME/.slang"
+          echo "$HOME/.slang/bin" >> "$GITHUB_PATH"
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy

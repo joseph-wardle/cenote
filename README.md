@@ -16,8 +16,9 @@ VRAM. Wavefront compute + ray queries, one integrator, everything resident.
 
 ## Quickstart
 
-Requires: stable Rust, [`slangc`](https://github.com/shader-slang/slang) on PATH,
-and a Vulkan GPU with `VK_KHR_ray_query` support (any recent RT-capable card).
+Requires: stable Rust, [`slangc`](https://github.com/shader-slang/slang) on PATH
+(CI pins 2026.9.1; any recent release should work), and a Vulkan GPU with
+`VK_KHR_ray_query` support (any recent RT-capable card).
 
 ```sh
 cargo run -p cenote-cli
