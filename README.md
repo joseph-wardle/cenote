@@ -24,10 +24,35 @@ Requires: stable Rust, [`slangc`](https://github.com/shader-slang/slang) on PATH
 cargo run -p cenote-cli
 ```
 
-Golden-image tests need the GPU and skip cleanly without one:
+## Tests and goldens
 
 ```sh
 cargo test --workspace
+```
+
+runs everything; tests that need a GPU skip cleanly (with a note on stderr)
+where there isn't one. The golden-image tests render the demo scene and
+compare it against the reference EXRs in `crates/cenote/tests/golden/` with
+[ꟻLIP](https://github.com/NVlabs/flip), a perceptual metric whose threshold
+survives the floating-point reordering that driver and compiler updates cause.
+A failure dumps the actual render and a FLIP heatmap (black = identical,
+bright = different) into `target/tmp/` — open them in `tev` next to the golden.
+
+After an **intentional** image change, regenerate the goldens and eyeball them
+before committing:
+
+```sh
+UPDATE_GOLDENS=1 cargo test -p cenote --test golden
+```
+
+### Pre-push ritual
+
+CI has no GPU, so everything image-shaped runs here, before pushing:
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace   # on the GPU machine — includes the goldens
 ```
 
 ## Repo map

@@ -25,3 +25,4 @@ workspace = true
 
 [dev-dependencies]
 env_logger = "0.11.11"
+nv-flip = "0.1.2"

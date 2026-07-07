@@ -23,9 +23,9 @@ pub enum Error {
     #[error("GPU allocation failed: {0}")]
     Allocation(#[from] gpu_allocator::AllocationError),
 
-    /// Writing a rendered image to disk failed (encoding or I/O).
-    #[error("image write failed: {0}")]
-    ImageWrite(#[from] exr::error::Error),
+    /// Writing or reading an EXR failed (encoding, decoding, or I/O).
+    #[error("image file failed: {0}")]
+    Image(#[from] exr::error::Error),
 
     /// `slangc` rejected a kernel during hot reload — or couldn't be run at
     /// all. The payload is the compiler's diagnostics; the caller keeps its

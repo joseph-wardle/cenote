@@ -15,7 +15,7 @@
 //! | `shaders` | Embedded SPIR-V registry, `slangc` runtime recompile, hot-reload watching | done |
 //! | `scene`   | Procedural test geometry and camera (real scene I/O arrives in M2) | done |
 //! | `render`  | Frame orchestration: the [`render::Renderer`] dispatches the primary kernel against the scene and reads pixels back | done; progressive accumulation is M1 |
-//! | `output`  | EXR writing | done |
+//! | `output`  | Linear EXR write + read (read exists for the golden-image tests in `tests/golden.rs`) | done |
 //! | `error`   | The crate-wide [`enum@Error`] | done |
 //!
 //! # Conventions
