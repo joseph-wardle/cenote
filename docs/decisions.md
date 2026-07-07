@@ -138,3 +138,21 @@ set for a convenience — and it only covers *positions*: the moment shading nee
 or vertex normals (M2), resident geometry buffers are required anyway, so this is
 the shape the renderer ends up with regardless. *Trade-off:* slightly more kernel
 code and memory traffic in M0.
+
+---
+
+## 2026-07-07 — hot reload
+
+### D-018: Hot reload is a dev-loop feature with a pinned interface
+The D-004 no-drift promise is enforced structurally: the `slangc` invocation lives in
+one file (`crates/cenote/slangc.rs`) that both `build.rs` and `src/shaders.rs`
+`include!` — there is no second definition to drift. Shader source paths are baked
+from `CARGO_MANIFEST_DIR` at compile time, so reload works from a source checkout and
+a deployed binary just renders its embedded kernels. A reload swaps SPIR-V only: the
+entry-point name and push-constant layout stay pinned by the embedded build, so hot
+reload covers kernel *body* edits — changing a kernel's `Params` struct means a
+`cargo build`, which is also the only correct response since the Rust mirror of that
+struct must change in the same commit. *Why:* the alternative (runtime reflection of
+recompiled SPIR-V to re-derive layouts) buys generality M0 doesn't need at the cost
+of a second pipeline-creation path; revisit alongside D-004's in-process Slang API
+when reflection-driven pipelines matter (M1+).

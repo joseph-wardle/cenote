@@ -26,6 +26,20 @@ pub enum Error {
     /// Writing a rendered image to disk failed (encoding or I/O).
     #[error("image write failed: {0}")]
     ImageWrite(#[from] exr::error::Error),
+
+    /// `slangc` rejected a kernel during hot reload — or couldn't be run at
+    /// all. The payload is the compiler's diagnostics; the caller keeps its
+    /// last good pipeline (D-004).
+    #[error("shader compile failed:\n{0}")]
+    ShaderCompile(String),
+
+    /// A filesystem operation failed (e.g. reading hot-reloaded SPIR-V).
+    #[error("I/O failed: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// The shader-source watcher couldn't start, or its backend shut down.
+    #[error("shader watch failed: {0}")]
+    Watch(#[from] notify::Error),
 }
 
 /// Crate-wide result alias.

@@ -2,16 +2,17 @@
 //! against the scene, read the pixels back. Orchestration only — all Vulkan
 //! stays behind [`crate::gpu`] (decision D-005).
 //!
-//! M0 renders exactly one frame per call, blocking until it's done (D-007).
-//! M1's progressive accumulation loop replaces this function, not the
-//! modules it calls.
+//! The [`Renderer`] owns the primary pipeline so hot reload (D-004) can swap
+//! in a recompiled kernel between frames. M0 renders exactly one frame per
+//! call, blocking until it's done (D-007). M1's progressive accumulation
+//! loop replaces [`Renderer::render`], not the modules it calls.
 
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 
 use crate::error::Result;
-use crate::gpu::{Context, MemoryLocation};
+use crate::gpu::{ComputePipeline, Context, MemoryLocation};
 use crate::scene::Scene;
 use crate::shaders;
 
@@ -40,65 +41,101 @@ struct Params {
     _pad1: f32,
 }
 
-/// Render one `width`×`height` frame of `scene` and return it as row-major
-/// RGBA `f32` with pixel (0, 0) top-left — the crate-wide image convention.
-/// Hits shade as the geometric normal mapped to color (0.5·n + 0.5), misses
-/// as black.
-///
-/// # Errors
-///
-/// Any [`crate::Error`] from buffer creation, pipeline creation, or
-/// submission.
-///
-/// # Panics
-///
-/// On a zero-sized target — callers validate their inputs, so this is a
-/// programmer bug (D-010).
-pub fn render(gpu: &Context, scene: &Scene, width: u32, height: u32) -> Result<Vec<f32>> {
-    assert!(width > 0 && height > 0, "zero-sized render target");
+/// The primary-visibility pipeline, ready to render frames. Created from the
+/// embedded kernel; [`Renderer::reload`] swaps in hot-reloaded SPIR-V.
+pub struct Renderer {
+    pipeline: ComputePipeline,
+}
 
-    let size = u64::from(width) * u64::from(height) * 4 * size_of::<f32>() as u64;
-    let pixels = gpu.create_buffer(
-        "render.pixels",
-        size,
-        vk::BufferUsageFlags::STORAGE_BUFFER
-            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-            | vk::BufferUsageFlags::TRANSFER_SRC,
-        MemoryLocation::GpuOnly,
-    )?;
-    let pipeline = gpu.create_compute_pipeline(
-        shaders::PRIMARY_SPIRV,
-        shaders::PRIMARY_ENTRY,
-        size_of::<Params>() as u32,
-    )?;
+impl Renderer {
+    /// Create the renderer from the embedded primary kernel.
+    ///
+    /// # Errors
+    ///
+    /// Any [`crate::Error`] from pipeline creation.
+    pub fn new(gpu: &Context) -> Result<Self> {
+        Ok(Self {
+            pipeline: create_pipeline(gpu, shaders::PRIMARY_SPIRV)?,
+        })
+    }
 
-    let basis = scene.camera().basis(width as f32 / height as f32);
-    let params = Params {
-        pixels: pixels.device_address(),
-        geometry: scene.geometry().device_address(),
-        camera_position: scene.camera().position,
-        width,
-        camera_right: basis.right,
-        height,
-        camera_up: basis.up,
-        _pad0: 0.0,
-        camera_forward: basis.forward,
-        _pad1: 0.0,
-    };
-    gpu.dispatch(
-        &pipeline,
-        scene.tlas(),
-        bytemuck::bytes_of(&params),
-        [
-            width.div_ceil(WORKGROUP_SIZE),
-            height.div_ceil(WORKGROUP_SIZE),
-            1,
-        ],
-    )?;
+    /// Swap in a recompiled primary kernel; if pipeline creation fails, the
+    /// current pipeline stays live (D-004). The entry-point name and the
+    /// push-constant layout are pinned by the embedded build — hot reload
+    /// covers kernel *body* edits; changing `Params` needs a `cargo build`.
+    ///
+    /// # Errors
+    ///
+    /// Any [`crate::Error`] from pipeline creation.
+    pub fn reload(&mut self, gpu: &Context, spirv: &[u8]) -> Result<()> {
+        self.pipeline = create_pipeline(gpu, spirv)?;
+        Ok(())
+    }
 
-    // pod_collect_to_vec rather than cast_slice: the downloaded bytes carry
-    // no alignment guarantee.
-    Ok(bytemuck::pod_collect_to_vec(&gpu.download_buffer(&pixels)?))
+    /// Render one `width`×`height` frame of `scene` and return it as
+    /// row-major RGBA `f32` with pixel (0, 0) top-left — the crate-wide
+    /// image convention. Hits shade as the geometric normal mapped to color
+    /// (0.5·n + 0.5), misses as black.
+    ///
+    /// # Errors
+    ///
+    /// Any [`crate::Error`] from buffer creation or submission.
+    ///
+    /// # Panics
+    ///
+    /// On a zero-sized target — callers validate their inputs, so this is a
+    /// programmer bug (D-010).
+    pub fn render(
+        &self,
+        gpu: &Context,
+        scene: &Scene,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<f32>> {
+        assert!(width > 0 && height > 0, "zero-sized render target");
+
+        let size = u64::from(width) * u64::from(height) * 4 * size_of::<f32>() as u64;
+        let pixels = gpu.create_buffer(
+            "render.pixels",
+            size,
+            vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                | vk::BufferUsageFlags::TRANSFER_SRC,
+            MemoryLocation::GpuOnly,
+        )?;
+
+        let basis = scene.camera().basis(width as f32 / height as f32);
+        let params = Params {
+            pixels: pixels.device_address(),
+            geometry: scene.geometry().device_address(),
+            camera_position: scene.camera().position,
+            width,
+            camera_right: basis.right,
+            height,
+            camera_up: basis.up,
+            _pad0: 0.0,
+            camera_forward: basis.forward,
+            _pad1: 0.0,
+        };
+        gpu.dispatch(
+            &self.pipeline,
+            scene.tlas(),
+            bytemuck::bytes_of(&params),
+            [
+                width.div_ceil(WORKGROUP_SIZE),
+                height.div_ceil(WORKGROUP_SIZE),
+                1,
+            ],
+        )?;
+
+        // pod_collect_to_vec rather than cast_slice: the downloaded bytes
+        // carry no alignment guarantee.
+        Ok(bytemuck::pod_collect_to_vec(&gpu.download_buffer(&pixels)?))
+    }
+}
+
+fn create_pipeline(gpu: &Context, spirv: &[u8]) -> Result<ComputePipeline> {
+    gpu.create_compute_pipeline(spirv, shaders::PRIMARY_ENTRY, size_of::<Params>() as u32)
 }
 
 #[cfg(test)]
@@ -125,8 +162,11 @@ mod tests {
             return;
         };
         let scene = Scene::demo(&gpu).expect("demo scene");
+        let renderer = Renderer::new(&gpu).expect("renderer");
         let (width, height) = (128, 128);
-        let pixels = render(&gpu, &scene, width, height).expect("render");
+        let pixels = renderer
+            .render(&gpu, &scene, width, height)
+            .expect("render");
 
         assert_eq!(pixel(&pixels, width, 0, 0), [0.0, 0.0, 0.0, 1.0]);
 
@@ -156,9 +196,30 @@ mod tests {
             return;
         };
         let scene = Scene::demo(&gpu).expect("demo scene");
-        let pixels = render(&gpu, &scene, 33, 17).expect("render");
+        let renderer = Renderer::new(&gpu).expect("renderer");
+        let pixels = renderer.render(&gpu, &scene, 33, 17).expect("render");
         for chunk in pixels.chunks_exact(4) {
             assert_eq!(chunk[3..], [1.0]);
         }
+    }
+
+    /// The hot-reload swap end to end, minus the file watch: recompile the
+    /// unmodified kernel through the runtime `slangc` path, swap it in, and
+    /// require a pixel-identical frame — same source, same compiler, same
+    /// flags must mean the same image (D-004's no-drift promise).
+    #[test]
+    fn reloaded_kernel_renders_identically() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let scene = Scene::demo(&gpu).expect("demo scene");
+        let mut renderer = Renderer::new(&gpu).expect("renderer");
+        let before = renderer.render(&gpu, &scene, 64, 64).expect("render");
+
+        let spirv = shaders::recompile_primary().expect("recompile");
+        renderer.reload(&gpu, &spirv).expect("reload");
+        let after = renderer.render(&gpu, &scene, 64, 64).expect("render");
+
+        assert_eq!(before, after);
     }
 }
