@@ -12,7 +12,14 @@ Where CPU production renderers optimize for memory capacity on unbounded scenes,
 Cenote makes the inverse bet: extreme single-GPU performance on scenes that fit in
 VRAM. Wavefront compute + ray queries, one integrator, everything resident.
 
-**Status: M0 (skeleton).** Demo image will appear here when there is one.
+**Status: M0 complete** — device bring-up, acceleration structures, an inline
+ray-query kernel, sub-second shader hot reload, and golden-image tests.
+
+![A faceted icosphere resting on a ground plane, shaded as geometric normals — a pastel rainbow sphere over a green floor against a black sky](docs/demo.png)
+
+*The M0 demo image: geometric normals as color, traced with ray queries
+against a real two-instance acceleration structure. Deliberately faceted —
+a winding or handedness bug would scramble the rainbow.*
 
 ## Quickstart
 
