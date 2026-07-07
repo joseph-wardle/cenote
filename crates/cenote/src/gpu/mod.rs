@@ -11,11 +11,17 @@
 
 use std::ffi::{CStr, c_void};
 use std::mem::ManuallyDrop;
+use std::sync::{Arc, Mutex};
 
 use ash::vk;
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 
 use crate::error::{Error, Result};
+
+mod buffer;
+mod submit;
+
+pub use buffer::{Buffer, MemoryLocation};
 
 /// Baseline API version. Vulkan 1.3 makes `synchronization2` mandatory and
 /// carries descriptor indexing + buffer device address in core, so the
@@ -39,8 +45,11 @@ const REQUIRED_EXTENSIONS: &[&CStr] = &[
 /// tears the stack down in reverse order after waiting for the device to
 /// go idle.
 pub struct Context {
-    // Freed in Drop before `device` — gpu-allocator frees device memory.
-    allocator: ManuallyDrop<Allocator>,
+    // Shared with every Buffer so they can free themselves on drop; the
+    // Context's reference is released in Drop before `device` because
+    // gpu-allocator frees device memory. Buffers must not outlive the
+    // Context (checked with a strong-count log in Drop).
+    allocator: ManuallyDrop<Arc<Mutex<Allocator>>>,
     device: ash::Device,
     queue: vk::Queue,
     queue_family_index: u32,
@@ -128,7 +137,7 @@ impl Context {
         };
 
         Ok(Self {
-            allocator: ManuallyDrop::new(allocator),
+            allocator: ManuallyDrop::new(Arc::new(Mutex::new(allocator))),
             device,
             queue,
             queue_family_index,
@@ -177,12 +186,21 @@ impl Context {
     pub fn physical_device(&self) -> vk::PhysicalDevice {
         self.physical_device
     }
+
+    /// A clone of the shared allocator handle, for resources that free
+    /// themselves on drop.
+    fn allocator_handle(&self) -> Arc<Mutex<Allocator>> {
+        Arc::clone(&self.allocator)
+    }
 }
 
 impl Drop for Context {
     fn drop(&mut self) {
         unsafe {
             self.device.device_wait_idle().ok();
+            if Arc::strong_count(&self.allocator) > 1 {
+                log::error!("GPU resources outlive their Context — teardown order is now wrong");
+            }
             // The allocator frees device memory, so it goes first.
             ManuallyDrop::drop(&mut self.allocator);
             self.device.destroy_device(None);
@@ -509,6 +527,20 @@ fn describe_device(
     )
 }
 
+/// GPU-gated test entry point (decision D-009): `Some(context)` on machines
+/// with a capable GPU, `None` (test passes vacuously, with a note on stderr)
+/// everywhere else, so plain `cargo test` works on GPU-less CI.
+#[cfg(test)]
+pub(crate) fn test_context() -> Option<Context> {
+    match Context::new() {
+        Ok(context) => Some(context),
+        Err(err) => {
+            eprintln!("skipping: no capable GPU here ({err})");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -519,12 +551,8 @@ mod tests {
     /// cleanly where bring-up fails entirely, e.g. GPU-less CI (D-009).
     #[test]
     fn selection_rejects_software_devices() {
-        let context = match Context::new() {
-            Ok(context) => context,
-            Err(err) => {
-                eprintln!("skipping: no capable GPU here ({err})");
-                return;
-            }
+        let Some(context) = test_context() else {
+            return;
         };
         assert_ne!(context.device_type(), vk::PhysicalDeviceType::CPU);
         assert!(!context.device_summary().contains("llvmpipe"));
