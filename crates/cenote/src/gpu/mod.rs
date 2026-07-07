@@ -3,8 +3,8 @@
 //! [`Context`] owns instance→device bring-up: validation wiring, physical
 //! device selection against the ray-tracing baseline, one compute queue, and
 //! the memory allocator. Code outside `gpu` never touches raw `vk` handles
-//! for creation or destruction. Buffer, submit, and acceleration-structure
-//! helpers join this module in later m0-plan steps, when they have callers.
+//! or writes `unsafe`. Buffers, one-shot submits, and compute pipelines live
+//! in submodules; acceleration structures join in m0-plan step 6.
 //!
 //! There is no backend abstraction here and there never will be (charter
 //! non-goal): a reader who knows Vulkan should be reading Vulkan.
@@ -19,9 +19,11 @@ use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 use crate::error::{Error, Result};
 
 mod buffer;
+mod pipeline;
 mod submit;
 
 pub use buffer::{Buffer, MemoryLocation};
+pub use pipeline::ComputePipeline;
 
 /// Baseline API version. Vulkan 1.3 makes `synchronization2` mandatory and
 /// carries descriptor indexing + buffer device address in core, so the

@@ -11,11 +11,11 @@
 //!
 //! | Module    | Role | Status |
 //! |-----------|------|--------|
-//! | `gpu`     | Unsafe-Vulkan quarantine: device context, buffers, submits, acceleration structures. Code outside this module does not touch raw `vk` handles. | context, buffers, submits done; accel step 6 |
+//! | `gpu`     | Unsafe-Vulkan quarantine: device context, buffers, submits, pipelines, acceleration structures. Code outside this module does not touch raw `vk` handles. | context, buffers, submits, pipelines done; accel step 6 |
 //! | `shaders` | Embedded SPIR-V registry, `slangc` runtime recompile, hot-reload watching | embedding done; reload lands step 8 |
 //! | `scene`   | Procedural test geometry and camera (real scene I/O arrives in M2) | planned |
-//! | `render`  | Pipeline creation, kernel dispatch, readback orchestration | planned |
-//! | `output`  | EXR writing | planned |
+//! | `render`  | Frame orchestration: dispatch the primary kernel, read pixels back | fill kernel renders; ray query step 7 |
+//! | `output`  | EXR writing | done |
 //! | `error`   | The crate-wide [`enum@Error`] | done |
 //!
 //! # Conventions
@@ -25,6 +25,8 @@
 
 pub mod error;
 pub mod gpu;
+pub mod output;
+pub mod render;
 pub mod shaders;
 
 pub use error::{Error, Result};

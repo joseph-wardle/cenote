@@ -13,6 +13,10 @@
 /// pipeline-creation time (e.g. `ash::util::read_spv`).
 pub const PRIMARY_SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/primary.spv"));
 
+/// Entry-point name inside [`PRIMARY_SPIRV`], preserved from the Slang
+/// source by `-fvk-use-entrypoint-name`.
+pub const PRIMARY_ENTRY: &std::ffi::CStr = c"primary";
+
 #[cfg(test)]
 mod tests {
     use super::*;

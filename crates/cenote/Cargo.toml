@@ -12,6 +12,8 @@ repository.workspace = true
 # lines of code gets written instead. Dependencies land with their first caller.
 [dependencies]
 ash = "0.38.0"
+bytemuck = { version = "1.25.0", features = ["derive", "extern_crate_alloc"] }
+exr = "1.74.0"
 gpu-allocator = "0.28.0"
 log = "0.4.33"
 thiserror = "2.0.18"

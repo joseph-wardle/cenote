@@ -22,6 +22,10 @@ pub enum Error {
     /// GPU memory allocation failed.
     #[error("GPU allocation failed: {0}")]
     Allocation(#[from] gpu_allocator::AllocationError),
+
+    /// Writing a rendered image to disk failed (encoding or I/O).
+    #[error("image write failed: {0}")]
+    ImageWrite(#[from] exr::error::Error),
 }
 
 /// Crate-wide result alias.
