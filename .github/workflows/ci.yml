@@ -1,0 +1,33 @@
+# Lean CI (decision D-012): format, lint, build, non-GPU tests.
+# Rendering needs a GPU that runners don't have — golden-image tests detect
+# this and skip; they run locally as the documented pre-push ritual.
+# A pinned-slangc shader-compile job joins this file with the first shader
+# (m0-plan §4 step 2), so kernel breakage fails CI without a GPU.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build
+        run: cargo build --workspace
+      - name: Test
+        run: cargo test --workspace

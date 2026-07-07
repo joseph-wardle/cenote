@@ -1,0 +1,16 @@
+[package]
+name = "cenote"
+description = "Core renderer library: GPU device management, scene, wavefront orchestration, image output"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Dependency policy (docs/decisions.md): every new dependency needs a sentence
+# of justification in the commit that adds it; anything replaceable by <100
+# lines of code gets written instead. Dependencies land with their first caller.
+[dependencies]
+
+[lints]
+workspace = true
