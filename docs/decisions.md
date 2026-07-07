@@ -110,3 +110,17 @@ color — ACEScg enters with actual radiance in M1). Device selection requires
 rayQuery + accelerationStructure + BDA + descriptor indexing, prefers discrete, and
 fails with a `NoCapableGpu` error listing what each rejected device lacked.
 Validation layers on in debug, off in release, debug-utils messenger routed to `log`.
+
+---
+
+## 2026-07-07 — device bring-up
+
+### D-016: Software rasterizers are rejected by device type, not capability
+Discovered during step 3: Mesa's lavapipe (llvmpipe) genuinely implements
+`VK_KHR_ray_query` + acceleration structures and passes every capability check —
+"require ray tracing" does *not* exclude software Vulkan. Selection therefore rejects
+`PhysicalDeviceType::CPU` explicitly. *Why:* a software path tracer is out of identity
+(the charter's bet is extreme single-GPU performance), and silently "working" on
+lavapipe in a GPU-less environment would make golden tests and perf numbers lie.
+*Noted trade-off:* this forgoes running real render tests on CI runners via lavapipe;
+if that ever becomes attractive, it needs its own decision entry reversing this one.

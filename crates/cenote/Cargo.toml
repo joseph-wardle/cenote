@@ -11,6 +11,10 @@ repository.workspace = true
 # of justification in the commit that adds it; anything replaceable by <100
 # lines of code gets written instead. Dependencies land with their first caller.
 [dependencies]
+ash = "0.38.0"
+gpu-allocator = "0.28.0"
+log = "0.4.33"
+thiserror = "2.0.18"
 
 [lints]
 workspace = true
