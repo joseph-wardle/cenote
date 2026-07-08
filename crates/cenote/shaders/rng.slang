@@ -25,7 +25,7 @@ public static const uint CAMERA_JITTER = 0;
 // M1 slot is named up front even though they go live across steps 7–9,
 // because inserting one later would renumber the rest — silently changing
 // every image ever rendered.
-public static const uint BSDF_LOBE = 0; // which lobe scatters (step 9)
+public static const uint BSDF_LOBE = 0; // which sampling technique scatters
 public static const uint BSDF_DIR = 1; // scattered direction
 public static const uint NEE_LIGHT = 2; // which light to sample
 public static const uint NEE_POINT = 3; // point on that light

@@ -2,10 +2,10 @@
 //! structures, per-instance materials, quad lights with their sampling
 //! table, a pinhole camera, and a constant sky. All geometry is procedural
 //! and zero file I/O (real scene formats are M2's job); [`Scene::demo`] is
-//! the standing test subject — a deliberately faceted icosphere resting on
-//! a ground plane, where winding or handedness mistakes are instantly
-//! visible, under a warm quad light that gives direct-light sampling
-//! something to find.
+//! the standing test subject — a row of deliberately faceted spheres
+//! sweeping metalness across a glossy floor, where winding, handedness, or
+//! energy mistakes are instantly visible, under a warm quad light that
+//! gives direct-light sampling something to find.
 
 use std::collections::HashMap;
 
@@ -88,10 +88,15 @@ pub struct Scene {
     tlas: AccelerationStructure,
     /// The one [`SceneTable`] every kernel reaches scene data through.
     table: Buffer,
-    /// The buffers `table` points into: geometry records, materials, light
+    /// The GPU material table the scene table points into — updated in
+    /// place by [`Scene::set_material`].
+    material_buffer: Buffer,
+    /// Host copy of the material table, so an edit rewrites one entry.
+    materials: Vec<Material>,
+    /// The other buffers `table` points into: geometry records and light
     /// records.
     #[expect(dead_code, reason = "GPU residency: the buffers `table` points into")]
-    resident: [Buffer; 3],
+    resident: [Buffer; 2],
     #[expect(
         dead_code,
         reason = "GPU residency: the BLASes and the buffers the geometry records point into"
@@ -180,7 +185,7 @@ impl Scene {
         let geometry =
             gpu.upload_buffer("scene.geometry", bytemuck::cast_slice(&records), usage)?;
         let materials: Vec<Material> = objects.iter().map(|object| object.material).collect();
-        let materials =
+        let material_buffer =
             gpu.upload_buffer("scene.materials", bytemuck::cast_slice(&materials), usage)?;
         // Vulkan forbids empty buffers, so a lightless scene uploads one
         // zeroed record the kernels never read (the table says count 0).
@@ -197,7 +202,7 @@ impl Scene {
 
         let table = SceneTable {
             geometry: geometry.device_address(),
-            materials: materials.device_address(),
+            materials: material_buffer.device_address(),
             lights: lights.device_address(),
             light_count: light_records.len() as u32,
             _pad0: 0,
@@ -207,49 +212,65 @@ impl Scene {
         Ok(Self {
             tlas,
             table,
-            resident: [geometry, materials, lights],
+            material_buffer,
+            materials,
+            resident: [geometry, lights],
             meshes,
             camera,
             sky,
         })
     }
 
-    /// The demo scene: a unit icosphere resting on a 10 m × 10 m ground
-    /// plane at y = 0, a rough terracotta ball on a near-Lambertian light
-    /// gray floor. A warm quad light overhead to the right is the key —
-    /// its soft shadow and warm cast are what next-event estimation
-    /// resolves — over a dim gray sky's ambient fill, with global
-    /// illumination reading as color bleed and contact darkening.
+    /// Instances `0..DEMO_SPHERES` of [`Scene::demo`] are its sphere row —
+    /// the objects the viewer's material sliders edit.
+    pub const DEMO_SPHERES: usize = 5;
+
+    /// The demo scene: a row of [`Scene::DEMO_SPHERES`] terracotta spheres
+    /// sweeping metalness 1 → 0 left to right — the same base color read
+    /// as a conductor's F0 on the left and a lacquered plastic's diffuse
+    /// base on the right — on a lightly glossy gray floor that mirrors
+    /// them. A warm quad light overhead to the right is the key (its soft
+    /// shadow and warm cast are what next-event estimation resolves) over
+    /// a dim gray sky's ambient fill.
     ///
     /// # Errors
     ///
     /// Any [`crate::Error`] from upload or acceleration-structure builds.
     pub fn demo(gpu: &Context) -> Result<Self> {
-        let objects = [
-            Object {
-                mesh: icosphere(2),
-                transform: Mat4::from_translation(Vec3::Y),
-                material: Material::surface(acescg_from_rec709(Vec3::new(0.7, 0.22, 0.08)), 0.6),
-            },
-            Object {
-                mesh: ground_plane(5.0),
-                transform: Mat4::IDENTITY,
-                material: Material::surface(acescg_from_rec709(Vec3::splat(0.65)), 0.1),
-            },
-            Object {
-                // A 1.5 m × 1.5 m quad, 3 m up and off to the right —
-                // outside the default framing, so it lights the scene
-                // without appearing in it.
-                mesh: ground_plane(0.75),
-                transform: Mat4::from_translation(Vec3::new(1.8, 3.0, 0.5)),
-                material: Material::emitter(acescg_from_rec709(Vec3::new(1.0, 0.85, 0.6)) * 12.0),
-            },
-        ];
-        // Slightly above and behind the sphere (center (0, 1, 0)), looking
-        // down at it so the ground plane fills the lower frame.
+        let terracotta = acescg_from_rec709(Vec3::new(0.7, 0.22, 0.08));
+        let mut objects: Vec<Object> = (0..Self::DEMO_SPHERES)
+            .map(|index| {
+                let step = index as f32 / (Self::DEMO_SPHERES - 1) as f32;
+                Object {
+                    mesh: icosphere(2),
+                    transform: Mat4::from_translation(Vec3::new(
+                        1.2 * (index as f32 - 2.0),
+                        0.5,
+                        0.0,
+                    )) * Mat4::from_scale(Vec3::splat(0.5)),
+                    material: Material::glossy(terracotta, 0.4, 0.2).with_metalness(1.0 - step),
+                }
+            })
+            .collect();
+        objects.push(Object {
+            // Large enough that the frame's bottom edge still lands on it
+            // from the pulled-back camera below.
+            mesh: ground_plane(12.0),
+            transform: Mat4::IDENTITY,
+            material: Material::glossy(acescg_from_rec709(Vec3::splat(0.65)), 0.1, 0.15),
+        });
+        // A 1.5 m × 1.5 m quad, up and off to the right — outside the
+        // default framing, so it lights the scene without appearing in it.
+        objects.push(Object {
+            mesh: ground_plane(0.75),
+            transform: Mat4::from_translation(Vec3::new(2.5, 3.5, 1.0)),
+            material: Material::emitter(acescg_from_rec709(Vec3::new(1.0, 0.85, 0.6)) * 12.0),
+        });
+        // Above and behind, looking slightly down the row so the floor
+        // (and its reflections) fill the lower frame.
         let camera = Camera {
-            position: Vec3::new(0.0, 1.8, 5.0),
-            look_at: Vec3::new(0.0, 1.0, 0.0),
+            position: Vec3::new(0.0, 2.0, 8.5),
+            look_at: Vec3::new(0.0, 0.5, 0.0),
             vfov_degrees: 40.0,
         };
         // Dim enough that the quad light reads as the key (soft shadow,
@@ -288,6 +309,40 @@ impl Scene {
     /// between frames.
     pub fn camera_mut(&mut self) -> &mut Camera {
         &mut self.camera
+    }
+
+    /// The material of instance `index` — read, modify, and hand back to
+    /// [`Scene::set_material`].
+    ///
+    /// # Panics
+    ///
+    /// If `index` is out of range — instance indices are fixed at build.
+    #[must_use]
+    pub fn material(&self, index: usize) -> Material {
+        self.materials[index]
+    }
+
+    /// Replace instance `index`'s material, in place on the GPU — the
+    /// viewer's sliders editing a surface between frames. The caller owns
+    /// resetting any accumulation that no longer matches. Emission is
+    /// *not* live-editable (the light list and its alias table are built
+    /// at prep), so the edit must not change it.
+    ///
+    /// # Errors
+    ///
+    /// Any [`crate::Error`] from the upload.
+    ///
+    /// # Panics
+    ///
+    /// If `index` is out of range, or the edit changes `emission` —
+    /// programmer bugs.
+    pub fn set_material(&mut self, gpu: &Context, index: usize, material: Material) -> Result<()> {
+        assert_eq!(
+            self.materials[index].emission, material.emission,
+            "emission is baked into the light list at prep"
+        );
+        self.materials[index] = material;
+        gpu.update_buffer(&self.material_buffer, bytemuck::cast_slice(&self.materials))
     }
 }
 

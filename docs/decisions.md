@@ -382,3 +382,30 @@ intersect is a pure-tracing stage behind a queue boundary, and the EXT's
 `hitObjectRecordFromQueryEXT` lets a raygen shader wrap inline ray queries — a
 SER-enabled trace stage would be a stage-implementation swap, not a rearchitecture.
 This entry exists so the choice stays eyes-open rather than accidental.
+
+---
+
+## 2026-07-08 — GGX energy compensation (step 9 implementation)
+
+### D-038: Albedo fits regenerated for the kernel's exact integrand; separable Smith pinned (amends D-033 detail)
+D-033 chose Turquin-style compensation via the Sforza-Pellacini analytic fits.
+Implementation surfaced two specifics worth recording. (1) **The published
+coefficients underperform on our exact model** — validating them against Monte
+Carlo integration of the kernel's own lobes measured up to 2.3% absolute error
+for conductors and 9.5% for the glossy layer at IOR 1.5 (their 3-variable fit
+spends its capacity across the full reflectivity range; we live on the 0.04
+slice). Since the furnace test divides by these values, that error is the
+furnace's error. Both fits were therefore **regenerated with their own
+methodology** against QMC tables of this kernel's precise integrand: conductors
+as a degree-4 rational in (roughness, μ) fit with relative-error weighting
+(the compensation factor is 1/E, so relative error is what propagates —
+max 1.3%); the glossy layer at fixed IOR 1.5 as a degree-3 rational in
+(roughness, √μ) — the √μ warp absorbs the Fresnel rise at grazing that
+defeated the unwarped form (max 1.4%, coefficients f32-safe). The full-mixture
+white furnace closes to 0.6% worst-case, CPU-validated before any Slang was
+written. (2) **Separable Smith G1·G1 is pinned by the fits**: the albedo
+tables integrate that exact masking-shadowing form, so swapping in
+height-correlated Smith (which reflects *more* energy) would silently turn the
+compensation into over-compensation — a furnace that runs hot. Height-
+correlated is a later upgrade that must land together with regenerated tables;
+the shader comment on `smithG1` says so.

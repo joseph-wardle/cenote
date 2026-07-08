@@ -1,10 +1,10 @@
 //! Interactive viewer: the render live in a window, under an orbit camera,
 //! progressively accumulated, with an egui stats/controls overlay. M1 build
-//! steps 2–8 — every sample is a full path-traced estimate (diffuse
-//! bounces, MIS-weighted direct light sampling of the quad light, a
-//! constant sky), so the image starts noisy and visibly converges as the
-//! spp counter climbs; specular lobes and the HDRI environment arrive in
-//! steps 9–10.
+//! steps 2–9 — every sample is a full path-traced estimate of the `OpenPBR`
+//! lobe mix (EON diffuse, energy-compensated GGX conductor and dielectric
+//! specular, MIS-weighted direct light sampling), so the image starts
+//! noisy and visibly converges as the spp counter climbs; the HDRI
+//! environment arrives in step 10.
 //!
 //! Single-threaded, and self-scheduling once visible: every redraw
 //! accumulates one sample into the film, tonemaps (live exposure), presents,
@@ -103,6 +103,10 @@ struct Viewer {
     orbiting: bool,
     /// Cursor position at the last `CursorMoved`, for drag deltas.
     cursor: Option<PhysicalPosition<f64>>,
+    /// The material-slider values already applied to the sphere row —
+    /// seeded from the sliders' initial positions, so startup never
+    /// touches the scene.
+    applied_material: (f32, f32),
 }
 
 impl Viewer {
@@ -125,6 +129,7 @@ impl Viewer {
             size.height,
         )?;
         let gui = Gui::new(&window);
+        let gui_material = gui.material();
         // Not every platform sends an initial redraw request unprompted.
         window.request_redraw();
         Ok(Self {
@@ -139,6 +144,7 @@ impl Viewer {
             stats: FrameStats::default(),
             orbiting: false,
             cursor: None,
+            applied_material: gui_material,
         })
     }
 
@@ -215,6 +221,22 @@ impl Viewer {
             );
         }
         let film = self.film.as_mut().expect("created just above");
+
+        // A material-slider drag (from last frame's UI pass) edits the
+        // sphere row in place; the stale accumulation restarts.
+        let (roughness, metalness) = self.gui.material();
+        if self.applied_material != (roughness, metalness) {
+            for index in 0..cenote::scene::Scene::DEMO_SPHERES {
+                let mut edited = self.scene.material(index);
+                edited.specular_roughness = roughness;
+                edited.metalness = metalness;
+                self.scene
+                    .set_material(&self.gpu, index, edited)
+                    .context("updating a material")?;
+            }
+            film.reset();
+            self.applied_material = (roughness, metalness);
+        }
 
         *self.scene.camera_mut() = self.camera.camera();
         let started = Instant::now();

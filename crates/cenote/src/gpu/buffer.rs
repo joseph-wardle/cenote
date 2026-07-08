@@ -182,6 +182,41 @@ impl Context {
         Ok(buffer)
     }
 
+    /// Overwrite an existing buffer's full contents through a transient
+    /// staging buffer — how the viewer's live material edits land without
+    /// invalidating the addresses other GPU data holds on the buffer. The
+    /// target needs `TRANSFER_DST` usage ([`Context::upload_buffer`] always
+    /// adds it), and `data` must match its size exactly.
+    ///
+    /// # Errors
+    ///
+    /// As [`Context::create_buffer`], plus [`Error::Vulkan`] from the copy
+    /// submission.
+    ///
+    /// # Panics
+    ///
+    /// On a size mismatch — the layouts are compile-time mirrors, so this
+    /// is a programmer bug.
+    pub fn update_buffer(&self, buffer: &Buffer, data: &[u8]) -> Result<()> {
+        assert_eq!(
+            data.len() as vk::DeviceSize,
+            buffer.size(),
+            "update must cover the buffer exactly"
+        );
+        let mut staging = self.create_buffer(
+            "update.staging",
+            buffer.size(),
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            MemoryLocation::CpuToGpu,
+        )?;
+        staging
+            .allocation
+            .mapped_slice_mut()
+            .expect("CpuToGpu memory is always mapped")[..data.len()]
+            .copy_from_slice(data);
+        self.copy_buffer(&staging, buffer, buffer.size())
+    }
+
     /// Read a buffer's full contents back to the host through a transient
     /// staging buffer. The source must have `TRANSFER_SRC` usage.
     ///

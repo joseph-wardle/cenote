@@ -1,6 +1,6 @@
 //! The overlay UI: device and frame stats, the live exposure control, and
-//! placeholder material sliders that stake out where the real parameters
-//! land (with the GGX lobes in step 9).
+//! the material sliders that edit the demo's sphere row in place — drag
+//! one and the render re-converges under the new surface.
 //!
 //! This is the egui half of the overlay — input translation, layout,
 //! tessellation. The Vulkan half lives behind the core's `gpu` quarantine
@@ -30,8 +30,9 @@ pub struct Gui {
     state: egui_winit::State,
     /// Exposure in stops, applied by the tonemap kernel.
     exposure: f32,
-    /// Placeholder — becomes `OpenPBR` material parameters in step 9.
+    /// `OpenPBR` specular roughness applied to the demo spheres.
     roughness: f32,
+    /// `OpenPBR` metalness applied to the demo spheres.
     metalness: f32,
 }
 
@@ -49,14 +50,21 @@ impl Gui {
         Self {
             state,
             exposure: 0.0,
-            roughness: 0.5,
-            metalness: 0.0,
+            // Match the demo's sphere row, so nothing jumps until dragged.
+            roughness: 0.2,
+            metalness: 0.5,
         }
     }
 
     /// Exposure in stops, for [`cenote::render::Renderer::tonemap`].
     pub fn exposure(&self) -> f32 {
         self.exposure
+    }
+
+    /// The material sliders' current (specular roughness, metalness) —
+    /// the redraw loop applies them to the demo spheres when they change.
+    pub fn material(&self) -> (f32, f32) {
+        (self.roughness, self.metalness)
     }
 
     /// Feed a window event to egui. `consumed` in the response means the UI
@@ -113,11 +121,9 @@ impl Gui {
                 ui.add(egui::Slider::new(&mut self.roughness, 0.0..=1.0).text("roughness"));
                 ui.add(egui::Slider::new(&mut self.metalness, 0.0..=1.0).text("metalness"));
                 ui.label(
-                    egui::RichText::new(
-                        "placeholders — material goes live with the GGX lobes (step 9)",
-                    )
-                    .small()
-                    .weak(),
+                    egui::RichText::new("applied to the sphere row; the render re-converges")
+                        .small()
+                        .weak(),
                 );
             });
     }

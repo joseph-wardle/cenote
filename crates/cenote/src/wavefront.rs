@@ -890,15 +890,17 @@ mod tests {
             return;
         };
         let objects = [
+            // Half-metal sphere and glossy floor: sharp specular lobes
+            // are where wrong-but-plausible MIS weights actually live.
             Object {
                 mesh: icosphere(2),
                 transform: Mat4::from_translation(Vec3::Y),
-                material: Material::surface(Vec3::splat(0.6), 0.4),
+                material: Material::glossy(Vec3::splat(0.6), 0.4, 0.3).with_metalness(0.5),
             },
             Object {
                 mesh: ground_plane(4.0),
                 transform: Mat4::IDENTITY,
-                material: Material::surface(Vec3::splat(0.7), 0.0),
+                material: Material::glossy(Vec3::splat(0.7), 0.0, 0.2),
             },
             Object {
                 // A 2 m × 2 m quad right above the sphere: big enough that

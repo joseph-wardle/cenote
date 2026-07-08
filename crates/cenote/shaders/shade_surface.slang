@@ -211,12 +211,12 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
             // The candidate's pdf in solid angle at this vertex, against
             // the pdf BSDF sampling would give the same direction.
             let neePdf = candidate.pdfArea * r2 / cosLight;
-            let bsdfPdf = wiLight.z / PI;
+            let scatterPdf = bsdfPdf(material, wiLight, wo);
             let weight = params.lightSampling == LIGHT_SAMPLING_MIS
-                       ? powerHeuristic(neePdf, bsdfPdf)
+                       ? powerHeuristic(neePdf, scatterPdf)
                        : 1.0;
             let unshadowed = throughput.xyz * candidate.emission
-                * eonBrdf(material.baseColor, material.baseRoughness, wiLight, wo)
+                * evalBsdf(material, wiLight, wo)
                 * wiLight.z * (weight / neePdf);
             if (any(unshadowed > 0.0)) {
                 ShadowRay shadow;
@@ -231,13 +231,18 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
         }
     }
 
-    // Scatter off the diffuse lobe. Cosine-sampled, so the path-throughput
-    // update f·cos/pdf collapses to f·π.
+    // Scatter off the mixture: one technique (VNDF or cosine) drawn by
+    // BSDF_LOBE, the estimator divided by the full mixture pdf.
+    let uLobe = sample_1d(pixel, params.sampleIndex,
+                          bounceDimension(params.bounce, BSDF_LOBE));
     let u = sample_2d(pixel, params.sampleIndex,
                       bounceDimension(params.bounce, BSDF_DIR));
-    let wi = sampleCosineHemisphere(u);
-    var scattered = throughput.xyz * PI
-        * eonBrdf(material.baseColor, material.baseRoughness, wi.xyz, wo);
+    let wi = sampleBsdf(material, wo, uLobe, u);
+    var scattered = float3(0.0);
+    if (wi.z > 0.0 && wi.w > 0.0) {
+        scattered = throughput.xyz * evalBsdf(material, wi.xyz, wo)
+                  * (wi.z / wi.w);
+    }
 
     // A path that can carry nothing forward is done — lights themselves
     // scatter nothing (their base color is black), and continuing would

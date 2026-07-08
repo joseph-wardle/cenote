@@ -404,26 +404,20 @@ mod tests {
         download_f32(gpu, &film.sum)
     }
 
-    /// A furnace scene: one big EON plane of the given albedo and
-    /// roughness, scaled by `scale` and centered at `center`, under a
-    /// half-intensity gray sky, with the camera just above looking
-    /// obliquely down (the basis forbids straight down) so every camera
-    /// ray lands on it. A path hits the plane once, scatters upward, and
-    /// escapes — so with albedo 1 the expected pixel value is exactly the
-    /// sky radiance at any roughness (EON's energy-preservation property),
-    /// and at roughness 0 (Lambert) every individual sample equals
-    /// albedo × sky.
-    fn furnace_scene(
-        gpu: &Context,
-        albedo: f32,
-        roughness: f32,
-        center: Vec3,
-        scale: f32,
-    ) -> Scene {
+    /// A furnace scene: one big plane of the given material, scaled by
+    /// `scale` and centered at `center`, under a half-intensity gray sky,
+    /// with the camera just above looking obliquely down (the basis
+    /// forbids straight down) so every camera ray lands on it. A path hits
+    /// the plane, scatters upward, and escapes — so for a white material
+    /// the expected pixel value is exactly the sky radiance (the
+    /// energy-preservation property the EON and compensated-GGX lobes are
+    /// built around), and for a pure Lambert surface every individual
+    /// sample equals albedo × sky.
+    fn furnace_scene(gpu: &Context, material: Material, center: Vec3, scale: f32) -> Scene {
         let object = Object {
             mesh: ground_plane(5.0),
             transform: Mat4::from_translation(center) * Mat4::from_scale(Vec3::splat(scale)),
-            material: Material::surface(Vec3::splat(albedo), roughness),
+            material,
         };
         let camera = Camera {
             position: center + Vec3::new(0.0, scale, 0.0),
@@ -505,7 +499,7 @@ mod tests {
         let renderer = Renderer::new(&gpu).expect("renderer");
         let sky = 0.5;
 
-        let lambert = furnace_scene(&gpu, 1.0, 0.0, Vec3::ZERO, 1.0);
+        let lambert = furnace_scene(&gpu, Material::matte(Vec3::ONE, 0.0), Vec3::ZERO, 1.0);
         let sum = accumulate_sum(&gpu, &renderer, &lambert, 32, 4);
         for chunk in sum.chunks_exact(4) {
             for channel in &chunk[..3] {
@@ -517,7 +511,7 @@ mod tests {
             }
         }
 
-        let rough = furnace_scene(&gpu, 1.0, 1.0, Vec3::ZERO, 1.0);
+        let rough = furnace_scene(&gpu, Material::matte(Vec3::ONE, 1.0), Vec3::ZERO, 1.0);
         let samples = 64;
         let sum = accumulate_sum(&gpu, &renderer, &rough, 32, samples);
         let mean =
@@ -543,7 +537,12 @@ mod tests {
             return;
         };
         let renderer = Renderer::new(&gpu).expect("renderer");
-        let scene = furnace_scene(&gpu, 0.5, 0.0, Vec3::new(1e4, 0.0, 1e4), 1e3);
+        let scene = furnace_scene(
+            &gpu,
+            Material::matte(Vec3::splat(0.5), 0.0),
+            Vec3::new(1e4, 0.0, 1e4),
+            1e3,
+        );
         let sum = accumulate_sum(&gpu, &renderer, &scene, 32, 4);
         let expected = 0.5 * 0.5; // albedo × sky
         for chunk in sum.chunks_exact(4) {
@@ -557,17 +556,81 @@ mod tests {
         }
     }
 
+    /// The step-9 checkpoint's teeth: the white-furnace matrix over the
+    /// `OpenPBR` M1 lobe set. A white material of any construction must
+    /// return exactly the sky's radiance — single-scatter GGX *fails this
+    /// by design* (it loses up to half its energy at roughness 1), so this
+    /// pins the Turquin compensation, the regenerated albedo fits, and the
+    /// albedo-scaling layering all at once. The tolerance is the fits'
+    /// measured residual (CPU-validated at ≤ 0.6% over these very
+    /// configurations) plus sampling noise.
+    #[test]
+    fn openpbr_furnace_matrix() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let renderer = Renderer::new(&gpu).expect("renderer");
+        let white = Vec3::ONE;
+        let configs = [
+            ("metal r=0.05", Material::metal(white, 0.05)),
+            ("metal r=0.5", Material::metal(white, 0.5)),
+            ("metal r=1.0", Material::metal(white, 1.0)),
+            ("glossy-diffuse r=0.05", Material::glossy(white, 0.0, 0.05)),
+            ("glossy-diffuse r=0.5", Material::glossy(white, 0.0, 0.5)),
+            (
+                "glossy-diffuse r=1.0, rough base",
+                Material::glossy(white, 1.0, 1.0),
+            ),
+            (
+                "half metal",
+                Material::glossy(white, 0.0, 0.5).with_metalness(0.5),
+            ),
+        ];
+        let (sky, samples) = (0.5, 64);
+        for (label, material) in configs {
+            let scene = furnace_scene(&gpu, material, Vec3::ZERO, 1.0);
+            let sum = accumulate_sum(&gpu, &renderer, &scene, 32, samples);
+            let mean = sum.chunks_exact(4).map(|chunk| chunk[0]).sum::<f32>()
+                / (32.0 * 32.0 * samples as f32);
+            assert!(
+                (mean - sky).abs() / sky < 0.015,
+                "{label}: furnace leaked, mean {mean} vs {sky}"
+            );
+        }
+    }
+
     /// First global illumination, made mechanical: sky light bounces off
-    /// the terracotta sphere onto the gray floor, so floor pixels beside
-    /// the sphere pick up a red cast that the far floor corner doesn't.
-    /// Both probes are the same neutral material — the difference is
-    /// purely bounced light.
+    /// a terracotta sphere onto a gray floor, so floor pixels beside the
+    /// sphere pick up a red cast that the far floor corner doesn't. Both
+    /// probes are the same neutral material — the difference is purely
+    /// bounced light. (A dedicated scene, not the demo: the probe
+    /// positions pin this geometry.)
     #[test]
     fn indirect_light_bleeds_color() {
         let Some(gpu) = crate::gpu::test_context() else {
             return;
         };
-        let scene = Scene::demo(&gpu).expect("demo scene");
+        let objects = [
+            Object {
+                mesh: crate::scene::icosphere(2),
+                transform: Mat4::from_translation(Vec3::Y),
+                material: Material::matte(
+                    crate::color::acescg_from_rec709(Vec3::new(0.7, 0.22, 0.08)),
+                    0.6,
+                ),
+            },
+            Object {
+                mesh: ground_plane(5.0),
+                transform: Mat4::IDENTITY,
+                material: Material::matte(crate::color::acescg_from_rec709(Vec3::splat(0.65)), 0.1),
+            },
+        ];
+        let camera = Camera {
+            position: Vec3::new(0.0, 1.8, 5.0),
+            look_at: Vec3::new(0.0, 1.0, 0.0),
+            vfov_degrees: 40.0,
+        };
+        let scene = Scene::new(&gpu, &objects, camera, Vec3::ONE).expect("scene");
         let renderer = Renderer::new(&gpu).expect("renderer");
         let size = 64;
         let sum = accumulate_sum(&gpu, &renderer, &scene, size, 32);
