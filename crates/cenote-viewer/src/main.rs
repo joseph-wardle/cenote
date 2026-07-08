@@ -1,14 +1,13 @@
 //! Interactive viewer: the render live in a window, under an orbit camera,
 //! progressively accumulated, with an egui stats/controls overlay. M1 build
-//! steps 2–5 — every sample now runs through the wavefront engine, though
-//! its kernels are still degenerate (one bounce, normals-as-color).
+//! steps 2–6 — every sample runs through the wavefront engine with jittered
+//! camera rays, so edges visibly anti-alias as the spp counter climbs,
+//! though shading is still degenerate (one bounce, normals-as-color).
 //!
-//! Single-threaded (D-030), and self-scheduling once visible: every redraw
+//! Single-threaded, and self-scheduling once visible: every redraw
 //! accumulates one sample into the film, tonemaps (live exposure), presents,
 //! and requests the next redraw — vsync paces the loop, and the spp counter
 //! climbs forever. Camera motion resets the film; a resize replaces it.
-//! With today's deterministic kernels extra samples change nothing; jitter
-//! (step 6) makes accumulation converge.
 
 mod camera;
 mod ui;

@@ -12,9 +12,10 @@
 //!   into the RGBA8 display buffer that [`crate::gpu::Presenter::present`]
 //!   shows. The viewer's redraw loop is one of each per frame.
 //!
-//! The wavefront's degenerate kernels are deterministic, so accumulating
-//! refines nothing yet — sample jitter (M1 step 6) makes every sample
-//! count.
+//! Shading is still degenerate (normals-as-color, black sky), but samples
+//! already differ: each wave jitters its camera rays through the sampler,
+//! keyed by the film's sample count — so accumulation is real box-filter
+//! anti-aliasing, and edges converge as samples add up.
 
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
@@ -217,10 +218,10 @@ impl Renderer {
         Ok(())
     }
 
-    /// Render one `width`×`height` frame of `scene` and return it as
-    /// row-major RGBA `f32` with pixel (0, 0) top-left — the crate-wide
-    /// image convention. Hits shade as the geometric normal mapped to color
-    /// (0.5·n + 0.5), misses as black.
+    /// Render one `width`×`height` frame of `scene` — sample 0 of every
+    /// pixel's sequence — and return it as row-major RGBA `f32` with pixel
+    /// (0, 0) top-left, the crate-wide image convention. Hits shade as the
+    /// geometric normal mapped to color (0.5·n + 0.5), misses as black.
     ///
     /// # Errors
     ///
@@ -271,21 +272,29 @@ impl Renderer {
                 | vk::BufferUsageFlags::TRANSFER_SRC,
             MemoryLocation::GpuOnly,
         )?;
-        self.wavefront.trace(gpu, scene, &pixels, width, height)?;
+        self.wavefront
+            .trace(gpu, scene, &pixels, width, height, 0)?;
         Ok(pixels)
     }
 
-    /// Trace one sample of `scene` and add it to `film`'s sums (the first
-    /// sample after creation or a reset overwrites them). One wave into the
-    /// film's sample buffer, then the accumulation kernel — with its
-    /// unconditional NaN/Inf guard — into the sums.
+    /// Trace the film's next sample of `scene` and add it to its sums (the
+    /// first sample after creation or a reset overwrites them). One wave —
+    /// at sample index [`Film::samples`], so a reset replays the exact same
+    /// sequence — into the film's sample buffer, then the accumulation
+    /// kernel, with its unconditional NaN/Inf guard, into the sums.
     ///
     /// # Errors
     ///
     /// Any [`crate::Error`] from submission.
     pub fn accumulate(&self, gpu: &Context, scene: &Scene, film: &mut Film) -> Result<()> {
-        self.wavefront
-            .trace(gpu, scene, &film.sample, film.width, film.height)?;
+        self.wavefront.trace(
+            gpu,
+            scene,
+            &film.sample,
+            film.width,
+            film.height,
+            film.samples,
+        )?;
         self.add_sample(gpu, film)?;
         film.samples += 1;
         Ok(())
@@ -455,10 +464,13 @@ mod tests {
         assert_eq!(first, second);
     }
 
-    /// Accumulating the deterministic M0 kernel N times must sum to N× a
-    /// single frame — the film adds, it doesn't average or overwrite.
+    /// The film adds each wave's sample — and consecutive samples genuinely
+    /// differ now that raygen jitters. Rebuild the expected sums from
+    /// individually traced samples 0..3: the CPU adds in the same order as
+    /// the three accumulation dispatches (one `f32` add per wave), so
+    /// agreement is bitwise.
     #[test]
-    fn accumulation_sums_identical_samples() {
+    fn accumulation_adds_distinct_samples() {
         let Some(gpu) = crate::gpu::test_context() else {
             return;
         };
@@ -472,19 +484,38 @@ mod tests {
         }
         assert_eq!(film.samples(), 3);
 
-        let single = renderer.render(&gpu, &scene, 64, 64).expect("render");
-        let sum = download_f32(&gpu, &film.sum);
-        for (accumulated, one) in sum.iter().zip(&single) {
-            assert!(
-                (accumulated - 3.0 * one).abs() < 1e-5,
-                "sum {accumulated} should be 3 × {one}"
-            );
-        }
+        let sample = |index: u32| -> Vec<f32> {
+            let radiance = gpu
+                .create_buffer(
+                    "test.sample",
+                    64 * 64 * 16,
+                    vk::BufferUsageFlags::STORAGE_BUFFER
+                        | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                        | vk::BufferUsageFlags::TRANSFER_SRC,
+                    MemoryLocation::GpuOnly,
+                )
+                .expect("radiance buffer");
+            renderer
+                .wavefront
+                .trace(&gpu, &scene, &radiance, 64, 64, index)
+                .expect("trace");
+            download_f32(&gpu, &radiance)
+        };
+        let (s0, s1, s2) = (sample(0), sample(1), sample(2));
+        assert_ne!(s0, s1, "jitter must vary from sample to sample");
+
+        let expected: Vec<f32> = s0
+            .iter()
+            .zip(&s1)
+            .zip(&s2)
+            .map(|((a, b), c)| a + b + c)
+            .collect();
+        assert_eq!(download_f32(&gpu, &film.sum), expected);
     }
 
     /// After a reset, the next sample overwrites the stale sums — that *is*
-    /// the clear pass. With the deterministic kernel the result must be
-    /// bitwise identical to a fresh single frame.
+    /// the clear pass. And a reset restarts the sample sequence at index 0,
+    /// so the result must be bitwise identical to a fresh single frame.
     #[test]
     fn reset_restarts_the_accumulation() {
         let Some(gpu) = crate::gpu::test_context() else {

@@ -91,6 +91,11 @@ struct RaygenParams {
     camera_forward: Vec3,
     /// Paths in this range.
     count: u32,
+    /// Which sample of every pixel's sequence this wave traces.
+    sample: u32,
+    /// Explicit tail padding: the device addresses align the struct to 8,
+    /// and `Pod` forbids implicit padding bytes.
+    _pad0: u32,
 }
 
 /// Push constants for the intersect kernel (`shaders/intersect.slang`).
@@ -334,8 +339,13 @@ impl Wavefront {
     /// with pixel (0, 0) top-left. One blocking submission; targets larger
     /// than the pool are walked in pool-sized pixel ranges within it.
     ///
-    /// Bitwise deterministic: queue push order varies run to run, but
-    /// radiance writes are pixel-owned, so the image never sees it.
+    /// `sample` indexes every pixel's sample sequence: it selects the
+    /// camera jitter (and, as kernels grow, every other random decision),
+    /// so accumulating consecutive indices is progressive refinement.
+    ///
+    /// Bitwise deterministic: the same `sample` re-traces the same wave bit
+    /// for bit. Queue push order varies run to run, but radiance writes are
+    /// pixel-owned, so the image never sees it.
     ///
     /// # Errors
     ///
@@ -352,6 +362,7 @@ impl Wavefront {
         radiance: &Buffer,
         width: u32,
         height: u32,
+        sample: u32,
     ) -> Result<()> {
         assert!(width > 0 && height > 0, "zero-sized trace target");
         let pixels = u64::from(width) * u64::from(height);
@@ -374,6 +385,8 @@ impl Wavefront {
                 base: base as u32,
                 camera_forward: basis.forward,
                 count: (pixels - base).min(u64::from(self.capacity)) as u32,
+                sample,
+                _pad0: 0,
             })
             .collect();
 
@@ -487,7 +500,7 @@ mod tests {
         let (width, height) = (33, 17);
         let radiance = radiance_buffer(&gpu, width, height);
         wavefront
-            .trace(&gpu, &scene, &radiance, width, height)
+            .trace(&gpu, &scene, &radiance, width, height, 0)
             .expect("trace");
 
         let headers: Vec<u32> = bytemuck::pod_collect_to_vec(
@@ -529,10 +542,168 @@ mod tests {
             let wavefront = Wavefront::new(&gpu, &kernels, capacity).expect("wavefront");
             let radiance = radiance_buffer(&gpu, width, height);
             wavefront
-                .trace(&gpu, &scene, &radiance, width, height)
+                .trace(&gpu, &scene, &radiance, width, height, 0)
                 .expect("trace");
             gpu.download_buffer(&radiance).expect("download")
         };
         assert_eq!(render(64), render(4096));
+    }
+
+    /// The step-6 checkpoint — progressive refinement is real. Across the
+    /// first 16 samples of a small render, some pixel must see both a
+    /// surface and the sky: its accumulated average is then a partial-
+    /// coverage value no single sample can produce, which is edges
+    /// converging. Meanwhile a pixel fully inside the ground plane must
+    /// return exactly (0.5, 1, 0.5) every sample — the plane's geometric
+    /// normal is the same at every jittered point, so any wobble there
+    /// would mean jitter leaking outside the pixel footprint.
+    #[test]
+    fn camera_jitter_mixes_edge_pixels() {
+        const SKY: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+        const PLANE: [f32; 4] = [0.5, 1.0, 0.5, 1.0];
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let scene = Scene::demo(&gpu).expect("demo scene");
+        let wavefront = Wavefront::new(&gpu, &Kernels::embedded(), 4096).expect("wavefront");
+        let (width, height) = (32, 32);
+        let radiance = radiance_buffer(&gpu, width, height);
+
+        let bottom_center = ((height - 1) * width + width / 2) as usize * 4;
+        let mut saw_sky = vec![false; (width * height) as usize];
+        let mut saw_surface = vec![false; (width * height) as usize];
+        for sample in 0..16 {
+            wavefront
+                .trace(&gpu, &scene, &radiance, width, height, sample)
+                .expect("trace");
+            let pixels: Vec<f32> =
+                bytemuck::pod_collect_to_vec(&gpu.download_buffer(&radiance).expect("download"));
+            assert_eq!(
+                &pixels[bottom_center..bottom_center + 4],
+                &PLANE,
+                "plane-interior pixel wobbled at sample {sample}"
+            );
+            for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+                if pixel == SKY {
+                    saw_sky[index] = true;
+                } else {
+                    saw_surface[index] = true;
+                }
+            }
+        }
+        let mixed = saw_sky
+            .iter()
+            .zip(&saw_surface)
+            .filter(|(sky, surface)| **sky && **surface)
+            .count();
+        assert!(
+            mixed > 0,
+            "no silhouette pixel saw both surface and sky across 16 samples"
+        );
+    }
+
+    /// Audit the sampler on the GPU it ships on, through the test-only dump
+    /// kernel `shaders/rng_test.slang` (compiled here via the hot-reload
+    /// compiler). Owen scrambling must preserve the Sobol (0,2)-sequence
+    /// guarantee: among the first 64 samples of any (pixel, dimension) key,
+    /// every cell of an 8×8 grid and every width-1/64 bin per axis holds
+    /// exactly one point. White noise fails immediately, and so does any
+    /// bit-order, matrix, or hash bug — while image-level tests would
+    /// render plausibly through all of them.
+    #[test]
+    fn sampler_is_stratified_and_decorrelated() {
+        const COUNT: u32 = 64;
+
+        /// Mirrors `struct Params` in `shaders/rng_test.slang`.
+        #[repr(C)]
+        #[derive(Clone, Copy, Pod, Zeroable)]
+        struct DumpParams {
+            points: vk::DeviceAddress,
+            values: vk::DeviceAddress,
+            pixel: u32,
+            dimension: u32,
+            count: u32,
+            _pad0: u32,
+        }
+
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let spirv = crate::shaders::compile_fixture("rng_test").expect("compile rng_test");
+        let pipeline = gpu
+            .create_compute_pipeline(
+                &spirv,
+                c"rng_test",
+                size_of::<DumpParams>() as u32,
+                Bindings::None,
+            )
+            .expect("pipeline");
+
+        // One dispatch per key: the first COUNT (2D point, 1D value) pairs.
+        let dump = |pixel: u32, dimension: u32| -> (Vec<f32>, Vec<f32>) {
+            let usage = vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                | vk::BufferUsageFlags::TRANSFER_SRC;
+            let points = gpu
+                .create_buffer(
+                    "test.rng.points",
+                    u64::from(COUNT) * 8,
+                    usage,
+                    MemoryLocation::GpuOnly,
+                )
+                .expect("points buffer");
+            let values = gpu
+                .create_buffer(
+                    "test.rng.values",
+                    u64::from(COUNT) * 4,
+                    usage,
+                    MemoryLocation::GpuOnly,
+                )
+                .expect("values buffer");
+            let params = DumpParams {
+                points: points.device_address(),
+                values: values.device_address(),
+                pixel,
+                dimension,
+                count: COUNT,
+                _pad0: 0,
+            };
+            gpu.dispatch(&pipeline, None, bytemuck::bytes_of(&params), [1, 1, 1])
+                .expect("dispatch");
+            (
+                bytemuck::pod_collect_to_vec(&gpu.download_buffer(&points).expect("download")),
+                bytemuck::pod_collect_to_vec(&gpu.download_buffer(&values).expect("download")),
+            )
+        };
+
+        let bin = |value: f32, bins: u32| {
+            assert!((0.0..1.0).contains(&value), "sample {value} outside [0, 1)");
+            (value * bins as f32) as usize
+        };
+        for (pixel, dimension) in [(0, 0), (7, 0), (123_456, 3)] {
+            let (points, values) = dump(pixel, dimension);
+            let mut cells = [0u32; 64]; // 8×8 grid over the 2D points
+            let mut x_bins = [0u32; 64];
+            let mut y_bins = [0u32; 64];
+            for point in points.chunks_exact(2) {
+                cells[bin(point[1], 8) * 8 + bin(point[0], 8)] += 1;
+                x_bins[bin(point[0], 64)] += 1;
+                y_bins[bin(point[1], 64)] += 1;
+            }
+            let mut value_bins = [0u32; 64];
+            for &value in &values {
+                value_bins[bin(value, 64)] += 1;
+            }
+            for bins in [cells, x_bins, y_bins, value_bins] {
+                assert!(
+                    bins.iter().all(|&count| count == 1),
+                    "key ({pixel}, {dimension}): a stratum holds ≠ 1 points: {bins:?}"
+                );
+            }
+        }
+
+        // Different keys must give different sequences.
+        assert_ne!(dump(0, 0), dump(1, 0), "pixels must decorrelate");
+        assert_ne!(dump(0, 0), dump(0, 1), "dimensions must decorrelate");
     }
 }

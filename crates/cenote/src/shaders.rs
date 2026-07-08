@@ -153,6 +153,14 @@ fn shader_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("shaders")
 }
 
+/// Compile a test-only kernel from the crate's `shaders/` directory —
+/// fixtures like `rng_test.slang` that live with the sources but are never
+/// embedded (`slangc.rs` lists what ships).
+#[cfg(test)]
+pub(crate) fn compile_fixture(stem: &str) -> Result<Vec<u8>> {
+    compile(&shader_dir().join(format!("{stem}.slang")))
+}
+
 /// Run `slangc` on `src` and return the SPIR-V bytes. The compiler writes
 /// binaries to paths, not stdout, so the output round-trips through a temp
 /// file — the same invocation shape as `build.rs`.

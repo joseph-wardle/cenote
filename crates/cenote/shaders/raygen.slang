@@ -1,11 +1,12 @@
 // Wave entry: one thread per path in the pixel range, generating the
-// pinhole-camera ray and pushing the path onto the ray queue — the first
-// link of the stage chain, and (with `base`/`count`) the seam where a
-// target larger than the path pool is walked range by range.
+// jittered pinhole-camera ray and pushing the path onto the ray queue —
+// the first link of the stage chain, and (with `base`/`count`) the seam
+// where a target larger than the path pool is walked range by range.
 //
 // Right-handed, Y-up, camera looks -Z. Pixel (0,0) is top-left.
 
 import pathstate;
+import rng;
 
 // The camera comes pre-baked into ray-basis vectors by scene::Camera::basis
 // on the host: direction = normalize(forward + ndc.x·right + ndc.y·up).
@@ -16,6 +17,7 @@ struct Params {
     float3 cameraRight;    uint height; // std430 padding lanes
     float3 cameraUp;       uint base;   // first pixel of this range
     float3 cameraForward;  uint count;  // paths in this range
+    uint sampleIndex; // which sample of every pixel's sequence this wave is
 };
 
 [vk::push_constant]
@@ -29,9 +31,13 @@ void raygen(uint3 tid: SV_DispatchThreadID) {
     }
     uint pixel = params.base + tid.x;
 
-    // Pixel center → NDC with +y up (pixel rows grow downward).
-    let xy = float2(uint2(pixel % params.width, pixel / params.width));
-    let uv = (xy + 0.5) / float2(params.width, params.height);
+    // A jittered point of the pixel footprint → NDC with +y up (pixel rows
+    // grow downward). The jitter is box-filter anti-aliasing and the
+    // sampler's first consumer: each accumulated sample looks through a
+    // different sub-pixel point, so edges converge as the film averages.
+    let jitter = sample_2d(pixel, params.sampleIndex, CAMERA_JITTER);
+    let xy = float2(uint2(pixel % params.width, pixel / params.width)) + jitter;
+    let uv = xy / float2(params.width, params.height);
     let ndc = float2(2.0 * uv.x - 1.0, 1.0 - 2.0 * uv.y);
     let direction = normalize(params.cameraForward
                               + ndc.x * params.cameraRight
