@@ -3,7 +3,7 @@
 //! [`Buffer`] owns its `vk::Buffer` plus allocation and frees both on drop
 //! (buffers must be dropped before their [`Context`]). Device-local data
 //! moves through transient staging buffers and the blocking one-shot submit
-//! (D-007) — no persistent staging ring until something needs one.
+//! — no persistent staging ring until something needs one.
 
 use std::mem::ManuallyDrop;
 use std::sync::{Arc, Mutex};
@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use ash::vk;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::gpu::Context;
 
 pub use gpu_allocator::MemoryLocation;
@@ -40,12 +40,13 @@ impl Buffer {
         self.size
     }
 
-    /// The buffer's GPU address, for BDA-first binding (D-006).
+    /// The buffer's GPU address, for kernels that reach it through a
+    /// push-constant pointer.
     ///
     /// # Panics
     ///
     /// If the buffer was created without `SHADER_DEVICE_ADDRESS` usage —
-    /// that's a programmer bug (D-010), not an environment failure.
+    /// a programmer bug, not an environment failure.
     #[must_use]
     pub fn device_address(&self) -> vk::DeviceAddress {
         self.address
@@ -90,7 +91,7 @@ impl Context {
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
         let buffer = unsafe { device.create_buffer(&info, None)? };
 
-        let result = self.allocate_and_bind(name, buffer, usage, location);
+        let result = self.allocate_and_bind(name, buffer, location);
         match result {
             Ok(allocation) => {
                 let address = usage
@@ -119,7 +120,6 @@ impl Context {
         &self,
         name: &str,
         buffer: vk::Buffer,
-        _usage: vk::BufferUsageFlags,
         location: MemoryLocation,
     ) -> Result<Allocation> {
         let device = self.device();
@@ -127,7 +127,9 @@ impl Context {
         let allocation = self
             .allocator_handle()
             .lock()
-            .map_err(|_| Error::NoCapableGpu("allocator mutex poisoned".into()))?
+            // Poison means another thread already panicked mid-allocation —
+            // a programmer bug, so panicking (not Err) is the honest shape.
+            .expect("allocator mutex poisoned")
             .allocate(&AllocationCreateDesc {
                 name,
                 requirements,
@@ -150,7 +152,7 @@ impl Context {
     /// # Panics
     ///
     /// Only if the allocator breaks its contract that `CpuToGpu` memory is
-    /// host-mapped — a bug, not an environment failure (D-010).
+    /// host-mapped — a bug, not an environment failure.
     pub fn upload_buffer(
         &self,
         name: &str,
@@ -191,7 +193,7 @@ impl Context {
     /// # Panics
     ///
     /// Only if the allocator breaks its contract that `GpuToCpu` memory is
-    /// host-mapped — a bug, not an environment failure (D-010).
+    /// host-mapped — a bug, not an environment failure.
     pub fn download_buffer(&self, buffer: &Buffer) -> Result<Vec<u8>> {
         let staging = self.create_buffer(
             "download.staging",
@@ -219,7 +221,7 @@ impl Context {
 mod tests {
     use super::*;
 
-    /// The step-4 checkpoint: bytes survive host → device-local → host.
+    /// Bytes survive host → device-local → host.
     #[test]
     fn buffer_upload_download_round_trip() {
         let Some(context) = crate::gpu::test_context() else {

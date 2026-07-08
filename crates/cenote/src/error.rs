@@ -1,7 +1,7 @@
-//! The crate-wide error type (decision D-010): one coarse enum, variants
-//! refined only when a caller actually matches on them. Binaries wrap this
-//! in `anyhow`; panics are reserved for programmer bugs — a missing GPU or
-//! a broken shader is always an `Err`.
+//! The crate-wide error type: one coarse enum, variants refined only when a
+//! caller actually matches on them. Binaries wrap this in `anyhow`; panics
+//! are reserved for programmer bugs — a missing GPU or a broken shader is
+//! always an `Err`.
 
 /// Anything that can go wrong inside the core library.
 #[derive(Debug, thiserror::Error)]
@@ -14,8 +14,8 @@ pub enum Error {
     #[error("Vulkan loader unavailable: {0}")]
     Loader(#[from] ash::LoadingError),
 
-    /// No physical device satisfies the ray-tracing baseline (D-015). The
-    /// payload lists every enumerated device and what it lacked.
+    /// No physical device satisfies the ray-tracing baseline. The payload
+    /// lists every enumerated device and what it lacked.
     #[error("no capable GPU found:\n{0}")]
     NoCapableGpu(String),
 
@@ -24,12 +24,12 @@ pub enum Error {
     Allocation(#[from] gpu_allocator::AllocationError),
 
     /// Writing or reading an EXR failed (encoding, decoding, or I/O).
-    #[error("image file failed: {0}")]
+    #[error("EXR I/O failed: {0}")]
     Image(#[from] exr::error::Error),
 
     /// `slangc` rejected a kernel during hot reload — or couldn't be run at
     /// all. The payload is the compiler's diagnostics; the caller keeps its
-    /// last good pipeline (D-004).
+    /// last good pipeline.
     #[error("shader compile failed:\n{0}")]
     ShaderCompile(String),
 

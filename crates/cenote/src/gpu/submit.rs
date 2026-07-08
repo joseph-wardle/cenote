@@ -1,5 +1,5 @@
-//! One-shot command submission (decision D-007): record, submit, block on a
-//! fence. M0's workload is strictly sequential, so there is no frames-in-
+//! One-shot command submission: record, submit, block on a fence.
+//! M0's workload is strictly sequential, so there is no frames-in-
 //! flight machinery and no semaphores — the fence wait is the sync model.
 //! Cross-submission memory visibility is free with this shape: fence signal
 //! makes all device writes available, and the next queue submission makes

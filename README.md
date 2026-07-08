@@ -1,7 +1,5 @@
 # Cenote
 
-[![CI](https://github.com/josephwardle/cenote/actions/workflows/ci.yml/badge.svg)](https://github.com/josephwardle/cenote/actions/workflows/ci.yml)
-
 A portable, GPU-first, interactive-progressive production path tracer built on Vulkan
 ray tracing, with GRIS/ReSTIR as its theoretical core. The defining thesis: **the
 interactive lookdev preview and the converged final frame are the same estimator** —

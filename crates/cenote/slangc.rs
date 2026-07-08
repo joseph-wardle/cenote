@@ -1,9 +1,6 @@
-// The one `slangc` invocation (decision D-004). This file is `include!`d by
-// both compile paths — `build.rs` (embed at build time) and `src/shaders.rs`
-// (hot reload at run time) — so the flags and failure handling cannot drift.
-//
-// Kept dependency-free and fully qualified: it must compile as part of the
-// build script and the library alike.
+// The one `slangc` invocation. This file is `include!`d by both compile
+// paths — `build.rs` (embed at build time) and `src/shaders.rs` (hot reload
+// at run time) — so the flags and failure handling cannot drift.
 
 /// Flags shared by every kernel compile. `-fvk-use-entrypoint-name` keeps the
 /// Slang entry-point name in the SPIR-V instead of renaming it to `main`,

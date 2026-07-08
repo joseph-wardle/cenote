@@ -1,8 +1,7 @@
-//! Headless batch renderer: bring up the GPU, render a frame, write an EXR
-//! (decision D-002 — view it in `tev`, which auto-refreshes on file change).
+//! Headless batch renderer: bring up the GPU, render a frame, write an EXR.
 //! With `--watch`, stays alive and re-renders on every shader edit: recompile
 //! via `slangc`, swap the pipeline on success, keep the last good image on
-//! failure (D-004).
+//! failure.
 
 use std::path::PathBuf;
 use std::time::Instant;

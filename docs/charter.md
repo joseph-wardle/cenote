@@ -1,6 +1,6 @@
 # GPU-First Production Path Tracer — Project Charter
 
-*Drafted July 2026. Decisions locked through structured interview; revisit only with cause.*
+*Drafted July 2026.*
 
 ---
 

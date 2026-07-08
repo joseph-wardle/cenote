@@ -1,10 +1,10 @@
 //! EXR image input and output.
 //!
-//! M0 files are linear RGBA with no color transform (D-015): the renderer is
+//! M0 files are linear RGBA with no color transform: the renderer is
 //! writing *data* — geometric normals mapped to color — not color. `ACEScg`
 //! and real radiance arrive with M1. View results in `tev`, which
-//! auto-refreshes on file change (D-002). Reading exists for the golden-image
-//! tests (D-009), which compare fresh renders against checked-in EXRs.
+//! auto-refreshes on file change. Reading exists for the golden-image
+//! tests, which compare fresh renders against checked-in EXRs.
 
 use std::path::Path;
 
@@ -20,7 +20,7 @@ use crate::error::Result;
 /// # Panics
 ///
 /// If `pixels` doesn't hold exactly `width × height` RGBA quads — a
-/// programmer bug (D-010).
+/// programmer bug.
 pub fn write_exr(path: &Path, width: u32, height: u32, pixels: &[f32]) -> Result<()> {
     assert_eq!(
         pixels.len() as u64,
@@ -71,7 +71,7 @@ mod tests {
     use super::*;
 
     /// `f32` EXR channels are lossless, so write → read must reproduce the
-    /// pixels exactly — the property the golden comparison (D-009) stands on.
+    /// pixels exactly — the property the golden comparison stands on.
     #[test]
     fn exr_round_trips_exactly() {
         let pixels: Vec<f32> = (0..3 * 2 * 4).map(|i| i as f32 * 0.125).collect();

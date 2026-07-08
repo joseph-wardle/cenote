@@ -1,11 +1,11 @@
 //! Acceleration-structure builds: a BLAS per triangle mesh, one TLAS over
 //! placed instances.
 //!
-//! Builds run as blocking one-shot submits (D-007), so scratch memory and
+//! Builds run as blocking one-shot submits, so scratch memory and
 //! the instance staging buffer live only for the call. The shape is
 //! deliberately minimal — no compaction, no refits — because every M0
 //! structure is built exactly once; rebuilds only become interesting with
-//! dynamic scenes, which no charter milestone requires.
+//! dynamic scenes, which nothing on the roadmap requires.
 
 use std::slice;
 
@@ -28,8 +28,8 @@ pub struct AccelerationStructure {
 
 impl AccelerationStructure {
     /// The raw handle, for the TLAS descriptor write in
-    /// [`Context::dispatch`] — the one binding that isn't a device address
-    /// (D-006). Stays inside `gpu`: the quarantine boundary (D-005).
+    /// [`Context::dispatch`] — the one binding that isn't a device address.
+    /// Stays inside `gpu`: the quarantine boundary.
     pub(super) fn handle(&self) -> vk::AccelerationStructureKHR {
         self.handle
     }
@@ -68,7 +68,7 @@ impl Context {
     ///
     /// # Panics
     ///
-    /// On an empty mesh — a programmer bug (D-010).
+    /// On an empty mesh — a programmer bug.
     pub fn build_blas(
         &self,
         name: &str,
@@ -95,7 +95,7 @@ impl Context {
         let geometry = vk::AccelerationStructureGeometryKHR::default()
             .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
             .geometry(vk::AccelerationStructureGeometryDataKHR { triangles })
-            // No any-hit logic anywhere in the charter's pipeline; alpha
+            // No any-hit logic anywhere on the roadmap; alpha
             // testing (M2 textures) revisits this flag.
             .flags(vk::GeometryFlagsKHR::OPAQUE);
         self.build_structure(
@@ -106,8 +106,8 @@ impl Context {
         )
     }
 
-    /// Build a TLAS over `instances`. Blocks until the build completes
-    /// (D-007), so the instance staging buffer is transient.
+    /// Build a TLAS over `instances`. Blocks until the build completes,
+    /// so the instance staging buffer is transient.
     ///
     /// # Errors
     ///
@@ -115,8 +115,8 @@ impl Context {
     ///
     /// # Panics
     ///
-    /// If an instance's `custom_index` exceeds 24 bits — a programmer bug
-    /// (D-010): Vulkan would silently truncate it.
+    /// If an instance's `custom_index` exceeds 24 bits — Vulkan would
+    /// silently truncate it.
     pub fn build_tlas(
         &self,
         name: &str,
@@ -168,7 +168,7 @@ impl Context {
             .geometries(slice::from_ref(geometry));
         let mut sizes = vk::AccelerationStructureBuildSizesInfoKHR::default();
         unsafe {
-            self.accel.get_acceleration_structure_build_sizes(
+            self.accel_loader.get_acceleration_structure_build_sizes(
                 vk::AccelerationStructureBuildTypeKHR::DEVICE,
                 &build_info,
                 &[primitive_count],
@@ -188,7 +188,7 @@ impl Context {
             .size(sizes.acceleration_structure_size)
             .ty(ty);
         let handle = unsafe {
-            self.accel
+            self.accel_loader
                 .create_acceleration_structure(&create_info, None)?
         };
 
@@ -204,10 +204,13 @@ impl Context {
                 handle,
                 address,
                 _buffer: buffer,
-                loader: self.accel.clone(),
+                loader: self.accel_loader.clone(),
             }),
             Err(err) => {
-                unsafe { self.accel.destroy_acceleration_structure(handle, None) };
+                unsafe {
+                    self.accel_loader
+                        .destroy_acceleration_structure(handle, None);
+                }
                 Err(err)
             }
         }
@@ -240,7 +243,7 @@ impl Context {
         let range =
             vk::AccelerationStructureBuildRangeInfoKHR::default().primitive_count(primitive_count);
         self.submit_once(|_, cmd| unsafe {
-            self.accel.cmd_build_acceleration_structures(
+            self.accel_loader.cmd_build_acceleration_structures(
                 cmd,
                 slice::from_ref(build_info),
                 &[slice::from_ref(&range)],
@@ -249,7 +252,10 @@ impl Context {
 
         let info =
             vk::AccelerationStructureDeviceAddressInfoKHR::default().acceleration_structure(dst);
-        Ok(unsafe { self.accel.get_acceleration_structure_device_address(&info) })
+        Ok(unsafe {
+            self.accel_loader
+                .get_acceleration_structure_device_address(&info)
+        })
     }
 
     fn scratch_alignment(&self) -> vk::DeviceSize {

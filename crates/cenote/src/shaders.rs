@@ -5,7 +5,7 @@
 //! files needed at run time. For interactive kernel editing, [`ShaderWatcher`]
 //! wakes on source changes and [`recompile_primary`] reproduces the build-time
 //! compile at run time — same binary, same flags, both `include!`ing
-//! `slangc.rs` next to `build.rs` so the paths can't drift (decision D-004).
+//! `slangc.rs` next to `build.rs` so the paths can't drift.
 //!
 //! Hot reload is a source-checkout feature: shader paths are baked from
 //! `CARGO_MANIFEST_DIR` at compile time. A deployed binary renders from its
@@ -19,7 +19,7 @@ use notify::Watcher as _;
 
 use crate::error::{Error, Result};
 
-/// The build-time `slangc` invocation, shared with `build.rs` (D-004).
+/// The build-time `slangc` invocation, shared with `build.rs`.
 mod slangc {
     include!("../slangc.rs");
 }
@@ -45,8 +45,8 @@ fn shader_dir() -> PathBuf {
 /// # Errors
 ///
 /// [`Error::ShaderCompile`] with `slangc`'s diagnostics if the source doesn't
-/// compile — the caller keeps rendering with its current pipeline (D-004) —
-/// or [`Error::Io`] if the compiled SPIR-V can't be read back.
+/// compile — the caller keeps rendering with its current pipeline — or
+/// [`Error::Io`] if the compiled SPIR-V can't be read back.
 pub fn recompile_primary() -> Result<Vec<u8>> {
     compile(&shader_dir().join("primary.slang"))
 }

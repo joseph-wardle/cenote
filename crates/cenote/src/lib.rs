@@ -2,8 +2,7 @@
 //!
 //! The defining thesis: the interactive preview and the converged final frame are
 //! the *same estimator*. No biased preview modes — what you see at one second is an
-//! honest prediction of the frame at one hour. See `docs/charter.md` for the full
-//! vision and `docs/decisions.md` for why things are the way they are.
+//! honest prediction of the frame at one hour.
 //!
 //! # Module map
 //!

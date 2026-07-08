@@ -1,4 +1,3 @@
 /target
-# Local render outputs at the repo root (checked-in golden EXRs live under
-# crates/cenote/tests/golden/ and are not matched by this).
+
 /*.exr

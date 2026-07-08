@@ -156,3 +156,15 @@ struct must change in the same commit. *Why:* the alternative (runtime reflectio
 recompiled SPIR-V to re-derive layouts) buys generality M0 doesn't need at the cost
 of a second pipeline-creation path; revisit alongside D-004's in-process Slang API
 when reflection-driven pipelines matter (M1+).
+
+---
+
+## 2026-07-07 — comment style
+
+### D-019: Code comments are self-sufficient — no citations of this log
+M0 code originally sprinkled `D-xxx` references through module headers and doc
+comments. They forced readers to context-switch into this file for rationale that
+belongs (succinctly) at the code site, and they read as noise once the numbered
+entries stop being fresh in anyone's head. Comments now carry their own why in a
+sentence; this log remains the deep archive with the full trade-off discussions,
+discoverable through the README. Amends the D-013 conventions.

@@ -1,10 +1,10 @@
 //! Compute pipelines and blocking dispatch.
 //!
-//! Pipelines follow the BDA-first binding model (D-006): kernels reach every
-//! buffer through device addresses in a single push-constant struct. The one
-//! resource that cannot be an address is the scene TLAS, so every pipeline
-//! carries the binding model's single descriptor set — set 0, binding 0 —
-//! and [`Context::dispatch`] writes the TLAS into it.
+//! Kernels reach every buffer through device addresses in a single
+//! push-constant struct. The one resource that cannot be an address is the
+//! scene TLAS, so every pipeline carries the binding model's single
+//! descriptor set — set 0, binding 0 — and [`Context::dispatch`] writes the
+//! TLAS into it.
 
 use std::ffi::CStr;
 use std::slice;
@@ -41,18 +41,29 @@ impl Drop for ComputePipeline {
 
 /// The TLAS descriptor set under construction: layout, pool, and the one
 /// allocated set. Plain handles — ownership passes to the [`ComputePipeline`]
-/// on success, back to the caller's cleanup on failure.
+/// on success, to [`TlasDescriptors::destroy`] on failure.
 struct TlasDescriptors {
     set_layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
     set: vk::DescriptorSet,
 }
 
+impl TlasDescriptors {
+    /// Tear down after a failed pipeline build. The set itself is
+    /// pool-allocated: destroying the pool frees it.
+    unsafe fn destroy(&self, device: &ash::Device) {
+        unsafe {
+            device.destroy_descriptor_pool(self.pool, None);
+            device.destroy_descriptor_set_layout(self.set_layout, None);
+        }
+    }
+}
+
 impl Context {
-    /// Create a compute pipeline from SPIR-V bytes (embedded or hot-reloaded —
-    /// both paths produce `slangc` output, decision D-004). `entry` names the
-    /// kernel entry point; `push_constant_size` is the byte size of the
-    /// kernel's push-constant struct, enforced again at dispatch time.
+    /// Create a compute pipeline from SPIR-V bytes (embedded or hot-reloaded
+    /// — both are `slangc` output). `entry` names the kernel entry point;
+    /// `push_constant_size` is the byte size of the kernel's push-constant
+    /// struct, enforced again at dispatch time.
     ///
     /// # Errors
     ///
@@ -62,8 +73,7 @@ impl Context {
     /// # Panics
     ///
     /// If `spirv` is not valid SPIR-V or `push_constant_size` is not a
-    /// non-zero multiple of 4 — both are compile-pipeline or programmer bugs
-    /// (D-010), not environment failures.
+    /// non-zero multiple of 4 — programmer bugs upstream of any GPU work.
     pub fn create_compute_pipeline(
         &self,
         spirv: &[u8],
@@ -82,36 +92,25 @@ impl Context {
         let module = unsafe { device.create_shader_module(&module_info, None)? };
 
         // The module is only an input to pipeline creation — destroyed on
-        // success and failure alike, so the rest funnels through one point.
-        let result = self.create_with_module(module, entry, push_constant_size);
+        // success and failure alike.
+        let result = self.create_descriptors_and_pipeline(module, entry, push_constant_size);
         unsafe { device.destroy_shader_module(module, None) };
         result
     }
 
-    fn create_with_module(
+    fn create_descriptors_and_pipeline(
         &self,
         module: vk::ShaderModule,
         entry: &CStr,
         push_constant_size: u32,
     ) -> Result<ComputePipeline> {
         let descriptors = self.create_tlas_descriptors()?;
-        // From here every failure must destroy the descriptor objects:
-        // funnel through one exit point.
-        match self.create_with_descriptors(module, entry, push_constant_size, &descriptors) {
-            Ok(pipeline) => Ok(pipeline),
-            Err(err) => {
-                let device = self.device();
-                unsafe {
-                    device.destroy_descriptor_pool(descriptors.pool, None);
-                    device.destroy_descriptor_set_layout(descriptors.set_layout, None);
-                }
-                Err(err)
-            }
-        }
+        self.create_layout_and_pipeline(module, entry, push_constant_size, &descriptors)
+            .inspect_err(|_| unsafe { descriptors.destroy(self.device()) })
     }
 
-    /// Create the single descriptor set of the binding model (D-006):
-    /// binding 0 = the scene TLAS. Its contents are written at dispatch time.
+    /// Create the binding model's single descriptor set: binding 0 = the
+    /// scene TLAS. Its contents are written at dispatch time.
     fn create_tlas_descriptors(&self) -> Result<TlasDescriptors> {
         let device = self.device();
         let binding = vk::DescriptorSetLayoutBinding::default()
@@ -138,26 +137,29 @@ impl Context {
             }
         };
 
+        // `destroy` only touches the pool and layout, so the struct — and
+        // its cleanup — can exist before the set does.
+        let mut descriptors = TlasDescriptors {
+            set_layout,
+            pool,
+            set: vk::DescriptorSet::null(),
+        };
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(pool)
             .set_layouts(slice::from_ref(&set_layout));
         match unsafe { device.allocate_descriptor_sets(&alloc_info) } {
-            Ok(sets) => Ok(TlasDescriptors {
-                set_layout,
-                pool,
-                set: sets[0],
-            }),
+            Ok(sets) => {
+                descriptors.set = sets[0];
+                Ok(descriptors)
+            }
             Err(err) => {
-                unsafe {
-                    device.destroy_descriptor_pool(pool, None);
-                    device.destroy_descriptor_set_layout(set_layout, None);
-                }
+                unsafe { descriptors.destroy(device) };
                 Err(err.into())
             }
         }
     }
 
-    fn create_with_descriptors(
+    fn create_layout_and_pipeline(
         &self,
         module: vk::ShaderModule,
         entry: &CStr,
@@ -208,9 +210,8 @@ impl Context {
 
     /// Bind `pipeline` with `tlas` in its descriptor set, set the push
     /// constants, dispatch `group_counts` workgroups, and block until the
-    /// GPU finishes (D-007). The fence wait makes the kernel's writes
-    /// available, so a subsequent [`Context::download_buffer`] needs no
-    /// barrier.
+    /// GPU finishes. The fence wait makes the kernel's writes available, so
+    /// a subsequent [`Context::download_buffer`] needs no barrier.
     ///
     /// # Errors
     ///
@@ -219,8 +220,8 @@ impl Context {
     /// # Panics
     ///
     /// If `push_constants` doesn't match the size the pipeline was created
-    /// with — a programmer bug (D-010): the bytes would silently misalign
-    /// with the kernel's view of them.
+    /// with — the bytes would silently misalign with the kernel's view of
+    /// them.
     pub fn dispatch(
         &self,
         pipeline: &ComputePipeline,
@@ -234,7 +235,7 @@ impl Context {
             "push constants don't match the pipeline's declared size"
         );
         // (Re)writing the set before recording is safe: blocking submits
-        // (D-007) mean it is never in flight here.
+        // mean it is never in flight here.
         let handles = [tlas.handle()];
         let mut tlas_write = vk::WriteDescriptorSetAccelerationStructureKHR::default()
             .acceleration_structures(&handles);

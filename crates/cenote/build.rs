@@ -2,7 +2,7 @@
 //! where `src/shaders.rs` embeds the results via `include_bytes!`.
 //!
 //! The invocation itself lives in `slangc.rs`, shared with the runtime
-//! hot-reload path so the two can't drift (decision D-004).
+//! hot-reload path so the two can't drift.
 
 use std::env;
 use std::path::{Path, PathBuf};

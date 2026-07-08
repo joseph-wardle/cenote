@@ -1,5 +1,5 @@
-//! Golden-image regression tests (decision D-009): render the demo scene and
-//! FLIP-compare against the reference EXR checked in at `tests/golden/`.
+//! Golden-image regression tests: render the demo scene and FLIP-compare
+//! against the reference EXR checked in at `tests/golden/`.
 //!
 //! FLIP is a perceptual metric, so the threshold survives the legitimate
 //! floating-point reordering a driver or compiler update can cause — where a
@@ -21,8 +21,8 @@ use cenote::output::{read_exr, write_exr};
 use cenote::render::Renderer;
 use cenote::scene::Scene;
 
-/// Golden resolution. Small on purpose (D-009): enough pixels to pin every
-/// feature of the demo image, small enough to live in the repo forever.
+/// Golden resolution. Small on purpose: enough pixels to pin every feature
+/// of the demo image, small enough to live in the repo forever.
 const SIZE: u32 = 256;
 
 /// Mean-FLIP failure threshold. Identical images score 0, and FP reordering
@@ -44,8 +44,8 @@ fn demo_scene_matches_golden() {
     compare_with_golden("demo", &actual);
 }
 
-/// GPU gate (D-009), mirroring the unit tests' `gpu::test_context`: `None`
-/// skips the test with a note on stderr, so GPU-less machines pass cleanly.
+/// GPU gate, mirroring the unit tests' `gpu::test_context`: `None` skips
+/// the test with a note on stderr, so GPU-less machines pass cleanly.
 fn test_context() -> Option<Context> {
     let _ = env_logger::builder().is_test(true).try_init();
     match Context::new() {
@@ -89,8 +89,8 @@ fn compare_with_golden(name: &str, actual: &[f32]) {
     );
 
     let error_map = nv_flip::flip(
-        flip_image(&golden),
-        flip_image(actual),
+        flip_image(SIZE, SIZE, &golden),
+        flip_image(SIZE, SIZE, actual),
         nv_flip::DEFAULT_PIXELS_PER_DEGREE,
     );
     let mean = nv_flip::FlipPool::from_image(&error_map).mean();
@@ -98,8 +98,8 @@ fn compare_with_golden(name: &str, actual: &[f32]) {
         return;
     }
 
-    // Dump what eyes need to diagnose the difference (D-009). The heatmap is
-    // the FLIP error map through the magma LUT: black = identical, bright =
+    // Dump what eyes need to diagnose the difference. The heatmap is the
+    // FLIP error map through the magma LUT: black = identical, bright =
     // perceptually different.
     let dump_dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
     std::fs::create_dir_all(dump_dir).expect("create dump dir");
@@ -122,7 +122,7 @@ fn compare_with_golden(name: &str, actual: &[f32]) {
 /// here). Quantization costs nothing this test cares about — the demo image
 /// is normals-as-color, already in [0, 1], and the threshold is far coarser
 /// than one 8-bit step.
-fn flip_image(pixels: &[f32]) -> nv_flip::FlipImageRgb8 {
+fn flip_image(width: u32, height: u32, pixels: &[f32]) -> nv_flip::FlipImageRgb8 {
     let rgb: Vec<u8> = pixels
         .chunks_exact(4)
         .flat_map(|rgba| {
@@ -131,7 +131,7 @@ fn flip_image(pixels: &[f32]) -> nv_flip::FlipImageRgb8 {
                 .map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8)
         })
         .collect();
-    nv_flip::FlipImageRgb8::with_data(SIZE, SIZE, &rgb)
+    nv_flip::FlipImageRgb8::with_data(width, height, &rgb)
 }
 
 /// Write the FLIP error map through the magma LUT as an EXR, so `tev` shows
@@ -150,5 +150,5 @@ fn write_heatmap(path: &Path, error_map: &nv_flip::FlipImageFloat) {
             ]
         })
         .collect();
-    write_exr(path, SIZE, SIZE, &pixels).expect("dump heatmap");
+    write_exr(path, error_map.width(), error_map.height(), &pixels).expect("dump heatmap");
 }

@@ -1,6 +1,6 @@
-//! The procedural M0 scene (decision D-008): a subdivided icosphere resting
-//! on a ground plane — two BLASes, one TLAS with two instances, a fixed
-//! pinhole camera, zero file I/O (real scene formats are M2's job). The
+//! The procedural M0 scene: a subdivided icosphere resting on a ground
+//! plane — two BLASes, one TLAS with two instances, a fixed pinhole
+//! camera, zero file I/O (real scene formats are M2's job). The
 //! sphere is deliberately faceted: geometric normals rendered as color make
 //! winding or handedness mistakes instantly visible.
 
@@ -23,7 +23,7 @@ pub struct Mesh {
 
 /// One mesh resident on the GPU. The vertex and index buffers stay alive
 /// past the BLAS build: the primary kernel fetches triangle corners from
-/// them to compute geometric normals (D-017).
+/// them to compute geometric normals.
 struct GpuMesh {
     blas: AccelerationStructure,
     vertices: Buffer,
@@ -32,7 +32,7 @@ struct GpuMesh {
 
 /// One entry of the geometry lookup table, indexed by instance custom index.
 /// Mirrors `struct GeometryRecord` in `shaders/primary.slang` — the kernel
-/// follows these addresses to fetch the hit triangle's corners (D-017).
+/// follows these addresses to fetch the hit triangle's corners.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct GeometryRecord {
@@ -119,7 +119,7 @@ impl Scene {
     }
 
     /// The geometry lookup table: one `{positions, indices}` address pair
-    /// per instance custom index (D-017).
+    /// per instance custom index.
     #[must_use]
     pub fn geometry(&self) -> &Buffer {
         &self.geometry
@@ -163,7 +163,7 @@ impl Camera {
     /// # Panics
     ///
     /// On a degenerate camera — `position == look_at`, or a view axis
-    /// parallel to world up. Both are programmer bugs (D-010).
+    /// parallel to world up. Both are programmer bugs.
     #[must_use]
     pub fn basis(&self, aspect: f32) -> RayBasis {
         let forward = (self.look_at - self.position).normalize();
@@ -182,7 +182,7 @@ impl Camera {
 
 fn upload_mesh(gpu: &Context, name: &str, mesh: &Mesh) -> Result<GpuMesh> {
     // BUILD_INPUT for the BLAS build; STORAGE + device address so the
-    // primary kernel can fetch triangle corners afterwards (D-017).
+    // primary kernel can fetch triangle corners afterwards.
     let usage = vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
         | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
         | vk::BufferUsageFlags::STORAGE_BUFFER;
@@ -331,9 +331,9 @@ mod tests {
         }
     }
 
-    /// The renderer-breaking bug this scene exists to catch (D-008): for a
-    /// convex solid centered at the origin, a counter-clockwise-outward face
-    /// has its geometric normal pointing away from the origin.
+    /// The renderer-breaking bug this scene exists to catch: for a convex
+    /// solid centered at the origin, a counter-clockwise-outward face has
+    /// its geometric normal pointing away from the origin.
     #[test]
     fn winding_is_counter_clockwise_outward() {
         let mesh = icosphere(1);
@@ -386,9 +386,8 @@ mod tests {
         assert!(mesh.triangles.iter().flatten().all(|&i| i < count));
     }
 
-    /// The step-6 checkpoint: two BLASes and the TLAS build without errors
-    /// on real hardware (validation complaints appear via the debug
-    /// messenger in the log).
+    /// Two BLASes and the TLAS build without errors on real hardware
+    /// (validation complaints appear via the debug messenger in the log).
     #[test]
     fn demo_scene_builds() {
         let Some(gpu) = crate::gpu::test_context() else {

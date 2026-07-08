@@ -1,11 +1,11 @@
 //! Frame rendering: allocate the output buffer, dispatch the primary kernel
 //! against the scene, read the pixels back. Orchestration only — all Vulkan
-//! stays behind [`crate::gpu`] (decision D-005).
+//! stays behind [`crate::gpu`].
 //!
-//! The [`Renderer`] owns the primary pipeline so hot reload (D-004) can swap
-//! in a recompiled kernel between frames. M0 renders exactly one frame per
-//! call, blocking until it's done (D-007). M1's progressive accumulation
-//! loop replaces [`Renderer::render`], not the modules it calls.
+//! The [`Renderer`] owns the primary pipeline so hot reload can swap in a
+//! recompiled kernel between frames. M0 renders exactly one frame per call,
+//! blocking until it's done. M1's progressive accumulation loop replaces
+//! [`Renderer::render`], not the modules it calls.
 
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
@@ -21,15 +21,15 @@ use crate::shaders;
 const WORKGROUP_SIZE: u32 = 8;
 
 /// Push constants for the primary kernel. Mirrors `struct Params` in
-/// `shaders/primary.slang` field-for-field (D-006: one struct at the top of
-/// the kernel names everything it reads). The scalars after each `Vec3` sit
-/// in what std430 would otherwise spend on padding — field order is layout.
+/// `shaders/primary.slang` field-for-field — one struct at the top of the
+/// kernel names everything it reads. The scalars after each `Vec3` sit in
+/// what std430 would otherwise spend on padding — field order is layout.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Params {
     /// Device address of the output pixel buffer (`float4*` on the GPU side).
     pixels: vk::DeviceAddress,
-    /// Device address of the scene's geometry lookup table (D-017).
+    /// Device address of the scene's geometry lookup table.
     geometry: vk::DeviceAddress,
     camera_position: Vec3,
     width: u32,
@@ -60,7 +60,7 @@ impl Renderer {
     }
 
     /// Swap in a recompiled primary kernel; if pipeline creation fails, the
-    /// current pipeline stays live (D-004). The entry-point name and the
+    /// current pipeline stays live. The entry-point name and the
     /// push-constant layout are pinned by the embedded build — hot reload
     /// covers kernel *body* edits; changing `Params` needs a `cargo build`.
     ///
@@ -84,7 +84,7 @@ impl Renderer {
     /// # Panics
     ///
     /// On a zero-sized target — callers validate their inputs, so this is a
-    /// programmer bug (D-010).
+    /// programmer bug.
     pub fn render(
         &self,
         gpu: &Context,
@@ -147,9 +147,8 @@ mod tests {
         &pixels[idx..idx + 4]
     }
 
-    /// The M0 checkpoint (m0-plan §4 step 7): the demo image shows the
-    /// sphere and plane as normals, sky as black. Three probes pin the
-    /// scene's known features:
+    /// The demo image shows the sphere and plane as normals, sky as black.
+    /// Three probes pin the scene's known features:
     ///
     /// - top-left is sky — an exact miss color;
     /// - the image center looks straight at the sphere, so the hit facet's
@@ -206,7 +205,7 @@ mod tests {
     /// The hot-reload swap end to end, minus the file watch: recompile the
     /// unmodified kernel through the runtime `slangc` path, swap it in, and
     /// require a pixel-identical frame — same source, same compiler, same
-    /// flags must mean the same image (D-004's no-drift promise).
+    /// flags must mean the same image.
     #[test]
     fn reloaded_kernel_renders_identically() {
         let Some(gpu) = crate::gpu::test_context() else {

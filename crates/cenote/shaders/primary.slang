@@ -3,25 +3,20 @@
 // mapped to color (0.5·n + 0.5); a miss shades black. This is the M0 demo
 // image — winding or handedness mistakes show up as the wrong rainbow.
 //
-// Conventions (must match the crate doc in src/lib.rs): right-handed, Y-up,
-// camera looks -Z. Pixel (0,0) is top-left; the pixel buffer is row-major
-// RGBA f32.
+// Right-handed, Y-up, camera looks -Z. Pixel (0,0) is top-left; the pixel
+// buffer is row-major RGBA f32.
 
-// The scene TLAS — the one resource that can't travel as a device address
-// (decision D-006), so it owns the binding model's single descriptor set.
+// The scene TLAS
 [vk::binding(0, 0)]
 RaytracingAccelerationStructure scene;
 
-// Where an instance's triangles live (D-017): the tightly packed position and
-// index buffers its BLAS was built from, keyed by the instance custom index.
-// Scalar pointers, because std430 would stride a float3 array by 16 bytes.
+// Where an instance's triangles live
 struct GeometryRecord {
     float* positions; // x, y, z per vertex
     uint* indices;    // three per triangle
 };
 
-// Everything else the kernel reads, visible in one struct (D-006: BDA-first —
-// buffers arrive as raw device addresses in push constants). The camera comes
+// Everything else the kernel reads, visible in one struct. The camera comes
 // pre-baked into ray-basis vectors by scene::Camera::basis on the host:
 // direction = normalize(forward + ndc.x · right + ndc.y · up).
 struct Params {
@@ -70,9 +65,9 @@ void primary(uint3 tid: SV_DispatchThreadID) {
 
     var color = float3(0.0);
     if (query.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
-        // Fetch the hit triangle's corners (D-017) and take the cross
-        // product in world space — correct for any affine instance
-        // transform, since translation cancels in the edge differences.
+        // Fetch the hit triangle's corners and take the cross product in
+        // world space — correct for any affine instance transform, since
+        // translation cancels in the edge differences.
         GeometryRecord mesh = params.geometry[query.CommittedInstanceID()];
         uint base = 3 * query.CommittedPrimitiveIndex();
         float3x4 objectToWorld = query.CommittedObjectToWorld3x4();

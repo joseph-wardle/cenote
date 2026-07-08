@@ -1,4 +1,4 @@
-# Lean CI (decision D-012): format, lint, build, non-GPU tests.
+# Lean CI: format, lint, build, non-GPU tests.
 # Rendering needs a GPU that runners don't have — golden-image tests detect
 # this and skip; they run locally as the documented pre-push ritual.
 # cargo build runs slangc over every kernel (crates/cenote/build.rs), so
