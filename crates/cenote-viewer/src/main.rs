@@ -1,13 +1,14 @@
 //! Interactive viewer: the render live in a window, under an orbit camera,
-//! with an egui stats/controls overlay. M1 build steps 2–3 — the M0 primary
-//! kernel drives it until the wavefront engine replaces that kernel
-//! (step 5).
+//! progressively accumulated, with an egui stats/controls overlay. M1 build
+//! steps 2–4 — the M0 primary kernel drives it until the wavefront engine
+//! replaces that kernel (step 5).
 //!
-//! Single-threaded and event-driven (D-030): the loop sleeps until input.
-//! Camera motion invalidates the cached frame and requests a redraw — one
-//! blocking render at window size; UI-only redraws (hover, slider drags)
-//! re-present the cached frame with fresh UI blended on top. Progressive
-//! accumulation across redraws arrives with build step 4.
+//! Single-threaded (D-030), and self-scheduling once visible: every redraw
+//! accumulates one sample into the film, tonemaps (live exposure), presents,
+//! and requests the next redraw — vsync paces the loop, and the spp counter
+//! climbs forever. Camera motion resets the film; a resize replaces it.
+//! With today's deterministic kernel extra samples change nothing — this
+//! step proves the display plumbing; jitter (step 6) makes it converge.
 
 mod camera;
 mod ui;
@@ -88,9 +89,9 @@ struct Viewer {
     presenter: cenote::gpu::Presenter,
     renderer: cenote::render::Renderer,
     scene: cenote::scene::Scene,
-    /// The last traced frame, kept so UI-only redraws re-present instead of
-    /// re-tracing. `None` when the view changed and a render is due.
-    frame: Option<CachedFrame>,
+    /// The accumulation target, created at window size by the first redraw
+    /// and replaced whenever the window size stops matching.
+    film: Option<cenote::render::Film>,
     gpu: cenote::gpu::Context,
     gui: Gui,
     window: Window,
@@ -101,13 +102,6 @@ struct Viewer {
     orbiting: bool,
     /// Cursor position at the last `CursorMoved`, for drag deltas.
     cursor: Option<PhysicalPosition<f64>>,
-}
-
-/// A rendered frame staying on the GPU, with the size it was traced at.
-struct CachedFrame {
-    pixels: cenote::gpu::Buffer,
-    width: u32,
-    height: u32,
 }
 
 impl Viewer {
@@ -136,7 +130,7 @@ impl Viewer {
             presenter,
             renderer,
             scene,
-            frame: None,
+            film: None,
             gpu,
             gui,
             window,
@@ -149,11 +143,9 @@ impl Viewer {
 
     fn handle(&mut self, event: &WindowEvent) -> anyhow::Result<()> {
         // egui sees every event first: only it knows whether the pointer is
-        // on the UI, and `consumed` keeps such events off the camera.
+        // on the UI, and `consumed` keeps such events off the camera. Its
+        // repaint requests need no handling — the redraw loop is continuous.
         let response = self.gui.on_window_event(&self.window, event);
-        if response.repaint {
-            self.window.request_redraw();
-        }
         match *event {
             WindowEvent::Resized(size) => {
                 self.presenter.resize(size.width, size.height);
@@ -195,49 +187,66 @@ impl Viewer {
         Ok(())
     }
 
-    /// The camera moved: the cached frame no longer matches the view.
+    /// The camera moved: the film's accumulated samples no longer match the
+    /// view, so the next sample starts a fresh average.
     fn view_changed(&mut self) {
-        self.frame = None;
+        if let Some(film) = &mut self.film {
+            film.reset();
+        }
         self.window.request_redraw();
     }
 
-    /// One frame: re-trace the scene if the view or window changed (else
-    /// keep the cached render), run the UI, present both together.
+    /// One frame: accumulate a sample into the film (replacing the film if
+    /// the window size changed), tonemap at the panel's exposure, run the
+    /// UI, present, and request the next redraw — accumulation never stops.
     fn redraw(&mut self) -> anyhow::Result<()> {
         let size = self.window.inner_size();
         if size.width == 0 || size.height == 0 {
-            return Ok(()); // minimized
+            return Ok(()); // minimized; the resize that restores us redraws
         }
-        let stale = |frame: &CachedFrame| frame.width != size.width || frame.height != size.height;
-        if self.frame.as_ref().is_none_or(stale) {
-            *self.scene.camera_mut() = self.camera.camera();
-            let started = Instant::now();
-            let pixels = self
-                .renderer
-                .render_to_buffer(&self.gpu, &self.scene, size.width, size.height)
-                .context("rendering the frame")?;
-            self.stats.render = started.elapsed();
-            self.stats.render_size = (size.width, size.height);
-            self.frame = Some(CachedFrame {
-                pixels,
-                width: size.width,
-                height: size.height,
-            });
+        let stale = |film: &cenote::render::Film| {
+            film.width() != size.width || film.height() != size.height
+        };
+        if self.film.as_ref().is_none_or(stale) {
+            self.film = Some(
+                cenote::render::Film::new(&self.gpu, size.width, size.height)
+                    .context("creating the film")?,
+            );
         }
+        let film = self.film.as_mut().expect("created just above");
 
-        let (gui_frame, repaint) =
-            self.gui
-                .run(&self.window, self.gpu.device_summary(), &self.stats);
-        let frame = self.frame.as_ref().expect("rendered just above");
+        *self.scene.camera_mut() = self.camera.camera();
+        let started = Instant::now();
+        self.renderer
+            .accumulate(&self.gpu, &self.scene, film)
+            .context("accumulating a sample")?;
+        self.stats.sample = started.elapsed();
+        self.stats.size = (size.width, size.height);
+        self.stats.samples = film.samples();
+
+        // The UI runs before the tonemap so an exposure drag lands in this
+        // very frame.
+        let gui_frame = self
+            .gui
+            .run(&self.window, self.gpu.device_summary(), &self.stats);
         self.window.pre_present_notify();
         let started = Instant::now();
+        self.renderer
+            .tonemap(&self.gpu, film, self.gui.exposure())
+            .context("tonemapping the film")?;
         self.presenter
-            .present(&frame.pixels, frame.width, frame.height, Some(&gui_frame))
+            .present(
+                film.display(),
+                film.width(),
+                film.height(),
+                Some(&gui_frame),
+            )
             .context("presenting the frame")?;
-        self.stats.present = started.elapsed();
-        if repaint {
-            self.window.request_redraw();
-        }
+        self.stats.display = started.elapsed();
+
+        // Progressive accumulation: there is always a next sample. FIFO
+        // (vsync) presents pace this loop at the refresh rate.
+        self.window.request_redraw();
         Ok(())
     }
 }

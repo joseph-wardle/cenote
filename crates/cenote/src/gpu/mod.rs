@@ -31,7 +31,7 @@ mod submit;
 pub use accel::{AccelerationStructure, TlasInstance};
 pub use buffer::{Buffer, MemoryLocation};
 pub use overlay::GuiFrame;
-pub use pipeline::ComputePipeline;
+pub use pipeline::{Bindings, ComputePipeline};
 pub use present::Presenter;
 
 use init::DebugMessenger;

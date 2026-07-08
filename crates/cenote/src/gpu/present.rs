@@ -1,15 +1,15 @@
 //! Window presentation: the surface, the swapchain, and the transfer path
 //! that puts a rendered frame on screen.
 //!
-//! [`Presenter`] shows linear RGBA f32 pixel buffers: copy into an RGBA32F
-//! transfer image, then one blit onto the acquired swapchain image — the
-//! blit scales to the window and encodes to the swapchain's sRGB format in
-//! fixed function, so displaying a frame needs no shader. The tonemap
-//! kernel (M1 build step 4) will replace the copy leg by writing the
-//! transfer image directly; the blit-and-present tail stays. A frame may
-//! carry a [`GuiFrame`], blended over the blit result by one dynamic-
-//! rendering pass (`overlay.rs`) before the image is handed to the
-//! presentation engine.
+//! [`Presenter`] shows display buffers — packed RGBA8, already
+//! sRGB-encoded, exactly what the tonemap kernel writes: copy into an sRGB
+//! transfer image (a raw byte copy — copies never convert), then one blit
+//! onto the acquired swapchain image, which rescales to the window
+//! filtering in linear light. The tonemap kernel writes a buffer rather
+//! than this image so the renderer stays presentation-blind; the copy is
+//! the seam between them. A frame may carry a [`GuiFrame`], blended over
+//! the blit result by one dynamic-rendering pass (`overlay.rs`) before the
+//! image is handed to the presentation engine.
 //!
 //! Pacing matches the crate's blocking-submit model: one frame in flight,
 //! fence-waited before [`Presenter::present`] returns. Timeline-semaphore
@@ -26,9 +26,11 @@ use crate::error::{Error, Result};
 use crate::gpu::overlay::{GuiFrame, OverlayRenderer};
 use crate::gpu::{Buffer, Context, MemoryLocation};
 
-/// Format of the transfer image — matches the pixel buffers' row-major
-/// RGBA f32 layout, so the buffer→image copy is a straight memcpy.
-const TRANSFER_FORMAT: vk::Format = vk::Format::R32G32B32A32_SFLOAT;
+/// Format of the transfer image — the display buffers' packed, row-major
+/// RGBA8 texels are already sRGB-encoded, so declaring the image sRGB makes
+/// the copied bytes mean what they are; the blit onto the (likewise sRGB)
+/// swapchain image then converts losslessly and filters in linear light.
+const TRANSFER_FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
 
 /// The whole color plane of a single-mip, single-layer image — every image
 /// this module touches.
@@ -83,8 +85,8 @@ pub struct Presenter {
     allocator: Arc<Mutex<Allocator>>,
 }
 
-/// The RGBA32F image frames pass through between pixel buffer and swapchain,
-/// sized to the *render*, not the window — the blit rescales.
+/// The sRGB RGBA8 image frames pass through between display buffer and
+/// swapchain, sized to the *render*, not the window — the blit rescales.
 struct TransferImage {
     image: vk::Image,
     allocation: Allocation,
@@ -176,12 +178,12 @@ impl Presenter {
         self.dirty = true;
     }
 
-    /// Show a frame: copy the `width`×`height` linear RGBA f32 `pixels`
-    /// buffer into the transfer image, blit it across the whole swapchain
-    /// image (bilinear rescale + sRGB encode), blend `gui` on top if one is
-    /// given, and present. Blocks until the GPU work finishes — one frame in
-    /// flight, like every submit in the crate. A zero-area (minimized)
-    /// window makes this a no-op.
+    /// Show a frame: copy the `width`×`height` sRGB-encoded RGBA8 `pixels`
+    /// buffer (a tonemapped display buffer) into the transfer image, blit
+    /// it across the whole swapchain image (bilinear rescale), blend `gui`
+    /// on top if one is given, and present. Blocks until the GPU work
+    /// finishes — one frame in flight, like every submit in the crate. A
+    /// zero-area (minimized) window makes this a no-op.
     ///
     /// `pixels` needs `TRANSFER_SRC` usage and an already-completed writer,
     /// which every blocking dispatch in this crate guarantees.
@@ -195,7 +197,7 @@ impl Presenter {
     ///
     /// # Panics
     ///
-    /// If `pixels` is smaller than `width`×`height` RGBA f32 texels.
+    /// If `pixels` is smaller than `width`×`height` RGBA8 texels.
     pub fn present(
         &mut self,
         pixels: &Buffer,
@@ -204,7 +206,7 @@ impl Presenter {
         gui: Option<&GuiFrame>,
     ) -> Result<()> {
         assert!(
-            pixels.size() >= u64::from(width) * u64::from(height) * 16,
+            pixels.size() >= u64::from(width) * u64::from(height) * 4,
             "pixel buffer is smaller than its stated dimensions"
         );
         // Texture deltas apply exactly once even when the frame itself is
@@ -787,9 +789,9 @@ fn probe_surface(
 
     let formats =
         unsafe { surface_loader.get_physical_device_surface_formats(physical_device, surface)? };
-    // An sRGB format makes the blit's fixed-function encode correct for the
-    // linear values we render. Every desktop driver offers one; the fallback
-    // would merely display too dark, not break.
+    // An sRGB format matches the sRGB transfer image, so the blit between
+    // them converts losslessly. Every desktop driver offers one; the
+    // fallback would merely display too dark, not break.
     Ok(formats
         .iter()
         .copied()
@@ -812,9 +814,10 @@ fn free_allocation(allocator: &Arc<Mutex<Allocator>>, allocation: Allocation) {
 }
 
 /// Record a blit of all of `src` onto all of `dst` (each given with its
-/// width and height): bilinear rescale plus the formats' conversion — the
-/// sRGB encode, when `dst` is a swapchain image. Layouts are the transfer
-/// ones the caller's barriers established.
+/// width and height): bilinear rescale plus the formats' conversion —
+/// between two sRGB images, a decode, linear-light filter, and lossless
+/// re-encode. Layouts are the transfer ones the caller's barriers
+/// established.
 fn blit_whole_image(
     device: &ash::Device,
     cmd: vk::CommandBuffer,

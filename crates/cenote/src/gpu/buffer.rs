@@ -202,10 +202,12 @@ impl Context {
             MemoryLocation::GpuToCpu,
         )?;
         self.copy_buffer(buffer, &staging, buffer.size())?;
+        // The mapped slice spans the whole allocation, which the allocator
+        // may pad past the requested size — return exactly the buffer.
         Ok(staging
             .allocation
             .mapped_slice()
-            .expect("GpuToCpu memory is always mapped")
+            .expect("GpuToCpu memory is always mapped")[..buffer.size() as usize]
             .to_vec())
     }
 

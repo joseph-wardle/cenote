@@ -1,6 +1,6 @@
-//! The overlay UI: device and frame stats, plus placeholder sliders that
-//! stake out where the real controls land (exposure with the tonemap
-//! kernel in step 4, material parameters with the GGX lobes in step 9).
+//! The overlay UI: device and frame stats, the live exposure control, and
+//! placeholder material sliders that stake out where the real parameters
+//! land (with the GGX lobes in step 9).
 //!
 //! This is the egui half of the overlay — input translation, layout,
 //! tessellation. The Vulkan half lives behind the core's `gpu` quarantine
@@ -12,21 +12,23 @@ use cenote::gpu::GuiFrame;
 use winit::event::WindowEvent;
 use winit::window::Window;
 
-/// Timings the panel displays, measured by the redraw loop. `render` keeps
-/// its last value across UI-only redraws that re-present a cached frame.
+/// Numbers the panel displays, measured by the redraw loop.
 #[derive(Default)]
 pub struct FrameStats {
-    /// The last scene render (dispatch + fence wait), and its target size.
-    pub render: Duration,
-    pub render_size: (u32, u32),
-    /// The last present (UI pass, blit, fence wait).
-    pub present: Duration,
+    /// The last accumulation wave (primary trace + film add, fence-waited),
+    /// and the size it rendered at.
+    pub sample: Duration,
+    pub size: (u32, u32),
+    /// The last display pass: tonemap through present.
+    pub display: Duration,
+    /// Samples in the film's average so far.
+    pub samples: u32,
 }
 
 /// The egui context/winit bridge and the panel's widget state.
 pub struct Gui {
     state: egui_winit::State,
-    /// Placeholder — becomes the tonemap kernel's exposure in step 4.
+    /// Exposure in stops, applied by the tonemap kernel.
     exposure: f32,
     /// Placeholder — becomes `OpenPBR` material parameters in step 9.
     roughness: f32,
@@ -52,9 +54,14 @@ impl Gui {
         }
     }
 
+    /// Exposure in stops, for [`cenote::render::Renderer::tonemap`].
+    pub fn exposure(&self) -> f32 {
+        self.exposure
+    }
+
     /// Feed a window event to egui. `consumed` in the response means the UI
     /// claimed it (pointer over a panel, widget being dragged) and it must
-    /// not also drive the camera; `repaint` means the UI wants a redraw.
+    /// not also drive the camera.
     pub fn on_window_event(
         &mut self,
         window: &Window,
@@ -63,9 +70,10 @@ impl Gui {
         self.state.on_window_event(window, event)
     }
 
-    /// Run one UI frame and tessellate it for the presenter. The `bool` is
-    /// egui asking for an immediate repaint (mid-animation).
-    pub fn run(&mut self, window: &Window, device: &str, stats: &FrameStats) -> (GuiFrame, bool) {
+    /// Run one UI frame and tessellate it for the presenter. No repaint
+    /// signal comes back: the viewer accumulates continuously, so every
+    /// frame is followed by another.
+    pub fn run(&mut self, window: &Window, device: &str, stats: &FrameStats) -> GuiFrame {
         let input = self.state.take_egui_input(window);
         // Clone the (cheap, shared-reference) context so the closure can
         // borrow `self`'s widget state while `self.state` stays untouched.
@@ -75,18 +83,11 @@ impl Gui {
             .handle_platform_output(window, output.platform_output);
 
         let primitives = context.tessellate(output.shapes, output.pixels_per_point);
-        let repaint = output
-            .viewport_output
-            .get(&egui::ViewportId::ROOT)
-            .is_some_and(|viewport| viewport.repaint_delay.is_zero());
-        (
-            GuiFrame {
-                pixels_per_point: output.pixels_per_point,
-                primitives,
-                textures_delta: output.textures_delta,
-            },
-            repaint,
-        )
+        GuiFrame {
+            pixels_per_point: output.pixels_per_point,
+            primitives,
+            textures_delta: output.textures_delta,
+        }
     }
 
     fn panel(&mut self, context: &egui::Context, device: &str, stats: &FrameStats) {
@@ -97,21 +98,23 @@ impl Gui {
                 ui.label(egui::RichText::new(device).small());
                 let millis = |duration: Duration| duration.as_secs_f64() * 1000.0;
                 ui.monospace(format!(
-                    "render  {:>6.2} ms  ({}×{})",
-                    millis(stats.render),
-                    stats.render_size.0,
-                    stats.render_size.1,
+                    "sample  {:>6.2} ms  ({}×{})",
+                    millis(stats.sample),
+                    stats.size.0,
+                    stats.size.1,
                 ));
-                ui.monospace(format!("present {:>6.2} ms", millis(stats.present)));
+                ui.monospace(format!("display {:>6.2} ms", millis(stats.display)));
+                ui.monospace(format!("spp     {}", stats.samples));
 
                 ui.separator();
                 ui.add(egui::Slider::new(&mut self.exposure, -4.0..=4.0).text("exposure"));
+
+                ui.separator();
                 ui.add(egui::Slider::new(&mut self.roughness, 0.0..=1.0).text("roughness"));
                 ui.add(egui::Slider::new(&mut self.metalness, 0.0..=1.0).text("metalness"));
                 ui.label(
                     egui::RichText::new(
-                        "placeholders — exposure goes live with the tonemap kernel \
-                         (step 4), material with the GGX lobes (step 9)",
+                        "placeholders — material goes live with the GGX lobes (step 9)",
                     )
                     .small()
                     .weak(),

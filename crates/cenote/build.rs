@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 include!("slangc.rs");
 
 /// Kernel modules under `shaders/`, one entry point each, named after the file.
-const KERNELS: &[&str] = &["primary"];
+const KERNELS: &[&str] = &["primary", "accumulate", "tonemap"];
 
 fn main() {
     println!("cargo::rerun-if-changed=shaders");

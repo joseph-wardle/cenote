@@ -27,13 +27,26 @@ mod slangc {
 /// SPIR-V for the primary-visibility kernel (`shaders/primary.slang`).
 /// Entry point: `primary`.
 ///
-/// A byte slice with no alignment guarantee — convert to `u32` words at
-/// pipeline-creation time (e.g. `ash::util::read_spv`).
+/// Like every `*_SPIRV` constant here: a byte slice with no alignment
+/// guarantee — convert to `u32` words at pipeline-creation time (e.g.
+/// `ash::util::read_spv`). Entry-point names are preserved from the Slang
+/// sources by `-fvk-use-entrypoint-name`.
 pub const PRIMARY_SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/primary.spv"));
 
-/// Entry-point name inside [`PRIMARY_SPIRV`], preserved from the Slang
-/// source by `-fvk-use-entrypoint-name`.
+/// Entry-point name inside [`PRIMARY_SPIRV`].
 pub const PRIMARY_ENTRY: &std::ffi::CStr = c"primary";
+
+/// SPIR-V for the film-accumulation kernel (`shaders/accumulate.slang`).
+pub const ACCUMULATE_SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/accumulate.spv"));
+
+/// Entry-point name inside [`ACCUMULATE_SPIRV`].
+pub const ACCUMULATE_ENTRY: &std::ffi::CStr = c"accumulate";
+
+/// SPIR-V for the display tonemap kernel (`shaders/tonemap.slang`).
+pub const TONEMAP_SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tonemap.spv"));
+
+/// Entry-point name inside [`TONEMAP_SPIRV`].
+pub const TONEMAP_ENTRY: &std::ffi::CStr = c"tonemap";
 
 /// The crate's shader sources in the checkout this binary was built from.
 fn shader_dir() -> PathBuf {
@@ -145,9 +158,11 @@ mod tests {
     }
 
     #[test]
-    fn embedded_primary_kernel_is_spirv() {
+    fn embedded_kernels_are_spirv() {
         // Catches a broken/empty build-time slangc invocation in GPU-less CI.
         assert!(is_spirv(PRIMARY_SPIRV));
+        assert!(is_spirv(ACCUMULATE_SPIRV));
+        assert!(is_spirv(TONEMAP_SPIRV));
     }
 
     #[test]

@@ -11,7 +11,7 @@
 //! | `gpu`     | Unsafe-Vulkan quarantine: device context, buffers, submits, pipelines, acceleration structures, window presentation, the viewer's egui overlay pass. Code outside this module does not touch raw `vk` handles. |
 //! | `shaders` | Embedded SPIR-V registry, `slangc` runtime recompile, hot-reload watching |
 //! | `scene`   | Procedural test geometry and camera (real scene I/O arrives in M2) |
-//! | `render`  | Frame orchestration: the [`render::Renderer`] dispatches the primary kernel against the scene and reads pixels back (progressive accumulation arrives in M1) |
+//! | `render`  | Frame orchestration: one-shot linear frames for the CLI and tests, and the progressive path — [`render::Renderer`] accumulates samples into a [`render::Film`] and tonemaps (ACES) for display |
 //! | `output`  | Linear EXR write + read (read exists for the golden-image tests in `tests/golden.rs`) |
 //! | `error`   | The crate-wide [`enum@Error`] |
 //!
