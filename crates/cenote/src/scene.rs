@@ -22,22 +22,26 @@ pub struct Mesh {
 }
 
 /// One mesh resident on the GPU. The vertex and index buffers stay alive
-/// past the BLAS build: the primary kernel fetches triangle corners from
-/// them to compute geometric normals.
+/// past the BLAS build: the surface-shading kernel fetches triangle corners
+/// from them to compute geometric normals.
 struct GpuMesh {
     blas: AccelerationStructure,
     vertices: Buffer,
     indices: Buffer,
 }
 
-/// One entry of the geometry lookup table, indexed by instance custom index.
-/// Mirrors `struct GeometryRecord` in `shaders/primary.slang` — the kernel
-/// follows these addresses to fetch the hit triangle's corners.
+/// One entry of the geometry lookup table, indexed by instance custom index:
+/// where the instance's triangles live plus its transform — everything a
+/// kernel needs to re-evaluate shading at a hit. Mirrors
+/// `struct GeometryRecord` in `shaders/shade_surface.slang` field for field.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct GeometryRecord {
     positions: vk::DeviceAddress,
     indices: vk::DeviceAddress,
+    /// Rows of the instance's 3×4 object-to-world transform — the same
+    /// shape the TLAS instance itself carries.
+    object_to_world: [[f32; 4]; 3],
 }
 
 /// The scene, resident on the GPU and ready to trace against.
@@ -67,27 +71,29 @@ impl Scene {
             upload_mesh(gpu, "scene.sphere", &icosphere(2))?,
             upload_mesh(gpu, "scene.plane", &ground_plane(5.0))?,
         ];
+        // The sphere sits on the plane; one instance per mesh, and
         // custom_index = position in `meshes`, so a hit leads back to the
         // right vertex data.
-        let instances = [
-            TlasInstance {
-                blas: &meshes[0].blas,
-                transform: Mat4::from_translation(Vec3::Y),
-                custom_index: 0,
-            },
-            TlasInstance {
-                blas: &meshes[1].blas,
-                transform: Mat4::IDENTITY,
-                custom_index: 1,
-            },
-        ];
+        let transforms = [Mat4::from_translation(Vec3::Y), Mat4::IDENTITY];
+        let instances: Vec<TlasInstance> = meshes
+            .iter()
+            .zip(&transforms)
+            .enumerate()
+            .map(|(index, (mesh, &transform))| TlasInstance {
+                blas: &mesh.blas,
+                transform,
+                custom_index: index as u32,
+            })
+            .collect();
         let tlas = gpu.build_tlas("scene.tlas", &instances)?;
 
         let records: Vec<GeometryRecord> = meshes
             .iter()
-            .map(|mesh| GeometryRecord {
+            .zip(&transforms)
+            .map(|(mesh, &transform)| GeometryRecord {
                 positions: mesh.vertices.device_address(),
                 indices: mesh.indices.device_address(),
+                object_to_world: transform_rows(transform),
             })
             .collect();
         let geometry = gpu.upload_buffer(
@@ -118,8 +124,8 @@ impl Scene {
         &self.tlas
     }
 
-    /// The geometry lookup table: one `{positions, indices}` address pair
-    /// per instance custom index.
+    /// The geometry lookup table: one `{positions, indices, transform}`
+    /// record per instance custom index.
     #[must_use]
     pub fn geometry(&self) -> &Buffer {
         &self.geometry
@@ -186,9 +192,20 @@ impl Camera {
     }
 }
 
+/// The top three rows of an affine transform, in the kernels' `float4[3]`
+/// row-major shape (glam matrices are column-major, hence the transpose).
+fn transform_rows(transform: Mat4) -> [[f32; 4]; 3] {
+    let rows = transform.transpose();
+    [
+        rows.x_axis.to_array(),
+        rows.y_axis.to_array(),
+        rows.z_axis.to_array(),
+    ]
+}
+
 fn upload_mesh(gpu: &Context, name: &str, mesh: &Mesh) -> Result<GpuMesh> {
     // BUILD_INPUT for the BLAS build; STORAGE + device address so the
-    // primary kernel can fetch triangle corners afterwards.
+    // shading kernel can fetch triangle corners afterwards.
     let usage = vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
         | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
         | vk::BufferUsageFlags::STORAGE_BUFFER;

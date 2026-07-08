@@ -6,14 +6,15 @@
 //!
 //! # Module map
 //!
-//! | Module    | Role |
-//! |-----------|------|
-//! | `gpu`     | Unsafe-Vulkan quarantine: device context, buffers, submits, pipelines, acceleration structures, window presentation, the viewer's egui overlay pass. Code outside this module does not touch raw `vk` handles. |
-//! | `shaders` | Embedded SPIR-V registry, `slangc` runtime recompile, hot-reload watching |
-//! | `scene`   | Procedural test geometry and camera (real scene I/O arrives in M2) |
-//! | `render`  | Frame orchestration: one-shot linear frames for the CLI and tests, and the progressive path — [`render::Renderer`] accumulates samples into a [`render::Film`] and tonemaps (ACES) for display |
-//! | `output`  | Linear EXR write + read (read exists for the golden-image tests in `tests/golden.rs`) |
-//! | `error`   | The crate-wide [`enum@Error`] |
+//! | Module      | Role |
+//! |-------------|------|
+//! | `gpu`       | Unsafe-Vulkan quarantine: device context, buffers, submits, pipelines, acceleration structures, window presentation, the viewer's egui overlay pass. Code outside this module does not touch raw `vk` handles. |
+//! | `shaders`   | Embedded SPIR-V registry, `slangc` runtime recompile, hot-reload watching |
+//! | `scene`     | Procedural test geometry and camera (real scene I/O arrives in M2) |
+//! | `wavefront` | The engine core: `SoA` path state, GPU stage queues, indirect dispatch — one [`wavefront::Wavefront::trace`] is one sample per pixel |
+//! | `render`    | Frame orchestration: one-shot linear frames for the CLI and tests, and the progressive path — [`render::Renderer`] accumulates samples into a [`render::Film`] and tonemaps (ACES) for display |
+//! | `output`    | Linear EXR write + read (read exists for the golden-image tests in `tests/golden.rs`) |
+//! | `error`     | The crate-wide [`enum@Error`] |
 //!
 //! # Conventions
 //!
@@ -26,5 +27,6 @@ pub mod output;
 pub mod render;
 pub mod scene;
 pub mod shaders;
+pub mod wavefront;
 
 pub use error::{Error, Result};

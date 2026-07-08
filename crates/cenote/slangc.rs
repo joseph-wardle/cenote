@@ -2,9 +2,23 @@
 // paths — `build.rs` (embed at build time) and `src/shaders.rs` (hot reload
 // at run time) — so the flags and failure handling cannot drift.
 
+/// Every kernel under `shaders/`, one compute entry point each, named after
+/// its file. The build embeds them in this order and hot reload recompiles
+/// them in this order. Shared modules (`pathstate.slang`) are compiled into
+/// their importers, not listed.
+pub const KERNELS: [&str; 7] = [
+    "raygen",
+    "intersect",
+    "shade_miss",
+    "shade_surface",
+    "trace_shadow",
+    "accumulate",
+    "tonemap",
+];
+
 /// Flags shared by every kernel compile. `-fvk-use-entrypoint-name` keeps the
-/// Slang entry-point name in the SPIR-V instead of renaming it to `main`,
-/// which matters once wavefront stages share a module (M1).
+/// Slang entry-point name in the SPIR-V instead of renaming it to `main` —
+/// load-bearing now that wavefront stages share the `pathstate` module.
 pub const SLANGC_ARGS: &[&str] = &["-target", "spirv", "-fvk-use-entrypoint-name"];
 
 /// Compile `src` to SPIR-V at `dst` via the `slangc` subprocess.

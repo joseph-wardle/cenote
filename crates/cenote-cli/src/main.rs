@@ -50,12 +50,13 @@ fn main() -> anyhow::Result<()> {
     loop {
         watcher.wait()?;
         let start = Instant::now();
-        // Compile and pipeline failures both leave the previous kernel — and
-        // the previous image — in place; only render/write failures are fatal.
-        let reloaded =
-            cenote::shaders::recompile_primary().and_then(|spirv| renderer.reload(&gpu, &spirv));
+        // Compile and pipeline failures both leave the previous kernels —
+        // and the previous image — in place; only render/write failures are
+        // fatal.
+        let reloaded = cenote::shaders::Kernels::recompile()
+            .and_then(|kernels| renderer.reload(&gpu, &kernels));
         if let Err(e) = reloaded {
-            eprintln!("{e}\nkeeping the previous kernel");
+            eprintln!("{e}\nkeeping the previous kernels");
             continue;
         }
         render_frame(&gpu, &scene, &renderer, &args)?;

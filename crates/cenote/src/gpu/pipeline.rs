@@ -1,11 +1,17 @@
-//! Compute pipelines and blocking dispatch.
+//! Compute pipelines and blocking dispatch — single kernels or multi-pass
+//! waves.
 //!
 //! Kernels reach every buffer through device addresses in a single
 //! push-constant struct. The one resource that cannot be an address is the
 //! scene TLAS, so kernels that trace rays declare [`Bindings::Tlas`] and
 //! carry the binding model's single descriptor set — set 0, binding 0 —
-//! which [`Context::dispatch`] writes the TLAS into. Kernels that only chew
-//! buffers ([`Bindings::None`]) have no descriptors at all.
+//! written at submission time. Kernels that only chew buffers
+//! ([`Bindings::None`]) have no descriptors at all.
+//!
+//! [`Context::submit_passes`] records a sequence of [`Pass`]es — buffer
+//! fills, direct and indirect dispatches — into one blocking submission,
+//! with a full barrier between passes: the wavefront engine's stage chain,
+//! where each stage's workgroup count is a number the previous stage wrote.
 
 use std::ffi::CStr;
 use std::slice;
@@ -13,7 +19,7 @@ use std::slice;
 use ash::vk;
 
 use crate::error::Result;
-use crate::gpu::{AccelerationStructure, Context};
+use crate::gpu::{AccelerationStructure, Buffer, Context};
 
 /// The descriptor bindings a kernel needs. Buffers travel as device
 /// addresses in push constants, so the only question is whether the kernel
@@ -244,9 +250,7 @@ impl Context {
     ///
     /// # Panics
     ///
-    /// If `push_constants` doesn't match the size the pipeline was created
-    /// with (the bytes would silently misalign with the kernel's view of
-    /// them), or if `tlas` doesn't match the pipeline's [`Bindings`].
+    /// As [`Context::submit_passes`].
     pub fn dispatch(
         &self,
         pipeline: &ComputePipeline,
@@ -254,6 +258,90 @@ impl Context {
         push_constants: &[u8],
         group_counts: [u32; 3],
     ) -> Result<()> {
+        self.submit_passes(&[Pass::Dispatch {
+            pipeline,
+            tlas,
+            push_constants,
+            group_counts,
+        }])
+    }
+
+    /// Record `passes` in order into one command buffer, submit it, and
+    /// block until the GPU finishes. A full memory barrier sits between
+    /// consecutive passes, so each pass sees every prior pass's writes —
+    /// including indirect dispatches reading workgroup counts a previous
+    /// pass wrote. (Full flushes between stages are the simple-and-correct
+    /// baseline; overlapping independent stages is a measured optimization
+    /// for later.) The fence wait makes all writes available, so a
+    /// subsequent [`Context::download_buffer`] needs no barrier.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Vulkan`] if submission fails.
+    ///
+    /// # Panics
+    ///
+    /// On programmer bugs, all checked before anything is recorded: push
+    /// constants not matching a pipeline's declared size, a TLAS argument
+    /// not matching a pipeline's [`Bindings`], the same pipeline given two
+    /// different TLASes (it has one descriptor set, written once per
+    /// submission), or a fill that is misaligned or out of bounds.
+    pub fn submit_passes(&self, passes: &[Pass]) -> Result<()> {
+        for pass in passes {
+            self.validate_and_write_descriptors(pass, passes);
+        }
+        self.submit_once(|device, cmd| {
+            for (index, pass) in passes.iter().enumerate() {
+                if index > 0 {
+                    barrier_between_passes(device, cmd);
+                }
+                record_pass(device, cmd, pass);
+            }
+        })
+    }
+
+    /// The pre-recording half of [`Context::submit_passes`]: assert the
+    /// pass is well-formed and write the TLAS descriptor for dispatches
+    /// that carry one. Writing before recording is safe — blocking submits
+    /// mean no set is ever in flight here.
+    fn validate_and_write_descriptors(&self, pass: &Pass, passes: &[Pass]) {
+        let (pipeline, tlas, push_constants) = match *pass {
+            Pass::Fill {
+                buffer,
+                offset,
+                size,
+                value: _,
+            } => {
+                assert!(
+                    offset.is_multiple_of(4) && size > 0 && size.is_multiple_of(4),
+                    "fill offset and size must be non-zero multiples of 4"
+                );
+                assert!(
+                    offset + size <= buffer.size(),
+                    "fill reaches past the end of the buffer"
+                );
+                return;
+            }
+            Pass::Dispatch {
+                pipeline,
+                tlas,
+                push_constants,
+                group_counts: _,
+            } => (pipeline, tlas, push_constants),
+            Pass::DispatchIndirect {
+                pipeline,
+                tlas,
+                push_constants,
+                args,
+                offset,
+            } => {
+                assert!(
+                    offset.is_multiple_of(4) && offset + 12 <= args.size(),
+                    "indirect args must be 4-byte aligned and inside the buffer"
+                );
+                (pipeline, tlas, push_constants)
+            }
+        };
         assert_eq!(
             push_constants.len() as u32,
             pipeline.push_constant_size,
@@ -264,46 +352,172 @@ impl Context {
             pipeline.tlas.is_some(),
             "TLAS argument doesn't match the pipeline's declared bindings"
         );
-        if let (Some(tlas), Some(descriptors)) = (tlas, &pipeline.tlas) {
-            // (Re)writing the set before recording is safe: blocking submits
-            // mean it is never in flight here.
-            let handles = [tlas.handle()];
-            let mut tlas_write = vk::WriteDescriptorSetAccelerationStructureKHR::default()
-                .acceleration_structures(&handles);
-            let write = vk::WriteDescriptorSet::default()
-                .dst_set(descriptors.set)
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
-                // Not inferred from the extension struct: without this the
-                // write is a zero-descriptor no-op.
-                .descriptor_count(1)
-                .push_next(&mut tlas_write);
-            unsafe {
-                self.device()
-                    .update_descriptor_sets(slice::from_ref(&write), &[]);
-            }
-        }
+        let Some(tlas) = tlas else {
+            return;
+        };
+        assert!(
+            passes
+                .iter()
+                .filter_map(|other| match *other {
+                    Pass::Dispatch {
+                        pipeline: p,
+                        tlas: t,
+                        ..
+                    }
+                    | Pass::DispatchIndirect {
+                        pipeline: p,
+                        tlas: t,
+                        ..
+                    } if std::ptr::eq(p, pipeline) => t,
+                    _ => None,
+                })
+                .all(|other| other.handle() == tlas.handle()),
+            "one pipeline, two TLASes — its single descriptor set can hold only one"
+        );
 
-        self.submit_once(|device, cmd| unsafe {
-            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline.handle);
-            if let Some(descriptors) = &pipeline.tlas {
-                device.cmd_bind_descriptor_sets(
-                    cmd,
-                    vk::PipelineBindPoint::COMPUTE,
-                    pipeline.layout,
-                    0,
-                    slice::from_ref(&descriptors.set),
-                    &[],
-                );
-            }
-            device.cmd_push_constants(
-                cmd,
-                pipeline.layout,
-                vk::ShaderStageFlags::COMPUTE,
-                0,
-                push_constants,
-            );
-            device.cmd_dispatch(cmd, group_counts[0], group_counts[1], group_counts[2]);
-        })
+        let descriptors = pipeline.tlas.as_ref().expect("checked against bindings");
+        let handles = [tlas.handle()];
+        let mut tlas_write = vk::WriteDescriptorSetAccelerationStructureKHR::default()
+            .acceleration_structures(&handles);
+        let write = vk::WriteDescriptorSet::default()
+            .dst_set(descriptors.set)
+            .dst_binding(0)
+            .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+            // Not inferred from the extension struct: without this the
+            // write is a zero-descriptor no-op.
+            .descriptor_count(1)
+            .push_next(&mut tlas_write);
+        unsafe {
+            self.device()
+                .update_descriptor_sets(slice::from_ref(&write), &[]);
+        }
     }
+}
+
+/// One step of a [`Context::submit_passes`] submission.
+pub enum Pass<'a> {
+    /// Overwrite a byte range with a repeated `u32` (`vkCmdFillBuffer`) —
+    /// how a wave resets queue counters without touching the host.
+    Fill {
+        /// Target buffer (needs `TRANSFER_DST` usage).
+        buffer: &'a Buffer,
+        /// First byte to fill; a multiple of 4.
+        offset: u64,
+        /// Bytes to fill; a non-zero multiple of 4.
+        size: u64,
+        /// The `u32` repeated across the range.
+        value: u32,
+    },
+    /// A compute dispatch with host-chosen workgroup counts.
+    Dispatch {
+        /// The pipeline to run.
+        pipeline: &'a ComputePipeline,
+        /// The scene TLAS, iff the pipeline declared [`Bindings::Tlas`].
+        tlas: Option<&'a AccelerationStructure>,
+        /// Exactly the pipeline's declared push-constant size.
+        push_constants: &'a [u8],
+        /// Workgroups along x, y, z.
+        group_counts: [u32; 3],
+    },
+    /// A compute dispatch whose workgroup counts the GPU reads from `args`
+    /// at `offset` at execution time — how a stage sized by the previous
+    /// stage's output dispatches with no readback.
+    DispatchIndirect {
+        /// The pipeline to run.
+        pipeline: &'a ComputePipeline,
+        /// The scene TLAS, iff the pipeline declared [`Bindings::Tlas`].
+        tlas: Option<&'a AccelerationStructure>,
+        /// Exactly the pipeline's declared push-constant size.
+        push_constants: &'a [u8],
+        /// Where the counts live (needs `INDIRECT_BUFFER` usage).
+        args: &'a Buffer,
+        /// Byte offset of the `VkDispatchIndirectCommand` (three `u32`s:
+        /// workgroups along x, y, z) inside `args`; a multiple of 4.
+        offset: u64,
+    },
+}
+
+fn record_pass(device: &ash::Device, cmd: vk::CommandBuffer, pass: &Pass) {
+    match *pass {
+        Pass::Fill {
+            buffer,
+            offset,
+            size,
+            value,
+        } => unsafe {
+            device.cmd_fill_buffer(cmd, buffer.handle(), offset, size, value);
+        },
+        Pass::Dispatch {
+            pipeline,
+            push_constants,
+            group_counts,
+            ..
+        } => unsafe {
+            bind_and_push(device, cmd, pipeline, push_constants);
+            device.cmd_dispatch(cmd, group_counts[0], group_counts[1], group_counts[2]);
+        },
+        Pass::DispatchIndirect {
+            pipeline,
+            push_constants,
+            args,
+            offset,
+            ..
+        } => unsafe {
+            bind_and_push(device, cmd, pipeline, push_constants);
+            device.cmd_dispatch_indirect(cmd, args.handle(), offset);
+        },
+    }
+}
+
+unsafe fn bind_and_push(
+    device: &ash::Device,
+    cmd: vk::CommandBuffer,
+    pipeline: &ComputePipeline,
+    push_constants: &[u8],
+) {
+    unsafe {
+        device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline.handle);
+        if let Some(descriptors) = &pipeline.tlas {
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                pipeline.layout,
+                0,
+                slice::from_ref(&descriptors.set),
+                &[],
+            );
+        }
+        device.cmd_push_constants(
+            cmd,
+            pipeline.layout,
+            vk::ShaderStageFlags::COMPUTE,
+            0,
+            push_constants,
+        );
+    }
+}
+
+/// Everything before, visible to everything after: compute and transfer
+/// writes flushed to compute reads/writes, transfer writes, and indirect-
+/// command reads. One barrier shape for every pass boundary keeps the wave
+/// obviously correct.
+fn barrier_between_passes(device: &ash::Device, cmd: vk::CommandBuffer) {
+    let barrier = vk::MemoryBarrier2::default()
+        .src_stage_mask(
+            vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::ALL_TRANSFER,
+        )
+        .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
+        .dst_stage_mask(
+            vk::PipelineStageFlags2::COMPUTE_SHADER
+                | vk::PipelineStageFlags2::DRAW_INDIRECT
+                | vk::PipelineStageFlags2::ALL_TRANSFER,
+        )
+        .dst_access_mask(
+            vk::AccessFlags2::SHADER_READ
+                | vk::AccessFlags2::SHADER_WRITE
+                | vk::AccessFlags2::INDIRECT_COMMAND_READ
+                | vk::AccessFlags2::TRANSFER_WRITE,
+        );
+    let info = vk::DependencyInfo::default().memory_barriers(slice::from_ref(&barrier));
+    unsafe { device.cmd_pipeline_barrier2(cmd, &info) };
 }

@@ -1,16 +1,19 @@
-//! Compiled GPU kernels: embedded SPIR-V, plus the hot-reload path.
+//! Compiled GPU kernels: the embedded SPIR-V registry, plus the hot-reload
+//! path.
 //!
-//! `build.rs` runs `slangc` over every kernel in `shaders/` and this module
-//! embeds the resulting SPIR-V, so binaries are self-contained — no shader
-//! files needed at run time. For interactive kernel editing, [`ShaderWatcher`]
-//! wakes on source changes and [`recompile_primary`] reproduces the build-time
-//! compile at run time — same binary, same flags, both `include!`ing
-//! `slangc.rs` next to `build.rs` so the paths can't drift.
+//! `build.rs` runs `slangc` over every kernel in `shaders/` and
+//! [`Kernels::embedded`] carries the results, so binaries are self-contained
+//! — no shader files needed at run time. For interactive kernel editing,
+//! [`ShaderWatcher`] wakes on source changes and [`Kernels::recompile`]
+//! reproduces the build-time compile at run time — same flags, same kernel
+//! list, both `include!`ing `slangc.rs` next to `build.rs` so nothing can
+//! drift.
 //!
 //! Hot reload is a source-checkout feature: shader paths are baked from
 //! `CARGO_MANIFEST_DIR` at compile time. A deployed binary renders from its
 //! embedded kernels and never touches the filesystem.
 
+use std::ffi::CStr;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -19,49 +22,135 @@ use notify::Watcher as _;
 
 use crate::error::{Error, Result};
 
-/// The build-time `slangc` invocation, shared with `build.rs`.
+/// The build-time `slangc` invocation and kernel list, shared with `build.rs`.
 mod slangc {
     include!("../slangc.rs");
 }
 
-/// SPIR-V for the primary-visibility kernel (`shaders/primary.slang`).
-/// Entry point: `primary`.
-///
-/// Like every `*_SPIRV` constant here: a byte slice with no alignment
-/// guarantee — convert to `u32` words at pipeline-creation time (e.g.
-/// `ash::util::read_spv`). Entry-point names are preserved from the Slang
-/// sources by `-fvk-use-entrypoint-name`.
-pub const PRIMARY_SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/primary.spv"));
+/// One compiled kernel: SPIR-V bytes (no alignment guarantee — convert to
+/// `u32` words at pipeline-creation time) plus the entry-point name inside
+/// them, preserved from the Slang source by `-fvk-use-entrypoint-name`.
+pub struct Kernel {
+    /// The compiled SPIR-V module.
+    pub spirv: Vec<u8>,
+    /// The entry-point name inside it — the kernel's file stem.
+    pub entry: &'static CStr,
+}
 
-/// Entry-point name inside [`PRIMARY_SPIRV`].
-pub const PRIMARY_ENTRY: &std::ffi::CStr = c"primary";
+/// The full kernel set, one field per entry in `slangc.rs`'s `KERNELS`.
+/// Both constructors produce the same set — [`Kernels::embedded`] from the
+/// bytes `build.rs` baked in, [`Kernels::recompile`] fresh from the source
+/// checkout — so swapping a whole set is the reload unit.
+pub struct Kernels {
+    /// Wave entry: camera rays, path init, ray-queue push.
+    pub raygen: Kernel,
+    /// Pure TLAS traversal; routes each path to hit or miss.
+    pub intersect: Kernel,
+    /// Escaped rays (constant sky until the HDRI lands).
+    pub shade_miss: Kernel,
+    /// Surface shading and path termination/continuation.
+    pub shade_surface: Kernel,
+    /// Occlusion tests for queued shadow rays.
+    pub trace_shadow: Kernel,
+    /// Film: add a wave's sample into the running sums (NaN/Inf-guarded).
+    pub accumulate: Kernel,
+    /// Film: sums → exposed, ACES-mapped, sRGB-encoded display RGBA8.
+    pub tonemap: Kernel,
+}
 
-/// SPIR-V for the film-accumulation kernel (`shaders/accumulate.slang`).
-pub const ACCUMULATE_SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/accumulate.spv"));
+impl Kernels {
+    /// The kernels `build.rs` compiled into this binary.
+    #[must_use]
+    pub fn embedded() -> Self {
+        fn kernel(spirv: &[u8], entry: &'static CStr) -> Kernel {
+            Kernel {
+                spirv: spirv.to_vec(),
+                entry,
+            }
+        }
+        macro_rules! spirv {
+            ($name:literal) => {
+                include_bytes!(concat!(env!("OUT_DIR"), "/", $name, ".spv"))
+            };
+        }
+        Self {
+            raygen: kernel(spirv!("raygen"), c"raygen"),
+            intersect: kernel(spirv!("intersect"), c"intersect"),
+            shade_miss: kernel(spirv!("shade_miss"), c"shade_miss"),
+            shade_surface: kernel(spirv!("shade_surface"), c"shade_surface"),
+            trace_shadow: kernel(spirv!("trace_shadow"), c"trace_shadow"),
+            accumulate: kernel(spirv!("accumulate"), c"accumulate"),
+            tonemap: kernel(spirv!("tonemap"), c"tonemap"),
+        }
+    }
 
-/// Entry-point name inside [`ACCUMULATE_SPIRV`].
-pub const ACCUMULATE_ENTRY: &std::ffi::CStr = c"accumulate";
-
-/// SPIR-V for the display tonemap kernel (`shaders/tonemap.slang`).
-pub const TONEMAP_SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tonemap.spv"));
-
-/// Entry-point name inside [`TONEMAP_SPIRV`].
-pub const TONEMAP_ENTRY: &std::ffi::CStr = c"tonemap";
+    /// Recompile the whole set from the source checkout — the hot-reload
+    /// path. Kernels compile in parallel (one `slangc` process each), which
+    /// keeps a whole-set reload inside the sub-second dev-loop budget.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ShaderCompile`] with `slangc`'s diagnostics if any kernel's
+    /// source doesn't compile — the caller keeps its current pipelines — or
+    /// [`Error::Io`] if compiled SPIR-V can't be read back.
+    ///
+    /// # Panics
+    ///
+    /// Only if a compile thread itself panics — a bug, not an environment
+    /// failure (compiler problems come back as errors above).
+    pub fn recompile() -> Result<Self> {
+        // Destructured in KERNELS order — the one place that order matters.
+        let [
+            raygen,
+            intersect,
+            shade_miss,
+            shade_surface,
+            trace_shadow,
+            accumulate,
+            tonemap,
+        ] = std::thread::scope(|scope| {
+            slangc::KERNELS
+                .map(|name| {
+                    scope.spawn(move || compile(&shader_dir().join(format!("{name}.slang"))))
+                })
+                .map(|handle| handle.join().expect("compile thread panicked"))
+        });
+        Ok(Self {
+            raygen: Kernel {
+                spirv: raygen?,
+                entry: c"raygen",
+            },
+            intersect: Kernel {
+                spirv: intersect?,
+                entry: c"intersect",
+            },
+            shade_miss: Kernel {
+                spirv: shade_miss?,
+                entry: c"shade_miss",
+            },
+            shade_surface: Kernel {
+                spirv: shade_surface?,
+                entry: c"shade_surface",
+            },
+            trace_shadow: Kernel {
+                spirv: trace_shadow?,
+                entry: c"trace_shadow",
+            },
+            accumulate: Kernel {
+                spirv: accumulate?,
+                entry: c"accumulate",
+            },
+            tonemap: Kernel {
+                spirv: tonemap?,
+                entry: c"tonemap",
+            },
+        })
+    }
+}
 
 /// The crate's shader sources in the checkout this binary was built from.
 fn shader_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("shaders")
-}
-
-/// Recompile the primary kernel from its source and return fresh SPIR-V.
-///
-/// # Errors
-///
-/// [`Error::ShaderCompile`] with `slangc`'s diagnostics if the source doesn't
-/// compile — the caller keeps rendering with its current pipeline — or
-/// [`Error::Io`] if the compiled SPIR-V can't be read back.
-pub fn recompile_primary() -> Result<Vec<u8>> {
-    compile(&shader_dir().join("primary.slang"))
 }
 
 /// Run `slangc` on `src` and return the SPIR-V bytes. The compiler writes
@@ -157,22 +246,36 @@ mod tests {
         u32::from_le_bytes(bytes[..4].try_into().unwrap()) == 0x0723_0203
     }
 
+    fn all(kernels: &Kernels) -> [&Kernel; 7] {
+        [
+            &kernels.raygen,
+            &kernels.intersect,
+            &kernels.shade_miss,
+            &kernels.shade_surface,
+            &kernels.trace_shadow,
+            &kernels.accumulate,
+            &kernels.tonemap,
+        ]
+    }
+
     #[test]
     fn embedded_kernels_are_spirv() {
         // Catches a broken/empty build-time slangc invocation in GPU-less CI.
-        assert!(is_spirv(PRIMARY_SPIRV));
-        assert!(is_spirv(ACCUMULATE_SPIRV));
-        assert!(is_spirv(TONEMAP_SPIRV));
+        for kernel in all(&Kernels::embedded()) {
+            assert!(is_spirv(&kernel.spirv), "{:?}", kernel.entry);
+        }
     }
 
     #[test]
     fn runtime_recompile_produces_spirv() {
         // The hot-reload path end to end, minus the file watch. Byte
-        // equality with PRIMARY_SPIRV is deliberately not asserted: debug
-        // info embeds source paths, which differ between the build-time
-        // (relative) and runtime (absolute) invocations.
-        let spirv = recompile_primary().expect("recompile primary kernel");
-        assert!(is_spirv(&spirv));
+        // equality with the embedded set is deliberately not asserted:
+        // debug info embeds source paths, which differ between the
+        // build-time (relative) and runtime (absolute) invocations.
+        let kernels = Kernels::recompile().expect("recompile kernel set");
+        for kernel in all(&kernels) {
+            assert!(is_spirv(&kernel.spirv), "{:?}", kernel.entry);
+        }
     }
 
     #[test]

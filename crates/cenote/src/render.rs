@@ -1,54 +1,34 @@
-//! Frame orchestration: dispatch kernels against the scene and manage the
-//! film. Orchestration only — all Vulkan stays behind [`crate::gpu`].
+//! Frame orchestration: drive the wavefront engine against the scene and
+//! manage the film. Orchestration only — Vulkan stays behind [`crate::gpu`],
+//! tracing behind [`crate::wavefront`].
 //!
-//! Two paths share the primary kernel:
+//! Two paths share the engine:
 //!
-//! - **One-shot** ([`Renderer::render`]): allocate a buffer, render one
-//!   frame, read the linear pixels back — the CLI and test path.
+//! - **One-shot** ([`Renderer::render`]): allocate a buffer, trace one
+//!   wave, read the linear pixels back — the CLI and test path.
 //! - **Progressive** ([`Renderer::accumulate`] + [`Renderer::tonemap`]):
 //!   each `accumulate` traces one sample into the [`Film`]'s running sums;
 //!   `tonemap` averages, exposes, and applies the ACES display transform
 //!   into the RGBA8 display buffer that [`crate::gpu::Presenter::present`]
 //!   shows. The viewer's redraw loop is one of each per frame.
 //!
-//! The M0 primary kernel is deterministic, so accumulating it refines
-//! nothing yet — the progressive path proves the display plumbing in
-//! isolation (M1 build step 4) until the wavefront engine (step 5) and
-//! sample jitter (step 6) make every sample count.
+//! The wavefront's degenerate kernels are deterministic, so accumulating
+//! refines nothing yet — sample jitter (M1 step 6) makes every sample
+//! count.
 
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
-use glam::Vec3;
 
 use crate::error::Result;
 use crate::gpu::{Bindings, Buffer, ComputePipeline, Context, MemoryLocation};
 use crate::scene::Scene;
-use crate::shaders;
+use crate::shaders::Kernels;
+use crate::wavefront::Wavefront;
 
-/// Workgroup width/height — must match `[numthreads(8, 8, 1)]` in every
-/// kernel under `shaders/`.
+/// Workgroup width/height — must match `[numthreads(8, 8, 1)]` in the film
+/// kernels (`accumulate.slang`, `tonemap.slang`). The wavefront's 1D path
+/// kernels have their own workgroup size, over in `wavefront.rs`.
 const WORKGROUP_SIZE: u32 = 8;
-
-/// Push constants for the primary kernel. Mirrors `struct Params` in
-/// `shaders/primary.slang` field-for-field — one struct at the top of the
-/// kernel names everything it reads. The scalars after each `Vec3` sit in
-/// what std430 would otherwise spend on padding — field order is layout.
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct Params {
-    /// Device address of the output pixel buffer (`float4*` on the GPU side).
-    pixels: vk::DeviceAddress,
-    /// Device address of the scene's geometry lookup table.
-    geometry: vk::DeviceAddress,
-    camera_position: Vec3,
-    width: u32,
-    camera_right: Vec3,
-    height: u32,
-    camera_up: Vec3,
-    _pad0: f32,
-    camera_forward: Vec3,
-    _pad1: f32,
-}
 
 /// Push constants for the accumulation kernel; mirrors `struct Params` in
 /// `shaders/accumulate.slang`.
@@ -92,8 +72,8 @@ struct TonemapParams {
 /// Sized at creation; a resize means a new `Film`. A view change means
 /// [`Film::reset`].
 pub struct Film {
-    /// One sample's radiance, written by the primary kernel each wave and
-    /// consumed by the accumulation kernel.
+    /// One sample's radiance, written by the wavefront's shading kernels
+    /// each wave and consumed by the accumulation kernel.
     sample: Buffer,
     /// The running sums. `TRANSFER_SRC` so the accumulated image can be
     /// read back (tests now, batch EXR output in later steps).
@@ -180,10 +160,11 @@ impl Film {
     }
 }
 
-/// The kernel pipelines, ready to render frames. Created from the embedded
-/// kernels; [`Renderer::reload`] swaps in hot-reloaded SPIR-V.
+/// The renderer: the wavefront engine plus the film kernels, ready to
+/// render frames. Created from the embedded kernels; [`Renderer::reload`]
+/// swaps in a recompiled set.
 pub struct Renderer {
-    primary: ComputePipeline,
+    wavefront: Wavefront,
     accumulate: ComputePipeline,
     tonemap: ComputePipeline,
 }
@@ -193,37 +174,46 @@ impl Renderer {
     ///
     /// # Errors
     ///
-    /// Any [`crate::Error`] from pipeline creation.
+    /// Any [`crate::Error`] from pipeline or buffer creation.
     pub fn new(gpu: &Context) -> Result<Self> {
+        Self::from_kernels(gpu, &Kernels::embedded())
+    }
+
+    /// Build every pipeline from `kernels` — [`Renderer::new`] with the
+    /// embedded set, [`Renderer::reload`] with a recompiled one.
+    ///
+    /// # Errors
+    ///
+    /// Any [`crate::Error`] from pipeline or buffer creation.
+    pub fn from_kernels(gpu: &Context, kernels: &Kernels) -> Result<Self> {
         Ok(Self {
-            primary: create_primary_pipeline(gpu, shaders::PRIMARY_SPIRV)?,
+            wavefront: Wavefront::new(gpu, kernels, Wavefront::DEFAULT_CAPACITY)?,
             accumulate: gpu.create_compute_pipeline(
-                shaders::ACCUMULATE_SPIRV,
-                shaders::ACCUMULATE_ENTRY,
+                &kernels.accumulate.spirv,
+                kernels.accumulate.entry,
                 size_of::<AccumulateParams>() as u32,
                 Bindings::None,
             )?,
             tonemap: gpu.create_compute_pipeline(
-                shaders::TONEMAP_SPIRV,
-                shaders::TONEMAP_ENTRY,
+                &kernels.tonemap.spirv,
+                kernels.tonemap.entry,
                 size_of::<TonemapParams>() as u32,
                 Bindings::None,
             )?,
         })
     }
 
-    /// Swap in a recompiled primary kernel; if pipeline creation fails, the
-    /// current pipeline stays live. The entry-point name and the
-    /// push-constant layout are pinned by the embedded build — hot reload
-    /// covers kernel *body* edits; changing `Params` needs a `cargo build`.
-    /// The accumulate and tonemap kernels aren't reloadable yet; the
-    /// wavefront engine's kernel registry (M1 step 5) generalizes this.
+    /// Swap in a recompiled kernel set; if any pipeline fails to build, the
+    /// current renderer stays live untouched. Entry-point names and
+    /// push-constant layouts are pinned by the embedded build — hot reload
+    /// covers kernel *body* edits; changing a params struct or the
+    /// path-state schema needs a `cargo build`.
     ///
     /// # Errors
     ///
-    /// Any [`crate::Error`] from pipeline creation.
-    pub fn reload(&mut self, gpu: &Context, spirv: &[u8]) -> Result<()> {
-        self.primary = create_primary_pipeline(gpu, spirv)?;
+    /// Any [`crate::Error`] from pipeline or buffer creation.
+    pub fn reload(&mut self, gpu: &Context, kernels: &Kernels) -> Result<()> {
+        *self = Self::from_kernels(gpu, kernels)?;
         Ok(())
     }
 
@@ -281,20 +271,21 @@ impl Renderer {
                 | vk::BufferUsageFlags::TRANSFER_SRC,
             MemoryLocation::GpuOnly,
         )?;
-        self.trace(gpu, scene, &pixels, width, height)?;
+        self.wavefront.trace(gpu, scene, &pixels, width, height)?;
         Ok(pixels)
     }
 
     /// Trace one sample of `scene` and add it to `film`'s sums (the first
-    /// sample after creation or a reset overwrites them). One blocking wave:
-    /// primary kernel into the film's sample buffer, then the accumulation
-    /// kernel — with its unconditional NaN/Inf guard — into the sums.
+    /// sample after creation or a reset overwrites them). One wave into the
+    /// film's sample buffer, then the accumulation kernel — with its
+    /// unconditional NaN/Inf guard — into the sums.
     ///
     /// # Errors
     ///
     /// Any [`crate::Error`] from submission.
     pub fn accumulate(&self, gpu: &Context, scene: &Scene, film: &mut Film) -> Result<()> {
-        self.trace(gpu, scene, &film.sample, film.width, film.height)?;
+        self.wavefront
+            .trace(gpu, scene, &film.sample, film.width, film.height)?;
         self.add_sample(gpu, film)?;
         film.samples += 1;
         Ok(())
@@ -330,36 +321,6 @@ impl Renderer {
         )
     }
 
-    /// Dispatch the primary kernel: one frame of `scene` into `pixels`.
-    fn trace(
-        &self,
-        gpu: &Context,
-        scene: &Scene,
-        pixels: &Buffer,
-        width: u32,
-        height: u32,
-    ) -> Result<()> {
-        let basis = scene.camera().basis(width as f32 / height as f32);
-        let params = Params {
-            pixels: pixels.device_address(),
-            geometry: scene.geometry().device_address(),
-            camera_position: scene.camera().position,
-            width,
-            camera_right: basis.right,
-            height,
-            camera_up: basis.up,
-            _pad0: 0.0,
-            camera_forward: basis.forward,
-            _pad1: 0.0,
-        };
-        gpu.dispatch(
-            &self.primary,
-            Some(scene.tlas()),
-            bytemuck::bytes_of(&params),
-            workgroups(width, height),
-        )
-    }
-
     /// Dispatch the accumulation kernel: `film.sample` into `film.sum`,
     /// overwriting when the film is empty.
     fn add_sample(&self, gpu: &Context, film: &Film) -> Result<()> {
@@ -378,15 +339,6 @@ impl Renderer {
             workgroups(film.width, film.height),
         )
     }
-}
-
-fn create_primary_pipeline(gpu: &Context, spirv: &[u8]) -> Result<ComputePipeline> {
-    gpu.create_compute_pipeline(
-        spirv,
-        shaders::PRIMARY_ENTRY,
-        size_of::<Params>() as u32,
-        Bindings::Tlas,
-    )
 }
 
 /// 2D dispatch covering every pixel of a `width`×`height` target.
@@ -467,11 +419,11 @@ mod tests {
     }
 
     /// The hot-reload swap end to end, minus the file watch: recompile the
-    /// unmodified kernel through the runtime `slangc` path, swap it in, and
-    /// require a pixel-identical frame — same source, same compiler, same
-    /// flags must mean the same image.
+    /// unmodified kernel set through the runtime `slangc` path, swap it in,
+    /// and require a pixel-identical frame — same source, same compiler,
+    /// same flags must mean the same image.
     #[test]
-    fn reloaded_kernel_renders_identically() {
+    fn reloaded_kernels_render_identically() {
         let Some(gpu) = crate::gpu::test_context() else {
             return;
         };
@@ -479,11 +431,28 @@ mod tests {
         let mut renderer = Renderer::new(&gpu).expect("renderer");
         let before = renderer.render(&gpu, &scene, 64, 64).expect("render");
 
-        let spirv = shaders::recompile_primary().expect("recompile");
-        renderer.reload(&gpu, &spirv).expect("reload");
+        let kernels = Kernels::recompile().expect("recompile");
+        renderer.reload(&gpu, &kernels).expect("reload");
         let after = renderer.render(&gpu, &scene, 64, 64).expect("render");
 
         assert_eq!(before, after);
+    }
+
+    /// Two renders of the same scene must agree bit for bit — the
+    /// charter's replay guarantee, made mechanical. This is the check that
+    /// pins the wavefront's determinism rule: queue push order varies from
+    /// run to run, so any radiance write that isn't pixel-owned (or any
+    /// atomic accumulation) shows up here as flickering low bits.
+    #[test]
+    fn rendering_is_bitwise_deterministic() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let scene = Scene::demo(&gpu).expect("demo scene");
+        let renderer = Renderer::new(&gpu).expect("renderer");
+        let first = renderer.render(&gpu, &scene, 128, 128).expect("render");
+        let second = renderer.render(&gpu, &scene, 128, 128).expect("render");
+        assert_eq!(first, second);
     }
 
     /// Accumulating the deterministic M0 kernel N times must sum to N× a
