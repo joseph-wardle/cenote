@@ -316,7 +316,7 @@ mod tests {
         let env =
             Environment::from_equirect_exr(include_bytes!("../assets/kloofendal_puresky.exr"))
                 .expect("demo HDRI decodes");
-        assert_eq!((env.width(), env.height()), (512, 256));
+        assert_eq!((env.width(), env.height()), (2048, 1024));
         assert!(env.texels().iter().all(|v| v.is_finite() && *v >= 0.0));
         assert!(env.tables().power > 1.0, "a daytime sky is not this dark");
     }
