@@ -323,7 +323,12 @@ pub(super) fn create_device(
         .descriptor_binding_variable_descriptor_count(true)
         .descriptor_binding_sampled_image_update_after_bind(true)
         .shader_sampled_image_array_non_uniform_indexing(true);
-    let mut vk13 = vk::PhysicalDeviceVulkan13Features::default().synchronization2(true);
+    // synchronization2 and dynamicRendering (the overlay's UI pass) have no
+    // entries in `missing_requirements`: Vulkan 1.3 mandates support for
+    // both, so the API-version check covers them.
+    let mut vk13 = vk::PhysicalDeviceVulkan13Features::default()
+        .synchronization2(true)
+        .dynamic_rendering(true);
     let mut accel =
         vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default().acceleration_structure(true);
     let mut ray_query = vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);

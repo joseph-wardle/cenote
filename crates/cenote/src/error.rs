@@ -33,6 +33,11 @@ pub enum Error {
     #[error("shader compile failed:\n{0}")]
     ShaderCompile(String),
 
+    /// The egui overlay renderer failed (pipeline creation, texture upload,
+    /// or draw recording).
+    #[error("UI overlay failed: {0}")]
+    Overlay(#[from] egui_ash_renderer::RendererError),
+
     /// A filesystem operation failed (e.g. reading hot-reloaded SPIR-V).
     #[error("I/O failed: {0}")]
     Io(#[from] std::io::Error),

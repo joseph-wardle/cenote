@@ -14,6 +14,10 @@ repository.workspace = true
 ash = "0.38.0"
 ash-window = "0.13.0"
 bytemuck = { version = "1.25.0", features = ["derive", "extern_crate_alloc"] }
+# Types only (tessellated meshes, texture deltas) — the UI itself lives in
+# cenote-viewer, which enables the fonts.
+egui = { version = "0.33.0", default-features = false }
+egui-ash-renderer = { version = "0.11.0", features = ["dynamic-rendering", "gpu-allocator"] }
 exr = "1.74.0"
 glam = { version = "0.33.2", features = ["bytemuck"] }
 gpu-allocator = "0.28.0"

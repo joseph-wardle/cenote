@@ -6,7 +6,10 @@
 //! blit scales to the window and encodes to the swapchain's sRGB format in
 //! fixed function, so displaying a frame needs no shader. The tonemap
 //! kernel (M1 build step 4) will replace the copy leg by writing the
-//! transfer image directly; the blit-and-present tail stays.
+//! transfer image directly; the blit-and-present tail stays. A frame may
+//! carry a [`GuiFrame`], blended over the blit result by one dynamic-
+//! rendering pass (`overlay.rs`) before the image is handed to the
+//! presentation engine.
 //!
 //! Pacing matches the crate's blocking-submit model: one frame in flight,
 //! fence-waited before [`Presenter::present`] returns. Timeline-semaphore
@@ -20,6 +23,7 @@ use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, 
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 use crate::error::{Error, Result};
+use crate::gpu::overlay::{GuiFrame, OverlayRenderer};
 use crate::gpu::{Buffer, Context, MemoryLocation};
 
 /// Format of the transfer image — matches the pixel buffers' row-major
@@ -47,6 +51,12 @@ pub struct Presenter {
     /// Null while the window is zero-area (minimized).
     swapchain: vk::SwapchainKHR,
     images: Vec<vk::Image>,
+    /// One view per swapchain image — the UI pass's color attachment.
+    views: Vec<vk::ImageView>,
+    /// The surface format every swapchain reincarnation uses. Chosen once at
+    /// creation — a surface's format list never changes, and the overlay
+    /// pipeline bakes the format in.
+    format: vk::SurfaceFormatKHR,
     /// One per swapchain image, indexed by acquired image index. Per-image
     /// rather than per-frame: a present may still be waiting on image *i*'s
     /// semaphore when the next frame starts, but never once *i* has been
@@ -64,6 +74,9 @@ pub struct Presenter {
     pool: vk::CommandPool,
     cmd: vk::CommandBuffer,
     transfer: Option<TransferImage>,
+    /// The egui mesh renderer, created by the first frame that carries a
+    /// [`GuiFrame`].
+    overlay: Option<OverlayRenderer>,
     physical_device: vk::PhysicalDevice,
     queue: vk::Queue,
     device: ash::Device,
@@ -110,29 +123,18 @@ impl Context {
         };
         let surface_loader = ash::khr::surface::Instance::new(&self.entry, &self.instance);
 
-        // Selection couldn't check this — surfaces outlive it conceptually
-        // (no window existed yet) — so verify here. On every desktop driver
-        // the universal graphics+compute family presents.
-        let support = unsafe {
-            surface_loader.get_physical_device_surface_support(
-                self.physical_device,
-                self.queue_family_index,
-                surface,
-            )
-        };
-        match support {
-            Ok(true) => {}
-            not_supported => {
+        let format = match probe_surface(
+            &surface_loader,
+            self.physical_device,
+            self.queue_family_index,
+            surface,
+        ) {
+            Ok(format) => format,
+            Err(err) => {
                 unsafe { surface_loader.destroy_surface(surface, None) };
-                return Err(match not_supported {
-                    Ok(_) => Error::NoCapableGpu(
-                        "  selected device: its compute queue family cannot present to this window\n"
-                            .into(),
-                    ),
-                    Err(err) => err.into(),
-                });
+                return Err(err);
             }
-        }
+        };
 
         let mut presenter = Presenter {
             surface_loader,
@@ -140,6 +142,8 @@ impl Context {
             surface,
             swapchain: vk::SwapchainKHR::null(),
             images: Vec::new(),
+            views: Vec::new(),
+            format,
             render_finished: Vec::new(),
             extent: vk::Extent2D::default(),
             desired_extent: vk::Extent2D { width, height },
@@ -149,6 +153,7 @@ impl Context {
             pool: vk::CommandPool::null(),
             cmd: vk::CommandBuffer::null(),
             transfer: None,
+            overlay: None,
             physical_device: self.physical_device,
             queue: self.queue,
             device: self.device.clone(),
@@ -173,9 +178,10 @@ impl Presenter {
 
     /// Show a frame: copy the `width`×`height` linear RGBA f32 `pixels`
     /// buffer into the transfer image, blit it across the whole swapchain
-    /// image (bilinear rescale + sRGB encode), and present. Blocks until the
-    /// GPU work finishes — one frame in flight, like every submit in the
-    /// crate. A zero-area (minimized) window makes this a no-op.
+    /// image (bilinear rescale + sRGB encode), blend `gui` on top if one is
+    /// given, and present. Blocks until the GPU work finishes — one frame in
+    /// flight, like every submit in the crate. A zero-area (minimized)
+    /// window makes this a no-op.
     ///
     /// `pixels` needs `TRANSFER_SRC` usage and an already-completed writer,
     /// which every blocking dispatch in this crate guarantees.
@@ -183,17 +189,52 @@ impl Presenter {
     /// # Errors
     ///
     /// [`crate::Error::Vulkan`] if a swapchain, submission, or present call
-    /// fails. An out-of-date swapchain is not an error: the frame is skipped
-    /// and the swapchain rebuilt for the next one.
+    /// fails; [`crate::Error::Overlay`] from the UI renderer. An out-of-date
+    /// swapchain is not an error: the frame is skipped and the swapchain
+    /// rebuilt for the next one.
     ///
     /// # Panics
     ///
     /// If `pixels` is smaller than `width`×`height` RGBA f32 texels.
-    pub fn present(&mut self, pixels: &Buffer, width: u32, height: u32) -> Result<()> {
+    pub fn present(
+        &mut self,
+        pixels: &Buffer,
+        width: u32,
+        height: u32,
+        gui: Option<&GuiFrame>,
+    ) -> Result<()> {
         assert!(
             pixels.size() >= u64::from(width) * u64::from(height) * 16,
             "pixel buffer is smaller than its stated dimensions"
         );
+        // Texture deltas apply exactly once even when the frame itself is
+        // skipped (minimized window, stale swapchain): egui sends them
+        // incrementally, so a dropped delta would corrupt the font atlas
+        // for good.
+        if let Some(gui) = gui {
+            self.upload_gui_textures(gui)?;
+        }
+        self.show(pixels, width, height, gui)?;
+        if let Some(gui) = gui {
+            // Safe to free now: `show` fence-waited its submission — or
+            // skipped the frame, in which case nothing sampled them at all.
+            self.overlay
+                .as_mut()
+                .expect("upload_gui_textures created the overlay renderer")
+                .free_textures(&gui.textures_delta)?;
+        }
+        Ok(())
+    }
+
+    /// [`Presenter::present`] minus the gui-texture lifecycle: one recorded,
+    /// submitted, fence-waited frame, or a clean skip.
+    fn show(
+        &mut self,
+        pixels: &Buffer,
+        width: u32,
+        height: u32,
+        gui: Option<&GuiFrame>,
+    ) -> Result<()> {
         if self.dirty {
             self.recreate_swapchain()?;
         }
@@ -228,7 +269,7 @@ impl Presenter {
             }
         };
 
-        self.record(pixels, width, height, self.images[index as usize])?;
+        self.record(pixels, width, height, index as usize, gui)?;
 
         let wait = vk::SemaphoreSubmitInfo::default()
             .semaphore(self.image_acquired)
@@ -284,8 +325,16 @@ impl Presenter {
     }
 
     /// Record this frame's commands: buffer → transfer image → blit onto
-    /// `target` → ready to present.
-    fn record(&self, pixels: &Buffer, width: u32, height: u32, target: vk::Image) -> Result<()> {
+    /// swapchain image `index` → optional UI pass → ready to present.
+    fn record(
+        &mut self,
+        pixels: &Buffer,
+        width: u32,
+        height: u32,
+        index: usize,
+        gui: Option<&GuiFrame>,
+    ) -> Result<()> {
+        let target = self.images[index];
         let transfer = self
             .transfer
             .as_ref()
@@ -372,11 +421,15 @@ impl Presenter {
                 (transfer, width, height),
                 (target, self.extent.width, self.extent.height),
             );
-
+        }
+        match gui {
+            // The UI pass takes the image the rest of the way to
+            // PRESENT_SRC.
+            Some(gui) => self.record_overlay(gui, index)?,
             // Hand the image to the presentation engine; the destination
             // side of the dependency is the signal semaphore, not a stage.
-            image_barrier(
-                device,
+            None => image_barrier(
+                &self.device,
                 self.cmd,
                 target,
                 (
@@ -388,10 +441,87 @@ impl Presenter {
                     vk::AccessFlags2::TRANSFER_WRITE,
                 ),
                 (vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE),
-            );
-            device.end_command_buffer(self.cmd)?;
+            ),
         }
+        unsafe { self.device.end_command_buffer(self.cmd)? };
         Ok(())
+    }
+
+    /// Record the UI pass over swapchain image `index`: make the blitted
+    /// image a color attachment, blend the egui meshes on top in one
+    /// dynamic-rendering pass, and hand it to the presentation engine.
+    fn record_overlay(&mut self, gui: &GuiFrame, index: usize) -> Result<()> {
+        image_barrier(
+            &self.device,
+            self.cmd,
+            self.images[index],
+            (
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            ),
+            (
+                vk::PipelineStageFlags2::BLIT,
+                vk::AccessFlags2::TRANSFER_WRITE,
+            ),
+            (
+                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                // READ too: alpha blending samples what the blit wrote.
+                vk::AccessFlags2::COLOR_ATTACHMENT_READ | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+            ),
+        );
+
+        let attachment = vk::RenderingAttachmentInfo::default()
+            .image_view(self.views[index])
+            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            // LOAD keeps the blitted render — the UI blends over it.
+            .load_op(vk::AttachmentLoadOp::LOAD)
+            .store_op(vk::AttachmentStoreOp::STORE);
+        let rendering = vk::RenderingInfo::default()
+            .render_area(vk::Rect2D {
+                offset: vk::Offset2D::default(),
+                extent: self.extent,
+            })
+            .layer_count(1)
+            .color_attachments(slice::from_ref(&attachment));
+        unsafe { self.device.cmd_begin_rendering(self.cmd, &rendering) };
+        self.overlay
+            .as_mut()
+            .expect("present() ensured the overlay renderer")
+            .draw(self.cmd, self.extent, gui)?;
+        unsafe { self.device.cmd_end_rendering(self.cmd) };
+
+        image_barrier(
+            &self.device,
+            self.cmd,
+            self.images[index],
+            (
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                vk::ImageLayout::PRESENT_SRC_KHR,
+            ),
+            (
+                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+            ),
+            (vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE),
+        );
+        Ok(())
+    }
+
+    /// Lazily create the overlay renderer and apply a frame's texture
+    /// additions and updates — its own blocking upload submissions, outside
+    /// the frame's command buffer.
+    fn upload_gui_textures(&mut self, gui: &GuiFrame) -> Result<()> {
+        if self.overlay.is_none() {
+            self.overlay = Some(OverlayRenderer::new(
+                Arc::clone(&self.allocator),
+                self.device.clone(),
+                self.format.format,
+            )?);
+        }
+        self.overlay
+            .as_mut()
+            .expect("just created above")
+            .upload_textures(self.queue, self.pool, &gui.textures_delta)
     }
 
     fn create_frame_resources(&mut self, queue_family_index: u32) -> Result<()> {
@@ -459,22 +589,6 @@ impl Presenter {
             ));
         }
 
-        let formats = unsafe {
-            self.surface_loader
-                .get_physical_device_surface_formats(self.physical_device, self.surface)?
-        };
-        // An sRGB format makes the blit's fixed-function encode correct for
-        // the linear values we render. Every desktop driver offers one; the
-        // fallback would merely display too dark, not break.
-        let format = formats
-            .iter()
-            .copied()
-            .find(|f| {
-                (f.format == vk::Format::B8G8R8A8_SRGB || f.format == vk::Format::R8G8B8A8_SRGB)
-                    && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
-            })
-            .unwrap_or(formats[0]);
-
         // One more than the minimum so acquire rarely blocks; 0 means "no
         // maximum".
         let image_count = if capabilities.max_image_count == 0 {
@@ -495,11 +609,13 @@ impl Presenter {
         let info = vk::SwapchainCreateInfoKHR::default()
             .surface(self.surface)
             .min_image_count(image_count)
-            .image_format(format.format)
-            .image_color_space(format.color_space)
+            .image_format(self.format.format)
+            .image_color_space(self.format.color_space)
             .image_extent(self.extent)
             .image_array_layers(1)
-            .image_usage(vk::ImageUsageFlags::TRANSFER_DST)
+            // Blit target, and the UI pass's attachment — color-attachment
+            // usage is guaranteed for every surface, so no check needed.
+            .image_usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::COLOR_ATTACHMENT)
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
             .pre_transform(capabilities.current_transform)
             .composite_alpha(composite)
@@ -510,7 +626,20 @@ impl Presenter {
         unsafe {
             self.swapchain = self.swapchain_loader.create_swapchain(&info, None)?;
             self.images = self.swapchain_loader.get_swapchain_images(self.swapchain)?;
-            for _ in 0..self.images.len() {
+            for &image in &self.images {
+                let view_info = vk::ImageViewCreateInfo::default()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(self.format.format)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    });
+                self.views
+                    .push(self.device.create_image_view(&view_info, None)?);
                 self.render_finished.push(
                     self.device
                         .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)?,
@@ -526,6 +655,9 @@ impl Presenter {
         unsafe {
             for semaphore in self.render_finished.drain(..) {
                 self.device.destroy_semaphore(semaphore, None);
+            }
+            for view in self.views.drain(..) {
+                self.device.destroy_image_view(view, None);
             }
             self.swapchain_loader
                 .destroy_swapchain(self.swapchain, None);
@@ -621,7 +753,51 @@ impl Drop for Presenter {
         }
         self.destroy_transfer_image();
         unsafe { self.surface_loader.destroy_surface(self.surface, None) };
+        // `overlay` (pipeline, buffers, font atlas) drops with the fields,
+        // after the idle wait above.
     }
+}
+
+/// Verify the queue family can present to `surface` and choose the surface
+/// format every swapchain will use — the fallible queries between surface
+/// creation and [`Presenter`] construction, grouped so the caller has one
+/// failure path to clean up after.
+///
+/// Selection couldn't check presentability — no window existed yet — so it
+/// happens here. On every desktop driver the universal graphics+compute
+/// family presents.
+fn probe_surface(
+    surface_loader: &ash::khr::surface::Instance,
+    physical_device: vk::PhysicalDevice,
+    queue_family_index: u32,
+    surface: vk::SurfaceKHR,
+) -> Result<vk::SurfaceFormatKHR> {
+    let supported = unsafe {
+        surface_loader.get_physical_device_surface_support(
+            physical_device,
+            queue_family_index,
+            surface,
+        )?
+    };
+    if !supported {
+        return Err(Error::NoCapableGpu(
+            "  selected device: its compute queue family cannot present to this window\n".into(),
+        ));
+    }
+
+    let formats =
+        unsafe { surface_loader.get_physical_device_surface_formats(physical_device, surface)? };
+    // An sRGB format makes the blit's fixed-function encode correct for the
+    // linear values we render. Every desktop driver offers one; the fallback
+    // would merely display too dark, not break.
+    Ok(formats
+        .iter()
+        .copied()
+        .find(|f| {
+            (f.format == vk::Format::B8G8R8A8_SRGB || f.format == vk::Format::R8G8B8A8_SRGB)
+                && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+        })
+        .unwrap_or(formats[0]))
 }
 
 fn free_allocation(allocator: &Arc<Mutex<Allocator>>, allocation: Allocation) {

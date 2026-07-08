@@ -1,13 +1,18 @@
-//! Interactive viewer: the render live in a window, under an orbit camera.
-//! M1 build step 2 — the M0 primary kernel drives it until the wavefront
-//! engine replaces that kernel (step 5); the egui overlay lands in step 3.
+//! Interactive viewer: the render live in a window, under an orbit camera,
+//! with an egui stats/controls overlay. M1 build steps 2–3 — the M0 primary
+//! kernel drives it until the wavefront engine replaces that kernel
+//! (step 5).
 //!
-//! Single-threaded and event-driven (D-030): the loop sleeps until input,
-//! camera motion requests a redraw, and each redraw is one blocking
-//! render-then-present at window size. Progressive accumulation across
-//! redraws arrives with build step 4.
+//! Single-threaded and event-driven (D-030): the loop sleeps until input.
+//! Camera motion invalidates the cached frame and requests a redraw — one
+//! blocking render at window size; UI-only redraws (hover, slider drags)
+//! re-present the cached frame with fresh UI blended on top. Progressive
+//! accumulation across redraws arrives with build step 4.
 
 mod camera;
+mod ui;
+
+use std::time::Instant;
 
 use anyhow::Context as _;
 use winit::application::ApplicationHandler;
@@ -18,6 +23,7 @@ use winit::raw_window_handle::{HasDisplayHandle as _, HasWindowHandle as _};
 use winit::window::{Window, WindowId};
 
 use crate::camera::OrbitCamera;
+use crate::ui::{FrameStats, Gui};
 
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -56,6 +62,10 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         if matches!(event, WindowEvent::CloseRequested) {
+            // Tear the viewer down now, while the event loop — and with it
+            // the display-server connection — is still alive: the exiting
+            // `run_app` drops the loop before `main` drops `App`.
+            self.viewer = None;
             event_loop.exit();
             return;
         }
@@ -69,22 +79,35 @@ impl ApplicationHandler for App {
     }
 }
 
-/// The live viewer: window, GPU, scene, and the input state driving the
+/// The live viewer: window, GPU, scene, UI, and the input state driving the
 /// orbit camera.
 struct Viewer {
     // Field order is drop order: GPU resources go down before their
-    // `Context`, and the surface-owning `Presenter` before the window it
-    // draws to.
+    // `Context`, and the surface-owning `Presenter` — like the `Gui`, whose
+    // clipboard handle talks to the display server — before the window.
     presenter: cenote::gpu::Presenter,
     renderer: cenote::render::Renderer,
     scene: cenote::scene::Scene,
+    /// The last traced frame, kept so UI-only redraws re-present instead of
+    /// re-tracing. `None` when the view changed and a render is due.
+    frame: Option<CachedFrame>,
     gpu: cenote::gpu::Context,
+    gui: Gui,
     window: Window,
     camera: OrbitCamera,
-    /// Left mouse button held — cursor motion orbits.
+    stats: FrameStats,
+    /// Left mouse button held (and not claimed by the UI) — cursor motion
+    /// orbits.
     orbiting: bool,
     /// Cursor position at the last `CursorMoved`, for drag deltas.
     cursor: Option<PhysicalPosition<f64>>,
+}
+
+/// A rendered frame staying on the GPU, with the size it was traced at.
+struct CachedFrame {
+    pixels: cenote::gpu::Buffer,
+    width: u32,
+    height: u32,
 }
 
 impl Viewer {
@@ -106,21 +129,31 @@ impl Viewer {
             size.width,
             size.height,
         )?;
+        let gui = Gui::new(&window);
         // Not every platform sends an initial redraw request unprompted.
         window.request_redraw();
         Ok(Self {
             presenter,
             renderer,
             scene,
+            frame: None,
             gpu,
+            gui,
             window,
             camera,
+            stats: FrameStats::default(),
             orbiting: false,
             cursor: None,
         })
     }
 
     fn handle(&mut self, event: &WindowEvent) -> anyhow::Result<()> {
+        // egui sees every event first: only it knows whether the pointer is
+        // on the UI, and `consumed` keeps such events off the camera.
+        let response = self.gui.on_window_event(&self.window, event);
+        if response.repaint {
+            self.window.request_redraw();
+        }
         match *event {
             WindowEvent::Resized(size) => {
                 self.presenter.resize(size.width, size.height);
@@ -130,26 +163,31 @@ impl Viewer {
                 button: MouseButton::Left,
                 state,
                 ..
-            } => self.orbiting = state == ElementState::Pressed,
+            } => {
+                // A press on the UI belongs to egui; a release always ends
+                // the orbit, or a drag let go over the panel never would.
+                self.orbiting = state == ElementState::Pressed && !response.consumed;
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 if self.orbiting
+                    && !response.consumed
                     && let Some(last) = self.cursor
                 {
                     self.camera
                         .orbit((position.x - last.x) as f32, (position.y - last.y) as f32);
-                    self.window.request_redraw();
+                    self.view_changed();
                 }
                 self.cursor = Some(position);
             }
             WindowEvent::CursorLeft { .. } => self.cursor = None,
-            WindowEvent::MouseWheel { delta, .. } => {
+            WindowEvent::MouseWheel { delta, .. } if !response.consumed => {
                 let notches = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     // Trackpads report pixels; ~50 px feels like one notch.
                     MouseScrollDelta::PixelDelta(position) => position.y as f32 / 50.0,
                 };
                 self.camera.dolly(notches);
-                self.window.request_redraw();
+                self.view_changed();
             }
             WindowEvent::RedrawRequested => self.redraw()?,
             _ => {}
@@ -157,22 +195,49 @@ impl Viewer {
         Ok(())
     }
 
-    /// One blocking frame at window size: move the scene camera to the
-    /// orbit position, render, present.
+    /// The camera moved: the cached frame no longer matches the view.
+    fn view_changed(&mut self) {
+        self.frame = None;
+        self.window.request_redraw();
+    }
+
+    /// One frame: re-trace the scene if the view or window changed (else
+    /// keep the cached render), run the UI, present both together.
     fn redraw(&mut self) -> anyhow::Result<()> {
         let size = self.window.inner_size();
         if size.width == 0 || size.height == 0 {
             return Ok(()); // minimized
         }
-        *self.scene.camera_mut() = self.camera.camera();
-        let pixels = self
-            .renderer
-            .render_to_buffer(&self.gpu, &self.scene, size.width, size.height)
-            .context("rendering the frame")?;
+        let stale = |frame: &CachedFrame| frame.width != size.width || frame.height != size.height;
+        if self.frame.as_ref().is_none_or(stale) {
+            *self.scene.camera_mut() = self.camera.camera();
+            let started = Instant::now();
+            let pixels = self
+                .renderer
+                .render_to_buffer(&self.gpu, &self.scene, size.width, size.height)
+                .context("rendering the frame")?;
+            self.stats.render = started.elapsed();
+            self.stats.render_size = (size.width, size.height);
+            self.frame = Some(CachedFrame {
+                pixels,
+                width: size.width,
+                height: size.height,
+            });
+        }
+
+        let (gui_frame, repaint) =
+            self.gui
+                .run(&self.window, self.gpu.device_summary(), &self.stats);
+        let frame = self.frame.as_ref().expect("rendered just above");
         self.window.pre_present_notify();
+        let started = Instant::now();
         self.presenter
-            .present(&pixels, size.width, size.height)
+            .present(&frame.pixels, frame.width, frame.height, Some(&gui_frame))
             .context("presenting the frame")?;
+        self.stats.present = started.elapsed();
+        if repaint {
+            self.window.request_redraw();
+        }
         Ok(())
     }
 }

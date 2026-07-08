@@ -4,8 +4,8 @@
 //! device selection against the ray-tracing baseline, one compute queue, and
 //! the memory allocator. Code outside `gpu` never touches raw `vk` handles
 //! or writes `unsafe`. Bring-up lives in `init`; buffers, one-shot submits,
-//! compute pipelines, acceleration structures, and window presentation in
-//! the other submodules.
+//! compute pipelines, acceleration structures, window presentation, and the
+//! viewer's egui overlay pass in the other submodules.
 //!
 //! There is no backend abstraction here and there never will be — Cenote is
 //! single-backend by design: a reader who knows Vulkan should be reading
@@ -23,12 +23,14 @@ use crate::error::Result;
 mod accel;
 mod buffer;
 mod init;
+mod overlay;
 mod pipeline;
 mod present;
 mod submit;
 
 pub use accel::{AccelerationStructure, TlasInstance};
 pub use buffer::{Buffer, MemoryLocation};
+pub use overlay::GuiFrame;
 pub use pipeline::ComputePipeline;
 pub use present::Presenter;
 
