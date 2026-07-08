@@ -34,6 +34,7 @@ public struct Paths {
     public float4* direction; // xyz = unit ray direction
     public uint* pixel; // the film pixel this path contributes to
     public Hit* hit; // written by intersect, read by shade_surface
+    public float4* throughput; // xyz = the path's accumulated weight
 };
 
 // A queue header. groupsX/Y/Z sit contiguous so the host can aim an

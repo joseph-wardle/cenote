@@ -12,10 +12,11 @@
 //!   into the RGBA8 display buffer that [`crate::gpu::Presenter::present`]
 //!   shows. The viewer's redraw loop is one of each per frame.
 //!
-//! Shading is still degenerate (normals-as-color, black sky), but samples
-//! already differ: each wave jitters its camera rays through the sampler,
-//! keyed by the film's sample count — so accumulation is real box-filter
-//! anti-aliasing, and edges converge as samples add up.
+//! Every sample is a full path-traced estimate — jittered camera ray,
+//! diffuse bounces, constant-sky lighting — keyed by the film's sample
+//! count, so accumulation converges toward the true render: edges
+//! anti-alias, indirect-lighting noise settles into color bleed and
+//! contact shadows.
 
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
@@ -188,7 +189,12 @@ impl Renderer {
     /// Any [`crate::Error`] from pipeline or buffer creation.
     pub fn from_kernels(gpu: &Context, kernels: &Kernels) -> Result<Self> {
         Ok(Self {
-            wavefront: Wavefront::new(gpu, kernels, Wavefront::DEFAULT_CAPACITY)?,
+            wavefront: Wavefront::new(
+                gpu,
+                kernels,
+                Wavefront::DEFAULT_CAPACITY,
+                Wavefront::DEFAULT_MAX_BOUNCES,
+            )?,
             accumulate: gpu.create_compute_pipeline(
                 &kernels.accumulate.spirv,
                 kernels.accumulate.entry,
@@ -219,9 +225,9 @@ impl Renderer {
     }
 
     /// Render one `width`×`height` frame of `scene` — sample 0 of every
-    /// pixel's sequence — and return it as row-major RGBA `f32` with pixel
-    /// (0, 0) top-left, the crate-wide image convention. Hits shade as the
-    /// geometric normal mapped to color (0.5·n + 0.5), misses as black.
+    /// pixel's sequence, a single path-traced estimate per pixel — and
+    /// return it as row-major RGBA `f32` with pixel (0, 0) top-left, the
+    /// crate-wide image convention.
     ///
     /// # Errors
     ///
@@ -361,7 +367,11 @@ fn workgroups(width: u32, height: u32) -> [u32; 3] {
 
 #[cfg(test)]
 mod tests {
+    use glam::{Mat4, Vec3};
+
     use super::*;
+    use crate::material::Material;
+    use crate::scene::{Camera, Object, ground_plane};
 
     fn pixel(pixels: &[f32], width: u32, x: u32, y: u32) -> &[f32] {
         let idx = ((y * width + x) * 4) as usize;
@@ -372,16 +382,63 @@ mod tests {
         bytemuck::pod_collect_to_vec(&gpu.download_buffer(buffer).expect("download"))
     }
 
-    /// The demo image shows the sphere and plane as normals, sky as black.
-    /// Three probes pin the scene's known features:
-    ///
-    /// - top-left is sky — an exact miss color;
-    /// - the image center looks straight at the sphere, so the hit facet's
-    ///   normal points back at the camera (≈ +Z → blue-dominant);
-    /// - bottom-center lands on the ground plane, whose geometric normal is
-    ///   exactly +Y → color (0.5, 1, 0.5).
+    /// Accumulate `samples` waves of `scene` into a fresh `size`×`size`
+    /// film and return the raw per-pixel RGBA sums.
+    fn accumulate_sum(
+        gpu: &Context,
+        renderer: &Renderer,
+        scene: &Scene,
+        size: u32,
+        samples: u32,
+    ) -> Vec<f32> {
+        let mut film = Film::new(gpu, size, size).expect("film");
+        for _ in 0..samples {
+            renderer
+                .accumulate(gpu, scene, &mut film)
+                .expect("accumulate");
+        }
+        download_f32(gpu, &film.sum)
+    }
+
+    /// A furnace scene: one big EON plane of the given albedo and
+    /// roughness, scaled by `scale` and centered at `center`, under a
+    /// half-intensity gray sky, with the camera just above looking
+    /// obliquely down (the basis forbids straight down) so every camera
+    /// ray lands on it. A path hits the plane once, scatters upward, and
+    /// escapes — so with albedo 1 the expected pixel value is exactly the
+    /// sky radiance at any roughness (EON's energy-preservation property),
+    /// and at roughness 0 (Lambert) every individual sample equals
+    /// albedo × sky.
+    fn furnace_scene(
+        gpu: &Context,
+        albedo: f32,
+        roughness: f32,
+        center: Vec3,
+        scale: f32,
+    ) -> Scene {
+        let object = Object {
+            mesh: ground_plane(5.0),
+            transform: Mat4::from_translation(center) * Mat4::from_scale(Vec3::splat(scale)),
+            material: Material {
+                base_color: Vec3::splat(albedo),
+                base_roughness: roughness,
+            },
+        };
+        let camera = Camera {
+            position: center + Vec3::new(0.0, scale, 0.0),
+            look_at: center + Vec3::new(0.0, 0.0, -scale),
+            vfov_degrees: 40.0,
+        };
+        Scene::new(gpu, &[object], camera, Vec3::splat(0.5)).expect("furnace scene")
+    }
+
+    /// Probe the demo image's known-exact features. The top-left pixel is
+    /// open sky, and a camera-ray miss writes the sky radiance exactly.
+    /// Every pixel is written exactly once per wave (alpha 1, finite,
+    /// non-negative), and most of the frame is lit surface — neither sky
+    /// nor a dead path's black.
     #[test]
-    fn demo_image_shows_normals_against_black_sky() {
+    fn demo_image_is_sky_lit() {
         let Some(gpu) = crate::gpu::test_context() else {
             return;
         };
@@ -392,22 +449,23 @@ mod tests {
             .render(&gpu, &scene, width, height)
             .expect("render");
 
-        assert_eq!(pixel(&pixels, width, 0, 0), [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(pixel(&pixels, width, 0, 0), [1.0, 1.0, 1.0, 1.0]);
 
-        let center = pixel(&pixels, width, 64, 64);
-        assert!(
-            center[2] > 0.85,
-            "sphere facet should face the camera, got {center:?}"
-        );
-        assert_eq!(center[3..], [1.0]);
-
-        let bottom = pixel(&pixels, width, 64, 127);
-        for (channel, expected) in bottom.iter().zip([0.5, 1.0, 0.5, 1.0]) {
+        let mut lit = 0;
+        for chunk in pixels.chunks_exact(4) {
+            assert_eq!(chunk[3..], [1.0], "a pixel was skipped: {chunk:?}");
             assert!(
-                (channel - expected).abs() < 1e-3,
-                "plane should shade as its +Y normal, got {bottom:?}"
+                chunk[..3].iter().all(|c| c.is_finite() && *c >= 0.0),
+                "non-finite or negative radiance: {chunk:?}"
             );
+            if chunk[..3] != [1.0, 1.0, 1.0] && chunk[..3].iter().sum::<f32>() > 0.0 {
+                lit += 1;
+            }
         }
+        assert!(
+            lit > (width * height / 3) as usize,
+            "most of the frame should be lit surface, got {lit} pixels"
+        );
     }
 
     /// Dimensions that aren't a multiple of the workgroup size exercise the
@@ -425,6 +483,113 @@ mod tests {
         for chunk in pixels.chunks_exact(4) {
             assert_eq!(chunk[3..], [1.0]);
         }
+    }
+
+    /// The diffuse white furnace (the step-7 checkpoint): an albedo-1 EON
+    /// plane under a uniform sky must reflect exactly the sky radiance —
+    /// energy lost or gained anywhere in the estimator (a dropped
+    /// multiple-scattering lobe, a wrong pdf, a biased roulette) shifts the
+    /// result. At roughness 0 the lobe is Lambert and *every sample of
+    /// every pixel* equals the sky exactly, so the bound is tight; at
+    /// roughness 1 the per-sample value is stochastic (and the albedo fit
+    /// itself is only good to ~4e-4), so the mean over pixels × samples
+    /// carries the assertion.
+    #[test]
+    fn diffuse_furnace_closes() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let renderer = Renderer::new(&gpu).expect("renderer");
+        let sky = 0.5;
+
+        let lambert = furnace_scene(&gpu, 1.0, 0.0, Vec3::ZERO, 1.0);
+        let sum = accumulate_sum(&gpu, &renderer, &lambert, 32, 4);
+        for chunk in sum.chunks_exact(4) {
+            for channel in &chunk[..3] {
+                let value = channel / 4.0;
+                assert!(
+                    (value - sky).abs() < 1e-3,
+                    "Lambert furnace leaked: {value} vs {sky}"
+                );
+            }
+        }
+
+        let rough = furnace_scene(&gpu, 1.0, 1.0, Vec3::ZERO, 1.0);
+        let samples = 64;
+        let sum = accumulate_sum(&gpu, &renderer, &rough, 32, samples);
+        let mean =
+            sum.chunks_exact(4).map(|chunk| chunk[0]).sum::<f32>() / (32.0 * 32.0 * samples as f32);
+        assert!(
+            (mean - sky).abs() < 0.005,
+            "rough furnace leaked: mean {mean} vs {sky}"
+        );
+    }
+
+    /// The spawn-point offsets hold at scene scale — the property the van
+    /// Antwerpen rigorous error bounds exist for. A half-albedo Lambert
+    /// furnace, with the plane pushed 10⁴ m from the origin and scaled
+    /// 1000×, where hit reconstruction error reaches millimeters: every
+    /// sample must still be albedo × sky exactly. A bounce ray that
+    /// self-intersects the plane it just left multiplies in another albedo
+    /// factor and fails the bound loudly. (An albedo-1 furnace can't see
+    /// this — spurious extra bounces cost it no energy — which is why this
+    /// one is gray.)
+    #[test]
+    fn ray_offsets_hold_at_scene_scale() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let renderer = Renderer::new(&gpu).expect("renderer");
+        let scene = furnace_scene(&gpu, 0.5, 0.0, Vec3::new(1e4, 0.0, 1e4), 1e3);
+        let sum = accumulate_sum(&gpu, &renderer, &scene, 32, 4);
+        let expected = 0.5 * 0.5; // albedo × sky
+        for chunk in sum.chunks_exact(4) {
+            for channel in &chunk[..3] {
+                let value = channel / 4.0;
+                assert!(
+                    (value - expected).abs() < 1e-3,
+                    "self-intersection at scale: {value} vs {expected}"
+                );
+            }
+        }
+    }
+
+    /// First global illumination, made mechanical: sky light bounces off
+    /// the terracotta sphere onto the gray floor, so floor pixels beside
+    /// the sphere pick up a red cast that the far floor corner doesn't.
+    /// Both probes are the same neutral material — the difference is
+    /// purely bounced light.
+    #[test]
+    fn indirect_light_bleeds_color() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let scene = Scene::demo(&gpu).expect("demo scene");
+        let renderer = Renderer::new(&gpu).expect("renderer");
+        let size = 64;
+        let sum = accumulate_sum(&gpu, &renderer, &scene, size, 32);
+
+        // Mean red/blue ratio over a 3×3 patch — single accumulated pixels
+        // are still noisy at 32 samples.
+        let redness = |x: u32, y: u32| {
+            let (mut red, mut blue) = (0.0, 0.0);
+            for dy in 0..3 {
+                for dx in 0..3 {
+                    let probe = pixel(&sum, size, x + dx, y + dy);
+                    red += probe[0];
+                    blue += probe[2];
+                }
+            }
+            red / blue
+        };
+        // The sphere (image center, radius ≈ 18 px at 64²) meets the floor
+        // around y = 50; the corner patch sees almost none of it.
+        let near = redness(30, 53);
+        let far = redness(2, 60);
+        assert!(
+            near > far * 1.05,
+            "no red bleed beside the sphere: near {near} vs far {far}"
+        );
     }
 
     /// The hot-reload swap end to end, minus the file watch: recompile the
@@ -593,7 +758,7 @@ mod tests {
     }
 
     /// The tonemap kernel against a CPU mirror of the same transform:
-    /// average + exposure scale, `ACEScg` → Rec.709, Hill's ACES fit, sRGB
+    /// average + exposure scale, `ACEScg` → `Rec.709`, Hill's ACES fit, sRGB
     /// encode, RGBA8 pack. A transposed matrix or wrong constant shows up
     /// as more than the ±1 quantization step allowed here.
     #[test]

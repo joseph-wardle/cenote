@@ -1,8 +1,9 @@
-//! The procedural M0 scene: a subdivided icosphere resting on a ground
-//! plane — two BLASes, one TLAS with two instances, a fixed pinhole
-//! camera, zero file I/O (real scene formats are M2's job). The
-//! sphere is deliberately faceted: geometric normals rendered as color make
-//! winding or handedness mistakes instantly visible.
+//! Scenes as the tracer consumes them: meshes built into acceleration
+//! structures, per-instance materials, a pinhole camera, and a constant
+//! sky. All geometry is procedural and zero file I/O (real scene formats
+//! are M2's job); [`Scene::demo`] is the standing test subject — a
+//! deliberately faceted icosphere resting on a ground plane, where winding
+//! or handedness mistakes are instantly visible.
 
 use std::collections::HashMap;
 
@@ -10,8 +11,10 @@ use ash::vk;
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 
+use crate::color::acescg_from_rec709;
 use crate::error::Result;
 use crate::gpu::{AccelerationStructure, Buffer, Context, TlasInstance};
+use crate::material::Material;
 
 /// A triangle mesh on the host: tightly packed positions plus index triples.
 pub struct Mesh {
@@ -19,6 +22,17 @@ pub struct Mesh {
     pub positions: Vec<Vec3>,
     /// Counter-clockwise-outward index triples into `positions`.
     pub triangles: Vec<[u32; 3]>,
+}
+
+/// One thing in a scene: a mesh, where it stands, and what its surface is.
+pub struct Object {
+    /// The geometry, in object space.
+    pub mesh: Mesh,
+    /// Object-to-world placement. Must be invertible — normals and ray
+    /// offsets transform through the inverse.
+    pub transform: Mat4,
+    /// The surface, constant across the mesh (per-face materials are M2+).
+    pub material: Material,
 }
 
 /// One mesh resident on the GPU. The vertex and index buffers stay alive
@@ -31,7 +45,7 @@ struct GpuMesh {
 }
 
 /// One entry of the geometry lookup table, indexed by instance custom index:
-/// where the instance's triangles live plus its transform — everything a
+/// where the instance's triangles live plus its transforms — everything a
 /// kernel needs to re-evaluate shading at a hit. Mirrors
 /// `struct GeometryRecord` in `shaders/shade_surface.slang` field for field.
 #[repr(C)]
@@ -42,6 +56,9 @@ struct GeometryRecord {
     /// Rows of the instance's 3×4 object-to-world transform — the same
     /// shape the TLAS instance itself carries.
     object_to_world: [[f32; 4]; 3],
+    /// Rows of the inverse: normals transform through it, and the
+    /// spawn-point error bounds need both directions.
+    world_to_object: [[f32; 4]; 3],
 }
 
 /// The scene, resident on the GPU and ready to trace against.
@@ -51,37 +68,47 @@ pub struct Scene {
     tlas: AccelerationStructure,
     /// One [`GeometryRecord`] per instance custom index.
     geometry: Buffer,
+    /// One [`Material`] per instance custom index.
+    materials: Buffer,
     #[expect(
         dead_code,
         reason = "GPU residency: the BLASes and the buffers `geometry` points into"
     )]
     meshes: Vec<GpuMesh>,
     camera: Camera,
+    sky: Vec3,
 }
 
 impl Scene {
-    /// Upload and build the M0 demo scene: a unit icosphere resting on a
-    /// 10 m × 10 m ground plane at y = 0.
+    /// Upload `objects` and build them into a traceable scene, lit by a
+    /// constant `sky` (radiance in `ACEScg`, every direction — the only light
+    /// until M1 steps 8 and 10 add quad lights and the HDRI).
     ///
     /// # Errors
     ///
     /// Any [`crate::Error`] from upload or acceleration-structure builds.
-    pub fn demo(gpu: &Context) -> Result<Self> {
-        let meshes = vec![
-            upload_mesh(gpu, "scene.sphere", &icosphere(2))?,
-            upload_mesh(gpu, "scene.plane", &ground_plane(5.0))?,
-        ];
-        // The sphere sits on the plane; one instance per mesh, and
-        // custom_index = position in `meshes`, so a hit leads back to the
-        // right vertex data.
-        let transforms = [Mat4::from_translation(Vec3::Y), Mat4::IDENTITY];
+    ///
+    /// # Panics
+    ///
+    /// On an empty scene or a non-invertible object transform — programmer
+    /// bugs.
+    pub fn new(gpu: &Context, objects: &[Object], camera: Camera, sky: Vec3) -> Result<Self> {
+        assert!(!objects.is_empty(), "a scene needs at least one object");
+        let meshes = objects
+            .iter()
+            .enumerate()
+            .map(|(index, object)| upload_mesh(gpu, &format!("scene.object{index}"), &object.mesh))
+            .collect::<Result<Vec<GpuMesh>>>()?;
+        // One instance per object, with custom_index = position in
+        // `objects`, so a hit leads back to the right vertex data and
+        // material.
         let instances: Vec<TlasInstance> = meshes
             .iter()
-            .zip(&transforms)
+            .zip(objects)
             .enumerate()
-            .map(|(index, (mesh, &transform))| TlasInstance {
+            .map(|(index, (mesh, object))| TlasInstance {
                 blas: &mesh.blas,
-                transform,
+                transform: object.transform,
                 custom_index: index as u32,
             })
             .collect();
@@ -89,19 +116,67 @@ impl Scene {
 
         let records: Vec<GeometryRecord> = meshes
             .iter()
-            .zip(&transforms)
-            .map(|(mesh, &transform)| GeometryRecord {
-                positions: mesh.vertices.device_address(),
-                indices: mesh.indices.device_address(),
-                object_to_world: transform_rows(transform),
+            .zip(objects)
+            .map(|(mesh, object)| {
+                let inverse = object.transform.inverse();
+                assert!(
+                    inverse.is_finite(),
+                    "object transform must be invertible, got {:?}",
+                    object.transform
+                );
+                GeometryRecord {
+                    positions: mesh.vertices.device_address(),
+                    indices: mesh.indices.device_address(),
+                    object_to_world: transform_rows(object.transform),
+                    world_to_object: transform_rows(inverse),
+                }
             })
             .collect();
-        let geometry = gpu.upload_buffer(
-            "scene.geometry",
-            bytemuck::cast_slice(&records),
-            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-        )?;
+        let usage =
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
+        let geometry =
+            gpu.upload_buffer("scene.geometry", bytemuck::cast_slice(&records), usage)?;
+        let materials: Vec<Material> = objects.iter().map(|object| object.material).collect();
+        let materials =
+            gpu.upload_buffer("scene.materials", bytemuck::cast_slice(&materials), usage)?;
 
+        Ok(Self {
+            tlas,
+            geometry,
+            materials,
+            meshes,
+            camera,
+            sky,
+        })
+    }
+
+    /// The demo scene: a unit icosphere resting on a 10 m × 10 m ground
+    /// plane at y = 0, a rough terracotta ball on a near-Lambertian light
+    /// gray floor, under a white sky — enough for global illumination to
+    /// read (color bleeds onto the floor, the contact darkens).
+    ///
+    /// # Errors
+    ///
+    /// Any [`crate::Error`] from upload or acceleration-structure builds.
+    pub fn demo(gpu: &Context) -> Result<Self> {
+        let objects = [
+            Object {
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::Y),
+                material: Material {
+                    base_color: acescg_from_rec709(Vec3::new(0.7, 0.22, 0.08)),
+                    base_roughness: 0.6,
+                },
+            },
+            Object {
+                mesh: ground_plane(5.0),
+                transform: Mat4::IDENTITY,
+                material: Material {
+                    base_color: acescg_from_rec709(Vec3::splat(0.65)),
+                    base_roughness: 0.1,
+                },
+            },
+        ];
         // Slightly above and behind the sphere (center (0, 1, 0)), looking
         // down at it so the ground plane fills the lower frame.
         let camera = Camera {
@@ -109,13 +184,9 @@ impl Scene {
             look_at: Vec3::new(0.0, 1.0, 0.0),
             vfov_degrees: 40.0,
         };
-
-        Ok(Self {
-            tlas,
-            geometry,
-            meshes,
-            camera,
-        })
+        // White is white in ACEScg too — no conversion to blur the exact
+        // sky values tests probe for.
+        Self::new(gpu, &objects, camera, Vec3::ONE)
     }
 
     /// The scene's TLAS, ready to bind for ray queries.
@@ -124,11 +195,23 @@ impl Scene {
         &self.tlas
     }
 
-    /// The geometry lookup table: one `{positions, indices, transform}`
+    /// The geometry lookup table: one `{positions, indices, transforms}`
     /// record per instance custom index.
     #[must_use]
     pub fn geometry(&self) -> &Buffer {
         &self.geometry
+    }
+
+    /// The material table: one [`Material`] per instance custom index.
+    #[must_use]
+    pub fn materials(&self) -> &Buffer {
+        &self.materials
+    }
+
+    /// The constant sky radiance (`ACEScg`).
+    #[must_use]
+    pub fn sky(&self) -> Vec3 {
+        self.sky
     }
 
     /// The scene's camera.

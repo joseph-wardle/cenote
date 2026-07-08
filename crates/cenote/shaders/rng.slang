@@ -15,11 +15,26 @@
 // -- The dimension registry --------------------------------------------
 // Every random decision draws from a named dimension — never allocated by
 // call order, where reordering two sample_* calls would silently change
-// every decision downstream. Later steps append entries (BSDF_LOBE,
-// BSDF_DIR, NEE_LIGHT, NEE_POINT, RR, …, blocked per bounce).
+// every decision downstream.
 
 // Sub-pixel position of the pixel's camera ray.
 public static const uint CAMERA_JITTER = 0;
+
+// Per-bounce decisions get one slot each in fixed blocks after the camera
+// dimensions: bounce b's slot s is dimension `bounceDimension(b, s)`. Every
+// M1 slot is named up front even though they go live across steps 7–9,
+// because inserting one later would renumber the rest — silently changing
+// every image ever rendered.
+public static const uint BSDF_LOBE = 0; // which lobe scatters (step 9)
+public static const uint BSDF_DIR = 1; // scattered direction
+public static const uint NEE_LIGHT = 2; // which light to sample (step 8)
+public static const uint NEE_POINT = 3; // point on that light (step 8)
+public static const uint RR = 4; // Russian-roulette survival
+static const uint BOUNCE_SLOTS = 5;
+
+public uint bounceDimension(uint bounce, uint slot) {
+    return 1 + bounce * BOUNCE_SLOTS + slot;
+}
 
 // -- Implementation ----------------------------------------------------
 

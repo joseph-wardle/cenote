@@ -1,8 +1,9 @@
 //! Interactive viewer: the render live in a window, under an orbit camera,
 //! progressively accumulated, with an egui stats/controls overlay. M1 build
-//! steps 2–6 — every sample runs through the wavefront engine with jittered
-//! camera rays, so edges visibly anti-alias as the spp counter climbs,
-//! though shading is still degenerate (one bounce, normals-as-color).
+//! steps 2–7 — every sample is a full path-traced estimate (diffuse
+//! bounces under a constant sky), so the image starts noisy and visibly
+//! converges as the spp counter climbs; direct light sampling, specular
+//! lobes, and the HDRI environment arrive in steps 8–10.
 //!
 //! Single-threaded, and self-scheduling once visible: every redraw
 //! accumulates one sample into the film, tonemaps (live exposure), presents,
