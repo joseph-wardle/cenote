@@ -31,8 +31,10 @@ const SIZE: u32 = 256;
 /// silhouette) lands well above it.
 const MAX_MEAN_FLIP: f32 = 0.01;
 
-/// The M0 demo image: icosphere + ground plane shaded as geometric normals
-/// against a black sky.
+/// The demo image at 1 spp: terracotta icosphere on a gray floor under the
+/// white sky and the warm quad light — path traced with MIS, so the golden
+/// pins the whole estimator (offsets, EON, NEE weights, sampler) at a
+/// fixed seed.
 #[test]
 fn demo_scene_matches_golden() {
     let Some(gpu) = test_context() else {

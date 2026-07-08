@@ -5,8 +5,9 @@
 /// Every kernel under `shaders/`, one compute entry point each, named after
 /// its file. The build embeds them in this order and hot reload recompiles
 /// them in this order. Not listed: shared modules (`pathstate.slang`,
-/// `rng.slang`, `openpbr.slang`) compile into their importers, and
-/// test-only fixtures (`rng_test.slang`) compile at test time.
+/// `rng.slang`, `openpbr.slang`, `lights.slang`, `scene.slang`) compile
+/// into their importers, and test-only fixtures (`rng_test.slang`) compile
+/// at test time.
 pub const KERNELS: [&str; 7] = [
     "raygen",
     "intersect",

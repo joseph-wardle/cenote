@@ -47,6 +47,8 @@ void raygen(uint3 tid: SV_DispatchThreadID) {
     params.paths.origin[tid.x] = float4(params.cameraPosition, 0.0);
     params.paths.direction[tid.x] = float4(direction, 0.0);
     params.paths.pixel[tid.x] = pixel;
+    // w = 0: a camera ray has no scatter pdf, which tells the first
+    // surface's emission that no light-sampling strategy competed for it.
     params.paths.throughput[tid.x] = float4(1.0, 1.0, 1.0, 0.0);
     params.rays.push(tid.x);
 }

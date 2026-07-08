@@ -3,15 +3,23 @@
 //!
 //! One wave traces one sample for every pixel of a target. The host records
 //! the fixed stage sequence — raygen, then per bounce intersect →
-//! (`shade_miss` | `shade_surface`) — into a single submission;
-//! `shade_surface` pushes scattered paths back onto the ray queue, so the
-//! recorded per-bounce round is the path tracer's bounce loop. Stages talk
-//! through GPU queues: a kernel pushes surviving paths into the next
-//! stage's queue, and every stage after raygen is dispatched indirectly
-//! from its queue's own header, so no path count ever crosses back to the
-//! host mid-wave. Termination is implicit — a path that pushes nothing is
-//! done — and a wave whose paths all die early just dispatches empty
-//! rounds until the recording runs out.
+//! (`shade_miss` | `shade_surface`) → `trace_shadow` — into a single
+//! submission; `shade_surface` pushes scattered paths back onto the ray
+//! queue and next-event connections onto the shadow queue, so the recorded
+//! per-bounce round is the path tracer's bounce loop. Stages talk through
+//! GPU queues: a kernel pushes surviving paths into the next stage's
+//! queue, and every stage after raygen is dispatched indirectly from its
+//! queue's own header, so no path count ever crosses back to the host
+//! mid-wave. Termination is implicit — a path that pushes nothing is done
+//! — and a wave whose paths all die early just dispatches empty rounds
+//! until the recording runs out.
+//!
+//! Radiance starts the wave zero-filled and every kernel write is a plain
+//! add: emission and shadow-ray contributions land per bounce, and each
+//! path's terminal add carries alpha 1, so "every pixel finished exactly
+//! once" stays checkable. Any one dispatch touches a pixel at most once
+//! (one path per pixel), and the barriers between passes order the adds —
+//! which is what keeps renders bitwise deterministic.
 //!
 //! The path pool is fixed capacity; a target with more pixels is walked in
 //! pool-sized pixel ranges within the same submission. Path state is `SoA` —
@@ -132,10 +140,10 @@ struct ShadeSurfaceParams {
     hits: QueueAddrs,
     /// The next bounce's input: scattered paths push themselves back here.
     rays: QueueAddrs,
-    /// Device address of the scene's geometry lookup table.
-    geometry: vk::DeviceAddress,
-    /// Device address of the scene's material table.
-    materials: vk::DeviceAddress,
+    /// Next-event connections, consumed by this round's `trace_shadow`.
+    shadows: QueueAddrs,
+    /// Device address of the scene table (geometry, materials, lights).
+    scene: vk::DeviceAddress,
     radiance: vk::DeviceAddress,
     /// Which sample of every pixel's sequence this wave traces.
     sample: u32,
@@ -143,7 +151,8 @@ struct ShadeSurfaceParams {
     bounce: u32,
     /// Path-length cap: the dispatch at `max_bounces - 1` never continues.
     max_bounces: u32,
-    _pad0: u32,
+    /// Which strategies reach the lights — a [`LightSampling`] as `u32`.
+    light_sampling: u32,
 }
 
 /// Push constants for the shadow-ray kernel (`shaders/trace_shadow.slang`).
@@ -292,6 +301,24 @@ impl Queues {
     }
 }
 
+/// Which sampling strategies reach the lights. [`LightSampling::Mis`] is
+/// the renderer; the single-strategy modes exist because the strongest
+/// test of the MIS weights is that either strategy alone converges to the
+/// same image (the MIS-agreement test below). Values match the
+/// `LIGHT_SAMPLING_*` constants in `shaders/shade_surface.slang`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum LightSampling {
+    /// Next-event estimation and BSDF sampling, combined by Veach's power
+    /// heuristic.
+    Mis = 0,
+    /// Lights count only when a scattered ray happens to hit them.
+    BsdfOnly = 1,
+    /// Lights count only through next-event shadow rays (plus directly
+    /// visible lights, which no shadow ray can reach).
+    NeeOnly = 2,
+}
+
 /// The engine: five stage pipelines over one path pool and its queues.
 /// Created once and reused across waves — nothing in it depends on the
 /// target size or the scene.
@@ -305,6 +332,7 @@ pub struct Wavefront {
     queues: Queues,
     capacity: u32,
     max_bounces: u32,
+    light_sampling: LightSampling,
 }
 
 impl Wavefront {
@@ -319,7 +347,9 @@ impl Wavefront {
     pub const DEFAULT_MAX_BOUNCES: u32 = 8;
 
     /// Build the five stage pipelines and allocate the pool and queues.
-    /// Each wave shades at most `max_bounces` bounces per path.
+    /// Each wave shades at most `max_bounces` bounces per path and reaches
+    /// lights via `light_sampling` (always [`LightSampling::Mis`] outside
+    /// the MIS-agreement test).
     ///
     /// # Errors
     ///
@@ -328,7 +358,13 @@ impl Wavefront {
     /// # Panics
     ///
     /// On zero capacity or zero bounces — programmer bugs.
-    pub fn new(gpu: &Context, kernels: &Kernels, capacity: u32, max_bounces: u32) -> Result<Self> {
+    pub fn new(
+        gpu: &Context,
+        kernels: &Kernels,
+        capacity: u32,
+        max_bounces: u32,
+        light_sampling: LightSampling,
+    ) -> Result<Self> {
         assert!(capacity > 0, "zero-capacity path pool");
         assert!(max_bounces > 0, "zero-bounce wavefront");
         let pipeline = |kernel: &Kernel, push_constant_size: usize, bindings| {
@@ -365,15 +401,18 @@ impl Wavefront {
             queues: Queues::new(gpu, capacity)?,
             capacity,
             max_bounces,
+            light_sampling,
         })
     }
 
     /// Trace one sample: one full path per pixel of a `width`×`height`
-    /// target — camera ray, diffuse bounces, Russian roulette from bounce
-    /// 3 — with the path's radiance written into `radiance` as row-major
-    /// RGBA `f32`, pixel (0, 0) top-left, exactly one write per pixel. One
-    /// blocking submission; targets larger than the pool are walked in
-    /// pool-sized pixel ranges within it.
+    /// target — camera ray, per-bounce direct-light sampling, diffuse
+    /// bounces, Russian roulette from bounce 3 — with the path's radiance
+    /// accumulated into `radiance` (zero-filled first; needs
+    /// `TRANSFER_DST`) as row-major RGBA `f32`, pixel (0, 0) top-left,
+    /// alpha 1 exactly once per pixel. One blocking submission; targets
+    /// larger than the pool are walked in pool-sized pixel ranges within
+    /// it.
     ///
     /// `sample` indexes every pixel's sample sequence: it selects the
     /// camera jitter and every scattering decision along the path, so
@@ -407,7 +446,7 @@ impl Wavefront {
             "radiance buffer smaller than the target"
         );
         let params = self.wave_params(scene, radiance, width, height, sample);
-        gpu.submit_passes(&self.record_wave(scene, &params))
+        gpu.submit_passes(&self.record_wave(scene, radiance, pixels, &params))
     }
 
     /// Every stage's push constants for one wave, built up front so the
@@ -459,13 +498,13 @@ impl Wavefront {
                     paths: self.paths.addresses(),
                     hits: self.queues.addresses(queue::HIT, &self.queues.hit),
                     rays: self.queues.addresses(queue::RAY, &self.queues.ray),
-                    geometry: scene.geometry().device_address(),
-                    materials: scene.materials().device_address(),
+                    shadows: self.queues.addresses(queue::SHADOW, &self.queues.shadow),
+                    scene: scene.table().device_address(),
                     radiance: radiance.device_address(),
                     sample,
                     bounce,
                     max_bounces: self.max_bounces,
-                    _pad0: 0,
+                    light_sampling: self.light_sampling as u32,
                 })
                 .collect(),
             trace_shadow: TraceShadowParams {
@@ -475,9 +514,15 @@ impl Wavefront {
         }
     }
 
-    /// Record one wave's pass sequence: per pixel range, raygen and then
-    /// the bounce loop.
-    fn record_wave<'a>(&'a self, scene: &'a Scene, params: &'a WaveParams) -> Vec<Pass<'a>> {
+    /// Record one wave's pass sequence: zero the radiance target, then per
+    /// pixel range, raygen and the bounce loop.
+    fn record_wave<'a>(
+        &'a self,
+        scene: &'a Scene,
+        radiance: &'a Buffer,
+        pixels: u64,
+        params: &'a WaveParams,
+    ) -> Vec<Pass<'a>> {
         // An indirect stage: workgroup counts read from its queue's header,
         // which the producing stage maintained.
         let indirect = |pipeline, tlas, push_constants, index: u64| Pass::DispatchIndirect {
@@ -496,10 +541,16 @@ impl Wavefront {
             value: 0,
         };
 
-        let mut passes = Vec::new();
+        // Radiance accumulates across the wave's bounce rounds, so the
+        // wave starts from zero rather than each pixel being written once.
+        let mut passes = vec![Pass::Fill {
+            buffer: radiance,
+            offset: 0,
+            size: pixels * 16,
+            value: 0,
+        }];
         for raygen in &params.ranges {
             passes.push(fill(queue::RAY));
-            passes.push(fill(queue::SHADOW));
             passes.push(Pass::Dispatch {
                 pipeline: &self.raygen,
                 tlas: None,
@@ -507,11 +558,13 @@ impl Wavefront {
                 group_counts: [raygen.count.div_ceil(WORKGROUP_SIZE), 1, 1],
             });
             // The bounce loop, recorded ahead of time: each round consumes
-            // the ray queue and refills it with the paths that scattered.
-            // Rounds after every path has died dispatch nothing.
+            // the ray queue, refills it with the paths that scattered, and
+            // ends by tracing the round's next-event shadow rays. Rounds
+            // after every path has died dispatch nothing.
             for bounce in 0..self.max_bounces {
                 passes.push(fill(queue::HIT));
                 passes.push(fill(queue::MISS));
+                passes.push(fill(queue::SHADOW));
                 passes.push(indirect(
                     &self.intersect,
                     Some(scene.tlas()),
@@ -536,13 +589,13 @@ impl Wavefront {
                     bytemuck::bytes_of(&params.shade_surface[bounce as usize]),
                     queue::HIT,
                 ));
+                passes.push(indirect(
+                    &self.trace_shadow,
+                    Some(scene.tlas()),
+                    bytemuck::bytes_of(&params.trace_shadow),
+                    queue::SHADOW,
+                ));
             }
-            passes.push(indirect(
-                &self.trace_shadow,
-                Some(scene.tlas()),
-                bytemuck::bytes_of(&params.trace_shadow),
-                queue::SHADOW,
-            ));
         }
         passes
     }
@@ -561,7 +614,11 @@ struct WaveParams {
 
 #[cfg(test)]
 mod tests {
+    use glam::{Mat4, Vec3};
+
     use super::*;
+    use crate::material::Material;
+    use crate::scene::{Camera, Object, ground_plane, icosphere};
 
     fn radiance_buffer(gpu: &Context, width: u32, height: u32) -> Buffer {
         gpu.create_buffer(
@@ -569,7 +626,8 @@ mod tests {
             u64::from(width) * u64::from(height) * 16,
             vk::BufferUsageFlags::STORAGE_BUFFER
                 | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-                | vk::BufferUsageFlags::TRANSFER_SRC,
+                | vk::BufferUsageFlags::TRANSFER_SRC
+                | vk::BufferUsageFlags::TRANSFER_DST,
             MemoryLocation::GpuOnly,
         )
         .expect("radiance buffer")
@@ -588,7 +646,8 @@ mod tests {
             return;
         };
         let scene = Scene::demo(&gpu).expect("demo scene");
-        let wavefront = Wavefront::new(&gpu, &Kernels::embedded(), 4096, 1).expect("wavefront");
+        let wavefront = Wavefront::new(&gpu, &Kernels::embedded(), 4096, 1, LightSampling::Mis)
+            .expect("wavefront");
         let (width, height) = (33, 17);
         let radiance = radiance_buffer(&gpu, width, height);
         wavefront
@@ -612,7 +671,10 @@ mod tests {
         assert_eq!(hit[0] + miss[0], paths, "every ray routed exactly once");
         assert!(hit[0] > 0, "the demo scene fills most of the frame");
         assert!(miss[0] > 0, "the demo scene has open sky");
-        assert_eq!(shadow[0], 0, "nothing feeds the shadow queue yet");
+        assert_eq!(
+            shadow[0], 0,
+            "the depth-cap bounce (here the only one) sends no shadow rays"
+        );
         for state in [ray, hit, miss, shadow] {
             assert_eq!(state[1], state[0].div_ceil(WORKGROUP_SIZE));
             assert_eq!(&state[2..], &[1, 1], "groupsY/Z hold constant 1");
@@ -631,9 +693,14 @@ mod tests {
         let kernels = Kernels::embedded();
         let (width, height) = (33, 17); // 561 pixels → 9 ranges of ≤ 64
         let render = |capacity: u32| {
-            let wavefront =
-                Wavefront::new(&gpu, &kernels, capacity, Wavefront::DEFAULT_MAX_BOUNCES)
-                    .expect("wavefront");
+            let wavefront = Wavefront::new(
+                &gpu,
+                &kernels,
+                capacity,
+                Wavefront::DEFAULT_MAX_BOUNCES,
+                LightSampling::Mis,
+            )
+            .expect("wavefront");
             let radiance = radiance_buffer(&gpu, width, height);
             wavefront
                 .trace(&gpu, &scene, &radiance, width, height, 0)
@@ -643,18 +710,19 @@ mod tests {
         assert_eq!(render(64), render(4096));
     }
 
-    /// The step-6 checkpoint, kept honest through step 7 — progressive
-    /// refinement is real. A camera ray that misses writes the sky radiance
-    /// exactly (throughput is still 1), and no surface path can produce it
-    /// (albedos < 1), so "this sample saw the sky" is an exact test. Across
-    /// the first 16 samples of a small render, some silhouette pixel must
-    /// see both a surface and the sky — its average is then a partial-
-    /// coverage value no single sample can produce, which is edges
-    /// converging — while a pixel fully inside the ground plane must never
-    /// see sky: its jitter stays within the pixel footprint.
+    /// The step-6 checkpoint, kept honest since — progressive refinement
+    /// is real. A camera ray that misses adds the sky radiance to a
+    /// zero-filled pixel exactly (throughput is still 1), and no surface
+    /// path plausibly lands on that exact value, so "this sample saw the
+    /// sky" is an exact test. Across the first 16 samples of a small
+    /// render, some silhouette pixel must see both a surface and the sky —
+    /// its average is then a partial-coverage value no single sample can
+    /// produce, which is edges converging — while a pixel fully inside the
+    /// ground plane must never see sky: its jitter stays within the pixel
+    /// footprint.
     #[test]
     fn camera_jitter_mixes_edge_pixels() {
-        const SKY: [f32; 4] = [1.0, 1.0, 1.0, 1.0]; // the demo scene's sky
+        const SKY: [f32; 4] = [0.4, 0.4, 0.4, 1.0]; // the demo scene's sky
         let Some(gpu) = crate::gpu::test_context() else {
             return;
         };
@@ -664,6 +732,7 @@ mod tests {
             &Kernels::embedded(),
             4096,
             Wavefront::DEFAULT_MAX_BOUNCES,
+            LightSampling::Mis,
         )
         .expect("wavefront");
         let (width, height) = (32, 32);
@@ -805,5 +874,87 @@ mod tests {
         // Different keys must give different sequences.
         assert_ne!(dump(0, 0), dump(1, 0), "pixels must decorrelate");
         assert_ne!(dump(0, 0), dump(0, 1), "dimensions must decorrelate");
+    }
+
+    /// The step-8 checkpoint, and the test that catches wrong-but-plausible
+    /// MIS: next-event-only, BSDF-only, and MIS renders of one scene must
+    /// converge to the same mean. A pdf mismatch or a weight pair that
+    /// doesn't sum to 1 biases the strategies apart (double-counting shows
+    /// up as 2×); goldens can't see this — they'd normalize the bias into
+    /// the reference. The sky is black, so every photon comes from the
+    /// quad, and the sphere really occludes it — broken shadow-ray
+    /// visibility shifts the next-event modes but not BSDF-only.
+    #[test]
+    fn light_sampling_strategies_agree() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let objects = [
+            Object {
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::Y),
+                material: Material::surface(Vec3::splat(0.6), 0.4),
+            },
+            Object {
+                mesh: ground_plane(4.0),
+                transform: Mat4::IDENTITY,
+                material: Material::surface(Vec3::splat(0.7), 0.0),
+            },
+            Object {
+                // A 2 m × 2 m quad right above the sphere: big enough that
+                // BSDF sampling finds it often (variance stays testable),
+                // low enough that its shadow occludes real floor.
+                mesh: ground_plane(1.0),
+                transform: Mat4::from_translation(Vec3::Y * 3.0),
+                material: Material::emitter(Vec3::splat(5.0)),
+            },
+        ];
+        let camera = Camera {
+            position: Vec3::new(0.0, 2.5, 6.0),
+            look_at: Vec3::new(0.0, 1.0, 0.0),
+            vfov_degrees: 45.0,
+        };
+        let scene = Scene::new(&gpu, &objects, camera, Vec3::ZERO).expect("scene");
+
+        let kernels = Kernels::embedded();
+        let (width, height) = (32, 32);
+        let samples = 64;
+        let mean = |light_sampling: LightSampling| -> f64 {
+            let wavefront = Wavefront::new(
+                &gpu,
+                &kernels,
+                4096,
+                Wavefront::DEFAULT_MAX_BOUNCES,
+                light_sampling,
+            )
+            .expect("wavefront");
+            let radiance = radiance_buffer(&gpu, width, height);
+            let mut total = 0.0;
+            for sample in 0..samples {
+                wavefront
+                    .trace(&gpu, &scene, &radiance, width, height, sample)
+                    .expect("trace");
+                let pixels: Vec<f32> = bytemuck::pod_collect_to_vec(
+                    &gpu.download_buffer(&radiance).expect("download"),
+                );
+                total += pixels
+                    .chunks_exact(4)
+                    .map(|pixel| f64::from(pixel[0]) + f64::from(pixel[1]) + f64::from(pixel[2]))
+                    .sum::<f64>();
+            }
+            total / f64::from(samples * width * height)
+        };
+
+        let mis = mean(LightSampling::Mis);
+        let bsdf = mean(LightSampling::BsdfOnly);
+        let nee = mean(LightSampling::NeeOnly);
+        assert!(mis > 0.01, "the scene should be lit, got mean {mis}");
+        for (name, value) in [("BSDF-only", bsdf), ("NEE-only", nee)] {
+            let deviation = (value - mis).abs() / mis;
+            assert!(
+                deviation < 0.03,
+                "{name} disagrees with MIS: {value} vs {mis} ({deviation:.4} relative)"
+            );
+        }
     }
 }

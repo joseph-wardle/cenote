@@ -1,9 +1,10 @@
 //! Interactive viewer: the render live in a window, under an orbit camera,
 //! progressively accumulated, with an egui stats/controls overlay. M1 build
-//! steps 2–7 — every sample is a full path-traced estimate (diffuse
-//! bounces under a constant sky), so the image starts noisy and visibly
-//! converges as the spp counter climbs; direct light sampling, specular
-//! lobes, and the HDRI environment arrive in steps 8–10.
+//! steps 2–8 — every sample is a full path-traced estimate (diffuse
+//! bounces, MIS-weighted direct light sampling of the quad light, a
+//! constant sky), so the image starts noisy and visibly converges as the
+//! spp counter climbs; specular lobes and the HDRI environment arrive in
+//! steps 9–10.
 //!
 //! Single-threaded, and self-scheduling once visible: every redraw
 //! accumulates one sample into the film, tonemaps (live exposure), presents,

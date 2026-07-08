@@ -12,8 +12,11 @@
 //
 // Determinism rule: queue push order varies run to run, so radiance is
 // written only to path-owned or pixel-owned memory — never atomically
-// accumulated. That is what makes renders bitwise reproducible, which the
-// replay guarantee (and later GRIS shift mappings) depend on.
+// accumulated. Each pixel has one path, so any one dispatch performs at
+// most one read-modify-write per pixel, and the barriers between stages
+// order the adds across dispatches into a fixed sequence. That is what
+// makes renders bitwise reproducible, which the replay guarantee (and
+// later GRIS shift mappings) depend on.
 
 // Threads per workgroup of every 1D path-stage kernel — must match
 // `WORKGROUP_SIZE` in `wavefront.rs`.
@@ -34,7 +37,10 @@ public struct Paths {
     public float4* direction; // xyz = unit ray direction
     public uint* pixel; // the film pixel this path contributes to
     public Hit* hit; // written by intersect, read by shade_surface
-    public float4* throughput; // xyz = the path's accumulated weight
+    // xyz = the path's accumulated weight; w = the solid-angle pdf of the
+    // scatter that produced this ray, which the next vertex's emission
+    // needs for MIS (0 on camera rays: no light-sampling strategy competed).
+    public float4* throughput;
 };
 
 // A queue header. groupsX/Y/Z sit contiguous so the host can aim an
@@ -74,7 +80,7 @@ public struct Queue<Entry> {
 // separate shadow-path pool once multi-candidate NEE wants one.
 public struct ShadowRay {
     public float3 origin;
-    public float tmax; // stop short of the light itself
+    public uint light; // TLAS custom index of the target light instance
     public float3 direction;
     public uint pixel;
     public float3 contribution; // unshadowed radiance, fully weighted

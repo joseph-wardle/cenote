@@ -1,8 +1,8 @@
 // The OpenPBR surface model, M1 subset: the EON diffuse base lobe —
 // energy-preserving Oren-Nayar ("EON: A Practical Energy-Preserving Rough
 // Diffuse BRDF", Portsmouth, Kutz & Hill, JCGT 2025) — which is the diffuse
-// lobe OpenPBR actually specifies (plain Lambert is not). The conductor and
-// dielectric GGX lobes join in M1 step 9.
+// lobe OpenPBR actually specifies (plain Lambert is not) — plus emission.
+// The conductor and dielectric GGX lobes join in M1 step 9.
 //
 // BSDF convention: wi (scattered) and wo (toward the viewer) are unit
 // directions pointing away from the surface, in a local frame with the
@@ -16,6 +16,8 @@ public static const float PI = 3.14159265358979;
 public struct Material {
     public float3 baseColor;    // diffuse single-scattering albedo, ACEScg
     public float baseRoughness; // Oren-Nayar roughness in [0, 1]; 0 = Lambert
+    public float3 emission;     // radiance, ACEScg — nonzero marks a light
+    float pad;
 };
 
 // The Fujii Oren-Nayar model's A and B coefficients depend on roughness r

@@ -13,10 +13,11 @@
 //!   shows. The viewer's redraw loop is one of each per frame.
 //!
 //! Every sample is a full path-traced estimate — jittered camera ray,
-//! diffuse bounces, constant-sky lighting — keyed by the film's sample
+//! MIS-weighted direct light sampling at every bounce, diffuse bounces
+//! under quad lights and a constant sky — keyed by the film's sample
 //! count, so accumulation converges toward the true render: edges
-//! anti-alias, indirect-lighting noise settles into color bleed and
-//! contact shadows.
+//! anti-alias, noise settles into soft shadows, color bleed, and contact
+//! darkening.
 
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
@@ -25,7 +26,7 @@ use crate::error::Result;
 use crate::gpu::{Bindings, Buffer, ComputePipeline, Context, MemoryLocation};
 use crate::scene::Scene;
 use crate::shaders::Kernels;
-use crate::wavefront::Wavefront;
+use crate::wavefront::{LightSampling, Wavefront};
 
 /// Workgroup width/height — must match `[numthreads(8, 8, 1)]` in the film
 /// kernels (`accumulate.slang`, `tonemap.slang`). The wavefront's 1D path
@@ -106,10 +107,11 @@ impl Film {
         let storage =
             vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
         Ok(Self {
+            // TRANSFER_DST: each wave starts by zero-filling its target.
             sample: gpu.create_buffer(
                 "film.sample",
                 texels * 16,
-                storage,
+                storage | vk::BufferUsageFlags::TRANSFER_DST,
                 MemoryLocation::GpuOnly,
             )?,
             sum: gpu.create_buffer(
@@ -194,6 +196,7 @@ impl Renderer {
                 kernels,
                 Wavefront::DEFAULT_CAPACITY,
                 Wavefront::DEFAULT_MAX_BOUNCES,
+                LightSampling::Mis,
             )?,
             accumulate: gpu.create_compute_pipeline(
                 &kernels.accumulate.spirv,
@@ -275,7 +278,8 @@ impl Renderer {
             size,
             vk::BufferUsageFlags::STORAGE_BUFFER
                 | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-                | vk::BufferUsageFlags::TRANSFER_SRC,
+                | vk::BufferUsageFlags::TRANSFER_SRC
+                | vk::BufferUsageFlags::TRANSFER_DST,
             MemoryLocation::GpuOnly,
         )?;
         self.wavefront
@@ -419,10 +423,7 @@ mod tests {
         let object = Object {
             mesh: ground_plane(5.0),
             transform: Mat4::from_translation(center) * Mat4::from_scale(Vec3::splat(scale)),
-            material: Material {
-                base_color: Vec3::splat(albedo),
-                base_roughness: roughness,
-            },
+            material: Material::surface(Vec3::splat(albedo), roughness),
         };
         let camera = Camera {
             position: center + Vec3::new(0.0, scale, 0.0),
@@ -433,10 +434,10 @@ mod tests {
     }
 
     /// Probe the demo image's known-exact features. The top-left pixel is
-    /// open sky, and a camera-ray miss writes the sky radiance exactly.
-    /// Every pixel is written exactly once per wave (alpha 1, finite,
-    /// non-negative), and most of the frame is lit surface — neither sky
-    /// nor a dead path's black.
+    /// open sky, and a camera-ray miss adds the sky radiance to a
+    /// zero-filled pixel — exact. Every pixel finishes exactly once per
+    /// wave (alpha 1, finite, non-negative), and most of the frame is lit
+    /// surface — neither sky nor a dead path's black.
     #[test]
     fn demo_image_is_sky_lit() {
         let Some(gpu) = crate::gpu::test_context() else {
@@ -449,7 +450,9 @@ mod tests {
             .render(&gpu, &scene, width, height)
             .expect("render");
 
-        assert_eq!(pixel(&pixels, width, 0, 0), [1.0, 1.0, 1.0, 1.0]);
+        let sky = scene.sky();
+        let sky = [sky.x, sky.y, sky.z, 1.0];
+        assert_eq!(pixel(&pixels, width, 0, 0), sky);
 
         let mut lit = 0;
         for chunk in pixels.chunks_exact(4) {
@@ -458,7 +461,7 @@ mod tests {
                 chunk[..3].iter().all(|c| c.is_finite() && *c >= 0.0),
                 "non-finite or negative radiance: {chunk:?}"
             );
-            if chunk[..3] != [1.0, 1.0, 1.0] && chunk[..3].iter().sum::<f32>() > 0.0 {
+            if chunk != sky && chunk[..3].iter().sum::<f32>() > 0.0 {
                 lit += 1;
             }
         }
@@ -656,7 +659,8 @@ mod tests {
                     64 * 64 * 16,
                     vk::BufferUsageFlags::STORAGE_BUFFER
                         | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-                        | vk::BufferUsageFlags::TRANSFER_SRC,
+                        | vk::BufferUsageFlags::TRANSFER_SRC
+                        | vk::BufferUsageFlags::TRANSFER_DST,
                     MemoryLocation::GpuOnly,
                 )
                 .expect("radiance buffer");

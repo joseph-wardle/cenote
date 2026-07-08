@@ -1,47 +1,60 @@
-// The surface-shading stage: reconstruct the hit, scatter off the EON
-// diffuse base, and push the path back onto the ray queue for the next
-// bounce — until it escapes to the sky, hits the depth cap, or loses
-// Russian roulette. No NEE or emissive surfaces yet (M1 step 8), so a
-// surface adds no radiance of its own: a path that terminates here
-// contributes black, written now — every pixel gets exactly one radiance
-// write per wave (here or in shade_miss), which keeps writes pixel-owned
-// and renders bitwise deterministic.
+// The surface-shading stage: reconstruct the hit, collect the surface's
+// emission (MIS-weighted — a BSDF-sampled path landing on a light competes
+// with next-event estimation for the same connection), send one shadow ray
+// toward the lights, and scatter off the EON diffuse base — until the path
+// escapes to the sky, hits the depth cap, or loses Russian roulette.
+//
+// Radiance bookkeeping: the wave's per-pixel accumulator starts at zero
+// and every write below is a plain +=. A pixel has one path and a path
+// visits this kernel once per bounce, so each dispatch performs at most
+// one read-modify-write per pixel — which keeps writes pixel-owned and
+// renders bitwise deterministic. The one *terminal* add per path carries
+// alpha 1 (here or in shade_miss): "every pixel finished exactly once"
+// stays mechanically checkable.
 
+import lights;
 import openpbr;
 import pathstate;
 import rng;
-
-// Where an instance's triangles live, plus its transforms — everything
-// needed to re-evaluate shading at a Hit. Mirrors `GeometryRecord` in
-// `scene.rs` field for field.
-struct GeometryRecord {
-    float* positions;        // x, y, z per vertex, object space
-    uint* indices;           // three per triangle
-    float4 objectToWorld[3]; // rows of the instance's 3×4 transform
-    float4 worldToObject[3]; // rows of its inverse — normals, error bounds
-};
+import scene;
 
 struct Params {
     Paths paths;
     Queue<uint> hits;
     Queue<uint> rays;         // the next bounce's input: survivors push here
-    GeometryRecord* geometry; // indexed by instance custom index
-    Material* materials;      // indexed by instance custom index
-    float4* radiance;         // the film's per-pixel sample for this wave
+    Queue<ShadowRay> shadows; // next-event connections, for trace_shadow
+    SceneTable* scene;
+    float4* radiance;         // the film's per-pixel accumulator for this wave
     uint sampleIndex; // which sample of every pixel's sequence this wave is
     uint bounce;      // which bounce of the wave this dispatch shades
     uint maxBounces;  // path-length cap: the last bounce never continues
-    uint pad;
+    uint lightSampling; // LIGHT_SAMPLING_*: which strategies reach the lights
 };
 
 [vk::push_constant]
 Params params;
+
+// MIS is the renderer; the single-strategy modes exist because the
+// strongest test of the weights is that either strategy alone converges
+// to the same image (the MIS-agreement test in `wavefront.rs`). Values
+// match `enum LightSampling` there.
+static const uint LIGHT_SAMPLING_MIS = 0;
+static const uint LIGHT_SAMPLING_BSDF = 1;
+static const uint LIGHT_SAMPLING_NEE = 2;
 
 // Bounces before this always survive — they carry most of the image's
 // energy, and killing them early would just trade traced rays for noise.
 // From here on, paths gamble survival against their throughput and the
 // survivors are reweighted to keep the estimate unbiased.
 static const uint ROULETTE_START = 3;
+
+// Veach's power heuristic (β = 2): the weight of a sample drawn from the
+// strategy with pdf `p` when the strategy with pdf `q` could have produced
+// it too. The weights of the two draws sum to 1, so combining strategies
+// stays unbiased; squaring favors whichever pdf is sharper.
+float powerHeuristic(float p, float q) {
+    return (p * p) / (p * p + q * q);
+}
 
 float3 position(float* positions, uint vertex) {
     return float3(positions[3 * vertex],
@@ -137,41 +150,121 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     }
     uint path = params.hits.entries[tid.x];
     uint pixel = params.paths.pixel[path];
+    Hit hit = params.paths.hit[path];
+    let direction = params.paths.direction[path].xyz;
+    GeometryRecord mesh = params.scene.geometry[hit.instance];
+    Material material = params.scene.materials[hit.instance];
+    let spawn = spawnPoint(mesh, hit, direction);
+    // xyz = the path's weight; w = the previous scatter's pdf (0: camera ray).
+    let throughput = params.paths.throughput[path];
 
-    // The depth cap. A capped path carries no radiance (only the sky emits,
-    // and this path never reached it), so its pixel's one write is black.
+    // Emission. This hit is the BSDF strategy's way of reaching a light,
+    // so it is weighted against the probability that next-event sampling
+    // at the previous vertex would have picked the same point — except on
+    // camera rays, where no other strategy competed and the weight is 1.
+    var contribution = float3(0.0);
+    if (mesh.light != LIGHT_NONE) {
+        var weight = 1.0;
+        if (throughput.w > 0.0) {
+            if (params.lightSampling == LIGHT_SAMPLING_NEE) {
+                weight = 0.0;
+            } else if (params.lightSampling == LIGHT_SAMPLING_MIS) {
+                let delta = spawn.position - params.paths.origin[path].xyz;
+                let cosLight = abs(dot(spawn.normal, direction));
+                let neePdf = params.scene.lights[mesh.light].pdfArea
+                           * dot(delta, delta) / cosLight;
+                weight = powerHeuristic(throughput.w, neePdf);
+            }
+        }
+        contribution = throughput.xyz * material.emission * weight;
+    }
+
+    // The depth cap: the path ends at this vertex, so this is its pixel's
+    // terminal add. No next-event estimation here — an NEE connection from
+    // this vertex would be one segment longer than any path BSDF sampling
+    // can trace, and the two strategies must cover the same path lengths
+    // to converge to the same image.
     if (params.bounce + 1 >= params.maxBounces) {
-        params.radiance[pixel] = float4(0.0, 0.0, 0.0, 1.0);
+        params.radiance[pixel] += float4(contribution, 1.0);
         return;
     }
 
-    Hit hit = params.paths.hit[path];
-    let direction = params.paths.direction[path].xyz;
-    let spawn = spawnPoint(params.geometry[hit.instance], hit, direction);
-    Material material = params.materials[hit.instance];
+    let frame = Frame(spawn.normal);
+    let wo = frame.toLocal(-direction);
+
+    // Next-event estimation: connect this vertex to one candidate point on
+    // the lights. The contribution is fully weighted here; trace_shadow
+    // just adds it if the connection is unoccluded.
+    if (params.lightSampling != LIGHT_SAMPLING_BSDF && params.scene.lightCount > 0) {
+        let uLight = sample_1d(pixel, params.sampleIndex,
+                               bounceDimension(params.bounce, NEE_LIGHT));
+        let uPoint = sample_2d(pixel, params.sampleIndex,
+                               bounceDimension(params.bounce, NEE_POINT));
+        let candidate = sampleLights(params.scene.lights,
+                                     params.scene.lightCount, uLight, uPoint);
+        let delta = candidate.position - spawn.position;
+        let r2 = dot(delta, delta);
+        let wiWorld = delta * rsqrt(r2);
+        let wiLight = frame.toLocal(wiWorld);
+        let cosLight = abs(dot(candidate.normal, wiWorld));
+        if (r2 > 0.0 && wiLight.z > 0.0 && cosLight > 0.0) {
+            // The candidate's pdf in solid angle at this vertex, against
+            // the pdf BSDF sampling would give the same direction.
+            let neePdf = candidate.pdfArea * r2 / cosLight;
+            let bsdfPdf = wiLight.z / PI;
+            let weight = params.lightSampling == LIGHT_SAMPLING_MIS
+                       ? powerHeuristic(neePdf, bsdfPdf)
+                       : 1.0;
+            let unshadowed = throughput.xyz * candidate.emission
+                * eonBrdf(material.baseColor, material.baseRoughness, wiLight, wo)
+                * wiLight.z * (weight / neePdf);
+            if (any(unshadowed > 0.0)) {
+                ShadowRay shadow;
+                shadow.origin = spawn.position;
+                shadow.light = candidate.instance;
+                shadow.direction = wiWorld;
+                shadow.pixel = pixel;
+                shadow.contribution = unshadowed;
+                shadow.pad = 0.0;
+                params.shadows.push(shadow);
+            }
+        }
+    }
 
     // Scatter off the diffuse lobe. Cosine-sampled, so the path-throughput
     // update f·cos/pdf collapses to f·π.
-    let frame = Frame(spawn.normal);
-    let wo = frame.toLocal(-direction);
     let u = sample_2d(pixel, params.sampleIndex,
                       bounceDimension(params.bounce, BSDF_DIR));
     let wi = sampleCosineHemisphere(u);
-    var throughput = params.paths.throughput[path].xyz * PI
+    var scattered = throughput.xyz * PI
         * eonBrdf(material.baseColor, material.baseRoughness, wi.xyz, wo);
 
+    // A path that can carry nothing forward is done — lights themselves
+    // scatter nothing (their base color is black), and continuing would
+    // just trace dead rays until roulette noticed.
+    var survival = max(scattered.r, max(scattered.g, scattered.b));
+    if (survival <= 0.0) {
+        params.radiance[pixel] += float4(contribution, 1.0);
+        return;
+    }
+
     if (params.bounce >= ROULETTE_START) {
-        let survival = min(1.0, max(throughput.r, max(throughput.g, throughput.b)));
+        survival = min(1.0, survival);
         if (sample_1d(pixel, params.sampleIndex,
                       bounceDimension(params.bounce, RR)) >= survival) {
-            params.radiance[pixel] = float4(0.0, 0.0, 0.0, 1.0);
+            params.radiance[pixel] += float4(contribution, 1.0);
             return;
         }
-        throughput /= survival;
+        scattered /= survival;
     }
 
     params.paths.origin[path] = float4(spawn.position, 0.0);
     params.paths.direction[path] = float4(frame.toWorld(wi.xyz), 0.0);
-    params.paths.throughput[path] = float4(throughput, 0.0);
+    params.paths.throughput[path] = float4(scattered, wi.w);
     params.rays.push(path);
+
+    // The path continues, but its pixel keeps the emission found here.
+    if (any(contribution > 0.0)) {
+        params.radiance[pixel] += float4(contribution, 0.0);
+    }
 }
