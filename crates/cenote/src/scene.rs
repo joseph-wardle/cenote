@@ -304,10 +304,43 @@ impl Scene {
             look_at: Vec3::new(0.0, 0.5, 0.0),
             vfov_degrees: 40.0,
         };
-        let sky =
-            Environment::from_equirect_exr(include_bytes!("../assets/kloofendal_puresky.exr"))?;
-        Self::new(gpu, &objects, camera, &sky)
+        // Loaded from the dev tree rather than embedded: at 4k the asset
+        // is 43 MB, which no binary should carry. Real scene I/O (and
+        // installable assets) is M2's job; this matches how shader hot
+        // reload already finds its sources.
+        let load = || -> Result<Environment> {
+            let path =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(Self::DEMO_ENVIRONMENT);
+            Environment::from_equirect_exr(&std::fs::read(path)?)
+        };
+        // The lib test suite builds this scene dozens of times per process,
+        // and the 4k decode plus table build is seconds of debug-profile
+        // CPU each — so tests share one copy. Outside tests a process
+        // builds the demo once, and shouldn't pin ~200 MB of host-side
+        // copies for its lifetime.
+        #[cfg(test)]
+        {
+            static DEMO_SKY: std::sync::OnceLock<Environment> = std::sync::OnceLock::new();
+            // Two steps rather than `get_or_init(load)`: the load can fail,
+            // and only a loaded environment may be stored.
+            let sky = if let Some(sky) = DEMO_SKY.get() {
+                sky
+            } else {
+                let loaded = load()?;
+                DEMO_SKY.get_or_init(|| loaded)
+            };
+            Self::new(gpu, &objects, camera, sky)
+        }
+        #[cfg(not(test))]
+        {
+            Self::new(gpu, &objects, camera, &load()?)
+        }
     }
+
+    /// The demo environment's path, relative to the crate root — the
+    /// bundled Kloofendal sky (`assets/README.md` has provenance and
+    /// encoding notes).
+    pub const DEMO_ENVIRONMENT: &str = "assets/kloofendal_puresky.exr";
 
     /// The scene's TLAS, ready to bind for ray queries.
     #[must_use]

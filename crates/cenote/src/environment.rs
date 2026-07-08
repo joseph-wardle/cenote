@@ -23,6 +23,8 @@
 //!   difference, which for dim texels under a bright sun cancels
 //!   catastrophically in `f32`.
 
+use std::sync::OnceLock;
+
 use glam::Vec3;
 
 use crate::color::{acescg_from_rec709, luminance};
@@ -38,6 +40,10 @@ pub struct Environment {
     height: u32,
     /// Tightly packed row-major RGBA (alpha 1), ready to upload.
     texels: Vec<f32>,
+    /// The sampling tables, built on first use — a pure function of the
+    /// texels, and heavy enough at 4k (a 3×3 dilation over 8M texels)
+    /// that scenes sharing an environment must not rebuild them.
+    tables: OnceLock<Tables>,
 }
 
 impl Environment {
@@ -68,6 +74,7 @@ impl Environment {
             width,
             height,
             texels,
+            tables: OnceLock::new(),
         }
     }
 
@@ -92,6 +99,7 @@ impl Environment {
             width,
             height,
             texels,
+            tables: OnceLock::new(),
         })
     }
 
@@ -113,9 +121,13 @@ impl Environment {
         &self.texels
     }
 
-    /// Build the sampling tables. All accumulation runs in `f64` and lands
-    /// in the `f32` the kernels read.
-    pub(crate) fn tables(&self) -> Tables {
+    /// The sampling tables, built on first call and cached. All
+    /// accumulation runs in `f64` and lands in the `f32` the kernels read.
+    pub(crate) fn tables(&self) -> &Tables {
+        self.tables.get_or_init(|| self.build_tables())
+    }
+
+    fn build_tables(&self) -> Tables {
         let (w, h) = (self.width as usize, self.height as usize);
         let lum: Vec<f64> = self
             .texels
@@ -236,6 +248,7 @@ mod tests {
             width,
             height,
             texels,
+            tables: OnceLock::new(),
         }
     }
 
@@ -287,7 +300,8 @@ mod tests {
     #[test]
     #[expect(clippy::float_cmp, reason = "zero mass is exact, not approximate")]
     fn black_environment_has_no_mass() {
-        let tables = Environment::constant(Vec3::ZERO).tables();
+        let env = Environment::constant(Vec3::ZERO);
+        let tables = env.tables();
         assert_eq!(tables.power, 0.0);
         assert!(tables.pdfs.iter().all(|&p| p == 0.0));
         assert_eq!(tables.marginal.last(), Some(&1.0));
@@ -313,10 +327,11 @@ mod tests {
     /// non-negative, and bright enough to light a scene.
     #[test]
     fn demo_asset_loads() {
-        let env =
-            Environment::from_equirect_exr(include_bytes!("../assets/kloofendal_puresky.exr"))
-                .expect("demo HDRI decodes");
-        assert_eq!((env.width(), env.height()), (2048, 1024));
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(crate::scene::Scene::DEMO_ENVIRONMENT);
+        let bytes = std::fs::read(path).expect("demo HDRI exists");
+        let env = Environment::from_equirect_exr(&bytes).expect("demo HDRI decodes");
+        assert_eq!((env.width(), env.height()), (4096, 2048));
         assert!(env.texels().iter().all(|v| v.is_finite() && *v >= 0.0));
         assert!(env.tables().power > 1.0, "a daytime sky is not this dark");
     }

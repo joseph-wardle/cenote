@@ -18,3 +18,11 @@ module_name_repetitions = "allow"
 cast_possible_truncation = "allow"
 cast_precision_loss = "allow"
 cast_sign_loss = "allow"
+
+# Every test that builds the demo scene decodes its 43 MB environment EXR;
+# unoptimized, that decompression dominates the debug test suite.
+[profile.dev.package.exr]
+opt-level = 3
+
+[profile.dev.package.miniz_oxide]
+opt-level = 3
