@@ -70,6 +70,7 @@ cargo test --workspace   # on the GPU machine — includes the goldens
 | `docs/charter.md` | Project charter: vision, locked decisions, milestone roadmap |
 | `docs/decisions.md` | Append-only log of every design decision and its rationale |
 | `docs/m0-plan.md` | The M0 implementation plan |
+| `docs/m1-plan.md` | The M1 implementation plan |
 
 ## License
 

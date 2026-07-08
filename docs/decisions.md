@@ -168,3 +168,217 @@ belongs (succinctly) at the code site, and they read as noise once the numbered
 entries stop being fresh in anyone's head. Comments now carry their own why in a
 sentence; this log remains the deep archive with the full trade-off discussions,
 discoverable through the README. Amends the D-013 conventions.
+
+---
+
+## 2026-07-07 — M1 structural decisions (interview session)
+
+The plan these seed is [m1-plan.md](m1-plan.md); charter §4 M1 is the parent scope.
+
+### D-020: M1 scope is the full charter list, staged as a walking skeleton
+Nothing is cut up front, but the build order (m1-plan.md §4) is a walking skeleton
+with pre-agreed fallback seams (§5): HDRI degrades to constant-sky, sliders to
+presets; the wavefront core is never compressed. *Why:* the milestone bundles two
+different risks — a novel engine and known-territory features — and staging keeps a
+schedule slip from becoming a scope panic.
+
+### D-021: Host-driven fixed-loop wavefront scheduler
+The host records a fixed stage sequence per bounce for a max-depth number of
+iterations, one command buffer per wave. GPU-side per-stage queues hold path indices;
+kernels push survivors into the next stage's queue (that push *is* both compaction
+and "each path records its next kernel"); every dispatch is indirect, sized by a
+counter a prior kernel wrote. No mid-frame CPU↔GPU readbacks. *Why:* satisfies every
+charter commitment (stages, queues, indirect dispatch, compaction) with the simplest
+correct sync story. Cycles-X-style adaptive kernel selection reads the same counters
+— it can layer on later without changing any kernel-facing contract.
+
+### D-022: Fixed-capacity path pool + tile loop
+The pool is capped (default 2²⁰ paths, configurable); a sample walks pixel tiles of
+pool size. *Why:* path state will reach 100–200+ bytes/path once GRIS data arrives —
+pool-per-pixel is 1–2 GB at 4K. Bounding the pool now costs one host-side loop level;
+retrofitting tiles after accumulation and viewer code assume path==pixel would be a
+structural rework. At viewer resolutions it degenerates to one tile.
+
+### D-023: Path state is SoA behind a schema seam; "reserved" means structural
+All path-state fields are declared in exactly one place — a Rust struct of buffers
+with a mirrored Slang struct of buffer addresses handed to every kernel — so adding a
+field (M3 reconnection vertex, M8 volume stack) is a two-line change no kernel
+signature notices. M1 allocates only fields M1 reads; path flags are in (termination
+and queue routing need them). *Why:* the charter pillar's intent is "adding these
+later must not be a refactor"; allocating placeholder fields would be dead memory and
+untestable layout guesses. Granularity: one buffer per logical field, 16-byte-friendly
+packing — per-component splits are a measured optimization later.
+
+### D-024: Six kernels — raygen, intersect, shade_miss, shade_surface, trace_shadow, accumulate
+Per-bounce sequence `intersect → (shade_miss | shade_surface) → trace_shadow`,
+bookended by raygen and a once-per-wave accumulate. Tracing and shading never share a
+kernel: intersect stays pure traversal (the layer that later learns procedural
+primitives), shadow rays are not inlined into shade_surface. *Why:* inlining is the
+tempting collapse ray queries make easy, but it fuses the most divergent work into
+one long-running kernel and deletes the exact queue boundaries where M3's GRIS
+candidate/visibility passes insert.
+
+### D-025: Sequential waves on one graphics+compute queue, timeline-semaphore pacing
+One wave in flight; per wave: stage dispatches → tonemap → present, host paced by a
+timeline semaphore (replacing M0's fence-blocked one-shots). The display image is
+double-buffered from day one — the seam where present/compute overlap later slots in.
+*Why:* path state has one copy, so waves can't overlap anyway; D-007's principle
+holds — measured stalls, not speculation, drive concurrency. Async compute and
+cross-queue transfers wait for a workload that demands them.
+
+### D-026: Stateless pcg4d sampler with a named dimension registry
+Sampling is a hash of (pixel, sample index, bounce, dimension) — nothing stored in
+path state beyond keys the path already carries. Dimensions are named constants
+(`CAMERA_JITTER`, `BSDF_LOBE`, `NEE_LIGHT`, …), never allocated by call order, behind
+a `sample_1d/2d` API. *Why:* replayable-by-construction is the charter's GRIS
+requirement — shift mappings re-trace with the same keys and get the same decisions.
+Call-order dimensions would make any reordered sample call silently change every
+downstream decision. Owen-scrambled Sobol is a pure drop-in behind the same seam
+when convergence-per-sample matters.
+
+### D-027: OpenPBR subset is three lobes with constant parameters
+Lambert base + conductor GGX (metalness) + dielectric GGX specular layered by
+OpenPBR's albedo-scaling approximation; parameters are per-instance constants in a
+material buffer (textures are M2). Plain Slang lobe functions (`eval`/`sample`/`pdf`)
+combined by a small ubershader evaluator — no Slang interfaces or dynamic dispatch.
+Every lobe lands with a white furnace test. *Why:* the smallest set that exercises
+MIS against sharp lobes (where MIS bugs actually live) and reads as a real renderer;
+transmission is excluded because interior tracking is a disproportionate correctness
+burden before M2. Parameters map onto named OpenPBR attributes so M2 grows the set
+instead of rewriting it.
+
+### D-028: Area lights are emissive mesh instances; alias-table selection; HDRI is M1's only texture
+Quad lights are two-triangle mesh instances inside the TLAS, referenced by a light
+list for NEE sampling; selection is a power-proportional alias table built at prep.
+The environment is an equirect EXR uploaded as a sampled image (joining the TLAS in
+the one small descriptor set — deliberately the only texture before M2's bindless
+table), importance-sampled via a marginal/conditional CDF and MIS'd in shade_miss.
+*Why:* analytic lights outside the BVH give MIS a second intersection code path to
+keep honest; mesh lights make BSDF-sampled hits the ordinary path. The alias table is
+~50 lines, chartered prep work, and M3's candidate generation wants it.
+
+### D-029: Authored colors are linear Rec.709, converted to ACEScg at prep; display is an analytic ACES fit
+The core is pure ACEScg. Human-authored values (material params, emission) and the
+HDRI are taken as linear Rec.709 and converted by one 3×3 matrix at prep/load — the
+first instance of the charter's IDT-at-prep pattern. The tonemap kernel applies the
+Hill ACES RRT+ODT fit for display; EXRs stay linear ACEScg with chromaticity metadata
+in the header. *Why:* every picker, tutorial, and copied reference value lives in
+sRGB space — authoring in raw ACEScg makes them all silently wrong. The tonemap
+kernel is the seam where M2's OCIO-baked 3D LUTs replace the formula without anything
+upstream noticing.
+
+### D-030: Viewer is a new `cenote-viewer` crate — egui on ash, blit presentation, single thread
+Core stays windowless; no winit types cross into `cenote`. UI is egui via egui-winit +
+egui-ash-renderer (dep-policy justification: an immediate-mode UI renderer is
+thousands of lines, nowhere near the <100-line bar; egui is the de-facto Rust choice).
+The tonemap kernel writes an offscreen RGBA8 storage image, blitted to the swapchain,
+egui pass on top — direct storage writes to swapchain images have spotty driver
+support; the blit always works. One winit event-loop thread drives one wave per
+redraw; any camera/parameter edit resets accumulation. *Why:* re-convergence after an
+edit is the thesis made visible; a render thread is a later optimization with real
+ownership costs, not a day-one need.
+
+### D-031: Four-layer test suite — goldens, furnace, MIS-agreement, determinism
+(1) Goldens: fixed seed + fixed spp through the full wavefront, FLIP-compared —
+D-009's threshold reasoning covers Monte Carlo with a pinned seed. (2) White furnace
+per lobe: uniform environment, albedo-1 material, must converge to the environment
+value. (3) MIS-agreement: NEE-only, BSDF-only, and MIS renders of one scene must
+converge to the same mean — catches wrong-but-plausible weights that goldens would
+normalize into the reference. (4) Determinism: same seed twice in-process must be
+bitwise identical — the charter's replay guarantee (which GRIS shift mappings depend
+on) made mechanical. Plus CPU unit tests for host-shared math (alias table, env CDF,
+color matrices, camera rays). All GPU tests skip cleanly without hardware, per the
+M0 pattern.
+
+---
+
+## 2026-07-07 — M1 plan review against Cycles X, MoonRay, and current practice
+
+Before implementation began, the locked plan was reviewed against Cycles X's actual
+source, MoonRay's paper and open source, and current research. Nine decisions
+survived unchanged — several confirmed near-verbatim by Cycles (fixed pool + work
+tiles, single-point-of-definition SoA with feature-gated allocation, intersect/shade
+separation, zero evidence against the sequential sync model). The entries below
+record what the review changed or surfaced.
+
+### D-032: Sampler is hash-based Owen-scrambled Sobol (amends D-026)
+M1 ships Sobol-Burley ("Practical Hash-based Owen Scrambling", Burley, JCGT 2020)
+instead of a PCG hash. It is stateless and keyed (pixel hash, sample index,
+dimension) exactly as D-026 required, ~200 lines (Cycles' whole implementation is
+~180), and the production baseline — Cycles' current blue-noise default modes are
+Sobol-Burley underneath, and pbrt-v4's default ZSobol is the same hashed-Owen
+construction. Better convergence per sample serves the preview-predicts-final thesis
+directly, and replayability is *cleaner* than the ReSTIR PT reference code, which
+stores raw LCG state in reservoirs and burns dummy samples to keep streams aligned.
+The named dimension registry and `sample_1d/2d` seam stand; blue-noise index
+ordering (Morton-shuffled offsets, the Cycles/psychopath approach) is the documented
+later drop-in. *Why the reversal:* "PCG now, Sobol later" priced the swap wrong —
+Sobol-Burley costs roughly a day more now, while swapping later would cost
+regenerating every golden.
+
+### D-033: EON diffuse, Turquin energy compensation, spherical-caps VNDF (amends D-027)
+Three upgrades, all evidence-forced. (1) The diffuse lobe is EON — energy-preserving
+Oren-Nayar (Portsmouth et al. 2024) — because that is the lobe OpenPBR actually
+specifies (Lambert is not in the spec), it is analytic and reciprocal, and it passes
+the furnace by construction. (2) GGX lobes get Turquin-style multiple-scattering
+energy compensation (Turquin 2019) via the Sforza-Pellacini analytic fits (2023,
+tens of coefficients — no LUT-baking infrastructure): single-scatter GGX fails an
+albedo-1 furnace test *by design*, and compensation is unanimous — Cycles 4.0+
+(Turquin), MoonRay (Kulla-Conty), OpenPBR ("should"). (3) GGX sampling is named:
+Dupuy-Benyoub spherical caps (HPG 2023) — identical distribution and PDF to Heitz
+2018, simpler and faster, what Falcor ships. Bounded VNDF (Tokuyoshi & Eto 2024) is
+a documented later option for opaque reflection lobes; it modifies the PDF, so it is
+not a silent drop-in. OpenPBR's white-furnace section lists the exact configurations
+to test; that list is the M1 furnace matrix.
+
+### D-034: Forward emissive hits, hit encoding, shadow records (amends D-023/D-024 detail)
+Cycles dedicates a shade_light kernel to BSDF rays that land on emitters; the plan
+was silent. Resolution: shade_surface handles light-tagged instances — evaluate
+emission, MIS-weight against the NEE pdf — which makes `prev_bsdf_pdf` a required
+M1 path-state field. Folding into shade_surface is right at one-ubershader scale;
+the queue boundary exists if it ever earns its own kernel. Two encodings recorded at
+the same time: hits are stored as instance + primitive + barycentrics (re-evaluable
+— the form M3 reservoirs must hold, per the ReSTIR PT reference's PathReservoir),
+and shadow-queue entries are self-contained records (origin, direction, unshadowed
+contribution, pixel) rather than main-path fields — simpler now, and already the
+shape of the separate shadow-path pool Cycles uses and M3's multi-candidate NEE will
+want. The per-bounce sampled-lobe/technique tag GRIS random replay needs is a known
+future field; the schema seam makes it a two-line add.
+
+### D-035: Robustness policy — rigorous ray offsets, unconditional finite guard, no default clamp
+Self-intersection avoidance uses the rigorous-bounds method from van Antwerpen's
+"Solving Self-Intersection Artifacts in DirectX Raytracing" (NVIDIA, 2023; reference
+HLSL/GLSL published), with Wächter-Binder (Ray Tracing Gems 2019 ch. 6, Falcor's
+choice) as fallback — never magic `TMin` epsilons. Every film contribution is
+finite-guarded before accumulation, unconditionally (Cycles' `ensure_finite`).
+Firefly clamping ships **off** by default: Cycles defaults indirect clamping to
+10.0, but clamping changes the ground truth the thesis promises the artist; the
+divergence is deliberate and gets revisited with the M2 denoiser.
+
+### D-036: Interface seams — env pdf query, swappable tonemap
+The environment light exposes `sample() → (direction, pdf, radiance)` and
+`pdf(direction)` as separate entry points: BSDF-sampling MIS needs the pdf query in
+M1, and every ReSTIR target-function and shift-Jacobian evaluation needs it in M3
+(it is the piece RTXDI explicitly requires of host tracers). The tonemap is a
+swappable stage, not a baked-in look: ACES 2.0 (finalized Sept 2024, in OCIO 2.4.2+)
+has no shader-friendly form — the ACES community's own engine guidance is "bake a
+3D LUT via OCIO" — and the DCC world is drifting to AgX (Blender's default since
+4.0). The Hill fit is the built-in; the LUT slot is where ACES 2.0 or AgX land
+without touching anything upstream.
+
+### D-037: SER acknowledged; the wavefront bet stands; intersect is the seam
+Since the charter was drafted, Shader Execution Reordering went cross-vendor:
+`VK_EXT_ray_tracing_invocation_reorder` was ratified November 2025
+(hardware-accelerated on NVIDIA RTX 40/50 and Intel Arc B; AMD committed), and DXR
+1.2 SER shipped retail in early 2026. The spec is unambiguous — reordering exists
+only in ray-tracing-pipeline raygen shaders, never in compute — so a
+compute-wavefront tracer forgoes hardware SER entirely, and NVIDIA's ReSTIR
+reference stack (Falcor, RTXPT) is a raygen loop + SER. The wavefront bet stands
+anyway: Cenote's profile is Cycles' profile — offline-convergent, feature-staged
+(curves/SSS/volumes as inserted stages), one fixed ubershader, divergence living
+mostly in traversal that RT cores absorb, ReSTIR multi-pass regardless — and Cycles
+remains wavefront. The escape hatch is architectural and cheap to keep true:
+intersect is a pure-tracing stage behind a queue boundary, and the EXT's
+`hitObjectRecordFromQueryEXT` lets a raygen shader wrap inline ray queries — a
+SER-enabled trace stage would be a stage-implementation swap, not a rearchitecture.
+This entry exists so the choice stays eyes-open rather than accidental.
