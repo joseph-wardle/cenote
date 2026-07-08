@@ -46,21 +46,40 @@ pub fn write_exr(path: &Path, width: u32, height: u32, pixels: &[f32]) -> Result
 ///
 /// # Errors
 ///
-/// [`crate::Error::Image`] if the file can't be opened or decoded.
+/// [`crate::Error::Io`] if the file can't be read, [`crate::Error::Image`]
+/// if it can't be decoded.
 pub fn read_exr(path: &Path) -> Result<(u32, u32, Vec<f32>)> {
-    let image = exr::prelude::read_first_rgba_layer_from_file(
-        path,
-        |resolution, _channels| {
-            (
-                resolution.width(),
-                vec![0.0_f32; resolution.width() * resolution.height() * 4],
-            )
-        },
-        |(width, pixels): &mut (usize, Vec<f32>), position, (r, g, b, a): (f32, f32, f32, f32)| {
-            let idx = (position.y() * *width + position.x()) * 4;
-            pixels[idx..idx + 4].copy_from_slice(&[r, g, b, a]);
-        },
-    )?;
+    read_exr_bytes(&std::fs::read(path)?)
+}
+
+/// [`read_exr`] from an in-memory EXR — how the embedded demo environment
+/// loads. A missing alpha channel reads as 1.
+///
+/// # Errors
+///
+/// [`crate::Error::Image`] if `bytes` don't decode as an EXR.
+pub fn read_exr_bytes(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>)> {
+    use exr::prelude::{ReadChannels, ReadLayers};
+    let image = exr::prelude::read()
+        .no_deep_data()
+        .largest_resolution_level()
+        .rgba_channels(
+            |resolution, _channels| {
+                (
+                    resolution.width(),
+                    vec![0.0_f32; resolution.width() * resolution.height() * 4],
+                )
+            },
+            |(width, pixels): &mut (usize, Vec<f32>),
+             position,
+             (r, g, b, a): (f32, f32, f32, f32)| {
+                let idx = (position.y() * *width + position.x()) * 4;
+                pixels[idx..idx + 4].copy_from_slice(&[r, g, b, a]);
+            },
+        )
+        .first_valid_layer()
+        .all_attributes()
+        .from_buffered(std::io::Cursor::new(bytes))?;
     let size = image.layer_data.size;
     let (_, pixels) = image.layer_data.channel_data.pixels;
     Ok((size.width() as u32, size.height() as u32, pixels))

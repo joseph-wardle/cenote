@@ -32,7 +32,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 
 use crate::error::Result;
-use crate::gpu::{Bindings, Buffer, ComputePipeline, Context, MemoryLocation, Pass};
+use crate::gpu::{Bindings, Buffer, ComputePipeline, Context, MemoryLocation, Pass, SceneBindings};
 use crate::scene::Scene;
 use crate::shaders::{Kernel, Kernels};
 
@@ -123,10 +123,12 @@ struct IntersectParams {
 struct ShadeMissParams {
     paths: PathsAddrs,
     misses: QueueAddrs,
+    /// Device address of the scene table — escapes read the environment.
+    scene: vk::DeviceAddress,
     /// Device address of the wave's per-pixel radiance target (`float4*`).
     radiance: vk::DeviceAddress,
-    /// The scene's constant sky radiance, `ACEScg`.
-    sky: Vec3,
+    /// Which strategies reach the lights — a [`LightSampling`] as `u32`.
+    light_sampling: u32,
     _pad0: u32,
 }
 
@@ -305,7 +307,7 @@ impl Queues {
 /// the renderer; the single-strategy modes exist because the strongest
 /// test of the MIS weights is that either strategy alone converges to the
 /// same image (the MIS-agreement test below). Values match the
-/// `LIGHT_SAMPLING_*` constants in `shaders/shade_surface.slang`.
+/// `LIGHT_SAMPLING_*` constants in `shaders/lights.slang`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u32)]
 pub enum LightSampling {
@@ -380,22 +382,22 @@ impl Wavefront {
             intersect: pipeline(
                 &kernels.intersect,
                 size_of::<IntersectParams>(),
-                Bindings::Tlas,
+                Bindings::Scene,
             )?,
             shade_miss: pipeline(
                 &kernels.shade_miss,
                 size_of::<ShadeMissParams>(),
-                Bindings::None,
+                Bindings::Scene,
             )?,
             shade_surface: pipeline(
                 &kernels.shade_surface,
                 size_of::<ShadeSurfaceParams>(),
-                Bindings::None,
+                Bindings::Scene,
             )?,
             trace_shadow: pipeline(
                 &kernels.trace_shadow,
                 size_of::<TraceShadowParams>(),
-                Bindings::Tlas,
+                Bindings::Scene,
             )?,
             paths: PathPool::new(gpu, capacity)?,
             queues: Queues::new(gpu, capacity)?,
@@ -489,8 +491,9 @@ impl Wavefront {
             shade_miss: ShadeMissParams {
                 paths: self.paths.addresses(),
                 misses: self.queues.addresses(queue::MISS, &self.queues.miss),
+                scene: scene.table().device_address(),
                 radiance: radiance.device_address(),
-                sky: scene.sky(),
+                light_sampling: self.light_sampling as u32,
                 _pad0: 0,
             },
             shade_surface: (0..self.max_bounces)
@@ -523,11 +526,18 @@ impl Wavefront {
         pixels: u64,
         params: &'a WaveParams,
     ) -> Vec<Pass<'a>> {
+        // Every post-raygen stage touches a scene resource — the TLAS, the
+        // environment texture, or both — and they share one descriptor
+        // layout, so each binds the same pair.
+        let bindings = SceneBindings {
+            tlas: scene.tlas(),
+            environment: scene.environment(),
+        };
         // An indirect stage: workgroup counts read from its queue's header,
         // which the producing stage maintained.
-        let indirect = |pipeline, tlas, push_constants, index: u64| Pass::DispatchIndirect {
+        let indirect = |pipeline, push_constants, index: u64| Pass::DispatchIndirect {
             pipeline,
-            tlas,
+            scene: Some(bindings),
             push_constants,
             args: &self.queues.headers,
             offset: index * QUEUE_HEADER_SIZE + INDIRECT_OFFSET,
@@ -553,7 +563,7 @@ impl Wavefront {
             passes.push(fill(queue::RAY));
             passes.push(Pass::Dispatch {
                 pipeline: &self.raygen,
-                tlas: None,
+                scene: None,
                 push_constants: bytemuck::bytes_of(raygen),
                 group_counts: [raygen.count.div_ceil(WORKGROUP_SIZE), 1, 1],
             });
@@ -567,7 +577,6 @@ impl Wavefront {
                 passes.push(fill(queue::SHADOW));
                 passes.push(indirect(
                     &self.intersect,
-                    Some(scene.tlas()),
                     bytemuck::bytes_of(&params.intersect),
                     queue::RAY,
                 ));
@@ -579,19 +588,16 @@ impl Wavefront {
                 }
                 passes.push(indirect(
                     &self.shade_miss,
-                    None,
                     bytemuck::bytes_of(&params.shade_miss),
                     queue::MISS,
                 ));
                 passes.push(indirect(
                     &self.shade_surface,
-                    None,
                     bytemuck::bytes_of(&params.shade_surface[bounce as usize]),
                     queue::HIT,
                 ));
                 passes.push(indirect(
                     &self.trace_shadow,
-                    Some(scene.tlas()),
                     bytemuck::bytes_of(&params.trace_shadow),
                     queue::SHADOW,
                 ));
@@ -617,6 +623,7 @@ mod tests {
     use glam::{Mat4, Vec3};
 
     use super::*;
+    use crate::environment::Environment;
     use crate::material::Material;
     use crate::scene::{Camera, Object, ground_plane, icosphere};
 
@@ -711,22 +718,48 @@ mod tests {
     }
 
     /// The step-6 checkpoint, kept honest since — progressive refinement
-    /// is real. A camera ray that misses adds the sky radiance to a
-    /// zero-filled pixel exactly (throughput is still 1), and no surface
-    /// path plausibly lands on that exact value, so "this sample saw the
-    /// sky" is an exact test. Across the first 16 samples of a small
-    /// render, some silhouette pixel must see both a surface and the sky —
-    /// its average is then a partial-coverage value no single sample can
+    /// is real. A camera ray that misses adds the environment radiance to
+    /// a zero-filled pixel exactly (throughput is still 1, and a constant
+    /// environment reads back its one texel exactly), and no surface path
+    /// plausibly lands on that exact value, so "this sample saw the sky"
+    /// is an exact test. Across the first 16 samples of a small render,
+    /// some silhouette pixel must see both a surface and the sky — its
+    /// average is then a partial-coverage value no single sample can
     /// produce, which is edges converging — while a pixel fully inside the
     /// ground plane must never see sky: its jitter stays within the pixel
-    /// footprint.
+    /// footprint. (A dedicated constant-sky scene: the demo wears an HDRI
+    /// now, whose background varies per direction.)
     #[test]
     fn camera_jitter_mixes_edge_pixels() {
-        const SKY: [f32; 4] = [0.4, 0.4, 0.4, 1.0]; // the demo scene's sky
+        const SKY: [f32; 4] = [0.4, 0.4, 0.4, 1.0]; // the scene's constant sky
         let Some(gpu) = crate::gpu::test_context() else {
             return;
         };
-        let scene = Scene::demo(&gpu).expect("demo scene");
+        let objects = [
+            Object {
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::Y),
+                material: Material::matte(Vec3::splat(0.5), 0.3),
+            },
+            Object {
+                // Large enough that the frame's bottom edge lands on it.
+                mesh: ground_plane(12.0),
+                transform: Mat4::IDENTITY,
+                material: Material::matte(Vec3::splat(0.5), 0.1),
+            },
+        ];
+        let camera = Camera {
+            position: Vec3::new(0.0, 2.0, 8.5),
+            look_at: Vec3::new(0.0, 0.5, 0.0),
+            vfov_degrees: 40.0,
+        };
+        let scene = Scene::new(
+            &gpu,
+            &objects,
+            camera,
+            &Environment::constant(Vec3::splat(0.4)),
+        )
+        .expect("scene");
         let wavefront = Wavefront::new(
             &gpu,
             &Kernels::embedded(),
@@ -916,25 +949,76 @@ mod tests {
             look_at: Vec3::new(0.0, 1.0, 0.0),
             vfov_degrees: 45.0,
         };
-        let scene = Scene::new(&gpu, &objects, camera, Vec3::ZERO).expect("scene");
+        let scene =
+            Scene::new(&gpu, &objects, camera, &Environment::constant(Vec3::ZERO)).expect("scene");
 
+        assert_strategies_agree(&gpu, &scene);
+    }
+
+    /// The same agreement, with the *environment* as the only light — the
+    /// step-10 counterpart. The synthetic sky is the CDF tables' worst
+    /// case: one bright texel flanked by hard zeros over a dim base, so
+    /// next-event sampling must importance-sample the sun through the
+    /// marginal/conditional tables *and* reach the zero texels its
+    /// bilinear footprint bleeds into (the dilated sampling support — an
+    /// undilated build biases NEE-only low right here), while BSDF-only
+    /// must be weighted consistently by `pdf(dir)` in `shade_miss`.
+    #[test]
+    fn light_sampling_strategies_agree_on_the_environment() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let objects = [
+            Object {
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::Y),
+                material: Material::glossy(Vec3::splat(0.6), 0.4, 0.3).with_metalness(0.5),
+            },
+            Object {
+                mesh: ground_plane(4.0),
+                transform: Mat4::IDENTITY,
+                material: Material::glossy(Vec3::splat(0.7), 0.0, 0.2),
+            },
+        ];
+        let camera = Camera {
+            position: Vec3::new(0.0, 2.5, 6.0),
+            look_at: Vec3::new(0.0, 1.0, 0.0),
+            vfov_degrees: 45.0,
+        };
+        let (width, height) = (8, 4);
+        let mut texels = vec![0.2_f32; (width * height * 4) as usize];
+        for col in 0..width as usize {
+            // A hard-zero band in the sky's upper row...
+            texels[(width as usize + col) * 4..(width as usize + col) * 4 + 3].fill(0.0);
+        }
+        // ...with the sun in the middle of it.
+        texels[(width as usize + 4) * 4..(width as usize + 4) * 4 + 3].fill(8.0);
+        let sky = Environment::equirect(width, height, texels);
+        let scene = Scene::new(&gpu, &objects, camera, &sky).expect("scene");
+        assert_strategies_agree(&gpu, &scene);
+    }
+
+    /// Render `scene` under all three light-sampling modes and require the
+    /// means to agree within 3% — the shared teeth of the MIS-agreement
+    /// tests above.
+    fn assert_strategies_agree(gpu: &Context, scene: &Scene) {
         let kernels = Kernels::embedded();
         let (width, height) = (32, 32);
         let samples = 64;
         let mean = |light_sampling: LightSampling| -> f64 {
             let wavefront = Wavefront::new(
-                &gpu,
+                gpu,
                 &kernels,
                 4096,
                 Wavefront::DEFAULT_MAX_BOUNCES,
                 light_sampling,
             )
             .expect("wavefront");
-            let radiance = radiance_buffer(&gpu, width, height);
+            let radiance = radiance_buffer(gpu, width, height);
             let mut total = 0.0;
             for sample in 0..samples {
                 wavefront
-                    .trace(&gpu, &scene, &radiance, width, height, sample)
+                    .trace(gpu, scene, &radiance, width, height, sample)
                     .expect("trace");
                 let pixels: Vec<f32> = bytemuck::pod_collect_to_vec(
                     &gpu.download_buffer(&radiance).expect("download"),

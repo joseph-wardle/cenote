@@ -1,11 +1,11 @@
 //! Scenes as the tracer consumes them: meshes built into acceleration
 //! structures, per-instance materials, quad lights with their sampling
-//! table, a pinhole camera, and a constant sky. All geometry is procedural
-//! and zero file I/O (real scene formats are M2's job); [`Scene::demo`] is
-//! the standing test subject — a row of deliberately faceted spheres
-//! sweeping metalness across a glossy floor, where winding, handedness, or
-//! energy mistakes are instantly visible, under a warm quad light that
-//! gives direct-light sampling something to find.
+//! table, a pinhole camera, and an equirect environment. All geometry is
+//! procedural and the only file input is the environment EXR (real scene
+//! formats are M2's job); [`Scene::demo`] is the standing test subject — a
+//! row of deliberately faceted spheres sweeping metalness across a glossy
+//! floor, where winding, handedness, or energy mistakes are instantly
+//! visible, under a warm quad light and the bundled Kloofendal sky.
 
 use std::collections::HashMap;
 
@@ -14,8 +14,9 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 
 use crate::color::acescg_from_rec709;
+use crate::environment::Environment;
 use crate::error::Result;
-use crate::gpu::{AccelerationStructure, Buffer, Context, TlasInstance};
+use crate::gpu::{AccelerationStructure, Buffer, Context, SampledImage, TlasInstance};
 use crate::lights::{LIGHT_NONE, QuadLight};
 use crate::material::Material;
 
@@ -68,17 +69,27 @@ struct GeometryRecord {
     _pad0: [u32; 3],
 }
 
-/// Every buffer the scene shares with the kernels, one address each —
-/// kernels carry a single pointer to this table in their push constants.
-/// Mirrors `struct SceneTable` in `shaders/scene.slang` field for field.
+/// Every buffer the scene shares with the kernels, one address each, plus
+/// the embedded environment tables — kernels carry a single pointer to
+/// this table in their push constants. Mirrors `struct SceneTable` (with
+/// its nested `struct Environment`) in `shaders/scene.slang` and
+/// `shaders/environment.slang` field for field.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct SceneTable {
     geometry: vk::DeviceAddress,
     materials: vk::DeviceAddress,
     lights: vk::DeviceAddress,
-    light_count: u32,
+    env_marginal: vk::DeviceAddress,
+    env_conditional: vk::DeviceAddress,
+    env_pdfs: vk::DeviceAddress,
+    env_width: u32,
+    env_height: u32,
+    /// p(next-event estimation samples the environment rather than a quad).
+    env_selection: f32,
     _pad0: u32,
+    light_count: u32,
+    _pad1: u32,
 }
 
 /// The scene, resident on the GPU and ready to trace against.
@@ -86,6 +97,9 @@ pub struct Scene {
     // Declared before `meshes`: the TLAS dies before the BLASes its
     // instances reference.
     tlas: AccelerationStructure,
+    /// The environment radiance image — the binding model's one texture,
+    /// bound next to the TLAS at every scene-resource dispatch.
+    environment: SampledImage,
     /// The one [`SceneTable`] every kernel reaches scene data through.
     table: Buffer,
     /// The GPU material table the scene table points into — updated in
@@ -93,23 +107,21 @@ pub struct Scene {
     material_buffer: Buffer,
     /// Host copy of the material table, so an edit rewrites one entry.
     materials: Vec<Material>,
-    /// The other buffers `table` points into: geometry records and light
-    /// records.
+    /// The other buffers `table` points into: geometry records, light
+    /// records, and the environment's three sampling tables.
     #[expect(dead_code, reason = "GPU residency: the buffers `table` points into")]
-    resident: [Buffer; 2],
+    resident: [Buffer; 5],
     #[expect(
         dead_code,
         reason = "GPU residency: the BLASes and the buffers the geometry records point into"
     )]
     meshes: Vec<GpuMesh>,
     camera: Camera,
-    sky: Vec3,
 }
 
 impl Scene {
     /// Upload `objects` and build them into a traceable scene, lit by its
-    /// emissive objects and a constant `sky` (radiance in `ACEScg`, every
-    /// direction — the environment upgrades to an HDRI in M1 step 10).
+    /// emissive objects and `environment`.
     ///
     /// # Errors
     ///
@@ -120,7 +132,12 @@ impl Scene {
     /// On an empty scene, a non-invertible object transform, or an
     /// emissive object whose mesh is not a parallelogram quad (all M1
     /// lights are) — programmer bugs.
-    pub fn new(gpu: &Context, objects: &[Object], camera: Camera, sky: Vec3) -> Result<Self> {
+    pub fn new(
+        gpu: &Context,
+        objects: &[Object],
+        camera: Camera,
+        environment: &Environment,
+    ) -> Result<Self> {
         assert!(!objects.is_empty(), "a scene needs at least one object");
         let meshes = objects
             .iter()
@@ -200,24 +217,32 @@ impl Scene {
             usage,
         )?;
 
+        let env = upload_environment(gpu, environment, &quads)?;
         let table = SceneTable {
             geometry: geometry.device_address(),
             materials: material_buffer.device_address(),
             lights: lights.device_address(),
-            light_count: light_records.len() as u32,
+            env_marginal: env.marginal.device_address(),
+            env_conditional: env.conditional.device_address(),
+            env_pdfs: env.pdfs.device_address(),
+            env_width: environment.width(),
+            env_height: environment.height(),
+            env_selection: env.selection,
             _pad0: 0,
+            light_count: light_records.len() as u32,
+            _pad1: 0,
         };
         let table = gpu.upload_buffer("scene.table", bytemuck::bytes_of(&table), usage)?;
 
         Ok(Self {
             tlas,
+            environment: env.image,
             table,
             material_buffer,
             materials,
-            resident: [geometry, lights],
+            resident: [geometry, lights, env.marginal, env.conditional, env.pdfs],
             meshes,
             camera,
-            sky,
         })
     }
 
@@ -230,12 +255,15 @@ impl Scene {
     /// as a conductor's F0 on the left and a lacquered plastic's diffuse
     /// base on the right — on a lightly glossy gray floor that mirrors
     /// them. A warm quad light overhead to the right is the key (its soft
-    /// shadow and warm cast are what next-event estimation resolves) over
-    /// a dim gray sky's ambient fill.
+    /// shadow and warm cast are what next-event estimation resolves), and
+    /// the bundled Kloofendal sky (see `assets/README.md`) fills, backs,
+    /// and reflects — its unclipped sun is the importance-sampling stress
+    /// case the environment tables exist for.
     ///
     /// # Errors
     ///
-    /// Any [`crate::Error`] from upload or acceleration-structure builds.
+    /// Any [`crate::Error`] from upload, decode, or acceleration-structure
+    /// builds.
     pub fn demo(gpu: &Context) -> Result<Self> {
         let terracotta = acescg_from_rec709(Vec3::new(0.7, 0.22, 0.08));
         let mut objects: Vec<Object> = (0..Self::DEMO_SPHERES)
@@ -259,11 +287,14 @@ impl Scene {
             transform: Mat4::IDENTITY,
             material: Material::glossy(acescg_from_rec709(Vec3::splat(0.65)), 0.1, 0.15),
         });
-        // A 1.5 m × 1.5 m quad, up and off to the right — outside the
-        // default framing, so it lights the scene without appearing in it.
+        // A 1.5 m × 1.5 m quad, up and off to the *left* — opposite the
+        // HDRI's sun (up-right-behind, 48° elevation), so the spheres are
+        // cross-lit warm/cool. Placed outside the default framing, and
+        // high enough that the shadow it cuts out of the sunlight lands
+        // outside the frame too, instead of reading as a dark artifact.
         objects.push(Object {
             mesh: ground_plane(0.75),
-            transform: Mat4::from_translation(Vec3::new(2.5, 3.5, 1.0)),
+            transform: Mat4::from_translation(Vec3::new(-3.5, 4.2, 1.0)),
             material: Material::emitter(acescg_from_rec709(Vec3::new(1.0, 0.85, 0.6)) * 12.0),
         });
         // Above and behind, looking slightly down the row so the floor
@@ -273,11 +304,9 @@ impl Scene {
             look_at: Vec3::new(0.0, 0.5, 0.0),
             vfov_degrees: 40.0,
         };
-        // Dim enough that the quad light reads as the key (soft shadow,
-        // warm cast) over the sky's ambient fill. Neutral gray is the same
-        // in ACEScg as in Rec.709 — no conversion to blur the exact sky
-        // values tests probe for.
-        Self::new(gpu, &objects, camera, Vec3::splat(0.4))
+        let sky =
+            Environment::from_equirect_exr(include_bytes!("../assets/kloofendal_puresky.exr"))?;
+        Self::new(gpu, &objects, camera, &sky)
     }
 
     /// The scene's TLAS, ready to bind for ray queries.
@@ -287,16 +316,17 @@ impl Scene {
     }
 
     /// The scene table: the one buffer of addresses kernels reach all
-    /// shared scene data through (geometry records, materials, lights).
+    /// shared scene data through (geometry records, materials, lights,
+    /// environment tables).
     #[must_use]
     pub fn table(&self) -> &Buffer {
         &self.table
     }
 
-    /// The constant sky radiance (`ACEScg`).
+    /// The environment radiance image, ready to bind next to the TLAS.
     #[must_use]
-    pub fn sky(&self) -> Vec3 {
-        self.sky
+    pub fn environment(&self) -> &SampledImage {
+        &self.environment
     }
 
     /// The scene's camera.
@@ -459,6 +489,63 @@ fn light_quad(object: &Object, instance: u32) -> QuadLight {
         emission: object.material.emission,
         instance,
     }
+}
+
+/// The environment's GPU half: the radiance image, the three sampling
+/// tables, and the next-event selection probability.
+struct GpuEnvironment {
+    image: SampledImage,
+    marginal: Buffer,
+    conditional: Buffer,
+    pdfs: Buffer,
+    selection: f32,
+}
+
+/// Upload the environment's image and sampling tables, and weigh it
+/// against the quad lights: the power-proportional probability that
+/// next-event estimation samples the environment rather than a quad.
+/// Quads weigh π × luminance × area (one face's exitance-weighted flux);
+/// the environment weighs its luminance integral over the sphere, which
+/// is a flux per unit receiver area — the comparison implicitly stands in
+/// a ~1 m² receiver, a heuristic that only noise, never correctness,
+/// rides on. The exact-0/exact-1 endpoints *are* load-bearing: the shader
+/// walks the quad list whenever its draw lands above `selection`, so a
+/// lightless scene must pin it to 1, and a black environment (with no
+/// quads either) disables next-event estimation entirely.
+fn upload_environment(
+    gpu: &Context,
+    environment: &Environment,
+    quads: &[QuadLight],
+) -> Result<GpuEnvironment> {
+    let tables = environment.tables();
+    let quad_power = std::f64::consts::PI * crate::lights::total_power(quads);
+    let selection = if quad_power == 0.0 {
+        f32::from(u8::from(tables.power > 0.0))
+    } else {
+        (tables.power / (tables.power + quad_power)) as f32
+    };
+    let image = gpu.upload_sampled_image(
+        "scene.environment",
+        environment.width(),
+        environment.height(),
+        environment.texels(),
+    )?;
+    let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
+    Ok(GpuEnvironment {
+        image,
+        marginal: gpu.upload_buffer(
+            "scene.env.marginal",
+            bytemuck::cast_slice(&tables.marginal),
+            usage,
+        )?,
+        conditional: gpu.upload_buffer(
+            "scene.env.conditional",
+            bytemuck::cast_slice(&tables.conditional),
+            usage,
+        )?,
+        pdfs: gpu.upload_buffer("scene.env.pdfs", bytemuck::cast_slice(&tables.pdfs), usage)?,
+        selection,
+    })
 }
 
 /// The top three rows of an affine transform, in the kernels' `float4[3]`

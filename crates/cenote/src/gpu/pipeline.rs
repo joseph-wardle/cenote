@@ -2,11 +2,13 @@
 //! waves.
 //!
 //! Kernels reach every buffer through device addresses in a single
-//! push-constant struct. The one resource that cannot be an address is the
-//! scene TLAS, so kernels that trace rays declare [`Bindings::Tlas`] and
-//! carry the binding model's single descriptor set — set 0, binding 0 —
-//! written at submission time. Kernels that only chew buffers
-//! ([`Bindings::None`]) have no descriptors at all.
+//! push-constant struct. The resources that cannot be addresses are the
+//! scene TLAS and the environment texture (filtered reads need a real
+//! sampled image), so kernels that touch either declare
+//! [`Bindings::Scene`] and carry the binding model's single descriptor set
+//! — set 0: binding 0 the TLAS, binding 1 the environment — written at
+//! submission time. Kernels that only chew buffers ([`Bindings::None`])
+//! have no descriptors at all.
 //!
 //! [`Context::submit_passes`] records a sequence of [`Pass`]es — buffer
 //! fills, direct and indirect dispatches — into one blocking submission,
@@ -19,27 +21,40 @@ use std::slice;
 use ash::vk;
 
 use crate::error::Result;
-use crate::gpu::{AccelerationStructure, Buffer, Context};
+use crate::gpu::{AccelerationStructure, Buffer, Context, SampledImage};
 
 /// The descriptor bindings a kernel needs. Buffers travel as device
 /// addresses in push constants, so the only question is whether the kernel
-/// traces rays — the TLAS is the one resource that must be a descriptor.
+/// touches the two resources that must be descriptors — the TLAS and the
+/// environment texture. One shared layout for both keeps the binding model
+/// a single small set; a kernel that statically uses only one of them is
+/// fine, Vulkan only requires that what it *uses* is bound.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Bindings {
     /// Push constants only — no descriptor set.
     None,
-    /// Set 0, binding 0: the scene TLAS, written at dispatch time.
-    Tlas,
+    /// Set 0 — binding 0: the scene TLAS; binding 1: the environment
+    /// texture. Both written at dispatch time.
+    Scene,
 }
 
-/// A compute pipeline plus its layout and (for ray-tracing kernels) TLAS
+/// The scene resources a [`Bindings::Scene`] dispatch binds.
+#[derive(Clone, Copy)]
+pub struct SceneBindings<'a> {
+    /// The scene TLAS (binding 0).
+    pub tlas: &'a AccelerationStructure,
+    /// The environment texture (binding 1).
+    pub environment: &'a SampledImage,
+}
+
+/// A compute pipeline plus its layout and (for scene-resource kernels) its
 /// descriptor set, destroyed on drop (before the [`Context`], like every
 /// `gpu` resource).
 pub struct ComputePipeline {
     handle: vk::Pipeline,
     layout: vk::PipelineLayout,
-    /// Present iff created with [`Bindings::Tlas`].
-    tlas: Option<TlasDescriptors>,
+    /// Present iff created with [`Bindings::Scene`].
+    scene: Option<SceneDescriptors>,
     push_constant_size: u32,
     device: ash::Device,
 }
@@ -49,23 +64,23 @@ impl Drop for ComputePipeline {
         unsafe {
             self.device.destroy_pipeline(self.handle, None);
             self.device.destroy_pipeline_layout(self.layout, None);
-            if let Some(tlas) = &self.tlas {
-                tlas.destroy(&self.device);
+            if let Some(scene) = &self.scene {
+                scene.destroy(&self.device);
             }
         }
     }
 }
 
-/// The TLAS descriptor set under construction: layout, pool, and the one
+/// The scene descriptor set under construction: layout, pool, and the one
 /// allocated set. Plain handles — ownership passes to the [`ComputePipeline`]
-/// on success, to [`TlasDescriptors::destroy`] on failure.
-struct TlasDescriptors {
+/// on success, to [`SceneDescriptors::destroy`] on failure.
+struct SceneDescriptors {
     set_layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
     set: vk::DescriptorSet,
 }
 
-impl TlasDescriptors {
+impl SceneDescriptors {
     /// Tear down after a failed pipeline build. The set itself is
     /// pool-allocated: destroying the pool frees it.
     unsafe fn destroy(&self, device: &ash::Device) {
@@ -81,7 +96,7 @@ impl Context {
     /// — both are `slangc` output). `entry` names the kernel entry point;
     /// `push_constant_size` is the byte size of the kernel's push-constant
     /// struct, enforced again at dispatch time; `bindings` says whether the
-    /// kernel traces rays and therefore needs the TLAS descriptor.
+    /// kernel touches the scene's descriptor resources (TLAS, environment).
     ///
     /// # Errors
     ///
@@ -125,21 +140,21 @@ impl Context {
         push_constant_size: u32,
         bindings: Bindings,
     ) -> Result<ComputePipeline> {
-        let tlas = match bindings {
+        let scene = match bindings {
             Bindings::None => None,
-            Bindings::Tlas => Some(self.create_tlas_descriptors()?),
+            Bindings::Scene => Some(self.create_scene_descriptors()?),
         };
-        match self.create_layout_and_pipeline(module, entry, push_constant_size, tlas.as_ref()) {
+        match self.create_layout_and_pipeline(module, entry, push_constant_size, scene.as_ref()) {
             Ok((handle, layout)) => Ok(ComputePipeline {
                 handle,
                 layout,
-                tlas,
+                scene,
                 push_constant_size,
                 device: self.device().clone(),
             }),
             Err(err) => {
-                if let Some(tlas) = &tlas {
-                    unsafe { tlas.destroy(self.device()) };
+                if let Some(scene) = &scene {
+                    unsafe { scene.destroy(self.device()) };
                 }
                 Err(err)
             }
@@ -147,24 +162,36 @@ impl Context {
     }
 
     /// Create the binding model's single descriptor set: binding 0 = the
-    /// scene TLAS. Its contents are written at dispatch time.
-    fn create_tlas_descriptors(&self) -> Result<TlasDescriptors> {
+    /// scene TLAS, binding 1 = the environment texture. Contents are
+    /// written at dispatch time.
+    fn create_scene_descriptors(&self) -> Result<SceneDescriptors> {
         let device = self.device();
-        let binding = vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::COMPUTE);
-        let layout_info =
-            vk::DescriptorSetLayoutCreateInfo::default().bindings(slice::from_ref(&binding));
+        let bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        ];
+        let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
         let set_layout = unsafe { device.create_descriptor_set_layout(&layout_info, None)? };
 
-        let pool_size = vk::DescriptorPoolSize::default()
-            .ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
-            .descriptor_count(1);
+        let pool_sizes = [
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+                .descriptor_count(1),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1),
+        ];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(1)
-            .pool_sizes(slice::from_ref(&pool_size));
+            .pool_sizes(&pool_sizes);
         let pool = unsafe { device.create_descriptor_pool(&pool_info, None) };
         let pool = match pool {
             Ok(pool) => pool,
@@ -176,7 +203,7 @@ impl Context {
 
         // `destroy` only touches the pool and layout, so the struct — and
         // its cleanup — can exist before the set does.
-        let mut descriptors = TlasDescriptors {
+        let mut descriptors = SceneDescriptors {
             set_layout,
             pool,
             set: vk::DescriptorSet::null(),
@@ -201,13 +228,13 @@ impl Context {
         module: vk::ShaderModule,
         entry: &CStr,
         push_constant_size: u32,
-        descriptors: Option<&TlasDescriptors>,
+        descriptors: Option<&SceneDescriptors>,
     ) -> Result<(vk::Pipeline, vk::PipelineLayout)> {
         let device = self.device();
         let range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
             .size(push_constant_size);
-        let set_layouts = descriptors.map_or(&[][..], |tlas| slice::from_ref(&tlas.set_layout));
+        let set_layouts = descriptors.map_or(&[][..], |scene| slice::from_ref(&scene.set_layout));
         let layout_info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(set_layouts)
             .push_constant_ranges(slice::from_ref(&range));
@@ -238,11 +265,11 @@ impl Context {
         }
     }
 
-    /// Bind `pipeline` (with `tlas` written into its descriptor set, for
-    /// ray-tracing kernels), set the push constants, dispatch `group_counts`
-    /// workgroups, and block until the GPU finishes. The fence wait makes
-    /// the kernel's writes available, so a subsequent
-    /// [`Context::download_buffer`] needs no barrier.
+    /// Bind `pipeline` (with `scene`'s resources written into its
+    /// descriptor set, for kernels that declared them), set the push
+    /// constants, dispatch `group_counts` workgroups, and block until the
+    /// GPU finishes. The fence wait makes the kernel's writes available, so
+    /// a subsequent [`Context::download_buffer`] needs no barrier.
     ///
     /// # Errors
     ///
@@ -254,13 +281,13 @@ impl Context {
     pub fn dispatch(
         &self,
         pipeline: &ComputePipeline,
-        tlas: Option<&AccelerationStructure>,
+        scene: Option<SceneBindings>,
         push_constants: &[u8],
         group_counts: [u32; 3],
     ) -> Result<()> {
         self.submit_passes(&[Pass::Dispatch {
             pipeline,
-            tlas,
+            scene,
             push_constants,
             group_counts,
         }])
@@ -282,9 +309,9 @@ impl Context {
     /// # Panics
     ///
     /// On programmer bugs, all checked before anything is recorded: push
-    /// constants not matching a pipeline's declared size, a TLAS argument
+    /// constants not matching a pipeline's declared size, a scene argument
     /// not matching a pipeline's [`Bindings`], the same pipeline given two
-    /// different TLASes (it has one descriptor set, written once per
+    /// different scenes (it has one descriptor set, written once per
     /// submission), or a fill that is misaligned or out of bounds.
     pub fn submit_passes(&self, passes: &[Pass]) -> Result<()> {
         for pass in passes {
@@ -301,11 +328,11 @@ impl Context {
     }
 
     /// The pre-recording half of [`Context::submit_passes`]: assert the
-    /// pass is well-formed and write the TLAS descriptor for dispatches
-    /// that carry one. Writing before recording is safe — blocking submits
+    /// pass is well-formed and write the scene descriptors for dispatches
+    /// that carry them. Writing before recording is safe — blocking submits
     /// mean no set is ever in flight here.
     fn validate_and_write_descriptors(&self, pass: &Pass, passes: &[Pass]) {
-        let (pipeline, tlas, push_constants) = match *pass {
+        let (pipeline, scene, push_constants) = match *pass {
             Pass::Fill {
                 buffer,
                 offset,
@@ -324,13 +351,13 @@ impl Context {
             }
             Pass::Dispatch {
                 pipeline,
-                tlas,
+                scene,
                 push_constants,
                 group_counts: _,
-            } => (pipeline, tlas, push_constants),
+            } => (pipeline, scene, push_constants),
             Pass::DispatchIndirect {
                 pipeline,
-                tlas,
+                scene,
                 push_constants,
                 args,
                 offset,
@@ -339,7 +366,7 @@ impl Context {
                     offset.is_multiple_of(4) && offset + 12 <= args.size(),
                     "indirect args must be 4-byte aligned and inside the buffer"
                 );
-                (pipeline, tlas, push_constants)
+                (pipeline, scene, push_constants)
             }
         };
         assert_eq!(
@@ -348,11 +375,11 @@ impl Context {
             "push constants don't match the pipeline's declared size"
         );
         assert_eq!(
-            tlas.is_some(),
-            pipeline.tlas.is_some(),
-            "TLAS argument doesn't match the pipeline's declared bindings"
+            scene.is_some(),
+            pipeline.scene.is_some(),
+            "scene argument doesn't match the pipeline's declared bindings"
         );
-        let Some(tlas) = tlas else {
+        let Some(scene) = scene else {
             return;
         };
         assert!(
@@ -361,35 +388,45 @@ impl Context {
                 .filter_map(|other| match *other {
                     Pass::Dispatch {
                         pipeline: p,
-                        tlas: t,
+                        scene: s,
                         ..
                     }
                     | Pass::DispatchIndirect {
                         pipeline: p,
-                        tlas: t,
+                        scene: s,
                         ..
-                    } if std::ptr::eq(p, pipeline) => t,
+                    } if std::ptr::eq(p, pipeline) => s,
                     _ => None,
                 })
-                .all(|other| other.handle() == tlas.handle()),
-            "one pipeline, two TLASes — its single descriptor set can hold only one"
+                .all(|other| {
+                    other.tlas.handle() == scene.tlas.handle()
+                        && std::ptr::eq(other.environment, scene.environment)
+                }),
+            "one pipeline, two scenes — its single descriptor set can hold only one"
         );
 
-        let descriptors = pipeline.tlas.as_ref().expect("checked against bindings");
-        let handles = [tlas.handle()];
+        let descriptors = pipeline.scene.as_ref().expect("checked against bindings");
+        let handles = [scene.tlas.handle()];
         let mut tlas_write = vk::WriteDescriptorSetAccelerationStructureKHR::default()
             .acceleration_structures(&handles);
-        let write = vk::WriteDescriptorSet::default()
-            .dst_set(descriptors.set)
-            .dst_binding(0)
-            .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
-            // Not inferred from the extension struct: without this the
-            // write is a zero-descriptor no-op.
-            .descriptor_count(1)
-            .push_next(&mut tlas_write);
+        let image_info = scene.environment.descriptor();
+        let writes = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(descriptors.set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+                // Not inferred from the extension struct: without this the
+                // write is a zero-descriptor no-op.
+                .descriptor_count(1)
+                .push_next(&mut tlas_write),
+            vk::WriteDescriptorSet::default()
+                .dst_set(descriptors.set)
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(slice::from_ref(&image_info)),
+        ];
         unsafe {
-            self.device()
-                .update_descriptor_sets(slice::from_ref(&write), &[]);
+            self.device().update_descriptor_sets(&writes, &[]);
         }
     }
 }
@@ -412,8 +449,8 @@ pub enum Pass<'a> {
     Dispatch {
         /// The pipeline to run.
         pipeline: &'a ComputePipeline,
-        /// The scene TLAS, iff the pipeline declared [`Bindings::Tlas`].
-        tlas: Option<&'a AccelerationStructure>,
+        /// The scene resources, iff the pipeline declared [`Bindings::Scene`].
+        scene: Option<SceneBindings<'a>>,
         /// Exactly the pipeline's declared push-constant size.
         push_constants: &'a [u8],
         /// Workgroups along x, y, z.
@@ -425,8 +462,8 @@ pub enum Pass<'a> {
     DispatchIndirect {
         /// The pipeline to run.
         pipeline: &'a ComputePipeline,
-        /// The scene TLAS, iff the pipeline declared [`Bindings::Tlas`].
-        tlas: Option<&'a AccelerationStructure>,
+        /// The scene resources, iff the pipeline declared [`Bindings::Scene`].
+        scene: Option<SceneBindings<'a>>,
         /// Exactly the pipeline's declared push-constant size.
         push_constants: &'a [u8],
         /// Where the counts live (needs `INDIRECT_BUFFER` usage).
@@ -477,7 +514,7 @@ unsafe fn bind_and_push(
 ) {
     unsafe {
         device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline.handle);
-        if let Some(descriptors) = &pipeline.tlas {
+        if let Some(descriptors) = &pipeline.scene {
             device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,

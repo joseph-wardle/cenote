@@ -1,8 +1,9 @@
 // The surface-shading stage: reconstruct the hit, collect the surface's
 // emission (MIS-weighted — a BSDF-sampled path landing on a light competes
 // with next-event estimation for the same connection), send one shadow ray
-// toward the lights, and scatter off the EON diffuse base — until the path
-// escapes to the sky, hits the depth cap, or loses Russian roulette.
+// toward the lights (a quad or the environment, chosen by power), and
+// scatter off the OpenPBR mixture — until the path escapes to the sky,
+// hits the depth cap, or loses Russian roulette.
 //
 // Radiance bookkeeping: the wave's per-pixel accumulator starts at zero
 // and every write below is a plain +=. A pixel has one path and a path
@@ -33,14 +34,6 @@ struct Params {
 
 [vk::push_constant]
 Params params;
-
-// MIS is the renderer; the single-strategy modes exist because the
-// strongest test of the weights is that either strategy alone converges
-// to the same image (the MIS-agreement test in `wavefront.rs`). Values
-// match `enum LightSampling` there.
-static const uint LIGHT_SAMPLING_MIS = 0;
-static const uint LIGHT_SAMPLING_BSDF = 1;
-static const uint LIGHT_SAMPLING_NEE = 2;
 
 // Bounces before this always survive — they carry most of the image's
 // energy, and killing them early would just trade traced rays for noise.
@@ -171,7 +164,10 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
             } else if (params.lightSampling == LIGHT_SAMPLING_MIS) {
                 let delta = spawn.position - params.paths.origin[path].xyz;
                 let cosLight = abs(dot(spawn.normal, direction));
-                let neePdf = params.scene.lights[mesh.light].pdfArea
+                // The full next-event pdf: choose the quads over the
+                // environment, then this quad and this point.
+                let neePdf = (1.0 - params.scene.env.selectProb)
+                           * params.scene.lights[mesh.light].pdfArea
                            * dot(delta, delta) / cosLight;
                 weight = powerHeuristic(throughput.w, neePdf);
             }
@@ -192,42 +188,72 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     let frame = Frame(spawn.normal);
     let wo = frame.toLocal(-direction);
 
-    // Next-event estimation: connect this vertex to one candidate point on
-    // the lights. The contribution is fully weighted here; trace_shadow
-    // just adds it if the connection is unoccluded.
-    if (params.lightSampling != LIGHT_SAMPLING_BSDF && params.scene.lightCount > 0) {
+    // Next-event estimation: connect this vertex to one candidate — a
+    // direction toward the environment or a point on a quad light, chosen
+    // in proportion to their power (the choice rides the low end of the
+    // NEE_LIGHT draw; the quad branch remaps the leftover back to a full-
+    // range uniform for the alias walk). The contribution is fully
+    // weighted here; trace_shadow just adds it if the connection is
+    // unoccluded.
+    let envProb = params.scene.env.selectProb;
+    if (params.lightSampling != LIGHT_SAMPLING_BSDF
+        && (params.scene.lightCount > 0 || envProb > 0.0)) {
         let uLight = sample_1d(pixel, params.sampleIndex,
                                bounceDimension(params.bounce, NEE_LIGHT));
         let uPoint = sample_2d(pixel, params.sampleIndex,
                                bounceDimension(params.bounce, NEE_POINT));
-        let candidate = sampleLights(params.scene.lights,
-                                     params.scene.lightCount, uLight, uPoint);
-        let delta = candidate.position - spawn.position;
-        let r2 = dot(delta, delta);
-        let wiWorld = delta * rsqrt(r2);
-        let wiLight = frame.toLocal(wiWorld);
-        let cosLight = abs(dot(candidate.normal, wiWorld));
-        if (r2 > 0.0 && wiLight.z > 0.0 && cosLight > 0.0) {
-            // The candidate's pdf in solid angle at this vertex, against
-            // the pdf BSDF sampling would give the same direction.
-            let neePdf = candidate.pdfArea * r2 / cosLight;
-            let scatterPdf = bsdfPdf(material, wiLight, wo);
-            let weight = params.lightSampling == LIGHT_SAMPLING_MIS
-                       ? powerHeuristic(neePdf, scatterPdf)
-                       : 1.0;
-            let unshadowed = throughput.xyz * candidate.emission
-                * evalBsdf(material, wiLight, wo)
-                * wiLight.z * (weight / neePdf);
-            if (any(unshadowed > 0.0)) {
-                ShadowRay shadow;
-                shadow.origin = spawn.position;
+        ShadowRay shadow;
+        shadow.origin = spawn.position;
+        shadow.pixel = pixel;
+        shadow.pad = 0.0;
+        var unshadowed = float3(0.0);
+        if (uLight < envProb) {
+            // Environment: a direction, unoccluded iff the shadow ray hits
+            // nothing (LIGHT_NONE is no instance's ID). A pole sample
+            // reports pdf 0 and is skipped — it carries no usable density.
+            let candidate = params.scene.env.sample(uPoint);
+            let wiLight = frame.toLocal(candidate.direction);
+            if (candidate.pdf > 0.0 && wiLight.z > 0.0) {
+                let neePdf = envProb * candidate.pdf;
+                let scatterPdf = bsdfPdf(material, wiLight, wo);
+                let weight = params.lightSampling == LIGHT_SAMPLING_MIS
+                           ? powerHeuristic(neePdf, scatterPdf)
+                           : 1.0;
+                unshadowed = throughput.xyz * candidate.radiance
+                    * evalBsdf(material, wiLight, wo)
+                    * wiLight.z * (weight / neePdf);
+                shadow.light = LIGHT_NONE;
+                shadow.direction = candidate.direction;
+            }
+        } else {
+            // A quad light. Scene prep pins envProb to exactly 1 when no
+            // quads exist, so this branch always has a light list to walk.
+            let uQuad = (uLight - envProb) / (1.0 - envProb);
+            let candidate = sampleLights(params.scene.lights,
+                                         params.scene.lightCount, uQuad, uPoint);
+            let delta = candidate.position - spawn.position;
+            let r2 = dot(delta, delta);
+            let wiWorld = delta * rsqrt(r2);
+            let wiLight = frame.toLocal(wiWorld);
+            let cosLight = abs(dot(candidate.normal, wiWorld));
+            if (r2 > 0.0 && wiLight.z > 0.0 && cosLight > 0.0) {
+                // The candidate's pdf in solid angle at this vertex,
+                // against the pdf BSDF sampling would give the direction.
+                let neePdf = (1.0 - envProb) * candidate.pdfArea * r2 / cosLight;
+                let scatterPdf = bsdfPdf(material, wiLight, wo);
+                let weight = params.lightSampling == LIGHT_SAMPLING_MIS
+                           ? powerHeuristic(neePdf, scatterPdf)
+                           : 1.0;
+                unshadowed = throughput.xyz * candidate.emission
+                    * evalBsdf(material, wiLight, wo)
+                    * wiLight.z * (weight / neePdf);
                 shadow.light = candidate.instance;
                 shadow.direction = wiWorld;
-                shadow.pixel = pixel;
-                shadow.contribution = unshadowed;
-                shadow.pad = 0.0;
-                params.shadows.push(shadow);
             }
+        }
+        if (any(unshadowed > 0.0)) {
+            shadow.contribution = unshadowed;
+            params.shadows.push(shadow);
         }
     }
 

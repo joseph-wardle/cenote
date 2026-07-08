@@ -27,8 +27,8 @@ public static const uint CAMERA_JITTER = 0;
 // every image ever rendered.
 public static const uint BSDF_LOBE = 0; // which sampling technique scatters
 public static const uint BSDF_DIR = 1; // scattered direction
-public static const uint NEE_LIGHT = 2; // which light to sample
-public static const uint NEE_POINT = 3; // point on that light
+public static const uint NEE_LIGHT = 2; // environment vs quads, and which quad
+public static const uint NEE_POINT = 3; // point on the quad, or env texel
 public static const uint RR = 4; // Russian-roulette survival
 static const uint BOUNCE_SLOTS = 5;
 

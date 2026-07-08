@@ -160,18 +160,7 @@ impl Context {
         usage: vk::BufferUsageFlags,
     ) -> Result<Buffer> {
         let size = data.len() as vk::DeviceSize;
-        let mut staging = self.create_buffer(
-            &format!("{name}.staging"),
-            size,
-            vk::BufferUsageFlags::TRANSFER_SRC,
-            MemoryLocation::CpuToGpu,
-        )?;
-        staging
-            .allocation
-            .mapped_slice_mut()
-            .expect("CpuToGpu memory is always mapped")[..data.len()]
-            .copy_from_slice(data);
-
+        let staging = self.staging_buffer(&format!("{name}.staging"), data)?;
         let buffer = self.create_buffer(
             name,
             size,
@@ -180,6 +169,23 @@ impl Context {
         )?;
         self.copy_buffer(&staging, &buffer, size)?;
         Ok(buffer)
+    }
+
+    /// A transient `CpuToGpu` staging buffer pre-filled with `data` — the
+    /// front half of every upload, buffer and image alike.
+    pub(super) fn staging_buffer(&self, name: &str, data: &[u8]) -> Result<Buffer> {
+        let mut staging = self.create_buffer(
+            name,
+            data.len() as vk::DeviceSize,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            MemoryLocation::CpuToGpu,
+        )?;
+        staging
+            .allocation
+            .mapped_slice_mut()
+            .expect("CpuToGpu memory is always mapped")[..data.len()]
+            .copy_from_slice(data);
+        Ok(staging)
     }
 
     /// Overwrite an existing buffer's full contents through a transient
@@ -203,17 +209,7 @@ impl Context {
             buffer.size(),
             "update must cover the buffer exactly"
         );
-        let mut staging = self.create_buffer(
-            "update.staging",
-            buffer.size(),
-            vk::BufferUsageFlags::TRANSFER_SRC,
-            MemoryLocation::CpuToGpu,
-        )?;
-        staging
-            .allocation
-            .mapped_slice_mut()
-            .expect("CpuToGpu memory is always mapped")[..data.len()]
-            .copy_from_slice(data);
+        let staging = self.staging_buffer("update.staging", data)?;
         self.copy_buffer(&staging, buffer, buffer.size())
     }
 

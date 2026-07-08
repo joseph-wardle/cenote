@@ -37,7 +37,8 @@ void trace_shadow(uint3 tid: SV_DispatchThreadID) {
     // *is* that light (or nothing, when the ray numerically grazes past
     // its silhouette). Testing identity instead of shortening TMax needs
     // no distance epsilon — the sampled point lies exactly on the traced
-    // quad only in exact arithmetic.
+    // quad only in exact arithmetic. Environment rays carry LIGHT_NONE,
+    // which no instance's ID matches: they pass iff they hit nothing.
     RayQuery<RAY_FLAG_NONE> query;
     query.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, ray);
     while (query.Proceed()) {

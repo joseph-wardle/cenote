@@ -7,6 +7,8 @@
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 
+use crate::color::luminance;
+
 /// The geometry record's light index for instances that are not lights.
 /// Matches `LIGHT_NONE` in `shaders/lights.slang`.
 pub(crate) const LIGHT_NONE: u32 = u32::MAX;
@@ -107,10 +109,17 @@ pub(crate) fn build(lights: &[QuadLight]) -> Vec<LightRecord> {
     records
 }
 
-/// Luminance of an `ACEScg` color — the Y row of the AP1 RGB→XYZ matrix
-/// (ACES TB S-2014-004).
-fn luminance(color: Vec3) -> f32 {
-    color.dot(Vec3::new(0.272_228_7, 0.674_081_8, 0.053_689_5))
+/// The list's total selection weight: Σ luminance × area over the quads —
+/// the same power measure the alias table is built from, exposed so scene
+/// prep can weigh the quads collectively against the environment.
+pub(crate) fn total_power(lights: &[QuadLight]) -> f64 {
+    lights
+        .iter()
+        .map(|light| {
+            f64::from(luminance(light.emission))
+                * f64::from(light.edge1.cross(light.edge2).length())
+        })
+        .sum()
 }
 
 #[cfg(test)]

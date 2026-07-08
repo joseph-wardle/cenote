@@ -22,6 +22,14 @@ pub fn acescg_from_rec709(rec709: Vec3) -> Vec3 {
     ACESCG_FROM_REC709 * rec709
 }
 
+/// Luminance of an `ACEScg` color — the Y row of the AP1 RGB→XYZ matrix
+/// (ACES TB S-2014-004). The scalar "how bright" every power-proportional
+/// sampling decision (light selection, environment CDFs) weighs by.
+#[must_use]
+pub fn luminance(acescg: Vec3) -> f32 {
+    acescg.dot(Vec3::new(0.272_228_7, 0.674_081_8, 0.053_689_5))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

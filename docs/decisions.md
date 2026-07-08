@@ -409,3 +409,35 @@ height-correlated Smith (which reflects *more* energy) would silently turn the
 compensation into over-compensation — a furnace that runs hot. Height-
 correlated is a later upgrade that must land together with regenerated tables;
 the shader comment on `smithG1` says so.
+
+---
+
+## 2026-07-08 — Environment sampling specifics (step 10 implementation)
+
+### D-039: Env CDF weights are 3×3-max dilated; pdfs stored, not differenced; selection is power-proportional (implements D-028/D-036)
+D-028 chose an equirect HDRI with marginal/conditional CDF importance sampling;
+implementation pinned three specifics, all CPU-validated in the step's Python
+prototype before any Slang. (1) **Sampling weights are the 3×3-neighborhood
+maximum of texel luminance** (wrapping horizontally, clamping vertically — the
+sampler's own address modes), times the row's sin θ. The kernel evaluates
+radiance *bilinearly*, so a zero texel adjacent to a bright one still carries
+radiance over its footprint; undilated weights give those regions sampling
+probability zero, which biases the NEE-only estimator low and breaks the
+MIS-agreement invariant exactly along zero/nonzero boundaries (the prototype
+measured 3.3M unreachable quadrature points on a test image; the environment
+MIS-agreement test pins this with a sun inside a hard-zero band). Slightly
+fatter sun selection is the entire cost. (2) **Per-texel pdfs are stored as
+their own table** rather than recovered as CDF differences at lookup:
+adjacent `f32` CDF entries for dim texels under a 20 000× sun differ near the
+representation's spacing, and the subtraction cancels catastrophically —
+pbrt's layout, adopted for pbrt's reason. Sample and query read the same
+table, so `sample()` and `pdf(dir)` (the D-036 split) agree exactly.
+(3) **Environment-vs-quad selection is power-proportional**: quads weigh
+π × luminance × area, the environment its luminance integral over the sphere —
+dimensionally a flux per unit receiver area, so the comparison stands in a
+~1 m² receiver. A heuristic, and deliberately so: selection probability
+affects only noise, never the converged image, and both endpoints are pinned
+exact (no quads → 1, black environment → 0) because the shader's quad branch
+must never run without a light list. Poles report pdf 0 (the equirect
+Jacobian is singular there): next-event skips such samples and an escaped
+ray's MIS weight becomes 1 — no epsilon, no bias, measure zero.

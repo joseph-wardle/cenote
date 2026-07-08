@@ -80,7 +80,8 @@ public struct Queue<Entry> {
 // separate shadow-path pool once multi-candidate NEE wants one.
 public struct ShadowRay {
     public float3 origin;
-    public uint light; // TLAS custom index of the target light instance
+    public uint light; // target light's TLAS custom index; LIGHT_NONE aims
+                       // at the environment (visible iff nothing is hit)
     public float3 direction;
     public uint pixel;
     public float3 contribution; // unshadowed radiance, fully weighted

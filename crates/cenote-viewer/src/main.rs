@@ -1,10 +1,10 @@
 //! Interactive viewer: the render live in a window, under an orbit camera,
 //! progressively accumulated, with an egui stats/controls overlay. M1 build
-//! steps 2–9 — every sample is a full path-traced estimate of the `OpenPBR`
+//! steps 2–10 — every sample is a full path-traced estimate of the `OpenPBR`
 //! lobe mix (EON diffuse, energy-compensated GGX conductor and dielectric
-//! specular, MIS-weighted direct light sampling), so the image starts
-//! noisy and visibly converges as the spp counter climbs; the HDRI
-//! environment arrives in step 10.
+//! specular) under MIS-weighted direct light sampling of the quad lights
+//! and the importance-sampled HDRI environment, so the image starts noisy
+//! and visibly converges as the spp counter climbs.
 //!
 //! Single-threaded, and self-scheduling once visible: every redraw
 //! accumulates one sample into the film, tonemaps (live exposure), presents,

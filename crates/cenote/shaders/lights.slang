@@ -8,8 +8,20 @@
 // Lights are two-sided, matching the renderer's two-sided surfaces: both
 // faces emit, and every light-side cosine is an absolute value.
 
-// `GeometryRecord.light` for instances that are not lights.
+// `GeometryRecord.light` for instances that are not lights — and, on a
+// queued shadow ray, the target "instance" of an environment connection
+// (no TLAS instance can carry this ID, so such a ray is unshadowed exactly
+// when it hits nothing).
 public static const uint LIGHT_NONE = 0xffffffff;
+
+// Which sampling strategies reach the lights (quads and environment
+// alike). MIS is the renderer; the single-strategy modes exist because the
+// strongest test of the weights is that either strategy alone converges to
+// the same image (the MIS-agreement test in `wavefront.rs`). Values match
+// `enum LightSampling` there.
+public static const uint LIGHT_SAMPLING_MIS = 0;
+public static const uint LIGHT_SAMPLING_BSDF = 1;
+public static const uint LIGHT_SAMPLING_NEE = 2;
 
 // One quad light. Selection is a power-proportional alias table — one slot
 // per light — so each record carries its own slot (`aliasThreshold`,

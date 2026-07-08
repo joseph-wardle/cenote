@@ -13,11 +13,11 @@
 //!   shows. The viewer's redraw loop is one of each per frame.
 //!
 //! Every sample is a full path-traced estimate — jittered camera ray,
-//! MIS-weighted direct light sampling at every bounce, diffuse bounces
-//! under quad lights and a constant sky — keyed by the film's sample
-//! count, so accumulation converges toward the true render: edges
-//! anti-alias, noise settles into soft shadows, color bleed, and contact
-//! darkening.
+//! MIS-weighted direct light sampling at every bounce (quad lights and the
+//! importance-sampled environment), `OpenPBR` bounces — keyed by the
+//! film's sample count, so accumulation converges toward the true render:
+//! edges anti-alias, noise settles into soft shadows, color bleed, and
+//! contact darkening.
 
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
@@ -374,6 +374,7 @@ mod tests {
     use glam::{Mat4, Vec3};
 
     use super::*;
+    use crate::environment::Environment;
     use crate::material::Material;
     use crate::scene::{Camera, Object, ground_plane};
 
@@ -424,14 +425,62 @@ mod tests {
             look_at: center + Vec3::new(0.0, 0.0, -scale),
             vfov_degrees: 40.0,
         };
-        Scene::new(gpu, &[object], camera, Vec3::splat(0.5)).expect("furnace scene")
+        Scene::new(
+            gpu,
+            &[object],
+            camera,
+            &Environment::constant(Vec3::splat(0.5)),
+        )
+        .expect("furnace scene")
     }
 
-    /// Probe the demo image's known-exact features. The top-left pixel is
-    /// open sky, and a camera-ray miss adds the sky radiance to a
-    /// zero-filled pixel — exact. Every pixel finishes exactly once per
-    /// wave (alpha 1, finite, non-negative), and most of the frame is lit
-    /// surface — neither sky nor a dead path's black.
+    /// Accumulate `samples` waves through a BSDF-only engine and return
+    /// the per-pixel RGBA sums. The exactness furnace tests below use this
+    /// mode deliberately: single-strategy Lambert estimates are pointwise
+    /// exact (every sample equals albedo × sky), while next-event + MIS
+    /// estimates the same integral with per-sample variance — unbiased,
+    /// but no longer a tight per-pixel assertion. Strategy agreement is
+    /// the MIS-agreement tests' job, over in `wavefront.rs`.
+    fn bsdf_only_sum(gpu: &Context, scene: &Scene, size: u32, samples: u32) -> Vec<f32> {
+        let wavefront = Wavefront::new(
+            gpu,
+            &Kernels::embedded(),
+            Wavefront::DEFAULT_CAPACITY,
+            Wavefront::DEFAULT_MAX_BOUNCES,
+            LightSampling::BsdfOnly,
+        )
+        .expect("wavefront");
+        let radiance = gpu
+            .create_buffer(
+                "test.radiance",
+                u64::from(size) * u64::from(size) * 16,
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                    | vk::BufferUsageFlags::TRANSFER_SRC
+                    | vk::BufferUsageFlags::TRANSFER_DST,
+                MemoryLocation::GpuOnly,
+            )
+            .expect("radiance buffer");
+        let mut sum = vec![0.0_f32; (size * size * 4) as usize];
+        for sample in 0..samples {
+            wavefront
+                .trace(gpu, scene, &radiance, size, size, sample)
+                .expect("trace");
+            for (total, value) in sum.iter_mut().zip(download_f32(gpu, &radiance)) {
+                *total += value;
+            }
+        }
+        sum
+    }
+
+    /// Probe the demo image's invariants. Every pixel finishes exactly
+    /// once per wave (alpha 1, finite, non-negative), nearly the whole
+    /// frame is lit under the daytime HDRI — at 1 spp a pixel goes black
+    /// only when Russian roulette kills its path with every next-event
+    /// connection occluded, which is rare — and the top-left pixel is open
+    /// sky bright enough to be daytime. (The exact-background probe lives
+    /// with the constant-sky scene in `wavefront.rs`; the demo's HDRI
+    /// background varies per direction.)
     #[test]
     fn demo_image_is_sky_lit() {
         let Some(gpu) = crate::gpu::test_context() else {
@@ -444,10 +493,6 @@ mod tests {
             .render(&gpu, &scene, width, height)
             .expect("render");
 
-        let sky = scene.sky();
-        let sky = [sky.x, sky.y, sky.z, 1.0];
-        assert_eq!(pixel(&pixels, width, 0, 0), sky);
-
         let mut lit = 0;
         for chunk in pixels.chunks_exact(4) {
             assert_eq!(chunk[3..], [1.0], "a pixel was skipped: {chunk:?}");
@@ -455,13 +500,17 @@ mod tests {
                 chunk[..3].iter().all(|c| c.is_finite() && *c >= 0.0),
                 "non-finite or negative radiance: {chunk:?}"
             );
-            if chunk != sky && chunk[..3].iter().sum::<f32>() > 0.0 {
+            if chunk[..3].iter().sum::<f32>() > 0.0 {
                 lit += 1;
             }
         }
         assert!(
-            lit > (width * height / 3) as usize,
-            "most of the frame should be lit surface, got {lit} pixels"
+            lit > (width * height * 9 / 10) as usize,
+            "most of the frame should be lit, got {lit} pixels"
+        );
+        assert!(
+            pixel(&pixels, width, 0, 0)[..3].iter().sum::<f32>() > 0.5,
+            "the top-left pixel should be open daytime sky"
         );
     }
 
@@ -486,11 +535,11 @@ mod tests {
     /// plane under a uniform sky must reflect exactly the sky radiance —
     /// energy lost or gained anywhere in the estimator (a dropped
     /// multiple-scattering lobe, a wrong pdf, a biased roulette) shifts the
-    /// result. At roughness 0 the lobe is Lambert and *every sample of
-    /// every pixel* equals the sky exactly, so the bound is tight; at
-    /// roughness 1 the per-sample value is stochastic (and the albedo fit
-    /// itself is only good to ~4e-4), so the mean over pixels × samples
-    /// carries the assertion.
+    /// result. At roughness 0 the lobe is Lambert and, BSDF-only, *every
+    /// sample of every pixel* equals the sky exactly, so the bound is
+    /// tight; at roughness 1 the per-sample value is stochastic (and the
+    /// albedo fit itself is only good to ~4e-4), so the mean over the full
+    /// MIS renderer carries the assertion.
     #[test]
     fn diffuse_furnace_closes() {
         let Some(gpu) = crate::gpu::test_context() else {
@@ -500,7 +549,7 @@ mod tests {
         let sky = 0.5;
 
         let lambert = furnace_scene(&gpu, Material::matte(Vec3::ONE, 0.0), Vec3::ZERO, 1.0);
-        let sum = accumulate_sum(&gpu, &renderer, &lambert, 32, 4);
+        let sum = bsdf_only_sum(&gpu, &lambert, 32, 4);
         for chunk in sum.chunks_exact(4) {
             for channel in &chunk[..3] {
                 let value = channel / 4.0;
@@ -530,20 +579,20 @@ mod tests {
     /// self-intersects the plane it just left multiplies in another albedo
     /// factor and fails the bound loudly. (An albedo-1 furnace can't see
     /// this — spurious extra bounces cost it no energy — which is why this
-    /// one is gray.)
+    /// one is gray. BSDF-only, for the same per-sample exactness as the
+    /// Lambert furnace above.)
     #[test]
     fn ray_offsets_hold_at_scene_scale() {
         let Some(gpu) = crate::gpu::test_context() else {
             return;
         };
-        let renderer = Renderer::new(&gpu).expect("renderer");
         let scene = furnace_scene(
             &gpu,
             Material::matte(Vec3::splat(0.5), 0.0),
             Vec3::new(1e4, 0.0, 1e4),
             1e3,
         );
-        let sum = accumulate_sum(&gpu, &renderer, &scene, 32, 4);
+        let sum = bsdf_only_sum(&gpu, &scene, 32, 4);
         let expected = 0.5 * 0.5; // albedo × sky
         for chunk in sum.chunks_exact(4) {
             for channel in &chunk[..3] {
@@ -630,7 +679,8 @@ mod tests {
             look_at: Vec3::new(0.0, 1.0, 0.0),
             vfov_degrees: 40.0,
         };
-        let scene = Scene::new(&gpu, &objects, camera, Vec3::ONE).expect("scene");
+        let scene =
+            Scene::new(&gpu, &objects, camera, &Environment::constant(Vec3::ONE)).expect("scene");
         let renderer = Renderer::new(&gpu).expect("renderer");
         let size = 64;
         let sum = accumulate_sum(&gpu, &renderer, &scene, size, 32);

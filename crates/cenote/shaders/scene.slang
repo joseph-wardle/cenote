@@ -1,8 +1,9 @@
 // The GPU scene, reached through one `SceneTable` of buffer addresses that
 // mirrors `Scene` in `scene.rs`: kernels carry a single scene pointer in
-// their push constants, and new scene-wide tables (the HDRI's CDFs next)
-// land here without growing any kernel's parameter block.
+// their push constants, and new scene-wide tables land here without
+// growing any kernel's parameter block.
 
+import environment;
 import lights;
 import openpbr;
 
@@ -20,12 +21,14 @@ public struct GeometryRecord {
     uint pad2;
 };
 
-// Everything the scene shares with the kernels, one address each, all
-// indexed by TLAS instance custom index except the light list.
+// Everything the scene shares with the kernels: buffer addresses (indexed
+// by TLAS instance custom index, except the light list) plus the embedded
+// environment light.
 public struct SceneTable {
     public GeometryRecord* geometry;
     public Material* materials;
     public LightRecord* lights;
+    public Environment env;
     public uint lightCount;
     uint pad;
 };
