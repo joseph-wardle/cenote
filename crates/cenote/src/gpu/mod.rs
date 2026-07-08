@@ -4,7 +4,8 @@
 //! device selection against the ray-tracing baseline, one compute queue, and
 //! the memory allocator. Code outside `gpu` never touches raw `vk` handles
 //! or writes `unsafe`. Bring-up lives in `init`; buffers, one-shot submits,
-//! compute pipelines, and acceleration structures in the other submodules.
+//! compute pipelines, acceleration structures, and window presentation in
+//! the other submodules.
 //!
 //! There is no backend abstraction here and there never will be — Cenote is
 //! single-backend by design: a reader who knows Vulkan should be reading
@@ -15,6 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use ash::vk;
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
+use raw_window_handle::RawDisplayHandle;
 
 use crate::error::Result;
 
@@ -22,11 +24,13 @@ mod accel;
 mod buffer;
 mod init;
 mod pipeline;
+mod present;
 mod submit;
 
 pub use accel::{AccelerationStructure, TlasInstance};
 pub use buffer::{Buffer, MemoryLocation};
 pub use pipeline::ComputePipeline;
+pub use present::Presenter;
 
 use init::DebugMessenger;
 
@@ -49,12 +53,15 @@ pub struct Context {
     queue_family_index: u32,
     physical_device: vk::PhysicalDevice,
     device_type: vk::PhysicalDeviceType,
+    /// Created via [`Context::presentable`], i.e. the surface and swapchain
+    /// extensions are enabled and [`Context::create_presenter`] may be called.
+    presentable: bool,
     summary: String,
     debug: Option<DebugMessenger>,
     instance: ash::Instance,
-    // Never read, but must outlive `instance`: dropping the Entry unloads
-    // libvulkan.
-    _entry: ash::Entry,
+    // Read by presenter surface creation; must outlive `instance` regardless,
+    // since dropping the Entry unloads libvulkan.
+    entry: ash::Entry,
 }
 
 impl Context {
@@ -76,10 +83,27 @@ impl Context {
     /// qualifies, [`crate::Error::Vulkan`] / [`crate::Error::Allocation`] if
     /// bring-up calls fail.
     pub fn new() -> Result<Self> {
+        Self::bring_up(None)
+    }
+
+    /// As [`Context::new`], but present-capable: enables the instance
+    /// extensions for `display`'s windowing protocol plus `VK_KHR_swapchain`
+    /// on the device, and requires them during device selection. Pair with
+    /// [`Context::create_presenter`] once a window exists.
+    ///
+    /// # Errors
+    ///
+    /// As [`Context::new`], plus [`crate::Error::Vulkan`] if Vulkan cannot
+    /// present on this platform's display protocol.
+    pub fn presentable(display: RawDisplayHandle) -> Result<Self> {
+        Self::bring_up(Some(display))
+    }
+
+    fn bring_up(display: Option<RawDisplayHandle>) -> Result<Self> {
         let entry = unsafe { ash::Entry::load() }?;
-        let (instance, debug_utils_enabled) = init::create_instance(&entry)?;
+        let (instance, debug_utils_enabled) = init::create_instance(&entry, display)?;
         // From here on, failure must unwind what the constructor built so far.
-        match Self::init_with_instance(&entry, &instance, debug_utils_enabled) {
+        match Self::init_with_instance(&entry, &instance, debug_utils_enabled, display.is_some()) {
             Ok(context) => Ok(context),
             Err(err) => {
                 unsafe { instance.destroy_instance(None) };
@@ -92,18 +116,20 @@ impl Context {
         entry: &ash::Entry,
         instance: &ash::Instance,
         debug_utils_enabled: bool,
+        presentable: bool,
     ) -> Result<Self> {
         let debug = debug_utils_enabled
             .then(|| init::create_debug_messenger(entry, instance))
             .transpose()?;
 
-        let (physical_device, properties) = init::select_physical_device(instance)?;
+        let (physical_device, properties) = init::select_physical_device(instance, presentable)?;
         let queue_family_index = init::compute_queue_family(instance, physical_device)
             .expect("selection already verified a compute queue family");
         let summary = init::describe_device(instance, physical_device, &properties);
         log::info!("selected {summary}");
 
-        let device = init::create_device(instance, physical_device, queue_family_index)?;
+        let device =
+            init::create_device(instance, physical_device, queue_family_index, presentable)?;
         let accel_loader = ash::khr::acceleration_structure::Device::new(instance, &device);
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
 
@@ -131,10 +157,11 @@ impl Context {
             queue_family_index,
             physical_device,
             device_type: properties.device_type,
+            presentable,
             summary,
             debug,
             instance: instance.clone(),
-            _entry: entry.clone(),
+            entry: entry.clone(),
         })
     }
 

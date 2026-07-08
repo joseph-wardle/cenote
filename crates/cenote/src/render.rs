@@ -1,5 +1,6 @@
 //! Frame rendering: allocate the output buffer, dispatch the primary kernel
-//! against the scene, read the pixels back. Orchestration only — all Vulkan
+//! against the scene, and either hand the buffer to the presenter (viewer)
+//! or read the pixels back (CLI, tests). Orchestration only — all Vulkan
 //! stays behind [`crate::gpu`].
 //!
 //! The [`Renderer`] owns the primary pipeline so hot reload can swap in a
@@ -12,7 +13,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 
 use crate::error::Result;
-use crate::gpu::{ComputePipeline, Context, MemoryLocation};
+use crate::gpu::{Buffer, ComputePipeline, Context, MemoryLocation};
 use crate::scene::Scene;
 use crate::shaders;
 
@@ -92,6 +93,30 @@ impl Renderer {
         width: u32,
         height: u32,
     ) -> Result<Vec<f32>> {
+        let pixels = self.render_to_buffer(gpu, scene, width, height)?;
+        // pod_collect_to_vec rather than cast_slice: the downloaded bytes
+        // carry no alignment guarantee.
+        Ok(bytemuck::pod_collect_to_vec(&gpu.download_buffer(&pixels)?))
+    }
+
+    /// [`Renderer::render`], minus the readback: the frame stays in the
+    /// returned GPU buffer, ready for [`crate::gpu::Presenter::present`].
+    ///
+    /// # Errors
+    ///
+    /// Any [`crate::Error`] from buffer creation or submission.
+    ///
+    /// # Panics
+    ///
+    /// On a zero-sized target — callers validate their inputs, so this is a
+    /// programmer bug.
+    pub fn render_to_buffer(
+        &self,
+        gpu: &Context,
+        scene: &Scene,
+        width: u32,
+        height: u32,
+    ) -> Result<Buffer> {
         assert!(width > 0 && height > 0, "zero-sized render target");
 
         let size = u64::from(width) * u64::from(height) * 4 * size_of::<f32>() as u64;
@@ -127,10 +152,7 @@ impl Renderer {
                 1,
             ],
         )?;
-
-        // pod_collect_to_vec rather than cast_slice: the downloaded bytes
-        // carry no alignment guarantee.
-        Ok(bytemuck::pod_collect_to_vec(&gpu.download_buffer(&pixels)?))
+        Ok(pixels)
     }
 }
 

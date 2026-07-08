@@ -5,9 +5,10 @@
 //! exactly the extensions and features [`create_device`] enables. When one
 //! list grows, grow the other.
 
-use std::ffi::{CStr, c_void};
+use std::ffi::{CStr, c_char, c_void};
 
 use ash::vk;
+use raw_window_handle::RawDisplayHandle;
 
 use crate::error::{Error, Result};
 
@@ -18,7 +19,8 @@ const MIN_API_VERSION: u32 = vk::API_VERSION_1_3;
 
 /// Device extensions every capable GPU must offer. Descriptor indexing and
 /// buffer device address are core-1.3 *features*, checked separately in
-/// [`missing_requirements`].
+/// [`missing_requirements`]. `VK_KHR_swapchain` is not here: it is required
+/// only of presentable contexts, so selection and creation take it as a flag.
 const REQUIRED_EXTENSIONS: &[&CStr] = &[
     ash::khr::acceleration_structure::NAME,
     // Required by VK_KHR_acceleration_structure even though we never build
@@ -43,17 +45,27 @@ impl Drop for DebugMessenger {
     }
 }
 
-/// Create the instance. Debug builds add the Khronos validation layer and
-/// the debug-utils extension when present — their absence is logged, never
+/// Create the instance. A presentable context passes its target `display`
+/// so the surface extensions (`VK_KHR_surface` + the platform's) are
+/// enabled. Debug builds add the Khronos validation layer and the
+/// debug-utils extension when present — their absence is logged, never
 /// fatal. The returned flag reports whether debug-utils was enabled, i.e.
 /// whether [`create_debug_messenger`] may be called.
-pub(super) fn create_instance(entry: &ash::Entry) -> Result<(ash::Instance, bool)> {
+pub(super) fn create_instance(
+    entry: &ash::Entry,
+    display: Option<RawDisplayHandle>,
+) -> Result<(ash::Instance, bool)> {
     let app_info = vk::ApplicationInfo::default()
         .application_name(c"cenote")
         .api_version(MIN_API_VERSION);
 
-    let mut layers: Vec<*const i8> = Vec::new();
-    let mut extensions: Vec<*const i8> = Vec::new();
+    let mut layers: Vec<*const c_char> = Vec::new();
+    let mut extensions: Vec<*const c_char> = Vec::new();
+    if let Some(display) = display {
+        // Errors when Vulkan can't present on this platform's display
+        // protocol at all.
+        extensions.extend_from_slice(ash_window::enumerate_required_extensions(display)?);
+    }
     let mut debug_utils_enabled = false;
     if cfg!(debug_assertions) {
         const VALIDATION: &CStr = c"VK_LAYER_KHRONOS_validation";
@@ -135,6 +147,7 @@ unsafe extern "system" fn debug_callback(
 /// rejected. Preference among capable devices: discrete > integrated > rest.
 pub(super) fn select_physical_device(
     instance: &ash::Instance,
+    presentable: bool,
 ) -> Result<(vk::PhysicalDevice, vk::PhysicalDeviceProperties)> {
     let mut rejections = String::new();
     let mut best: Option<(u32, vk::PhysicalDevice, vk::PhysicalDeviceProperties)> = None;
@@ -145,7 +158,7 @@ pub(super) fn select_physical_device(
             .device_name_as_c_str()
             .map_or_else(|_| "<unnamed>".into(), CStr::to_string_lossy);
 
-        let missing = missing_requirements(instance, device, &properties);
+        let missing = missing_requirements(instance, device, &properties, presentable);
         if missing.is_empty() {
             log::debug!("{name}: capable");
             let rank = device_type_rank(properties.device_type);
@@ -178,6 +191,7 @@ fn missing_requirements(
     instance: &ash::Instance,
     device: vk::PhysicalDevice,
     properties: &vk::PhysicalDeviceProperties,
+    presentable: bool,
 ) -> Vec<String> {
     let mut missing = Vec::new();
 
@@ -210,6 +224,9 @@ fn missing_requirements(
         if !has_extension(required) {
             missing.push(required.to_string_lossy().into_owned());
         }
+    }
+    if presentable && !has_extension(ash::khr::swapchain::NAME) {
+        missing.push(ash::khr::swapchain::NAME.to_string_lossy().into_owned());
     }
 
     // Only chain feature structs whose extension exists — querying features
@@ -288,6 +305,7 @@ pub(super) fn create_device(
     instance: &ash::Instance,
     physical_device: vk::PhysicalDevice,
     queue_family_index: u32,
+    presentable: bool,
 ) -> Result<ash::Device> {
     let priorities = [1.0_f32];
     let queue_info = vk::DeviceQueueCreateInfo::default()
@@ -315,7 +333,11 @@ pub(super) fn create_device(
         .push_next(&mut accel)
         .push_next(&mut ray_query);
 
-    let extensions: Vec<*const i8> = REQUIRED_EXTENSIONS.iter().map(|e| e.as_ptr()).collect();
+    let mut extensions: Vec<*const c_char> =
+        REQUIRED_EXTENSIONS.iter().map(|e| e.as_ptr()).collect();
+    if presentable {
+        extensions.push(ash::khr::swapchain::NAME.as_ptr());
+    }
     let create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(std::slice::from_ref(&queue_info))
         .enabled_extension_names(&extensions)

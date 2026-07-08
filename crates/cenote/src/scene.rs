@@ -130,6 +130,12 @@ impl Scene {
     pub fn camera(&self) -> &Camera {
         &self.camera
     }
+
+    /// Mutable camera access — the viewer's orbit control writes here
+    /// between frames.
+    pub fn camera_mut(&mut self) -> &mut Camera {
+        &mut self.camera
+    }
 }
 
 /// A pinhole camera, described by where it sits and what it looks at.

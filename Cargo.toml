@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/cenote", "crates/cenote-cli"]
+members = ["crates/cenote", "crates/cenote-cli", "crates/cenote-viewer"]
 
 [workspace.package]
 version = "0.0.1"

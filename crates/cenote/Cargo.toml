@@ -12,12 +12,14 @@ repository.workspace = true
 # lines of code gets written instead. Dependencies land with their first caller.
 [dependencies]
 ash = "0.38.0"
+ash-window = "0.13.0"
 bytemuck = { version = "1.25.0", features = ["derive", "extern_crate_alloc"] }
 exr = "1.74.0"
 glam = { version = "0.33.2", features = ["bytemuck"] }
 gpu-allocator = "0.28.0"
 log = "0.4.33"
 notify = "8.2.0"
+raw-window-handle = "0.6.2"
 thiserror = "2.0.18"
 
 [lints]

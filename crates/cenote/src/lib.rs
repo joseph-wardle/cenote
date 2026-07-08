@@ -8,7 +8,7 @@
 //!
 //! | Module    | Role |
 //! |-----------|------|
-//! | `gpu`     | Unsafe-Vulkan quarantine: device context, buffers, submits, pipelines, acceleration structures. Code outside this module does not touch raw `vk` handles. |
+//! | `gpu`     | Unsafe-Vulkan quarantine: device context, buffers, submits, pipelines, acceleration structures, window presentation. Code outside this module does not touch raw `vk` handles. |
 //! | `shaders` | Embedded SPIR-V registry, `slangc` runtime recompile, hot-reload watching |
 //! | `scene`   | Procedural test geometry and camera (real scene I/O arrives in M2) |
 //! | `render`  | Frame orchestration: the [`render::Renderer`] dispatches the primary kernel against the scene and reads pixels back (progressive accumulation arrives in M1) |

@@ -67,6 +67,7 @@ cargo test --workspace   # on the GPU machine — includes the goldens
 | `crates/cenote/` | The core renderer library — start at `src/lib.rs`, whose crate doc is the architecture map |
 | `crates/cenote/shaders/` | Slang GPU kernels — the heart of the renderer |
 | `crates/cenote-cli/` | Headless batch renderer binary |
+| `crates/cenote-viewer/` | Interactive viewer binary: live render in a window, orbit camera |
 | `docs/charter.md` | Project charter: vision, locked decisions, milestone roadmap |
 | `docs/decisions.md` | Append-only log of every design decision and its rationale |
 | `docs/m0-plan.md` | The M0 implementation plan |
