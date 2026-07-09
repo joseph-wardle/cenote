@@ -217,24 +217,26 @@ impl Viewer {
         let film = self.film.as_mut().expect("created just above");
 
         *self.scene.camera_mut() = self.camera.camera();
+
+        // The UI runs first now that trace, accumulate, and tonemap fold
+        // into one submission: its exposure must be known before that
+        // submission records the tonemap, and an exposure drag still lands
+        // this very frame. The stats it shows are the previous frame's —
+        // one frame stale, imperceptible, and the price of the single fence.
+        let gui_frame = self
+            .gui
+            .run(&self.window, self.gpu.device_summary(), &self.stats);
+
         let started = Instant::now();
         self.renderer
-            .accumulate(&self.gpu, &self.scene, film)
-            .context("accumulating a sample")?;
+            .accumulate_and_tonemap(&self.gpu, &self.scene, film, self.gui.exposure())
+            .context("accumulating and tonemapping a sample")?;
         self.stats.sample = started.elapsed();
         self.stats.size = (size.width, size.height);
         self.stats.samples = film.samples();
 
-        // The UI runs before the tonemap so an exposure drag lands in this
-        // very frame.
-        let gui_frame = self
-            .gui
-            .run(&self.window, self.gpu.device_summary(), &self.stats);
         self.window.pre_present_notify();
         let started = Instant::now();
-        self.renderer
-            .tonemap(&self.gpu, film, self.gui.exposure())
-            .context("tonemapping the film")?;
         self.presenter
             .present(
                 film.display(),

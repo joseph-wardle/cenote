@@ -21,7 +21,10 @@ use ash::vk;
 use crate::error::Result;
 use crate::gpu::{Buffer, ComputePipeline, Context, SceneBindings};
 
-/// One step of a [`Context::submit_passes`] submission.
+/// One step of a [`Context::submit_passes`] submission. `Copy` so a caller
+/// can append its own passes to a recorded list and submit them together —
+/// how the film's accumulate and tonemap ride the wave's one submission.
+#[derive(Clone, Copy)]
 pub enum Pass<'a> {
     /// Overwrite a byte range with a repeated `u32` (`vkCmdFillBuffer`) —
     /// how a wave resets queue counters without touching the host.

@@ -569,3 +569,36 @@ frame-average enough that the worst case sits near 1% with the 3% bound intact �
 so the bound still catches a real bias instead of tripping on noise. This is now
 permanent: reserved-slot additions do not renumber, so the realization these
 tests and the goldens pin stays fixed until someone deliberately renumbers.
+
+## 2026-07-09 — Film passes folded into the wave submission (D-043 follow-up)
+
+### D-045: Accumulate and tonemap ride the wave's one fence
+The performance half of D-043's render-loop note, delivered now (its
+timeline-pacing and narrowed-per-stage-barrier parts stay deferred to the
+pre-M3 pass). `submit_passes` already records any number of passes into one
+command buffer — a full memory barrier between each — and blocks on a single
+fence at the end, so appending the film's accumulate and tonemap dispatches to
+the wave's own pass list costs no new correctness machinery: only a `Pass: Copy`
+derive and a `Wavefront::trace_then(trailing)` seam that concatenates the two
+pass lists before submitting. The viewer's per-frame cost drops from three
+blocking submissions (trace, accumulate, tonemap) to one; the batch CLI's
+per-sample cost from two to one.
+
+Correctness rests on the inter-pass barrier being as strong as the fence it
+replaces: it flushes the wave's radiance writes before the accumulate reads
+them, and the accumulate's sum writes before the tonemap reads them — exactly
+the ordering the fence gave across separate submissions. So the output is
+bit-identical. Both goldens pass unregenerated, and a new test
+(`folded_frame_matches_separate_passes`) pins the folded viewer path to a
+byte-identical display buffer against running the three passes apart. The fold
+divides the average by the count *including* its own sample, since that
+accumulate lands in the same submission the tonemap reads.
+
+Folding the tonemap carries one viewer cost, taken deliberately: the tonemap
+needs the exposure at record time, so the egui UI now runs *before* the combined
+submission rather than between the accumulate and the tonemap. The stats it
+shows are one frame stale as a result — imperceptible, and the price of the
+single fence; the exposure itself still lands the frame it is dragged. The
+viewer is vsync-paced (FIFO present), so fewer fences do not raise its frame
+rate — the win there is latency. The real throughput win is the batch CLI,
+which accumulates back-to-back with no vsync between samples.

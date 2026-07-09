@@ -8,13 +8,14 @@
 //!   wave, read the linear pixels back — the test and hot-reload-probe
 //!   path.
 //! - **Progressive** ([`Renderer::accumulate`]): each call traces one
-//!   sample into the [`Film`]'s running sums. The viewer follows with
-//!   [`Renderer::tonemap`] — average, exposure, the ACES display
-//!   transform — into the RGBA8 buffer that
-//!   [`crate::gpu::Presenter::present`] shows; the CLI instead reads the
-//!   linear average back with [`Film::average`] and writes it as the
-//!   batch EXR. Batch output and the viewer's converged image are the
-//!   same estimator by construction — they share the film.
+//!   sample into the [`Film`]'s running sums. The viewer instead calls
+//!   [`Renderer::accumulate_and_tonemap`], folding that trace, the
+//!   accumulate, and the tonemap — average, exposure, the ACES display
+//!   transform, into the RGBA8 buffer [`crate::gpu::Presenter::present`]
+//!   shows — into a single submission; the CLI accumulates to a fixed
+//!   sample count and reads the linear average back with [`Film::average`],
+//!   writing it as the batch EXR. Batch output and the viewer's converged
+//!   image are the same estimator by construction — they share the film.
 //!
 //! Every sample is a full path-traced estimate — jittered camera ray,
 //! MIS-weighted direct light sampling at every bounce (quad lights and the
@@ -27,7 +28,7 @@ use ash::vk;
 use bytemuck::{Pod, Zeroable};
 
 use crate::error::Result;
-use crate::gpu::{Bindings, Buffer, ComputePipeline, Context, MemoryLocation};
+use crate::gpu::{Bindings, Buffer, ComputePipeline, Context, MemoryLocation, Pass};
 use crate::scene::Scene;
 use crate::shaders::Kernels;
 use crate::wavefront::{LightSampling, Wavefront};
@@ -328,24 +329,61 @@ impl Renderer {
     }
 
     /// Trace the film's next sample of `scene` and add it to its sums (the
-    /// first sample after creation or a reset overwrites them). One wave —
-    /// at sample index [`Film::samples`], so a reset replays the exact same
-    /// sequence — into the film's sample buffer, then the accumulation
-    /// kernel, with its unconditional NaN/Inf guard, into the sums.
+    /// first sample after creation or a reset overwrites them). One
+    /// submission: the wave — at sample index [`Film::samples`], so a reset
+    /// replays the exact same sequence — into the film's sample buffer, then
+    /// the accumulation kernel, with its unconditional NaN/Inf guard, folded
+    /// into the same fence, into the sums.
     ///
     /// # Errors
     ///
     /// Any [`crate::Error`] from submission.
     pub fn accumulate(&self, gpu: &Context, scene: &Scene, film: &mut Film) -> Result<()> {
-        self.wavefront.trace(
+        let accumulate = accumulate_params(film);
+        self.wavefront.trace_then(
             gpu,
             scene,
             &film.sample,
             film.width,
             film.height,
             film.samples,
+            &[self.accumulate_pass(&accumulate)],
         )?;
-        self.add_sample(gpu, film)?;
+        film.samples += 1;
+        Ok(())
+    }
+
+    /// [`Renderer::accumulate`] with the tonemap folded in: trace the next
+    /// sample, add it to the sums, and tonemap the new average into the
+    /// display buffer — all one fence-waited submission, the viewer's
+    /// per-frame path. `exposure` (stops) applies as in [`Renderer::tonemap`];
+    /// the average divides by the count *including* this sample, since its
+    /// accumulate lands in the same submission the tonemap reads.
+    ///
+    /// # Errors
+    ///
+    /// Any [`crate::Error`] from submission.
+    pub fn accumulate_and_tonemap(
+        &self,
+        gpu: &Context,
+        scene: &Scene,
+        film: &mut Film,
+        exposure: f32,
+    ) -> Result<()> {
+        let accumulate = accumulate_params(film);
+        let tonemap = tonemap_params(film, exposure, film.samples + 1);
+        self.wavefront.trace_then(
+            gpu,
+            scene,
+            &film.sample,
+            film.width,
+            film.height,
+            film.samples,
+            &[
+                self.accumulate_pass(&accumulate),
+                self.tonemap_pass(&tonemap),
+            ],
+        )?;
         film.samples += 1;
         Ok(())
     }
@@ -364,14 +402,7 @@ impl Renderer {
     /// order is a programmer bug.
     pub fn tonemap(&self, gpu: &Context, film: &Film, exposure: f32) -> Result<()> {
         assert!(film.samples > 0, "tonemapping an empty film");
-        let params = TonemapParams {
-            sum: film.sum.device_address(),
-            display: film.display.device_address(),
-            width: film.width,
-            height: film.height,
-            scale: exposure.exp2() / film.samples as f32,
-            _pad0: 0.0,
-        };
+        let params = tonemap_params(film, exposure, film.samples);
         gpu.dispatch(
             &self.tonemap,
             None,
@@ -380,23 +411,53 @@ impl Renderer {
         )
     }
 
-    /// Dispatch the accumulation kernel: `film.sample` into `film.sum`,
-    /// overwriting when the film is empty.
-    fn add_sample(&self, gpu: &Context, film: &Film) -> Result<()> {
-        let params = AccumulateParams {
-            sample: film.sample.device_address(),
-            sum: film.sum.device_address(),
-            width: film.width,
-            height: film.height,
-            reset: u32::from(film.samples == 0),
-            _pad0: 0,
-        };
-        gpu.dispatch(
-            &self.accumulate,
-            None,
-            bytemuck::bytes_of(&params),
-            workgroups(film.width, film.height),
-        )
+    /// The accumulation dispatch as a [`Pass`], so it can ride the wave's
+    /// submission (see [`Renderer::accumulate`]) or run on its own.
+    fn accumulate_pass<'a>(&'a self, params: &'a AccumulateParams) -> Pass<'a> {
+        Pass::Dispatch {
+            pipeline: &self.accumulate,
+            scene: None,
+            push_constants: bytemuck::bytes_of(params),
+            group_counts: workgroups(params.width, params.height),
+        }
+    }
+
+    /// The tonemap dispatch as a [`Pass`], like [`Renderer::accumulate_pass`].
+    fn tonemap_pass<'a>(&'a self, params: &'a TonemapParams) -> Pass<'a> {
+        Pass::Dispatch {
+            pipeline: &self.tonemap,
+            scene: None,
+            push_constants: bytemuck::bytes_of(params),
+            group_counts: workgroups(params.width, params.height),
+        }
+    }
+}
+
+/// The accumulation kernel's push constants: `film.sample` into `film.sum`,
+/// overwriting when the film is empty.
+fn accumulate_params(film: &Film) -> AccumulateParams {
+    AccumulateParams {
+        sample: film.sample.device_address(),
+        sum: film.sum.device_address(),
+        width: film.width,
+        height: film.height,
+        reset: u32::from(film.samples == 0),
+        _pad0: 0,
+    }
+}
+
+/// The tonemap kernel's push constants: `film.sum`, averaged over `samples`
+/// and exposure-scaled, into `film.display`. `samples` is a parameter
+/// because the folded path ([`Renderer::accumulate_and_tonemap`]) divides by
+/// the count *after* its own accumulate lands, one past [`Film::samples`].
+fn tonemap_params(film: &Film, exposure: f32, samples: u32) -> TonemapParams {
+    TonemapParams {
+        sum: film.sum.device_address(),
+        display: film.display.device_address(),
+        width: film.width,
+        height: film.height,
+        scale: exposure.exp2() / samples as f32,
+        _pad0: 0.0,
     }
 }
 
@@ -866,6 +927,50 @@ mod tests {
         assert_eq!(download_f32(&gpu, &film.sum), single);
     }
 
+    /// The viewer's folded path — trace, accumulate, and tonemap in one
+    /// submission — must produce the exact same display buffer as running
+    /// the three as separate fence-waited submissions: a barrier between
+    /// passes orders the writes a fence would. Both films trace the same
+    /// sample sequence, and the fold divides by the count *including* its
+    /// own sample, so the average and the tonemap match bit for bit.
+    #[test]
+    fn folded_frame_matches_separate_passes() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let scene = Scene::demo(&gpu).expect("demo scene");
+        let renderer = Renderer::new(&gpu).expect("renderer");
+        let exposure = 0.5;
+
+        // Separate: three accumulations, then a standalone tonemap.
+        let mut separate = Film::new(&gpu, 64, 64).expect("film");
+        for _ in 0..3 {
+            renderer
+                .accumulate(&gpu, &scene, &mut separate)
+                .expect("accumulate");
+        }
+        renderer
+            .tonemap(&gpu, &separate, exposure)
+            .expect("tonemap");
+        let expected = gpu.download_buffer(separate.display()).expect("download");
+
+        // Folded: the third sample's accumulate and the tonemap ride the wave.
+        let mut folded = Film::new(&gpu, 64, 64).expect("film");
+        for _ in 0..2 {
+            renderer
+                .accumulate(&gpu, &scene, &mut folded)
+                .expect("accumulate");
+        }
+        renderer
+            .accumulate_and_tonemap(&gpu, &scene, &mut folded, exposure)
+            .expect("accumulate and tonemap");
+        assert_eq!(folded.samples(), 3);
+        assert_eq!(
+            gpu.download_buffer(folded.display()).expect("download"),
+            expected
+        );
+    }
+
     /// The accumulation kernel's finite guard: a NaN or Inf in any channel
     /// drops that pixel's whole contribution — on the overwrite path and
     /// the additive path alike — while clean pixels land untouched.
@@ -904,7 +1009,12 @@ mod tests {
             )
             .expect("upload");
 
-        renderer.add_sample(&gpu, &film).expect("overwrite path");
+        // Drive the accumulation kernel directly — the same pass the render
+        // paths fold into the wave, here submitted alone against a poisoned
+        // sample the primary kernel could never produce.
+        let overwrite = accumulate_params(&film);
+        gpu.submit_passes(&[renderer.accumulate_pass(&overwrite)])
+            .expect("overwrite path");
         let expected_once = [
             0.0, 0.0, 0.0, 0.0, //
             0.0, 0.0, 0.0, 0.0, //
@@ -914,7 +1024,9 @@ mod tests {
         assert_eq!(download_f32(&gpu, &film.sum), expected_once);
 
         film.samples = 1;
-        renderer.add_sample(&gpu, &film).expect("additive path");
+        let additive = accumulate_params(&film);
+        gpu.submit_passes(&[renderer.accumulate_pass(&additive)])
+            .expect("additive path");
         let doubled: Vec<f32> = expected_once.iter().map(|value| 2.0 * value).collect();
         assert_eq!(download_f32(&gpu, &film.sum), doubled);
     }

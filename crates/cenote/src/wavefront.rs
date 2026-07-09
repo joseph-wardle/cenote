@@ -444,6 +444,40 @@ impl Wavefront {
         height: u32,
         sample: u32,
     ) -> Result<()> {
+        self.trace_then(gpu, scene, radiance, width, height, sample, &[])
+    }
+
+    /// [`Wavefront::trace`], then `trailing` — extra passes appended to the
+    /// same submission, sharing its single fence. The full memory barrier
+    /// [`Context::submit_passes`] places between passes flushes the wave's
+    /// radiance writes before the first trailing pass reads them, so folding
+    /// the film's accumulate and tonemap in here spends one GPU round-trip
+    /// per sample instead of three — bit-for-bit as if they ran as separate
+    /// submissions, since a barrier orders the same writes a fence does.
+    ///
+    /// # Errors
+    ///
+    /// Any [`crate::Error`] from submission.
+    ///
+    /// # Panics
+    ///
+    /// As [`Wavefront::trace`]: on a zero-sized target or a `radiance`
+    /// buffer smaller than it.
+    // The target (radiance, width, height), which sample, and the passes to
+    // append: exactly `trace`'s parameters plus the trailing slice. A struct
+    // would only scatter the call — every caller already hands these same
+    // values to `trace`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn trace_then(
+        &self,
+        gpu: &Context,
+        scene: &Scene,
+        radiance: &Buffer,
+        width: u32,
+        height: u32,
+        sample: u32,
+        trailing: &[Pass],
+    ) -> Result<()> {
         assert!(width > 0 && height > 0, "zero-sized trace target");
         let pixels = u64::from(width) * u64::from(height);
         assert!(
@@ -451,7 +485,9 @@ impl Wavefront {
             "radiance buffer smaller than the target"
         );
         let params = self.wave_params(scene, radiance, width, height, sample);
-        gpu.submit_passes(&self.record_wave(scene, radiance, pixels, &params))
+        let mut passes = self.record_wave(scene, radiance, pixels, &params);
+        passes.extend_from_slice(trailing);
+        gpu.submit_passes(&passes)
     }
 
     /// Every stage's push constants for one wave, built up front so the

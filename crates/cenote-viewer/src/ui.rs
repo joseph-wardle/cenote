@@ -13,11 +13,11 @@ use winit::window::Window;
 /// Numbers the panel displays, measured by the redraw loop.
 #[derive(Default)]
 pub struct FrameStats {
-    /// The last accumulation wave (primary trace + film add, fence-waited),
-    /// and the size it rendered at.
+    /// The last wave — primary trace, film add, and tonemap folded into one
+    /// fence-waited submission — and the size it rendered at.
     pub sample: Duration,
     pub size: (u32, u32),
-    /// The last display pass: tonemap through present.
+    /// The last present.
     pub display: Duration,
     /// Samples in the film's average so far.
     pub samples: u32,
