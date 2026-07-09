@@ -441,3 +441,25 @@ exact (no quads → 1, black environment → 0) because the shader's quad branch
 must never run without a light list. Poles report pdf 0 (the equirect
 Jacobian is singular there): next-event skips such samples and an escaped
 ray's MIS weight becomes 1 — no epsilon, no bias, measure zero.
+
+---
+
+## 2026-07-08 — The demo is a material chart (step 12 polish)
+
+### D-040: Demo spheres form a roughness × metalness grid; the sliders edit the floor (amends D-030 detail)
+The m1 plan's demo was a row of spheres sweeping metalness, with viewer sliders
+applying roughness/metalness uniformly to the whole row. That arrangement was
+self-defeating: dragging the metalness slider flattened the very sweep the row
+existed to show, with no way back. Resolution: the demo becomes the standard
+material chart — a 5 × 3 grid sweeping `specular_roughness` 0 → 1 left to right
+and `metalness` 0 → 1 bottom to top — so the golden pins the whole parameter
+plane (including the energy-compensation fits across the roughness range, which
+the old golden sampled at a single roughness) and the README still shows the
+entire material space at once. The sliders stay, repointed at the floor: they
+remain the only demonstration that an in-place scene edit (a GPU material-buffer
+update mid-accumulation) restarts the estimator — the lookdev half of the thesis,
+and the DoD's "drag material sliders, watch the image re-converge" — and the
+floor is the demo's one uniform surface, the only place a uniform edit is
+coherent. The quad key light moved up out of the taller frame (and its emission
+rose to keep the warm key comparable), preserving the original placement intent:
+a visible blown-out quad reads as an artifact, not a light.

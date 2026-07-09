@@ -3,9 +3,10 @@
 //! table, a pinhole camera, and an equirect environment. All geometry is
 //! procedural and the only file input is the environment EXR (real scene
 //! formats are M2's job); [`Scene::demo`] is the standing test subject — a
-//! row of deliberately faceted spheres sweeping metalness across a glossy
-//! floor, where winding, handedness, or energy mistakes are instantly
-//! visible, under a warm quad light and the bundled Kloofendal sky.
+//! grid of deliberately faceted spheres sweeping roughness × metalness
+//! over a glossy floor, where winding, handedness, or energy mistakes are
+//! instantly visible, under a warm quad light and the bundled Kloofendal
+//! sky.
 
 use std::collections::HashMap;
 
@@ -246,19 +247,27 @@ impl Scene {
         })
     }
 
-    /// Instances `0..DEMO_SPHERES` of [`Scene::demo`] are its sphere row —
-    /// the objects the viewer's material sliders edit.
-    pub const DEMO_SPHERES: usize = 5;
+    /// Grid columns: `specular_roughness` 0 → 1, left to right.
+    const GRID_COLUMNS: usize = 5;
+    /// Grid rows: `metalness` 0 → 1, bottom to top.
+    const GRID_ROWS: usize = 3;
 
-    /// The demo scene: a row of [`Scene::DEMO_SPHERES`] terracotta spheres
-    /// sweeping metalness 1 → 0 left to right — the same base color read
-    /// as a conductor's F0 on the left and a lacquered plastic's diffuse
-    /// base on the right — on a lightly glossy gray floor that mirrors
-    /// them. A warm quad light overhead to the right is the key (its soft
-    /// shadow and warm cast are what next-event estimation resolves), and
-    /// the bundled Kloofendal sky (see `assets/README.md`) fills, backs,
-    /// and reflects — its unclipped sun is the importance-sampling stress
-    /// case the environment tables exist for.
+    /// The floor's instance index in [`Scene::demo`] — the grid's spheres
+    /// come first, so this is also their count. The floor is the one
+    /// uniform surface in the demo, which makes it the object the viewer's
+    /// material sliders edit.
+    pub const DEMO_FLOOR: usize = Self::GRID_COLUMNS * Self::GRID_ROWS;
+
+    /// The demo scene: a terracotta material chart — a grid of spheres
+    /// sweeping `specular_roughness` 0 → 1 left to right and `metalness`
+    /// 0 → 1 bottom to top, the same base color read as a lacquered
+    /// plastic's diffuse base in the bottom row and a conductor's F0 in
+    /// the top — over a lightly glossy gray floor that mirrors it. A warm
+    /// quad light overhead to the left is the key (its soft shadow and
+    /// warm cast are what next-event estimation resolves), and the bundled
+    /// Kloofendal sky (see `assets/README.md`) fills, backs, and reflects
+    /// — its unclipped sun is the importance-sampling stress case the
+    /// environment tables exist for.
     ///
     /// # Errors
     ///
@@ -266,17 +275,21 @@ impl Scene {
     /// builds.
     pub fn demo(gpu: &Context) -> Result<Self> {
         let terracotta = acescg_from_rec709(Vec3::new(0.7, 0.22, 0.08));
-        let mut objects: Vec<Object> = (0..Self::DEMO_SPHERES)
+        let mut objects: Vec<Object> = (0..Self::DEMO_FLOOR)
             .map(|index| {
-                let step = index as f32 / (Self::DEMO_SPHERES - 1) as f32;
+                let (row, column) = (index / Self::GRID_COLUMNS, index % Self::GRID_COLUMNS);
+                let sweep = |step: usize, steps: usize| step as f32 / (steps - 1) as f32;
                 Object {
                     mesh: icosphere(2),
+                    // The bottom row rests on the floor; the rest float
+                    // above it — the standard material-chart layout.
                     transform: Mat4::from_translation(Vec3::new(
-                        1.2 * (index as f32 - 2.0),
-                        0.5,
+                        1.2 * (column as f32 - 2.0),
+                        0.5 + 1.2 * row as f32,
                         0.0,
                     )) * Mat4::from_scale(Vec3::splat(0.5)),
-                    material: Material::glossy(terracotta, 0.4, 0.2).with_metalness(1.0 - step),
+                    material: Material::glossy(terracotta, 0.4, sweep(column, Self::GRID_COLUMNS))
+                        .with_metalness(sweep(row, Self::GRID_ROWS)),
                 }
             })
             .collect();
@@ -289,19 +302,21 @@ impl Scene {
         });
         // A 1.5 m × 1.5 m quad, up and off to the *left* — opposite the
         // HDRI's sun (up-right-behind, 48° elevation), so the spheres are
-        // cross-lit warm/cool. Placed outside the default framing, and
-        // high enough that the shadow it cuts out of the sunlight lands
-        // outside the frame too, instead of reading as a dark artifact.
+        // cross-lit warm/cool. Placed outside the default framing (above
+        // the frame's top edge, ~y 4.8 at the quad's depth), and high
+        // enough that the shadow it cuts out of the sunlight lands outside
+        // the frame too, instead of reading as a dark artifact.
         objects.push(Object {
             mesh: ground_plane(0.75),
-            transform: Mat4::from_translation(Vec3::new(-3.5, 4.2, 1.0)),
-            material: Material::emitter(acescg_from_rec709(Vec3::new(1.0, 0.85, 0.6)) * 12.0),
+            transform: Mat4::from_translation(Vec3::new(-3.5, 5.4, 1.0)),
+            material: Material::emitter(acescg_from_rec709(Vec3::new(1.0, 0.85, 0.6)) * 18.0),
         });
-        // Above and behind, looking slightly down the row so the floor
-        // (and its reflections) fill the lower frame.
+        // A little above the grid's center and pulled back far enough that
+        // the whole chart fits a square frame (the goldens'), with the
+        // floor and its reflections along the lower edge.
         let camera = Camera {
-            position: Vec3::new(0.0, 2.0, 8.5),
-            look_at: Vec3::new(0.0, 0.5, 0.0),
+            position: Vec3::new(0.0, 2.6, 9.5),
+            look_at: Vec3::new(0.0, 1.7, 0.0),
             vfov_degrees: 40.0,
         };
         // Loaded from the dev tree rather than embedded: at 4k the asset

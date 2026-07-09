@@ -1,6 +1,6 @@
 //! The overlay UI: device and frame stats, the live exposure control, and
-//! the material sliders that edit the demo's sphere row in place — drag
-//! one and the render re-converges under the new surface.
+//! the material sliders that edit the demo's floor in place — drag one and
+//! the render re-converges under the new surface.
 //!
 //! This is the egui half of the overlay — input translation, layout,
 //! tessellation. The Vulkan half lives behind the core's `gpu` quarantine
@@ -30,9 +30,9 @@ pub struct Gui {
     state: egui_winit::State,
     /// Exposure in stops, applied by the tonemap kernel.
     exposure: f32,
-    /// `OpenPBR` specular roughness applied to the demo spheres.
+    /// `OpenPBR` specular roughness applied to the demo's floor.
     roughness: f32,
-    /// `OpenPBR` metalness applied to the demo spheres.
+    /// `OpenPBR` metalness applied to the demo's floor.
     metalness: f32,
 }
 
@@ -50,9 +50,9 @@ impl Gui {
         Self {
             state,
             exposure: 0.0,
-            // Match the demo's sphere row, so nothing jumps until dragged.
-            roughness: 0.2,
-            metalness: 0.5,
+            // Match the demo's floor, so nothing jumps until dragged.
+            roughness: 0.15,
+            metalness: 0.0,
         }
     }
 
@@ -62,7 +62,7 @@ impl Gui {
     }
 
     /// The material sliders' current (specular roughness, metalness) —
-    /// the redraw loop applies them to the demo spheres when they change.
+    /// the redraw loop applies them to the demo's floor when they change.
     pub fn material(&self) -> (f32, f32) {
         (self.roughness, self.metalness)
     }
@@ -121,7 +121,7 @@ impl Gui {
                 ui.add(egui::Slider::new(&mut self.roughness, 0.0..=1.0).text("roughness"));
                 ui.add(egui::Slider::new(&mut self.metalness, 0.0..=1.0).text("metalness"));
                 ui.label(
-                    egui::RichText::new("applied to the sphere row; the render re-converges")
+                    egui::RichText::new("edits the floor in place; the render re-converges")
                         .small()
                         .weak(),
                 );

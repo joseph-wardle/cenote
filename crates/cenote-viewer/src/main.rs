@@ -1,10 +1,10 @@
 //! Interactive viewer: the render live in a window, under an orbit camera,
-//! progressively accumulated, with an egui stats/controls overlay. M1 build
-//! steps 2–10 — every sample is a full path-traced estimate of the `OpenPBR`
-//! lobe mix (EON diffuse, energy-compensated GGX conductor and dielectric
-//! specular) under MIS-weighted direct light sampling of the quad lights
-//! and the importance-sampled HDRI environment, so the image starts noisy
-//! and visibly converges as the spp counter climbs.
+//! progressively accumulated, with an egui stats/controls overlay. Every
+//! sample is a full path-traced estimate of the `OpenPBR` lobe mix (EON
+//! diffuse, energy-compensated GGX conductor and dielectric specular)
+//! under MIS-weighted direct light sampling of the quad lights and the
+//! importance-sampled HDRI environment, so the image starts noisy and
+//! visibly converges as the spp counter climbs.
 //!
 //! Single-threaded, and self-scheduling once visible: every redraw
 //! accumulates one sample into the film, tonemaps (live exposure), presents,
@@ -103,7 +103,7 @@ struct Viewer {
     orbiting: bool,
     /// Cursor position at the last `CursorMoved`, for drag deltas.
     cursor: Option<PhysicalPosition<f64>>,
-    /// The material-slider values already applied to the sphere row —
+    /// The material-slider values already applied to the demo's floor —
     /// seeded from the sliders' initial positions, so startup never
     /// touches the scene.
     applied_material: (f32, f32),
@@ -223,17 +223,19 @@ impl Viewer {
         let film = self.film.as_mut().expect("created just above");
 
         // A material-slider drag (from last frame's UI pass) edits the
-        // sphere row in place; the stale accumulation restarts.
+        // floor in place; the stale accumulation restarts. The floor and
+        // not the sphere grid: the grid's parameters are its axes, and the
+        // floor is the demo's one uniform surface — the only place a
+        // uniform edit is coherent.
         let (roughness, metalness) = self.gui.material();
         if self.applied_material != (roughness, metalness) {
-            for index in 0..cenote::scene::Scene::DEMO_SPHERES {
-                let mut edited = self.scene.material(index);
-                edited.specular_roughness = roughness;
-                edited.metalness = metalness;
-                self.scene
-                    .set_material(&self.gpu, index, edited)
-                    .context("updating a material")?;
-            }
+            let floor = cenote::scene::Scene::DEMO_FLOOR;
+            let mut edited = self.scene.material(floor);
+            edited.specular_roughness = roughness;
+            edited.metalness = metalness;
+            self.scene
+                .set_material(&self.gpu, floor, edited)
+                .context("updating the floor material")?;
             film.reset();
             self.applied_material = (roughness, metalness);
         }

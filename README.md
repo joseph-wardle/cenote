@@ -10,14 +10,23 @@ Where CPU production renderers optimize for memory capacity on unbounded scenes,
 Cenote makes the inverse bet: extreme single-GPU performance on scenes that fit in
 VRAM. Wavefront compute + ray queries, one integrator, everything resident.
 
-**Status: M0 complete** — device bring-up, acceleration structures, an inline
-ray-query kernel, sub-second shader hot reload, and golden-image tests.
+**Status: M1 complete** — the six-kernel wavefront engine (indirect dispatch,
+zero mid-frame readbacks), Sobol-Burley sampling, `OpenPBR` lobes with GGX
+energy compensation, MIS-weighted next-event estimation of quad lights and an
+importance-sampled HDRI, a progressive viewer, and a batch CLI that writes
+exactly the image the viewer converges to.
 
-![A faceted icosphere resting on a ground plane, shaded as geometric normals — a pastel rainbow sphere over a green floor against a black sky](docs/demo.png)
+![A grid of faceted terracotta spheres — roughness increasing left to right, metalness bottom to top — floating over a glossy gray floor under a blue sky](docs/demo.png)
 
-*The M0 demo image: geometric normals as color, traced with ray queries
-against a real two-instance acceleration structure. Deliberately faceted —
-a winding or handedness bug would scramble the rainbow.*
+*The M1 demo: a material chart sweeping `OpenPBR` roughness (left to right)
+and metalness (bottom to top), path traced under the Kloofendal sky's sun
+and a warm quad key light. Deliberately faceted — a shading-normal or
+energy bug would show as a wrong or flat facet.*
+
+![Four crops of the same render at 1, 8, 64, and 512 samples per pixel, the noise resolving away left to right](docs/convergence.png)
+
+*The thesis in one strip: 1, 8, 64, and 512 spp are the same estimator —
+noise is the only difference between preview and final.*
 
 ## Quickstart
 
@@ -26,8 +35,15 @@ Requires: stable Rust, [`slangc`](https://github.com/shader-slang/slang) on PATH
 `VK_KHR_ray_query` support (any recent RT-capable card).
 
 ```sh
-cargo run -p cenote-cli
+cargo run --release -p cenote-viewer   # orbit (drag), dolly (scroll), live material sliders
+cargo run --release -p cenote-cli -- --spp 256 --out shot.exr
 ```
+
+The viewer accumulates forever and re-converges after every camera move or
+material edit. The CLI accumulates `--spp` samples of the same estimator
+into the same film and writes the linear `ACEScg` average as an EXR
+(chromaticities declared in the header); with `--watch` it re-renders on
+every shader edit, recompiling from the source checkout in under a second.
 
 ## Tests and goldens
 

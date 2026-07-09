@@ -31,10 +31,11 @@ const SIZE: u32 = 256;
 /// silhouette) lands well above it.
 const MAX_MEAN_FLIP: f32 = 0.01;
 
-/// The demo image at 1 spp: the metalness row of terracotta spheres on
-/// the glossy floor, cross-lit by the Kloofendal HDRI's sun and the warm
-/// quad — path traced with MIS, so the golden pins the whole estimator
-/// (offsets, `OpenPBR` lobes, NEE weights, environment tables, sampler)
+/// The demo image at 1 spp: the roughness × metalness grid of terracotta
+/// spheres over the glossy floor, cross-lit by the Kloofendal HDRI's sun
+/// and the warm quad — path traced with MIS, so the golden pins the whole
+/// estimator (offsets, `OpenPBR` lobes and their energy-compensation fits
+/// across the roughness range, NEE weights, environment tables, sampler)
 /// at a fixed seed.
 #[test]
 fn demo_scene_matches_golden() {

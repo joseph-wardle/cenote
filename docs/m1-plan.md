@@ -3,8 +3,8 @@
 *Decisions locked 2026-07-07 via structured interview, then amended the same day after
 a sourced review against Cycles X's source, MoonRay, and current research (see
 D-032…D-037). Parent scope is charter §4 M1: wavefront core + first light. Decisions
-D-020…D-037 in [decisions.md](decisions.md) carry the full rationale; this file is the
-working plan.*
+D-020…D-040 in [decisions.md](decisions.md) carry the full rationale (D-038…D-040
+were recorded during implementation); this file is the working plan.*
 
 ---
 

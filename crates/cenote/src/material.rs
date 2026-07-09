@@ -90,8 +90,8 @@ impl Material {
         }
     }
 
-    /// The same surface at a different conductor blend — how the demo
-    /// sweeps a row of spheres from metal to plastic.
+    /// The same surface at a different conductor blend — how the demo's
+    /// grid sweeps its spheres from plastic to metal.
     #[must_use]
     pub fn with_metalness(self, metalness: f32) -> Self {
         Self { metalness, ..self }

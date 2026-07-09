@@ -17,7 +17,7 @@
 //! | `color`     | Authored `Rec.709` → `ACEScg` conversion at scene prep |
 //! | `wavefront` | The engine core: `SoA` path state, GPU stage queues, indirect dispatch — one [`wavefront::Wavefront::trace`] is one sample per pixel |
 //! | `render`    | Frame orchestration: one-shot linear frames for the CLI and tests, and the progressive path — [`render::Renderer`] accumulates samples into a [`render::Film`] and tonemaps (ACES) for display |
-//! | `output`    | Linear EXR write + read (read exists for the golden-image tests in `tests/golden.rs`) |
+//! | `output`    | Linear EXR write + read (read exists for the golden-image tests and the demo environment) |
 //! | `error`     | The crate-wide [`enum@Error`] |
 //!
 //! # Conventions
