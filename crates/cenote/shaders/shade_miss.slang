@@ -21,12 +21,6 @@ struct Params {
 [vk::push_constant]
 Params params;
 
-// Veach's power heuristic (β = 2) — see shade_surface.slang, whose
-// next-event weights these complete.
-float powerHeuristic(float p, float q) {
-    return (p * p) / (p * p + q * q);
-}
-
 [shader("compute")]
 [numthreads(WORKGROUP_SIZE, 1, 1)]
 void shade_miss(uint3 tid: SV_DispatchThreadID) {

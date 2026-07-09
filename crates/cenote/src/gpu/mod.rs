@@ -33,8 +33,9 @@ pub use accel::{AccelerationStructure, TlasInstance};
 pub use buffer::{Buffer, MemoryLocation};
 pub use image::SampledImage;
 pub use overlay::GuiFrame;
-pub use pipeline::{Bindings, ComputePipeline, Pass, SceneBindings};
+pub use pipeline::{Bindings, ComputePipeline, SceneBindings};
 pub use present::Presenter;
+pub use submit::Pass;
 
 use init::DebugMessenger;
 
@@ -182,27 +183,31 @@ impl Context {
         self.device_type
     }
 
+    // The raw-handle accessors below are `pub(super)`: the quarantine —
+    // code outside `gpu` never touches raw `vk` handles — is enforced by
+    // the compiler, not by convention.
+
     /// The logical device. Handles derived from it must not outlive `self`.
     #[must_use]
-    pub fn device(&self) -> &ash::Device {
+    pub(super) fn device(&self) -> &ash::Device {
         &self.device
     }
 
     /// The one compute queue — every submission in the crate goes through it.
     #[must_use]
-    pub fn queue(&self) -> vk::Queue {
+    pub(super) fn queue(&self) -> vk::Queue {
         self.queue
     }
 
     /// Family index [`Self::queue`] belongs to.
     #[must_use]
-    pub fn queue_family_index(&self) -> u32 {
+    pub(super) fn queue_family_index(&self) -> u32 {
         self.queue_family_index
     }
 
     /// The selected physical device.
     #[must_use]
-    pub fn physical_device(&self) -> vk::PhysicalDevice {
+    pub(super) fn physical_device(&self) -> vk::PhysicalDevice {
         self.physical_device
     }
 

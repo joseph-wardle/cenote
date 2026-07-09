@@ -23,6 +23,16 @@ public static const uint LIGHT_SAMPLING_MIS = 0;
 public static const uint LIGHT_SAMPLING_BSDF = 1;
 public static const uint LIGHT_SAMPLING_NEE = 2;
 
+// Veach's power heuristic (β = 2): the weight of a sample drawn from the
+// strategy with pdf `p` when the strategy with pdf `q` could have produced
+// it too. The weights of the two draws sum to 1, so combining strategies
+// stays unbiased; squaring favors whichever pdf is sharper. Shared by the
+// two kernels that weigh next-event against BSDF sampling (shade_surface,
+// shade_miss).
+public float powerHeuristic(float p, float q) {
+    return (p * p) / (p * p + q * q);
+}
+
 // One quad light. Selection is a power-proportional alias table — one slot
 // per light — so each record carries its own slot (`aliasThreshold`,
 // `aliasIndex`) in what std430 would otherwise spend on padding: one

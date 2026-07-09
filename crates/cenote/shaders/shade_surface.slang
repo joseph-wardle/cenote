@@ -41,14 +41,6 @@ Params params;
 // survivors are reweighted to keep the estimate unbiased.
 static const uint ROULETTE_START = 3;
 
-// Veach's power heuristic (β = 2): the weight of a sample drawn from the
-// strategy with pdf `p` when the strategy with pdf `q` could have produced
-// it too. The weights of the two draws sum to 1, so combining strategies
-// stays unbiased; squaring favors whichever pdf is sharper.
-float powerHeuristic(float p, float q) {
-    return (p * p) / (p * p + q * q);
-}
-
 // One float3 out of a tightly packed vertex-attribute buffer.
 float3 fetch3(float* attributes, uint vertex) {
     return float3(attributes[3 * vertex],

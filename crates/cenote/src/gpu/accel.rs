@@ -3,7 +3,7 @@
 //!
 //! Builds run as blocking one-shot submits, so scratch memory and
 //! the instance staging buffer live only for the call. The shape is
-//! deliberately minimal — no compaction, no refits — because every M0
+//! deliberately minimal — no compaction, no refits — because every
 //! structure is built exactly once; rebuilds only become interesting with
 //! dynamic scenes, which nothing on the roadmap requires.
 

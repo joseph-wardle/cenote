@@ -95,8 +95,9 @@ struct SceneTable {
     env_pdfs: vk::DeviceAddress,
     env_width: u32,
     env_height: u32,
-    /// p(next-event estimation samples the environment rather than a quad).
-    env_selection: f32,
+    /// p(next-event estimation samples the environment rather than a quad) —
+    /// `selectProb` on the Slang side.
+    env_select_prob: f32,
     _pad0: u32,
     light_count: u32,
     _pad1: u32,
@@ -233,7 +234,7 @@ impl Scene {
             env_pdfs: env.pdfs.device_address(),
             env_width: environment.width(),
             env_height: environment.height(),
-            env_selection: env.selection,
+            env_select_prob: env.select_prob,
             _pad0: 0,
             light_count: light_records.len() as u32,
             _pad1: 0,
@@ -521,17 +522,18 @@ struct GpuEnvironment {
     marginal: Buffer,
     conditional: Buffer,
     pdfs: Buffer,
-    selection: f32,
+    select_prob: f32,
 }
 
 /// Upload the environment's image and sampling tables, and weigh it
 /// against the quad lights: the power-proportional probability that
 /// next-event estimation samples the environment rather than a quad.
-/// Quads weigh π × luminance × area (one face's exitance-weighted flux);
-/// the environment weighs its luminance integral over the sphere, which
-/// is a flux per unit receiver area — the comparison implicitly stands in
-/// a ~1 m² receiver, a heuristic that only noise, never correctness,
-/// rides on. The exact-0/exact-1 endpoints *are* load-bearing: the shader
+/// Quads weigh π × luminance × area — one face's exitance-weighted flux,
+/// though the quad emits from both; the environment weighs its luminance
+/// integral over the sphere, which is a flux per unit receiver area — the
+/// comparison implicitly stands in a ~1 m² receiver. Both approximations
+/// (the one-face flux, the unit receiver) only steer noise: the MIS
+/// weights stay exact whatever this probability is. The exact-0/exact-1 endpoints *are* load-bearing: the shader
 /// walks the quad list whenever its draw lands above `selection`, so a
 /// lightless scene must pin it to 1, and a black environment (with no
 /// quads either) disables next-event estimation entirely.
@@ -542,7 +544,7 @@ fn upload_environment(
 ) -> Result<GpuEnvironment> {
     let tables = environment.tables();
     let quad_power = std::f64::consts::PI * crate::lights::total_power(quads);
-    let selection = if quad_power == 0.0 {
+    let select_prob = if quad_power == 0.0 {
         f32::from(u8::from(tables.power > 0.0))
     } else {
         (tables.power / (tables.power + quad_power)) as f32
@@ -567,7 +569,7 @@ fn upload_environment(
             usage,
         )?,
         pdfs: gpu.upload_buffer("scene.env.pdfs", bytemuck::cast_slice(&tables.pdfs), usage)?,
-        selection,
+        select_prob,
     })
 }
 

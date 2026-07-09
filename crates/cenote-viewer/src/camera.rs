@@ -78,8 +78,8 @@ mod tests {
     use super::*;
 
     fn demo_pose() -> Camera {
-        // The M0 demo camera (scene.rs), so the tests pin the pose the
-        // viewer actually opens with.
+        // Any representative off-axis pose does — these tests exercise the
+        // orbit math, not the demo scene's authored camera.
         Camera {
             position: Vec3::new(0.0, 1.8, 5.0),
             look_at: Vec3::new(0.0, 1.0, 0.0),

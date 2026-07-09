@@ -10,11 +10,11 @@
 
 // Everything the kernel reads, visible in one struct.
 struct Params {
-    float4* frame; // the new sample, row-major width×height
-    float4* sum;   // the film's running sums, same layout
+    float4* sample; // the new sample, row-major width×height
+    float4* sum;    // the film's running sums, same layout
     uint width;
     uint height;
-    uint reset;    // bool: overwrite instead of add
+    uint reset;     // bool: overwrite instead of add
     uint pad0;
 };
 
@@ -29,7 +29,7 @@ void accumulate(uint3 tid: SV_DispatchThreadID) {
     }
     uint pixel = tid.y * params.width + tid.x;
 
-    var contribution = params.frame[pixel];
+    var contribution = params.sample[pixel];
     if (any(isnan(contribution)) || any(isinf(contribution))) {
         contribution = float4(0.0);
     }

@@ -12,8 +12,9 @@
 //! image is handed to the presentation engine.
 //!
 //! Pacing matches the crate's blocking-submit model: one frame in flight,
-//! fence-waited before [`Presenter::present`] returns. Timeline-semaphore
-//! pacing (D-022) arrives with the wavefront loop, not here.
+//! fence-waited before [`Presenter::present`] returns. Overlapping frames
+//! with timeline-semaphore pacing waits until the render loop is fast
+//! enough to be bound by it — not this milestone.
 
 use std::slice;
 use std::sync::{Arc, Mutex};
@@ -23,6 +24,8 @@ use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, 
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 use crate::error::{Error, Result};
+use crate::gpu::buffer::free_allocation;
+use crate::gpu::image::image_barrier;
 use crate::gpu::overlay::{GuiFrame, OverlayRenderer};
 use crate::gpu::{Buffer, Context, MemoryLocation};
 
@@ -722,7 +725,7 @@ impl Presenter {
         };
         if let Err(err) = bound {
             unsafe { self.device.destroy_image(image, None) };
-            free_allocation(&self.allocator, allocation);
+            free_allocation(&self.allocator, allocation, "transfer-image");
             return Err(err.into());
         }
 
@@ -738,7 +741,7 @@ impl Presenter {
     fn destroy_transfer_image(&mut self) {
         if let Some(transfer) = self.transfer.take() {
             unsafe { self.device.destroy_image(transfer.image, None) };
-            free_allocation(&self.allocator, transfer.allocation);
+            free_allocation(&self.allocator, transfer.allocation, "transfer-image");
         }
     }
 }
@@ -802,17 +805,6 @@ fn probe_surface(
         .unwrap_or(formats[0]))
 }
 
-fn free_allocation(allocator: &Arc<Mutex<Allocator>>, allocation: Allocation) {
-    match allocator.lock() {
-        Ok(mut allocator) => {
-            if let Err(err) = allocator.free(allocation) {
-                log::error!("failed to free transfer-image allocation: {err}");
-            }
-        }
-        Err(_) => log::error!("allocator mutex poisoned — leaking transfer-image allocation"),
-    }
-}
-
 /// Record a blit of all of `src` onto all of `dst` (each given with its
 /// width and height): bilinear rescale plus the formats' conversion —
 /// between two sRGB images, a decode, linear-light filter, and lossless
@@ -842,33 +834,4 @@ fn blit_whole_image(
         .regions(slice::from_ref(&blit))
         .filter(vk::Filter::LINEAR);
     unsafe { device.cmd_blit_image2(cmd, &info) };
-}
-
-/// Record one full-image layout transition, `(old, new)` layouts ordered
-/// between the `(stage, access)` source and destination scopes.
-fn image_barrier(
-    device: &ash::Device,
-    cmd: vk::CommandBuffer,
-    image: vk::Image,
-    (old_layout, new_layout): (vk::ImageLayout, vk::ImageLayout),
-    (src_stage, src_access): (vk::PipelineStageFlags2, vk::AccessFlags2),
-    (dst_stage, dst_access): (vk::PipelineStageFlags2, vk::AccessFlags2),
-) {
-    let barrier = vk::ImageMemoryBarrier2::default()
-        .src_stage_mask(src_stage)
-        .src_access_mask(src_access)
-        .dst_stage_mask(dst_stage)
-        .dst_access_mask(dst_access)
-        .old_layout(old_layout)
-        .new_layout(new_layout)
-        .image(image)
-        .subresource_range(vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0,
-            level_count: 1,
-            base_array_layer: 0,
-            layer_count: 1,
-        });
-    let info = vk::DependencyInfo::default().image_memory_barriers(slice::from_ref(&barrier));
-    unsafe { device.cmd_pipeline_barrier2(cmd, &info) };
 }

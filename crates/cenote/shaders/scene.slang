@@ -1,7 +1,8 @@
 // The GPU scene, reached through one `SceneTable` of buffer addresses that
-// mirrors `Scene` in `scene.rs`: kernels carry a single scene pointer in
-// their push constants, and new scene-wide tables land here without
-// growing any kernel's parameter block.
+// mirrors `struct SceneTable` in `scene.rs` (not the resource-owning
+// `struct Scene` beside it): kernels carry a single scene pointer in their
+// push constants, and new scene-wide tables land here without growing any
+// kernel's parameter block.
 
 import environment;
 import lights;

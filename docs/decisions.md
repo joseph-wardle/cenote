@@ -500,3 +500,40 @@ history, and the live-edit story returns properly with M2's interactive
 lookdev. The floor keeps the one good material the sliders defaulted to
 (gray, `base_roughness` 0.1, `specular_roughness` 0.15). The viewer's
 overlay keeps stats and exposure.
+
+---
+
+## 2026-07-08 — M1 code-review pass; timeline pacing formally deferred
+
+### D-043: Timeline-semaphore frame pacing is deferred, not dropped (records a gap in D-025)
+D-025's M1 plan described the render loop as sequential waves under
+timeline-semaphore pacing. What shipped is the M0 blocking-submit model
+throughout: every wave, every film pass, and every present is one
+fence-waited submission, and `submit.rs` / `present.rs` now say so plainly in
+their headers. That model is correct and bitwise-deterministic, but it
+serializes stages that could overlap and idles the GPU on each fence — the
+interactive thesis will eventually be bound by it. The decision: keep the
+blocking model for now (it is the simple, obviously-correct baseline, and the
+*estimator* — not the frame loop — is what M1 had to prove), and land timeline
+pacing, narrowed per-stage barriers, and folding the accumulate/tonemap passes
+into the wave submission as one measured performance pass before M3's ReSTIR
+demo, where the interactive claim actually needs the frame loop. Recorded here
+because this log is otherwise scrupulous about matching the code, and the
+render loop was the one place it had drifted.
+
+This entry closes a review of all of M1's code along three axes — readability,
+architecture against Cycles X / MoonRay / recent research, and discoverability.
+The review found the estimator correct by its existing tests (the furnace
+matrix, MIS agreement under both light types, bitwise replay) and needing no
+change; the ReSTIR seams the charter promises verifiably exist in the code.
+Its other outputs were cleanups, not decisions, and shipped alongside this
+entry: the `gpu` raw-handle quarantine is now compiler-enforced (`pub(super)`
+instead of `pub`), pass submission moved out of `pipeline.rs` into the
+like-named `submit.rs`, duplicated helpers (`image_barrier`, allocation-free,
+the `powerHeuristic` MIS weight) were unified, cross-language mirror names were
+aligned (`sample_index`, `select_prob`), stale milestone comments were swept,
+and the `SceneTable`/`Environment` byte-mirror cross-references were corrected.
+Two deeper follow-ups were logged for their milestones rather than done now:
+reserving sampler-dimension headroom before more goldens exist, and designing
+a per-pixel G-buffer once to serve both OIDN AOVs and ReSTIR neighbor
+validation.

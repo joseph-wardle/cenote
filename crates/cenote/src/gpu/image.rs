@@ -12,6 +12,7 @@ use ash::vk;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 
 use crate::error::{Error, Result};
+use crate::gpu::buffer::free_allocation;
 use crate::gpu::{Context, MemoryLocation};
 
 /// A 2D RGBA `f32` image with a view and its sampler, ready to bind for
@@ -46,14 +47,7 @@ impl Drop for SampledImage {
             self.device.destroy_image(self.image, None);
         }
         let allocation = unsafe { ManuallyDrop::take(&mut self.allocation) };
-        match self.allocator.lock() {
-            Ok(mut allocator) => {
-                if let Err(err) = allocator.free(allocation) {
-                    log::error!("failed to free image allocation: {err}");
-                }
-            }
-            Err(_) => log::error!("allocator mutex poisoned — leaking image allocation"),
-        }
+        free_allocation(&self.allocator, allocation, "image");
     }
 }
 
@@ -204,7 +198,7 @@ impl Context {
     ) -> Result<()> {
         let staging = self.staging_buffer("image.staging", bytemuck::cast_slice(texels))?;
         self.submit_once(|device, cmd| {
-            barrier(
+            image_barrier(
                 device,
                 cmd,
                 sampled.image,
@@ -239,7 +233,7 @@ impl Context {
                     slice::from_ref(&region),
                 );
             }
-            barrier(
+            image_barrier(
                 device,
                 cmd,
                 sampled.image,
@@ -260,8 +254,10 @@ impl Context {
     }
 }
 
-/// One full-image layout transition between the given stage/access scopes.
-fn barrier(
+/// One full-image layout transition, `(old, new)` layouts ordered between
+/// the `(stage, access)` source and destination scopes. Shared with
+/// `present.rs`, the other module recording image transitions.
+pub(super) fn image_barrier(
     device: &ash::Device,
     cmd: vk::CommandBuffer,
     image: vk::Image,

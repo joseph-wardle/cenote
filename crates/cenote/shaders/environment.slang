@@ -57,10 +57,11 @@ CdfSlot sampleCdf(float* cdf, uint count, float u) {
     return slot;
 }
 
-// The environment as the scene table carries it. Mirrors the table layout
-// `environment.rs` builds; `selectProb` is scene prep's power-proportional
-// probability that next-event estimation samples the environment rather
-// than a quad light.
+// The environment as the scene table carries it. Its byte layout is the
+// `env_*` fields of `struct SceneTable` in `scene.rs` (flattened there, not
+// nested); the CDF tables it points into are built by `environment.rs`.
+// `selectProb` is scene prep's power-proportional probability that
+// next-event estimation samples the environment rather than a quad light.
 public struct Environment {
     float* marginalCdf;    // height + 1 entries: CDF over rows
     float* conditionalCdf; // height runs of width + 1: per-row CDF

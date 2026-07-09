@@ -46,7 +46,7 @@ pub struct Kernels {
     pub raygen: Kernel,
     /// Pure TLAS traversal; routes each path to hit or miss.
     pub intersect: Kernel,
-    /// Escaped rays (constant sky until the HDRI lands).
+    /// Escaped rays: the environment's radiance, MIS-weighted.
     pub shade_miss: Kernel,
     /// Surface shading and path termination/continuation.
     pub shade_surface: Kernel,

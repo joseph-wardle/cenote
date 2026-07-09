@@ -28,9 +28,10 @@ pub struct Buffer {
 }
 
 impl Buffer {
-    /// The raw handle, for recording commands against.
+    /// The raw handle, for recording commands against. Stays inside `gpu`:
+    /// the quarantine boundary.
     #[must_use]
-    pub fn handle(&self) -> vk::Buffer {
+    pub(super) fn handle(&self) -> vk::Buffer {
         self.handle
     }
 
@@ -58,14 +59,26 @@ impl Drop for Buffer {
     fn drop(&mut self) {
         unsafe { self.device.destroy_buffer(self.handle, None) };
         let allocation = unsafe { ManuallyDrop::take(&mut self.allocation) };
-        match self.allocator.lock() {
-            Ok(mut allocator) => {
-                if let Err(err) = allocator.free(allocation) {
-                    log::error!("failed to free buffer allocation: {err}");
-                }
+        free_allocation(&self.allocator, allocation, "buffer");
+    }
+}
+
+/// Return an allocation to the shared allocator, logging rather than
+/// panicking on failure — a `Drop` path can't propagate an error, and a
+/// leak is preferable to unwinding through it. `what` names the resource in
+/// those logs. Shared by every `gpu` type that frees an allocation on drop.
+pub(super) fn free_allocation(
+    allocator: &Arc<Mutex<Allocator>>,
+    allocation: Allocation,
+    what: &str,
+) {
+    match allocator.lock() {
+        Ok(mut allocator) => {
+            if let Err(err) = allocator.free(allocation) {
+                log::error!("failed to free {what} allocation: {err}");
             }
-            Err(_) => log::error!("allocator mutex poisoned — leaking buffer allocation"),
         }
+        Err(_) => log::error!("allocator mutex poisoned — leaking {what} allocation"),
     }
 }
 

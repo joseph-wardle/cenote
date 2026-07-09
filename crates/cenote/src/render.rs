@@ -33,9 +33,10 @@ use crate::shaders::Kernels;
 use crate::wavefront::{LightSampling, Wavefront};
 
 /// Workgroup width/height — must match `[numthreads(8, 8, 1)]` in the film
-/// kernels (`accumulate.slang`, `tonemap.slang`). The wavefront's 1D path
-/// kernels have their own workgroup size, over in `wavefront.rs`.
-const WORKGROUP_SIZE: u32 = 8;
+/// kernels (`accumulate.slang`, `tonemap.slang`). Named apart from the
+/// wavefront's 1D `WORKGROUP_SIZE` (`wavefront.rs`), which is a different
+/// value governing a different kernel family.
+const FILM_WORKGROUP_SIZE: u32 = 8;
 
 /// Push constants for the accumulation kernel; mirrors `struct Params` in
 /// `shaders/accumulate.slang`.
@@ -43,7 +44,7 @@ const WORKGROUP_SIZE: u32 = 8;
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct AccumulateParams {
     /// Device address of the new sample (`float4*`).
-    frame: vk::DeviceAddress,
+    sample: vk::DeviceAddress,
     /// Device address of the film's running sums (`float4*`).
     sum: vk::DeviceAddress,
     width: u32,
@@ -383,7 +384,7 @@ impl Renderer {
     /// overwriting when the film is empty.
     fn add_sample(&self, gpu: &Context, film: &Film) -> Result<()> {
         let params = AccumulateParams {
-            frame: film.sample.device_address(),
+            sample: film.sample.device_address(),
             sum: film.sum.device_address(),
             width: film.width,
             height: film.height,
@@ -402,8 +403,8 @@ impl Renderer {
 /// 2D dispatch covering every pixel of a `width`×`height` target.
 fn workgroups(width: u32, height: u32) -> [u32; 3] {
     [
-        width.div_ceil(WORKGROUP_SIZE),
-        height.div_ceil(WORKGROUP_SIZE),
+        width.div_ceil(FILM_WORKGROUP_SIZE),
+        height.div_ceil(FILM_WORKGROUP_SIZE),
         1,
     ]
 }

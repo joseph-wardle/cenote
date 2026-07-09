@@ -91,7 +91,7 @@ struct RaygenParams {
     paths: PathsAddrs,
     rays: QueueAddrs,
     /// Which sample of every pixel's sequence this wave traces.
-    sample: u32,
+    sample_index: u32,
     /// Aligns the camera block to the 16-byte stride std430 gives its
     /// `float3`s (`Pod` forbids implicit padding bytes).
     _pad0: u32,
@@ -148,7 +148,7 @@ struct ShadeSurfaceParams {
     scene: vk::DeviceAddress,
     radiance: vk::DeviceAddress,
     /// Which sample of every pixel's sequence this wave traces.
-    sample: u32,
+    sample_index: u32,
     /// Which bounce of the wave this dispatch shades.
     bounce: u32,
     /// Path-length cap: the dispatch at `max_bounces - 1` never continues.
@@ -167,10 +167,9 @@ struct TraceShadowParams {
 
 /// The `SoA` path state: one GPU buffer per logical field, `capacity` slots
 /// each. The Rust half of the path-state schema — `struct Paths` in
-/// `shaders/pathstate.slang` mirrors it field for field. Later M1 steps
-/// grow it (throughput, `prev_bsdf_pdf`, flags, …); each new field is a
-/// buffer here, an address in [`PathsAddrs`], and a pointer in the Slang
-/// struct.
+/// `shaders/pathstate.slang` mirrors it field for field. Adding a field
+/// (flags, reservoirs, …) is a buffer here, an address in [`PathsAddrs`],
+/// and a pointer in the Slang struct — no kernel signature changes.
 struct PathPool {
     /// xyz = ray origin; 16 B/path.
     origin: Buffer,
@@ -180,7 +179,9 @@ struct PathPool {
     pixel: Buffer,
     /// Hit record — instance + primitive + barycentrics; 16 B/path.
     hit: Buffer,
-    /// xyz = the path's accumulated weight; 16 B/path.
+    /// xyz = the path's accumulated weight; w = the solid-angle pdf of the
+    /// scatter that produced this ray (0 on camera rays), kept for the next
+    /// vertex's MIS weight; 16 B/path.
     throughput: Buffer,
 }
 
@@ -343,9 +344,10 @@ impl Wavefront {
     /// — and comfortably covers a viewer-sized window in one.
     pub const DEFAULT_CAPACITY: u32 = 1 << 20;
 
-    /// Default path-length cap: with only diffuse bounces and a bright sky,
-    /// throughput past this depth is visually nil, and Russian roulette has
-    /// usually settled paths well before it.
+    /// Default path-length cap. Deep bounces matter only to near-specular
+    /// chains — Russian roulette settles everything else well before the
+    /// cap — and eight covers the deepest transport the demo makes visible
+    /// (mirror spheres reflecting each other's reflections) with margin.
     pub const DEFAULT_MAX_BOUNCES: u32 = 8;
 
     /// Build the five stage pipelines and allocate the pool and queues.
@@ -408,8 +410,9 @@ impl Wavefront {
     }
 
     /// Trace one sample: one full path per pixel of a `width`×`height`
-    /// target — camera ray, per-bounce direct-light sampling, diffuse
-    /// bounces, Russian roulette from bounce 3 — with the path's radiance
+    /// target — camera ray, then per bounce an MIS-weighted direct-light
+    /// sample and an `OpenPBR` scatter, Russian roulette from bounce 3 —
+    /// with the path's radiance
     /// accumulated into `radiance` (zero-filled first; needs
     /// `TRANSFER_DST`) as row-major RGBA `f32`, pixel (0, 0) top-left,
     /// alpha 1 exactly once per pixel. One blocking submission; targets
@@ -468,7 +471,7 @@ impl Wavefront {
             .map(|base| RaygenParams {
                 paths: self.paths.addresses(),
                 rays: self.queues.addresses(queue::RAY, &self.queues.ray),
-                sample,
+                sample_index: sample,
                 _pad0: 0,
                 camera_position: scene.camera().position,
                 width,
@@ -504,7 +507,7 @@ impl Wavefront {
                     shadows: self.queues.addresses(queue::SHADOW, &self.queues.shadow),
                     scene: scene.table().device_address(),
                     radiance: radiance.device_address(),
-                    sample,
+                    sample_index: sample,
                     bounce,
                     max_bounces: self.max_bounces,
                     light_sampling: self.light_sampling as u32,
