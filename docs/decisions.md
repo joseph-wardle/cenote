@@ -537,3 +537,35 @@ Two deeper follow-ups were logged for their milestones rather than done now:
 reserving sampler-dimension headroom before more goldens exist, and designing
 a per-pixel G-buffer once to serve both OIDN AOVs and ReSTIR neighbor
 validation.
+
+## 2026-07-08 — Sampler-dimension headroom reserved (D-043 follow-up)
+
+### D-044: The dimension registry carries reserved headroom, paid for with one golden regen
+The first of D-043's follow-ups, done now while only two goldens exist and the
+regen is cheap. `rng.slang`'s registry numbered the per-bounce block tight —
+five named slots at stride five, camera jitter alone at dimension zero, bounces
+starting at one. Any new decision (a dielectric's Fresnel choice, a light BVH's
+RIS candidates, a GRIS shift's randoms, or a pre-path lens/time draw for depth
+of field and motion blur) would have to insert into that packing and renumber
+every dimension after it — and every renumber silently changes every image ever
+rendered. The registry now strides both blocks at eight: camera at 0 with room
+reserved ahead of the bounces, per-bounce blocks of eight (five named, three
+spare). Future decisions claim a reserved slot without shifting the ones after
+them. The headroom is free at runtime — each dimension is an independently
+hashed-and-scrambled copy of the same Sobol sequence (the padding
+construction), so unused slots cost nothing and spacing decisions apart never
+correlates them. The one price is a re-scramble of the current decisions'
+noise, which moved both goldens; regenerated and confirmed a pure noise change,
+not a bias one — the converged 64-spp frame-average shifted 0.42% and the 1-spp
+1.9%, the ratio tracking the √-sample noise drop, with no directional offset.
+
+The re-scramble also exposed that the MIS light-sampling agreement tests
+(`assert_strategies_agree`) were under-margined: at 64 spp the worst-case sky —
+a lone bright sun texel, high-variance for NEE — swings several percent between
+sampler realizations, and the old numbering passed the 3% bound partly by luck
+(the quad case sat at 2.29%, a whisker under). The new realization tripped it at
+5.5%. The fix raises the shared sample budget to 256 spp, which converges the
+frame-average enough that the worst case sits near 1% with the 3% bound intact —
+so the bound still catches a real bias instead of tripping on noise. This is now
+permanent: reserved-slot additions do not renumber, so the realization these
+tests and the goldens pin stays fixed until someone deliberately renumbers.

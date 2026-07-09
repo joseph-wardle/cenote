@@ -16,24 +16,34 @@
 // Every random decision draws from a named dimension — never allocated by
 // call order, where reordering two sample_* calls would silently change
 // every decision downstream.
+//
+// The numbering carries reserved headroom: a decision added later claims a
+// spare slot instead of renumbering the ones after it, since every renumber
+// changes every image ever rendered (and forces a golden regeneration).
+// Headroom is free here — each dimension is an independently shuffled copy
+// of the same sequence (see below), keyed by a hash, so unused slots cost
+// nothing and spacing decisions apart never correlates them.
 
-// Sub-pixel position of the pixel's camera ray.
-public static const uint CAMERA_JITTER = 0;
+// Pre-path dimensions, drawn once per camera ray. Only the sub-pixel jitter
+// is live; the block reserves room ahead of the bounces for lens sampling
+// (depth of field) and shutter time (motion blur).
+public static const uint CAMERA_JITTER = 0; // sub-pixel ray position
+static const uint PATH_BASE = 8;            // first per-bounce dimension
 
-// Per-bounce decisions get one slot each in fixed blocks after the camera
-// dimensions: bounce b's slot s is dimension `bounceDimension(b, s)`. Every
-// M1 slot is named up front even though they go live across steps 7–9,
-// because inserting one later would renumber the rest — silently changing
-// every image ever rendered.
+// Per-bounce decisions get one slot each in fixed-size blocks: bounce b's
+// slot s is dimension `bounceDimension(b, s)`. The block is sized past its
+// named slots so a later lobe (transmission's Fresnel choice, a light BVH's
+// RIS candidates, a GRIS shift decision) can take a reserved slot without
+// shifting the next bounce's block.
 public static const uint BSDF_LOBE = 0; // which sampling technique scatters
-public static const uint BSDF_DIR = 1; // scattered direction
+public static const uint BSDF_DIR = 1;  // scattered direction
 public static const uint NEE_LIGHT = 2; // environment vs quads, and which quad
 public static const uint NEE_POINT = 3; // point on the quad, or env texel
-public static const uint RR = 4; // Russian-roulette survival
-static const uint BOUNCE_SLOTS = 5;
+public static const uint RR = 4;        // Russian-roulette survival
+static const uint BOUNCE_SLOTS = 8;     // 5 named + 3 reserved
 
 public uint bounceDimension(uint bounce, uint slot) {
-    return 1 + bounce * BOUNCE_SLOTS + slot;
+    return PATH_BASE + bounce * BOUNCE_SLOTS + slot;
 }
 
 // -- Implementation ----------------------------------------------------

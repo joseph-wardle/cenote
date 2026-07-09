@@ -1007,7 +1007,13 @@ mod tests {
     fn assert_strategies_agree(gpu: &Context, scene: &Scene) {
         let kernels = Kernels::embedded();
         let (width, height) = (32, 32);
-        let samples = 64;
+        // Enough that the frame-average converges under the environment
+        // test's worst case — a lone bright sun texel is high-variance for
+        // NEE, and at 64 spp the mean still swings several percent between
+        // sampler realizations, more than the 3% agreement bound below. 256
+        // brings that swing under ~1%, so the bound keeps its teeth against a
+        // real bias rather than tripping on noise.
+        let samples: u32 = 256;
         let mean = |light_sampling: LightSampling| -> f64 {
             let wavefront = Wavefront::new(
                 gpu,
