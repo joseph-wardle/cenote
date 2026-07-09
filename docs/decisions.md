@@ -463,3 +463,40 @@ floor is the demo's one uniform surface, the only place a uniform edit is
 coherent. The quad key light moved up out of the taller frame (and its emission
 rose to keep the warm key comparable), preserving the original placement intent:
 a visible blown-out quad reads as an artifact, not a light.
+
+---
+
+## 2026-07-08 — Smooth shading normals; the demo lies down and loses its sliders
+
+### D-041: Interpolated vertex shading normals, guarded by the geometric normal
+The engine shaded exclusively with geometric normals, which made every sphere
+a disco ball: faceting in specular reflections is a discontinuity in the
+normal *field*, so no mesh resolution can smooth a mirror — only a smooth
+normal field can. `Mesh` now carries one unit object-space shading normal per
+vertex (the icosphere's are exact — a unit-sphere vertex is its own normal;
+planes carry their face normal), the geometry record carries the buffer's
+address, and `shade_surface` interpolates by barycentrics and builds the BSDF
+frame on the result. The geometric normal keeps every job that must match
+the actual triangle: the van Antwerpen spawn offset, and sidedness guards at
+each consumer of a direction — next-event candidates and BSDF-sampled
+continuations below the geometric horizon are rejected. That is the classic
+shading-normal trade (a sliver of energy lost near silhouettes, never light
+through walls), applied identically to every strategy so the MIS-agreement
+tests still hold; the furnace tests are untouched by construction, since
+their scenes are planes where both normals coincide.
+
+### D-042: The demo chart lies on the floor at 5 × 5; the material sliders are gone (supersedes the slider half of D-040)
+The vertical 5 × 3 chart floated its rows to fit a wall of spheres; with
+smooth shading the showpiece is reflection, and a chart laid *across* the
+floor gives every sphere a grounded contact shadow and a second reading of
+the whole sweep in the glossy floor. Now 5 × 5 (roughness left → right,
+metalness back → front, the full-metal mirror row nearest the camera), every
+sphere resting on the floor, camera raised to separate the rows. The
+roughness/metalness sliders — D-040's remaining justification was
+demonstrating an in-place GPU material edit — are removed with their whole
+machinery (`Scene::set_material`, the host material copy,
+`Context::update_buffer`): M1 is complete, the DoD sentence they served is
+history, and the live-edit story returns properly with M2's interactive
+lookdev. The floor keeps the one good material the sliders defaulted to
+(gray, `base_roughness` 0.1, `specular_roughness` 0.15). The viewer's
+overlay keeps stats and exposure.

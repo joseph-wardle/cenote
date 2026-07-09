@@ -12,6 +12,7 @@ import openpbr;
 // `scene.rs` field for field.
 public struct GeometryRecord {
     public float* positions;        // x, y, z per vertex, object space
+    public float* normals;          // unit shading normal per vertex, object space
     public uint* indices;           // three per triangle
     public float4 objectToWorld[3]; // rows of the instance's 3×4 transform
     public float4 worldToObject[3]; // rows of its inverse — normals, error bounds

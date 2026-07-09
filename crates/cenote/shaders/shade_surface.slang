@@ -49,17 +49,23 @@ float powerHeuristic(float p, float q) {
     return (p * p) / (p * p + q * q);
 }
 
-float3 position(float* positions, uint vertex) {
-    return float3(positions[3 * vertex],
-                  positions[3 * vertex + 1],
-                  positions[3 * vertex + 2]);
+// One float3 out of a tightly packed vertex-attribute buffer.
+float3 fetch3(float* attributes, uint vertex) {
+    return float3(attributes[3 * vertex],
+                  attributes[3 * vertex + 1],
+                  attributes[3 * vertex + 2]);
 }
 
 // A reconstructed hit: where the next ray segment starts, already nudged
-// off the surface, and the unit geometric normal it shades with.
+// off the surface, plus both unit normals. The interpolated shading normal
+// carries the BSDF frame — it is what makes a coarse sphere render smooth
+// — while the geometric normal keeps the jobs that must match the actual
+// triangle: the spawn offset, and the sidedness guards that reject
+// directions passing through the surface the shading frame pretends away.
 struct SpawnPoint {
     float3 position;
-    float3 normal;
+    float3 normal;  // geometric, facing the arriving ray
+    float3 shading; // interpolated, flipped to the geometric side
 };
 
 // Reconstruct the world-space hit point and geometric normal, both facing
@@ -72,9 +78,9 @@ struct SpawnPoint {
 // coordinates it bounds, so this holds at any scene scale.
 SpawnPoint spawnPoint(GeometryRecord mesh, Hit hit, float3 rayDirection) {
     uint base = 3 * hit.primitive;
-    let v0 = position(mesh.positions, mesh.indices[base]);
-    let v1 = position(mesh.positions, mesh.indices[base + 1]);
-    let v2 = position(mesh.positions, mesh.indices[base + 2]);
+    let v0 = fetch3(mesh.positions, mesh.indices[base]);
+    let v1 = fetch3(mesh.positions, mesh.indices[base + 1]);
+    let v2 = fetch3(mesh.positions, mesh.indices[base + 2]);
     let o2w = mesh.objectToWorld;
     let w2o = mesh.worldToObject;
 
@@ -129,9 +135,26 @@ SpawnPoint spawnPoint(GeometryRecord mesh, Hit hit, float3 rayDirection) {
     if (dot(wldNormal, rayDirection) > 0.0) {
         wldNormal = -wldNormal;
     }
+
+    // The shading normal: vertex normals lerped by the hit's barycentrics,
+    // through the same inverse transpose. Flipped to the geometric side —
+    // shading must agree with the face the ray actually struck.
+    let n0 = fetch3(mesh.normals, mesh.indices[base]);
+    let n1 = fetch3(mesh.normals, mesh.indices[base + 1]);
+    let n2 = fetch3(mesh.normals, mesh.indices[base + 2]);
+    let objShading = n0 + hit.barycentrics.x * (n1 - n0)
+                        + hit.barycentrics.y * (n2 - n0);
+    var shading = normalize(w2o[0].xyz * objShading.x
+                          + w2o[1].xyz * objShading.y
+                          + w2o[2].xyz * objShading.z);
+    if (dot(shading, wldNormal) < 0.0) {
+        shading = -shading;
+    }
+
     SpawnPoint spawn;
     spawn.position = fma(float3(wldOffset), wldNormal, wldPosition);
     spawn.normal = wldNormal;
+    spawn.shading = shading;
     return spawn;
 }
 
@@ -185,7 +208,12 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
         return;
     }
 
-    let frame = Frame(spawn.normal);
+    // The BSDF lives in the shading frame. Directions that are valid there
+    // but pass through the real triangle (below the geometric horizon) are
+    // rejected at each use below — the standard shading-normal trade: a
+    // sliver of energy lost near silhouettes, never light through walls,
+    // and the same treatment for every strategy so MIS stays consistent.
+    let frame = Frame(spawn.shading);
     let wo = frame.toLocal(-direction);
 
     // Next-event estimation: connect this vertex to one candidate — a
@@ -213,7 +241,8 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
             // reports pdf 0 and is skipped — it carries no usable density.
             let candidate = params.scene.env.sample(uPoint);
             let wiLight = frame.toLocal(candidate.direction);
-            if (candidate.pdf > 0.0 && wiLight.z > 0.0) {
+            if (candidate.pdf > 0.0 && wiLight.z > 0.0
+                && dot(candidate.direction, spawn.normal) > 0.0) {
                 let neePdf = envProb * candidate.pdf;
                 let scatterPdf = bsdfPdf(material, wiLight, wo);
                 let weight = params.lightSampling == LIGHT_SAMPLING_MIS
@@ -236,7 +265,8 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
             let wiWorld = delta * rsqrt(r2);
             let wiLight = frame.toLocal(wiWorld);
             let cosLight = abs(dot(candidate.normal, wiWorld));
-            if (r2 > 0.0 && wiLight.z > 0.0 && cosLight > 0.0) {
+            if (r2 > 0.0 && wiLight.z > 0.0 && cosLight > 0.0
+                && dot(wiWorld, spawn.normal) > 0.0) {
                 // The candidate's pdf in solid angle at this vertex,
                 // against the pdf BSDF sampling would give the direction.
                 let neePdf = (1.0 - envProb) * candidate.pdfArea * r2 / cosLight;
@@ -264,8 +294,9 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     let u = sample_2d(pixel, params.sampleIndex,
                       bounceDimension(params.bounce, BSDF_DIR));
     let wi = sampleBsdf(material, wo, uLobe, u);
+    let wiWorld = frame.toWorld(wi.xyz);
     var scattered = float3(0.0);
-    if (wi.z > 0.0 && wi.w > 0.0) {
+    if (wi.z > 0.0 && wi.w > 0.0 && dot(wiWorld, spawn.normal) > 0.0) {
         scattered = throughput.xyz * evalBsdf(material, wi.xyz, wo)
                   * (wi.z / wi.w);
     }
@@ -290,7 +321,7 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     }
 
     params.paths.origin[path] = float4(spawn.position, 0.0);
-    params.paths.direction[path] = float4(frame.toWorld(wi.xyz), 0.0);
+    params.paths.direction[path] = float4(wiWorld, 0.0);
     params.paths.throughput[path] = float4(scattered, wi.w);
     params.rays.push(path);
 

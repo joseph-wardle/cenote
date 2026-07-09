@@ -26,17 +26,17 @@ use cenote::scene::Scene;
 const SIZE: u32 = 256;
 
 /// Mean-FLIP failure threshold. Identical images score 0, and FP reordering
-/// across driver/compiler updates moves facet edges by a pixel at most —
-/// far below this. Any visible regression (a wrong facet color, a shifted
-/// silhouette) lands well above it.
+/// across driver/compiler updates moves noise and silhouette edges by a
+/// pixel at most — far below this. Any visible regression (a wrong sphere
+/// shade, a shifted silhouette) lands well above it.
 const MAX_MEAN_FLIP: f32 = 0.01;
 
 /// The demo image at 1 spp: the roughness × metalness grid of terracotta
-/// spheres over the glossy floor, cross-lit by the Kloofendal HDRI's sun
+/// spheres across the glossy floor, cross-lit by the Kloofendal HDRI's sun
 /// and the warm quad — path traced with MIS, so the golden pins the whole
-/// estimator (offsets, `OpenPBR` lobes and their energy-compensation fits
-/// across the roughness range, NEE weights, environment tables, sampler)
-/// at a fixed seed.
+/// estimator (offsets, interpolated shading normals, `OpenPBR` lobes and
+/// their energy-compensation fits across the roughness range, NEE weights,
+/// environment tables, sampler) at a fixed seed.
 #[test]
 fn demo_scene_matches_golden() {
     let Some(gpu) = test_context() else {

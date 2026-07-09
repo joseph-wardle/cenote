@@ -16,12 +16,13 @@ energy compensation, MIS-weighted next-event estimation of quad lights and an
 importance-sampled HDRI, a progressive viewer, and a batch CLI that writes
 exactly the image the viewer converges to.
 
-![A grid of faceted terracotta spheres — roughness increasing left to right, metalness bottom to top — floating over a glossy gray floor under a blue sky](docs/demo.png)
+![A 5×5 grid of terracotta spheres resting on a glossy gray floor — roughness increasing left to right, metalness back to front — under a blue sky](docs/demo.png)
 
 *The M1 demo: a material chart sweeping `OpenPBR` roughness (left to right)
-and metalness (bottom to top), path traced under the Kloofendal sky's sun
-and a warm quad key light. Deliberately faceted — a shading-normal or
-energy bug would show as a wrong or flat facet.*
+and metalness (back to front), path traced under the Kloofendal sky's sun
+and a warm quad key light. The spheres are coarse meshes shaded smooth by
+interpolated vertex normals — the mirror-sharp front row is where a
+shading-normal or energy bug would show first.*
 
 ![Four crops of the same render at 1, 8, 64, and 512 samples per pixel, the noise resolving away left to right](docs/convergence.png)
 
@@ -35,12 +36,12 @@ Requires: stable Rust, [`slangc`](https://github.com/shader-slang/slang) on PATH
 `VK_KHR_ray_query` support (any recent RT-capable card).
 
 ```sh
-cargo run --release -p cenote-viewer   # orbit (drag), dolly (scroll), live material sliders
+cargo run --release -p cenote-viewer   # orbit (drag), dolly (scroll), live exposure
 cargo run --release -p cenote-cli -- --spp 256 --out shot.exr
 ```
 
-The viewer accumulates forever and re-converges after every camera move or
-material edit. The CLI accumulates `--spp` samples of the same estimator
+The viewer accumulates forever and re-converges after every camera move.
+The CLI accumulates `--spp` samples of the same estimator
 into the same film and writes the linear `ACEScg` average as an EXR
 (chromaticities declared in the header); with `--watch` it re-renders on
 every shader edit, recompiling from the source checkout in under a second.

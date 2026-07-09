@@ -1,6 +1,4 @@
-//! The overlay UI: device and frame stats, the live exposure control, and
-//! the material sliders that edit the demo's floor in place — drag one and
-//! the render re-converges under the new surface.
+//! The overlay UI: device and frame stats, plus the live exposure control.
 //!
 //! This is the egui half of the overlay — input translation, layout,
 //! tessellation. The Vulkan half lives behind the core's `gpu` quarantine
@@ -30,10 +28,6 @@ pub struct Gui {
     state: egui_winit::State,
     /// Exposure in stops, applied by the tonemap kernel.
     exposure: f32,
-    /// `OpenPBR` specular roughness applied to the demo's floor.
-    roughness: f32,
-    /// `OpenPBR` metalness applied to the demo's floor.
-    metalness: f32,
 }
 
 impl Gui {
@@ -50,21 +44,12 @@ impl Gui {
         Self {
             state,
             exposure: 0.0,
-            // Match the demo's floor, so nothing jumps until dragged.
-            roughness: 0.15,
-            metalness: 0.0,
         }
     }
 
     /// Exposure in stops, for [`cenote::render::Renderer::tonemap`].
     pub fn exposure(&self) -> f32 {
         self.exposure
-    }
-
-    /// The material sliders' current (specular roughness, metalness) —
-    /// the redraw loop applies them to the demo's floor when they change.
-    pub fn material(&self) -> (f32, f32) {
-        (self.roughness, self.metalness)
     }
 
     /// Feed a window event to egui. `consumed` in the response means the UI
@@ -116,15 +101,6 @@ impl Gui {
 
                 ui.separator();
                 ui.add(egui::Slider::new(&mut self.exposure, -4.0..=4.0).text("exposure"));
-
-                ui.separator();
-                ui.add(egui::Slider::new(&mut self.roughness, 0.0..=1.0).text("roughness"));
-                ui.add(egui::Slider::new(&mut self.metalness, 0.0..=1.0).text("metalness"));
-                ui.label(
-                    egui::RichText::new("edits the floor in place; the render re-converges")
-                        .small()
-                        .weak(),
-                );
             });
     }
 }

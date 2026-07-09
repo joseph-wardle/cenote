@@ -103,10 +103,6 @@ struct Viewer {
     orbiting: bool,
     /// Cursor position at the last `CursorMoved`, for drag deltas.
     cursor: Option<PhysicalPosition<f64>>,
-    /// The material-slider values already applied to the demo's floor —
-    /// seeded from the sliders' initial positions, so startup never
-    /// touches the scene.
-    applied_material: (f32, f32),
 }
 
 impl Viewer {
@@ -129,7 +125,6 @@ impl Viewer {
             size.height,
         )?;
         let gui = Gui::new(&window);
-        let gui_material = gui.material();
         // Not every platform sends an initial redraw request unprompted.
         window.request_redraw();
         Ok(Self {
@@ -144,7 +139,6 @@ impl Viewer {
             stats: FrameStats::default(),
             orbiting: false,
             cursor: None,
-            applied_material: gui_material,
         })
     }
 
@@ -221,24 +215,6 @@ impl Viewer {
             );
         }
         let film = self.film.as_mut().expect("created just above");
-
-        // A material-slider drag (from last frame's UI pass) edits the
-        // floor in place; the stale accumulation restarts. The floor and
-        // not the sphere grid: the grid's parameters are its axes, and the
-        // floor is the demo's one uniform surface — the only place a
-        // uniform edit is coherent.
-        let (roughness, metalness) = self.gui.material();
-        if self.applied_material != (roughness, metalness) {
-            let floor = cenote::scene::Scene::DEMO_FLOOR;
-            let mut edited = self.scene.material(floor);
-            edited.specular_roughness = roughness;
-            edited.metalness = metalness;
-            self.scene
-                .set_material(&self.gpu, floor, edited)
-                .context("updating the floor material")?;
-            film.reset();
-            self.applied_material = (roughness, metalness);
-        }
 
         *self.scene.camera_mut() = self.camera.camera();
         let started = Instant::now();

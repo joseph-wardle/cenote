@@ -3,10 +3,10 @@
 //! table, a pinhole camera, and an equirect environment. All geometry is
 //! procedural and the only file input is the environment EXR (real scene
 //! formats are M2's job); [`Scene::demo`] is the standing test subject — a
-//! grid of deliberately faceted spheres sweeping roughness × metalness
-//! over a glossy floor, where winding, handedness, or energy mistakes are
-//! instantly visible, under a warm quad light and the bundled Kloofendal
-//! sky.
+//! grid of smooth-shaded spheres sweeping roughness × metalness across a
+//! glossy floor, where winding, handedness, shading-normal, or energy
+//! mistakes are instantly visible, under a warm quad light and the bundled
+//! Kloofendal sky.
 
 use std::collections::HashMap;
 
@@ -21,10 +21,16 @@ use crate::gpu::{AccelerationStructure, Buffer, Context, SampledImage, TlasInsta
 use crate::lights::{LIGHT_NONE, QuadLight};
 use crate::material::Material;
 
-/// A triangle mesh on the host: tightly packed positions plus index triples.
+/// A triangle mesh on the host: tightly packed positions, matching shading
+/// normals, plus index triples.
 pub struct Mesh {
     /// Vertex positions, in meters, in object space.
     pub positions: Vec<Vec3>,
+    /// Unit shading normals, one per position, in object space. Shading
+    /// interpolates these across each triangle, which is what makes a
+    /// coarse sphere render smooth; geometry that *should* look flat
+    /// (planes, quads) carries its face normal at every vertex.
+    pub normals: Vec<Vec3>,
     /// Counter-clockwise-outward index triples into `positions`.
     pub triangles: Vec<[u32; 3]>,
 }
@@ -40,12 +46,14 @@ pub struct Object {
     pub material: Material,
 }
 
-/// One mesh resident on the GPU. The vertex and index buffers stay alive
-/// past the BLAS build: the surface-shading kernel fetches triangle corners
-/// from them to compute geometric normals.
+/// One mesh resident on the GPU. The vertex, normal, and index buffers stay
+/// alive past the BLAS build: the surface-shading kernel fetches triangle
+/// corners from them to compute geometric normals and interpolate shading
+/// normals.
 struct GpuMesh {
     blas: AccelerationStructure,
     vertices: Buffer,
+    normals: Buffer,
     indices: Buffer,
 }
 
@@ -57,6 +65,7 @@ struct GpuMesh {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct GeometryRecord {
     positions: vk::DeviceAddress,
+    normals: vk::DeviceAddress,
     indices: vk::DeviceAddress,
     /// Rows of the instance's 3×4 object-to-world transform — the same
     /// shape the TLAS instance itself carries.
@@ -103,15 +112,10 @@ pub struct Scene {
     environment: SampledImage,
     /// The one [`SceneTable`] every kernel reaches scene data through.
     table: Buffer,
-    /// The GPU material table the scene table points into — updated in
-    /// place by [`Scene::set_material`].
-    material_buffer: Buffer,
-    /// Host copy of the material table, so an edit rewrites one entry.
-    materials: Vec<Material>,
-    /// The other buffers `table` points into: geometry records, light
+    /// The buffers `table` points into: geometry records, materials, light
     /// records, and the environment's three sampling tables.
     #[expect(dead_code, reason = "GPU residency: the buffers `table` points into")]
-    resident: [Buffer; 5],
+    resident: [Buffer; 6],
     #[expect(
         dead_code,
         reason = "GPU residency: the BLASes and the buffers the geometry records point into"
@@ -190,6 +194,7 @@ impl Scene {
                 );
                 GeometryRecord {
                     positions: mesh.vertices.device_address(),
+                    normals: mesh.normals.device_address(),
                     indices: mesh.indices.device_address(),
                     object_to_world: transform_rows(object.transform),
                     world_to_object: transform_rows(inverse),
@@ -203,7 +208,7 @@ impl Scene {
         let geometry =
             gpu.upload_buffer("scene.geometry", bytemuck::cast_slice(&records), usage)?;
         let materials: Vec<Material> = objects.iter().map(|object| object.material).collect();
-        let material_buffer =
+        let materials =
             gpu.upload_buffer("scene.materials", bytemuck::cast_slice(&materials), usage)?;
         // Vulkan forbids empty buffers, so a lightless scene uploads one
         // zeroed record the kernels never read (the table says count 0).
@@ -221,7 +226,7 @@ impl Scene {
         let env = upload_environment(gpu, environment, &quads)?;
         let table = SceneTable {
             geometry: geometry.device_address(),
-            materials: material_buffer.device_address(),
+            materials: materials.device_address(),
             lights: lights.device_address(),
             env_marginal: env.marginal.device_address(),
             env_conditional: env.conditional.device_address(),
@@ -239,9 +244,14 @@ impl Scene {
             tlas,
             environment: env.image,
             table,
-            material_buffer,
-            materials,
-            resident: [geometry, lights, env.marginal, env.conditional, env.pdfs],
+            resident: [
+                geometry,
+                materials,
+                lights,
+                env.marginal,
+                env.conditional,
+                env.pdfs,
+            ],
             meshes,
             camera,
         })
@@ -249,25 +259,20 @@ impl Scene {
 
     /// Grid columns: `specular_roughness` 0 → 1, left to right.
     const GRID_COLUMNS: usize = 5;
-    /// Grid rows: `metalness` 0 → 1, bottom to top.
-    const GRID_ROWS: usize = 3;
-
-    /// The floor's instance index in [`Scene::demo`] — the grid's spheres
-    /// come first, so this is also their count. The floor is the one
-    /// uniform surface in the demo, which makes it the object the viewer's
-    /// material sliders edit.
-    pub const DEMO_FLOOR: usize = Self::GRID_COLUMNS * Self::GRID_ROWS;
+    /// Grid rows: `metalness` 0 → 1, back to front.
+    const GRID_ROWS: usize = 5;
 
     /// The demo scene: a terracotta material chart — a grid of spheres
-    /// sweeping `specular_roughness` 0 → 1 left to right and `metalness`
-    /// 0 → 1 bottom to top, the same base color read as a lacquered
-    /// plastic's diffuse base in the bottom row and a conductor's F0 in
-    /// the top — over a lightly glossy gray floor that mirrors it. A warm
-    /// quad light overhead to the left is the key (its soft shadow and
-    /// warm cast are what next-event estimation resolves), and the bundled
-    /// Kloofendal sky (see `assets/README.md`) fills, backs, and reflects
-    /// — its unclipped sun is the importance-sampling stress case the
-    /// environment tables exist for.
+    /// laid across the floor, sweeping `specular_roughness` 0 → 1 left to
+    /// right and `metalness` 0 → 1 back to front, the same base color read
+    /// as a lacquered plastic's diffuse base in the back row and a
+    /// conductor's F0 in the front — on a lightly glossy gray floor that
+    /// mirrors the whole chart. A warm quad light overhead to the left is
+    /// the key (its soft shadow and warm cast are what next-event
+    /// estimation resolves), and the bundled Kloofendal sky (see
+    /// `assets/README.md`) fills, backs, and reflects — its unclipped sun
+    /// is the importance-sampling stress case the environment tables exist
+    /// for.
     ///
     /// # Errors
     ///
@@ -275,18 +280,21 @@ impl Scene {
     /// builds.
     pub fn demo(gpu: &Context) -> Result<Self> {
         let terracotta = acescg_from_rec709(Vec3::new(0.7, 0.22, 0.08));
-        let mut objects: Vec<Object> = (0..Self::DEMO_FLOOR)
+        let mut objects: Vec<Object> = (0..Self::GRID_COLUMNS * Self::GRID_ROWS)
             .map(|index| {
                 let (row, column) = (index / Self::GRID_COLUMNS, index % Self::GRID_COLUMNS);
                 let sweep = |step: usize, steps: usize| step as f32 / (steps - 1) as f32;
                 Object {
-                    mesh: icosphere(2),
-                    // The bottom row rests on the floor; the rest float
-                    // above it — the standard material-chart layout.
+                    // Subdivided until the silhouette reads round — the
+                    // *surface* is already smooth at any resolution, from
+                    // the interpolated sphere normals.
+                    mesh: icosphere(4),
+                    // Every sphere rests on the floor, so the chart reads
+                    // twice: in the spheres and in their reflections.
                     transform: Mat4::from_translation(Vec3::new(
                         1.2 * (column as f32 - 2.0),
-                        0.5 + 1.2 * row as f32,
-                        0.0,
+                        0.5,
+                        1.2 * (row as f32 - 2.0),
                     )) * Mat4::from_scale(Vec3::splat(0.5)),
                     material: Material::glossy(terracotta, 0.4, sweep(column, Self::GRID_COLUMNS))
                         .with_metalness(sweep(row, Self::GRID_ROWS)),
@@ -302,21 +310,22 @@ impl Scene {
         });
         // A 1.5 m × 1.5 m quad, up and off to the *left* — opposite the
         // HDRI's sun (up-right-behind, 48° elevation), so the spheres are
-        // cross-lit warm/cool. Placed outside the default framing (above
-        // the frame's top edge, ~y 4.8 at the quad's depth), and high
-        // enough that the shadow it cuts out of the sunlight lands outside
-        // the frame too, instead of reading as a dark artifact.
+        // cross-lit warm/cool. Above the camera's downward-pitched frame,
+        // and high enough that the shadow it cuts out of the sunlight
+        // lands outside the frame too, instead of reading as a dark
+        // artifact.
         objects.push(Object {
             mesh: ground_plane(0.75),
             transform: Mat4::from_translation(Vec3::new(-3.5, 5.4, 1.0)),
             material: Material::emitter(acescg_from_rec709(Vec3::new(1.0, 0.85, 0.6)) * 18.0),
         });
-        // A little above the grid's center and pulled back far enough that
-        // the whole chart fits a square frame (the goldens'), with the
-        // floor and its reflections along the lower edge.
+        // Above and in front, pitched down at the chart's center so the
+        // rows separate, pulled back until the corner spheres just fit a
+        // square frame (the goldens' — wider targets only gain margin),
+        // with sky along the top edge.
         let camera = Camera {
-            position: Vec3::new(0.0, 2.6, 9.5),
-            look_at: Vec3::new(0.0, 1.7, 0.0),
+            position: Vec3::new(0.0, 5.5, 11.0),
+            look_at: Vec3::ZERO,
             vfov_degrees: 40.0,
         };
         // Loaded from the dev tree rather than embedded: at 4k the asset
@@ -387,40 +396,6 @@ impl Scene {
     /// between frames.
     pub fn camera_mut(&mut self) -> &mut Camera {
         &mut self.camera
-    }
-
-    /// The material of instance `index` — read, modify, and hand back to
-    /// [`Scene::set_material`].
-    ///
-    /// # Panics
-    ///
-    /// If `index` is out of range — instance indices are fixed at build.
-    #[must_use]
-    pub fn material(&self, index: usize) -> Material {
-        self.materials[index]
-    }
-
-    /// Replace instance `index`'s material, in place on the GPU — the
-    /// viewer's sliders editing a surface between frames. The caller owns
-    /// resetting any accumulation that no longer matches. Emission is
-    /// *not* live-editable (the light list and its alias table are built
-    /// at prep), so the edit must not change it.
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from the upload.
-    ///
-    /// # Panics
-    ///
-    /// If `index` is out of range, or the edit changes `emission` —
-    /// programmer bugs.
-    pub fn set_material(&mut self, gpu: &Context, index: usize, material: Material) -> Result<()> {
-        assert_eq!(
-            self.materials[index].emission, material.emission,
-            "emission is baked into the light list at prep"
-        );
-        self.materials[index] = material;
-        gpu.update_buffer(&self.material_buffer, bytemuck::cast_slice(&self.materials))
     }
 }
 
@@ -608,6 +583,11 @@ fn transform_rows(transform: Mat4) -> [[f32; 4]; 3] {
 }
 
 fn upload_mesh(gpu: &Context, name: &str, mesh: &Mesh) -> Result<GpuMesh> {
+    assert_eq!(
+        mesh.normals.len(),
+        mesh.positions.len(),
+        "a mesh needs one shading normal per vertex"
+    );
     // BUILD_INPUT for the BLAS build; STORAGE + device address so the
     // shading kernel can fetch triangle corners afterwards.
     let usage = vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
@@ -616,6 +596,11 @@ fn upload_mesh(gpu: &Context, name: &str, mesh: &Mesh) -> Result<GpuMesh> {
     let vertices = gpu.upload_buffer(
         &format!("{name}.vertices"),
         bytemuck::cast_slice(&mesh.positions),
+        usage,
+    )?;
+    let normals = gpu.upload_buffer(
+        &format!("{name}.normals"),
+        bytemuck::cast_slice(&mesh.normals),
         usage,
     )?;
     let indices = gpu.upload_buffer(
@@ -633,13 +618,16 @@ fn upload_mesh(gpu: &Context, name: &str, mesh: &Mesh) -> Result<GpuMesh> {
     Ok(GpuMesh {
         blas,
         vertices,
+        normals,
         indices,
     })
 }
 
 /// A unit-radius icosphere: `subdivisions` rounds of 4-way face splits of an
 /// icosahedron, every vertex re-projected onto the sphere. Yields 20·4ⁿ
-/// faceted triangles.
+/// triangles whose shading normals are the exact sphere normals, so the
+/// surface shades smooth at any subdivision — only the silhouette betrays
+/// the facets.
 #[must_use]
 pub fn icosphere(subdivisions: u32) -> Mesh {
     let mut mesh = icosahedron();
@@ -656,6 +644,9 @@ pub fn icosphere(subdivisions: u32) -> Mesh {
         }
         mesh.triangles = faces;
     }
+    // Every vertex lies on the unit sphere, where the exact normal at a
+    // point is the point itself.
+    mesh.normals = mesh.positions.clone();
     mesh
 }
 
@@ -693,7 +684,8 @@ fn icosahedron() -> Mesh {
     ]
     .into_iter()
     .map(|p| Vec3::from(p).normalize())
-    .collect();
+    .collect::<Vec<Vec3>>();
+    let normals = positions.clone();
     let triangles = vec![
         [0, 11, 5],
         [0, 5, 1],
@@ -718,6 +710,7 @@ fn icosahedron() -> Mesh {
     ];
     Mesh {
         positions,
+        normals,
         triangles,
     }
 }
@@ -734,6 +727,7 @@ pub fn ground_plane(half_extent: f32) -> Mesh {
             Vec3::new(e, 0.0, e),
             Vec3::new(e, 0.0, -e),
         ],
+        normals: vec![Vec3::Y; 4],
         triangles: vec![[0, 1, 2], [0, 2, 3]],
     }
 }
@@ -753,8 +747,21 @@ mod tests {
 
     #[test]
     fn icosphere_vertices_lie_on_the_unit_sphere() {
-        for position in icosphere(2).positions {
+        let mesh = icosphere(2);
+        for position in &mesh.positions {
             assert!((position.length() - 1.0).abs() < 1e-6);
+        }
+        // …which makes each vertex its own exact shading normal.
+        assert_eq!(mesh.normals, mesh.positions);
+    }
+
+    #[test]
+    fn meshes_carry_one_shading_normal_per_vertex() {
+        for mesh in [icosphere(0), icosphere(3), ground_plane(2.0)] {
+            assert_eq!(mesh.normals.len(), mesh.positions.len());
+            for normal in mesh.normals {
+                assert!((normal.length() - 1.0).abs() < 1e-6);
+            }
         }
     }
 
