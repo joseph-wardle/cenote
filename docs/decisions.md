@@ -602,3 +602,57 @@ single fence; the exposure itself still lands the frame it is dragged. The
 viewer is vsync-paced (FIFO present), so fewer fences do not raise its frame
 rate — the win there is latency. The real throughput win is the batch CLI,
 which accumulates back-to-back with no vsync between samples.
+
+## 2026-07-09 — The render loop decouples from the display (architecture)
+
+### D-046: The renderer becomes an actor; the viewer and the future Hydra delegate are peer consumers of a linear frame
+The render loop must accumulate as fast as the GPU allows, not at the display's
+refresh rate. Today the viewer's redraw is single-threaded and vsync-paced: FIFO
+`acquire_next_image` blocks at vblank, so accumulation is pinned to ~60 Hz no
+matter how fast a sample is. Cycles X, MoonRay, and Karma all run the path
+tracer on a dedicated thread and let the UI *peek* at its output; cenote will
+too. The shape below was verified against those renderers, not assumed.
+
+- A `render::Session` in the **core** owns the render thread, the
+  `Renderer`/`Scene`/`Film`, and an `Arc<Context>`. It is the synchronization
+  boundary. The viewer is its first consumer; the M2 Hydra delegate is a second
+  — so the hard concurrency code is written once, in the core, not reimplemented
+  per consumer. (Cycles' `Session`, not Blender, owns the loop.)
+- Inputs cross in through an `Arc<Mutex<RenderInputs>>` latch (camera, size, a
+  `generation` counter, a running flag), latest-wins, snapshotted once per
+  sample.
+- Output crosses out as the **linear** HDR average, published by a
+  double-buffered pointer-swap under a short lock — never a lock held across a
+  GPU submit, which would either deadlock against the queue lock or stall the
+  render thread for a frame. (Cycles' double-buffered display driver; not the
+  triple-buffer mailbox an earlier sketch reached for and this one rejected.)
+- The view transform (tonemap + exposure) is the *consumer's*, applied
+  downstream of the published linear frame — matching Hydra's `HdRenderBuffer` +
+  `HdxColorCorrectionTask` split, and what the batch CLI already does (it writes
+  the linear average to EXR with no tonemap at all). This moves the tonemap out
+  of the render loop, superseding the viewer-arrangement half of D-045; that
+  entry's throughput win for the CLI stands.
+
+Delivered as green, committed batches: (1) the queue becomes a lock-guarded
+handle [D-047]; (2) the viewer takes ownership of the tonemap and the `Film`
+grows a linear-average resolve target; (3) the `render::Session` thread, the
+input latch, and the double-buffered frame; (4) resize and shutdown hardening.
+
+### D-047: The queue is a lock-guarded handle, not a raw `vk::Queue` (implements D-046; batch 1)
+`vkQueueSubmit`/`vkQueuePresentKHR` require the queue to be externally
+synchronized, yet `vk::Queue` is `Sync`, so nothing stops two threads racing it
+once the render thread submits traces while the present thread blits. A
+`submit::Queue` newtype wraps `Arc<Mutex<vk::Queue>>` and exposes
+`submit`/`submit2`/`present`, each locking *only* around the one Vulkan call;
+the fence wait that follows a submit runs with the lock released, so neither
+thread blocks the other for a whole GPU frame.
+
+It is a granular cloned handle, symmetric with how `Context` and `Presenter`
+already share the allocator (`Arc<Mutex<Allocator>>`) and the device. The
+alternative — a bare `Mutex<vk::Queue>` reached through an `Arc<Context>`
+back-reference — would have made `Presenter` hold both a context handle and its
+own device/allocator clones, three routes to the same object, and it fought
+Rust's receiver rules at `create_presenter`. The one submission whose fence wait
+is unavoidably inside the lock is the egui texture upload, which submits and
+waits internally (`Queue::locked`); those uploads are rare and small. No
+behavior change — both goldens pass unregenerated.

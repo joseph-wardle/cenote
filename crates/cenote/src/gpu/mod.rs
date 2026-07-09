@@ -38,6 +38,7 @@ pub use present::Presenter;
 pub use submit::Pass;
 
 use init::DebugMessenger;
+use submit::Queue;
 
 /// An initialized Vulkan device ready for compute dispatch.
 ///
@@ -54,7 +55,9 @@ pub struct Context {
     // Extension function table for VK_KHR_acceleration_structure; plain
     // function pointers, nothing to destroy.
     accel_loader: ash::khr::acceleration_structure::Device,
-    queue: vk::Queue,
+    // The one queue, lock-guarded so the render and present threads take
+    // turns submitting to it — see [`submit::Queue`].
+    queue: Queue,
     queue_family_index: u32,
     physical_device: vk::PhysicalDevice,
     device_type: vk::PhysicalDeviceType,
@@ -158,7 +161,7 @@ impl Context {
             allocator: ManuallyDrop::new(Arc::new(Mutex::new(allocator))),
             device,
             accel_loader,
-            queue,
+            queue: Queue::new(queue),
             queue_family_index,
             physical_device,
             device_type: properties.device_type,
@@ -193,13 +196,7 @@ impl Context {
         &self.device
     }
 
-    /// The one compute queue — every submission in the crate goes through it.
-    #[must_use]
-    pub(super) fn queue(&self) -> vk::Queue {
-        self.queue
-    }
-
-    /// Family index [`Self::queue`] belongs to.
+    /// Family index the queue belongs to.
     #[must_use]
     pub(super) fn queue_family_index(&self) -> u32 {
         self.queue_family_index
@@ -215,6 +212,12 @@ impl Context {
     /// themselves on drop.
     fn allocator_handle(&self) -> Arc<Mutex<Allocator>> {
         Arc::clone(&self.allocator)
+    }
+
+    /// A clone of the shared queue handle, for the presenter's own
+    /// submissions.
+    fn queue_handle(&self) -> Queue {
+        self.queue.clone()
     }
 }
 

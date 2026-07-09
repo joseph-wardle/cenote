@@ -13,13 +13,90 @@
 //! Cross-submission memory visibility is free with this shape: the fence
 //! signal makes all device writes available, so the next upload, dispatch,
 //! or readback needs no extra barrier.
+//!
+//! The one queue every submission funnels through is wrapped in [`Queue`],
+//! whose lock is where the render loop's traces and the presenter's blits
+//! take turns — Vulkan requires submission to a queue to be externally
+//! synchronized.
 
 use std::slice;
+use std::sync::{Arc, Mutex};
 
+use ash::prelude::VkResult;
 use ash::vk;
 
 use crate::error::Result;
 use crate::gpu::{Buffer, ComputePipeline, Context, SceneBindings};
+
+/// The device's single queue, wrapped so Vulkan's external-synchronization
+/// rule for submission is enforced by the type rather than by a comment.
+///
+/// `vk::Queue` is `Sync`, so the compiler would let two threads submit at
+/// once — which Vulkan forbids. Once the render loop traces on its own thread
+/// while the presenter blits on another, every submission must take this
+/// lock. It is held *only* around the submit call, never across the fence
+/// wait that follows: waiting under it would stall the other thread for a
+/// whole GPU frame.
+///
+/// Cloned rather than borrowed — the [`Context`] and its [`Presenter`] each
+/// hold a handle to the same lock, exactly as they share the allocator.
+#[derive(Clone)]
+pub(super) struct Queue {
+    queue: Arc<Mutex<vk::Queue>>,
+}
+
+impl Queue {
+    /// Wrap the device's queue handle.
+    pub(super) fn new(queue: vk::Queue) -> Self {
+        Self {
+            queue: Arc::new(Mutex::new(queue)),
+        }
+    }
+
+    /// Submit `submits`, signaling `fence` on completion. Locks only for the
+    /// submit; wait on `fence` after this returns, with the lock released.
+    pub(super) fn submit(
+        &self,
+        device: &ash::Device,
+        submits: &[vk::SubmitInfo],
+        fence: vk::Fence,
+    ) -> VkResult<()> {
+        let queue = self.queue.lock().expect("queue mutex poisoned");
+        unsafe { device.queue_submit(*queue, submits, fence) }
+    }
+
+    /// As [`Queue::submit`], for the synchronization2 submission the presenter
+    /// records.
+    pub(super) fn submit2(
+        &self,
+        device: &ash::Device,
+        submits: &[vk::SubmitInfo2],
+        fence: vk::Fence,
+    ) -> VkResult<()> {
+        let queue = self.queue.lock().expect("queue mutex poisoned");
+        unsafe { device.queue_submit2(*queue, submits, fence) }
+    }
+
+    /// Present through `swapchain`. Locks only for the present call; the
+    /// returned bool is the swapchain's suboptimal flag.
+    pub(super) fn present(
+        &self,
+        swapchain: &ash::khr::swapchain::Device,
+        present_info: &vk::PresentInfoKHR,
+    ) -> VkResult<bool> {
+        let queue = self.queue.lock().expect("queue mutex poisoned");
+        unsafe { swapchain.queue_present(*queue, present_info) }
+    }
+
+    /// Run `f` holding the queue lock, for a submission buried inside a
+    /// dependency we don't record ourselves — the egui texture upload submits
+    /// *and* fence-waits internally. Unlike [`Queue::submit`], the lock spans
+    /// all of `f`, wait included, so this is for rare, small uploads only.
+    pub(super) fn locked<T>(&self, f: impl FnOnce(vk::Queue) -> T) -> T {
+        let queue = self.queue.lock().expect("queue mutex poisoned");
+        f(*queue)
+    }
+}
 
 /// One step of a [`Context::submit_passes`] submission. `Copy` so a caller
 /// can append its own passes to a recorded list and submit them together —
@@ -114,11 +191,12 @@ impl Context {
         let fence = unsafe { device.create_fence(&vk::FenceCreateInfo::default(), None)? };
         let buffers = [command_buffer];
         let submit_info = vk::SubmitInfo::default().command_buffers(&buffers);
-        let result = unsafe {
-            device
-                .queue_submit(self.queue(), &[submit_info], fence)
-                .and_then(|()| device.wait_for_fences(&[fence], true, u64::MAX))
-        };
+        // Submit under the queue lock, then wait with it released — a fence
+        // wait held across the lock would stall the other thread's submits.
+        let result = self
+            .queue
+            .submit(device, &[submit_info], fence)
+            .and_then(|()| unsafe { device.wait_for_fences(&[fence], true, u64::MAX) });
         unsafe { device.destroy_fence(fence, None) };
         Ok(result?)
     }

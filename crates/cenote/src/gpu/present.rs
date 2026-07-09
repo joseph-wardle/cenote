@@ -27,6 +27,7 @@ use crate::error::{Error, Result};
 use crate::gpu::buffer::free_allocation;
 use crate::gpu::image::image_barrier;
 use crate::gpu::overlay::{GuiFrame, OverlayRenderer};
+use crate::gpu::submit::Queue;
 use crate::gpu::{Buffer, Context, MemoryLocation};
 
 /// Format of the transfer image — the display buffers' packed, row-major
@@ -83,7 +84,7 @@ pub struct Presenter {
     /// [`GuiFrame`].
     overlay: Option<OverlayRenderer>,
     physical_device: vk::PhysicalDevice,
-    queue: vk::Queue,
+    queue: Queue,
     device: ash::Device,
     allocator: Arc<Mutex<Allocator>>,
 }
@@ -160,7 +161,7 @@ impl Context {
             transfer: None,
             overlay: None,
             physical_device: self.physical_device,
-            queue: self.queue,
+            queue: self.queue_handle(),
             device: self.device.clone(),
             allocator: self.allocator_handle(),
         };
@@ -289,10 +290,8 @@ impl Presenter {
             .wait_semaphore_infos(slice::from_ref(&wait))
             .command_buffer_infos(slice::from_ref(&cmd))
             .signal_semaphore_infos(slice::from_ref(&signal));
-        unsafe {
-            self.device
-                .queue_submit2(self.queue, slice::from_ref(&submit), self.frame_done)?;
-        }
+        self.queue
+            .submit2(&self.device, slice::from_ref(&submit), self.frame_done)?;
 
         let semaphores = [self.render_finished[index as usize]];
         let swapchains = [self.swapchain];
@@ -301,10 +300,7 @@ impl Presenter {
             .wait_semaphores(&semaphores)
             .swapchains(&swapchains)
             .image_indices(&indices);
-        let presented = unsafe {
-            self.swapchain_loader
-                .queue_present(self.queue, &present_info)
-        };
+        let presented = self.queue.present(&self.swapchain_loader, &present_info);
 
         // One frame in flight: this frame's GPU work ends before we return.
         unsafe {
@@ -523,10 +519,10 @@ impl Presenter {
                 self.format.format,
             )?);
         }
-        self.overlay
-            .as_mut()
-            .expect("just created above")
-            .upload_textures(self.queue, self.pool, &gui.textures_delta)
+        let overlay = self.overlay.as_mut().expect("just created above");
+        let pool = self.pool;
+        self.queue
+            .locked(|queue| overlay.upload_textures(queue, pool, &gui.textures_delta))
     }
 
     fn create_frame_resources(&mut self, queue_family_index: u32) -> Result<()> {
