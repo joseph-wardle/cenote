@@ -16,16 +16,16 @@
 //! | `environment` | The equirect environment light: EXR load and the CDF sampling tables, built at prep |
 //! | `color`     | Authored `Rec.709` → `ACEScg` conversion at scene prep |
 //! | `wavefront` | The engine core: `SoA` path state, GPU stage queues, indirect dispatch — one [`wavefront::Wavefront::trace`] is one sample per pixel, written pixel-owned so renders are bitwise deterministic |
-//! | `render`    | Frame orchestration: one-shot linear frames for the CLI and tests, and the progressive path — [`render::Renderer`] accumulates samples into a [`render::Film`] and tonemaps (ACES) for display |
+//! | `render`    | Frame orchestration: one-shot linear frames for the CLI and tests, and the progressive path — [`render::Renderer`] accumulates samples into a [`render::Film`] and resolves the linear average; [`render::Tonemap`] is the consumer's downstream view transform (exposure + ACES), which the viewer owns and the CLI skips |
 //! | `output`    | Linear EXR write + read (read exists for the golden-image tests and the demo environment) |
 //! | `error`     | The crate-wide [`enum@Error`] |
 //!
 //! The GPU kernels themselves live in `shaders/` (Slang, compiled to SPIR-V
 //! by `build.rs`; the embedded/recompiled `Kernels` set is registered in
 //! `shaders.rs`). Their stage chain — raygen → intersect →
-//! (`shade_miss` | `shade_surface`) → `trace_shadow`, then the `accumulate`
-//! and `tonemap` film kernels — is mapped in [`wavefront`]'s module doc, and
-//! each `.slang` file's header states its own job.
+//! (`shade_miss` | `shade_surface`) → `trace_shadow`, then the `accumulate`,
+//! `resolve`, and `tonemap` film kernels — is mapped in [`wavefront`]'s
+//! module doc, and each `.slang` file's header states its own job.
 //!
 //! # Conventions
 //!

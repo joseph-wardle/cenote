@@ -7,9 +7,10 @@
 //! visibly converges as the spp counter climbs.
 //!
 //! Single-threaded, and self-scheduling once visible: every redraw
-//! accumulates one sample into the film, tonemaps (live exposure), presents,
-//! and requests the next redraw — vsync paces the loop, and the spp counter
-//! climbs forever. Camera motion resets the film; a resize replaces it.
+//! accumulates one sample into the film, resolves the running average and
+//! tonemaps it (live exposure), presents, and requests the next redraw —
+//! vsync paces the loop, and the spp counter climbs forever. Camera motion
+//! resets the film; a resize replaces it.
 
 mod camera;
 mod ui;
@@ -89,6 +90,10 @@ struct Viewer {
     // clipboard handle talks to the display server — before the window.
     presenter: cenote::gpu::Presenter,
     renderer: cenote::render::Renderer,
+    /// The view transform: the film's linear average → the displayed frame,
+    /// at the panel's exposure. The consumer half of the estimator/view
+    /// split, owned here and never by the renderer.
+    tonemap: cenote::render::Tonemap,
     scene: cenote::scene::Scene,
     /// The accumulation target, created at window size by the first redraw
     /// and replaced whenever the window size stops matching.
@@ -117,6 +122,7 @@ impl Viewer {
         let scene = cenote::scene::Scene::demo(&gpu)?;
         let camera = OrbitCamera::framing(scene.camera());
         let renderer = cenote::render::Renderer::new(&gpu)?;
+        let tonemap = cenote::render::Tonemap::new(&gpu)?;
         let size = window.inner_size();
         let presenter = gpu.create_presenter(
             display,
@@ -130,6 +136,7 @@ impl Viewer {
         Ok(Self {
             presenter,
             renderer,
+            tonemap,
             scene,
             film: None,
             gpu,
@@ -198,8 +205,9 @@ impl Viewer {
     }
 
     /// One frame: accumulate a sample into the film (replacing the film if
-    /// the window size changed), tonemap at the panel's exposure, run the
-    /// UI, present, and request the next redraw — accumulation never stops.
+    /// the window size changed), resolve the average, tonemap it at the
+    /// panel's exposure, run the UI, present, and request the next redraw —
+    /// accumulation never stops.
     fn redraw(&mut self) -> anyhow::Result<()> {
         let size = self.window.inner_size();
         if size.width == 0 || size.height == 0 {
@@ -218,19 +226,33 @@ impl Viewer {
 
         *self.scene.camera_mut() = self.camera.camera();
 
-        // The UI runs first now that trace, accumulate, and tonemap fold
-        // into one submission: its exposure must be known before that
-        // submission records the tonemap, and an exposure drag still lands
-        // this very frame. The stats it shows are the previous frame's —
-        // one frame stale, imperceptible, and the price of the single fence.
+        // The UI runs first so its exposure is current for this frame's
+        // tonemap and an exposure drag lands this very frame. The stats it
+        // shows are the previous frame's — one frame stale, imperceptible.
         let gui_frame = self
             .gui
             .run(&self.window, self.gpu.device_summary(), &self.stats);
 
+        // Accumulate one sample, resolve the running average, tonemap it for
+        // display. Three submissions, not a single fold: it keeps the
+        // estimator (accumulate, resolve) cleanly apart from the view
+        // transform (tonemap) — the seam the threaded render loop splits at.
         let started = Instant::now();
         self.renderer
-            .accumulate_and_tonemap(&self.gpu, &self.scene, film, self.gui.exposure())
-            .context("accumulating and tonemapping a sample")?;
+            .accumulate(&self.gpu, &self.scene, film)
+            .context("accumulating a sample")?;
+        self.renderer
+            .resolve(&self.gpu, film)
+            .context("resolving the average")?;
+        self.tonemap
+            .apply(
+                &self.gpu,
+                film.average_buffer(),
+                film.width(),
+                film.height(),
+                self.gui.exposure(),
+            )
+            .context("tonemapping the frame")?;
         self.stats.sample = started.elapsed();
         self.stats.size = (size.width, size.height);
         self.stats.samples = film.samples();
@@ -239,7 +261,7 @@ impl Viewer {
         let started = Instant::now();
         self.presenter
             .present(
-                film.display(),
+                self.tonemap.display(),
                 film.width(),
                 film.height(),
                 Some(&gui_frame),

@@ -54,7 +54,9 @@ pub struct Kernels {
     pub trace_shadow: Kernel,
     /// Film: add a wave's sample into the running sums (NaN/Inf-guarded).
     pub accumulate: Kernel,
-    /// Film: sums → exposed, ACES-mapped, sRGB-encoded display RGBA8.
+    /// Film: running sums → the resolved linear `ACEScg` average.
+    pub resolve: Kernel,
+    /// View transform: linear average → exposed, ACES-mapped, sRGB display RGBA8.
     pub tonemap: Kernel,
 }
 
@@ -80,6 +82,7 @@ impl Kernels {
             shade_surface: kernel(spirv!("shade_surface"), c"shade_surface"),
             trace_shadow: kernel(spirv!("trace_shadow"), c"trace_shadow"),
             accumulate: kernel(spirv!("accumulate"), c"accumulate"),
+            resolve: kernel(spirv!("resolve"), c"resolve"),
             tonemap: kernel(spirv!("tonemap"), c"tonemap"),
         }
     }
@@ -107,6 +110,7 @@ impl Kernels {
             shade_surface,
             trace_shadow,
             accumulate,
+            resolve,
             tonemap,
         ] = std::thread::scope(|scope| {
             slangc::KERNELS
@@ -139,6 +143,10 @@ impl Kernels {
             accumulate: Kernel {
                 spirv: accumulate?,
                 entry: c"accumulate",
+            },
+            resolve: Kernel {
+                spirv: resolve?,
+                entry: c"resolve",
             },
             tonemap: Kernel {
                 spirv: tonemap?,
@@ -254,7 +262,7 @@ mod tests {
         u32::from_le_bytes(bytes[..4].try_into().unwrap()) == 0x0723_0203
     }
 
-    fn all(kernels: &Kernels) -> [&Kernel; 7] {
+    fn all(kernels: &Kernels) -> [&Kernel; 8] {
         [
             &kernels.raygen,
             &kernels.intersect,
@@ -262,6 +270,7 @@ mod tests {
             &kernels.shade_surface,
             &kernels.trace_shadow,
             &kernels.accumulate,
+            &kernels.resolve,
             &kernels.tonemap,
         ]
     }

@@ -656,3 +656,38 @@ Rust's receiver rules at `create_presenter`. The one submission whose fence wait
 is unavoidably inside the lock is the egui texture upload, which submits and
 waits internally (`Queue::locked`); those uploads are rare and small. No
 behavior change — both goldens pass unregenerated.
+
+### D-048: The estimator ends at a linear average; the tonemap moves downstream to the consumer (implements D-046; batch 2)
+D-046's estimator/view split, made concrete while still single-threaded, so
+batch 3 only adds the thread. The renderer's output is now a **linear average**,
+and the tonemap is a separate, consumer-owned step:
+
+- A new `resolve.slang` kernel divides the film's running sums by the sample
+  count into a new `Film` linear-average buffer (which replaces the film's old
+  RGBA8 `display` buffer). `Renderer` swaps its tonemap pipeline for the resolve
+  pipeline, gains `Renderer::resolve`, and drops `tonemap` and
+  `accumulate_and_tonemap`.
+- A new `render::Tonemap` type — the tonemap pipeline plus a lazily-sized
+  display buffer — is the view transform: exposure, ACES, sRGB, pack. The viewer
+  owns one permanently and drives it; the CLI never builds one (EXR stays
+  linear). `tonemap.slang` re-points from the sums to the resolved average, and
+  its scale drops the `÷ samples` (now the resolve kernel's job) to just
+  `exp2(exposure)`.
+
+Resolve is deliberately **separate** from accumulate, not folded into the wave
+like D-045's tonemap was: batch 3's render thread accumulates flat out and
+resolves only when it publishes, so resolve must not ride every sample. This
+supersedes the viewer half of D-045 — the viewer's single fold becomes three
+submissions (accumulate, resolve, tonemap), and `accumulate_and_tonemap` and its
+`folded_frame_matches_separate_passes` test are gone. The CLI keeps its
+trace+accumulate fold via `trace_then`, so D-045's throughput win for the batch
+path stands.
+
+One consequence of resolving on the GPU: Vulkan floating-point division is
+correctly rounded only to ~2.5 ULP, so the GPU average and the host
+`Film::average` readback (the batch EXR) agree to a few ULP, not bit for bit —
+the same reason D-045 divided host-side into the scale. That is imperceptible in
+a display image and irrelevant to the "same estimator" claim, which rests on the
+identical sums, not the final normalize; the new `resolve_matches_host_average`
+test asserts a ULP tolerance. The linear estimator itself is untouched, so both
+goldens pass unregenerated.

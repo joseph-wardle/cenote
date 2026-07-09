@@ -2,20 +2,26 @@
 //! manage the film. Orchestration only — Vulkan stays behind [`crate::gpu`],
 //! tracing behind [`crate::wavefront`].
 //!
-//! Two paths share the engine:
+//! The estimator ends at a *linear average*, and the view transform is a
+//! separate, downstream step — the split every production renderer draws
+//! between the render buffer and its color pipeline:
 //!
 //! - **One-shot** ([`Renderer::render`]): allocate a buffer, trace one
 //!   wave, read the linear pixels back — the test and hot-reload-probe
 //!   path.
 //! - **Progressive** ([`Renderer::accumulate`]): each call traces one
-//!   sample into the [`Film`]'s running sums. The viewer instead calls
-//!   [`Renderer::accumulate_and_tonemap`], folding that trace, the
-//!   accumulate, and the tonemap — average, exposure, the ACES display
-//!   transform, into the RGBA8 buffer [`crate::gpu::Presenter::present`]
-//!   shows — into a single submission; the CLI accumulates to a fixed
-//!   sample count and reads the linear average back with [`Film::average`],
-//!   writing it as the batch EXR. Batch output and the viewer's converged
+//!   sample into the [`Film`]'s running sums. [`Renderer::resolve`] then
+//!   divides those sums by the sample count into the film's linear
+//!   average — the estimator's current best image. The CLI resolves on the
+//!   host with [`Film::average`] and writes the batch EXR; the viewer
+//!   resolves on the GPU and hands the average to [`Tonemap`], the
+//!   consumer's view transform. Batch output and the viewer's converged
 //!   image are the same estimator by construction — they share the film.
+//!
+//! [`Tonemap`] is the other half of that split: exposure, the ACES display
+//! transform, and the sRGB pack that turn a linear average into the frame
+//! the presenter blits. The viewer owns one and drives it each frame; the
+//! CLI never touches it, since EXR output stays linear.
 //!
 //! Every sample is a full path-traced estimate — jittered camera ray,
 //! MIS-weighted direct light sampling at every bounce (quad lights and the
@@ -56,27 +62,44 @@ struct AccumulateParams {
     _pad0: u32,
 }
 
+/// Push constants for the resolve kernel; mirrors `struct Params` in
+/// `shaders/resolve.slang`.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ResolveParams {
+    /// Device address of the film's running sums (`float4*`).
+    sum: vk::DeviceAddress,
+    /// Device address of the linear average target (`float4*`).
+    average: vk::DeviceAddress,
+    width: u32,
+    height: u32,
+    /// The sample count to divide by, as an `f32`. The host
+    /// [`Film::average`] divides by the same count, so the two averages
+    /// agree to a few ULP (GPU division is only approximately rounded).
+    samples: f32,
+    _pad0: f32,
+}
+
 /// Push constants for the tonemap kernel; mirrors `struct Params` in
 /// `shaders/tonemap.slang`.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct TonemapParams {
-    /// Device address of the film's running sums (`float4*`).
-    sum: vk::DeviceAddress,
+    /// Device address of the film's resolved linear average (`float4*`).
+    average: vk::DeviceAddress,
     /// Device address of the packed RGBA8 display buffer (`uint*`).
     display: vk::DeviceAddress,
     width: u32,
     height: u32,
-    /// `exp2(exposure stops) / sample count` — average and exposure folded
-    /// into one multiply.
-    scale: f32,
+    /// `exp2(exposure stops)` — the resolve kernel already averaged.
+    exposure_scale: f32,
     _pad0: f32,
 }
 
 /// Progressive accumulation state for one render-target size: per-pixel
-/// linear RGBA f32 sums, the sample the current wave writes, and the
-/// tonemapped RGBA8 frame the presenter shows. The sample count lives on
-/// the host — it is uniform across pixels by construction.
+/// linear RGBA f32 sums, the sample the current wave writes, and the linear
+/// average the sums resolve to. The sample count lives on the host — it is
+/// uniform across pixels by construction.
 ///
 /// Sized at creation; a resize means a new `Film`. A view change means
 /// [`Film::reset`].
@@ -87,9 +110,10 @@ pub struct Film {
     /// The running sums. `TRANSFER_SRC` so the accumulated image can be
     /// read back — [`Film::average`] and the tests.
     sum: Buffer,
-    /// The tonemap kernel's output: packed RGBA8, sRGB-encoded — exactly
-    /// what [`crate::gpu::Presenter::present`] expects.
-    display: Buffer,
+    /// [`Renderer::resolve`]'s output: the sums divided by the sample count,
+    /// linear `ACEScg` — the estimator's published image, which [`Tonemap`]
+    /// reads. `TRANSFER_SRC` so it can be read back for tests.
+    average: Buffer,
     width: u32,
     height: u32,
     samples: u32,
@@ -126,9 +150,9 @@ impl Film {
                 storage | vk::BufferUsageFlags::TRANSFER_SRC,
                 MemoryLocation::GpuOnly,
             )?,
-            display: gpu.create_buffer(
-                "film.display",
-                texels * 4,
+            average: gpu.create_buffer(
+                "film.average",
+                texels * 16,
                 storage | vk::BufferUsageFlags::TRANSFER_SRC,
                 MemoryLocation::GpuOnly,
             )?,
@@ -150,11 +174,12 @@ impl Film {
         self.samples
     }
 
-    /// The tonemapped frame, valid after [`Renderer::tonemap`] — hand it to
-    /// [`crate::gpu::Presenter::present`].
+    /// The resolved linear average, valid after [`Renderer::resolve`] — the
+    /// image [`Tonemap::apply`] reads, and (in the threaded viewer) the
+    /// buffer published across the render/present seam.
     #[must_use]
-    pub fn display(&self) -> &Buffer {
-        &self.display
+    pub fn average_buffer(&self) -> &Buffer {
+        &self.average
     }
 
     /// Read back the accumulated average — linear `ACEScg` RGBA, row-major,
@@ -195,7 +220,7 @@ impl Film {
 pub struct Renderer {
     wavefront: Wavefront,
     accumulate: ComputePipeline,
-    tonemap: ComputePipeline,
+    resolve: ComputePipeline,
     /// The path-length cap the wavefront was built with, kept so
     /// [`Renderer::reload`] rebuilds an identical engine.
     max_bounces: u32,
@@ -244,10 +269,10 @@ impl Renderer {
                 size_of::<AccumulateParams>() as u32,
                 Bindings::None,
             )?,
-            tonemap: gpu.create_compute_pipeline(
-                &kernels.tonemap.spirv,
-                kernels.tonemap.entry,
-                size_of::<TonemapParams>() as u32,
+            resolve: gpu.create_compute_pipeline(
+                &kernels.resolve.spirv,
+                kernels.resolve.entry,
+                size_of::<ResolveParams>() as u32,
                 Bindings::None,
             )?,
             max_bounces,
@@ -353,44 +378,11 @@ impl Renderer {
         Ok(())
     }
 
-    /// [`Renderer::accumulate`] with the tonemap folded in: trace the next
-    /// sample, add it to the sums, and tonemap the new average into the
-    /// display buffer — all one fence-waited submission, the viewer's
-    /// per-frame path. `exposure` (stops) applies as in [`Renderer::tonemap`];
-    /// the average divides by the count *including* this sample, since its
-    /// accumulate lands in the same submission the tonemap reads.
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from submission.
-    pub fn accumulate_and_tonemap(
-        &self,
-        gpu: &Context,
-        scene: &Scene,
-        film: &mut Film,
-        exposure: f32,
-    ) -> Result<()> {
-        let accumulate = accumulate_params(film);
-        let tonemap = tonemap_params(film, exposure, film.samples + 1);
-        self.wavefront.trace_then(
-            gpu,
-            scene,
-            &film.sample,
-            film.width,
-            film.height,
-            film.samples,
-            &[
-                self.accumulate_pass(&accumulate),
-                self.tonemap_pass(&tonemap),
-            ],
-        )?;
-        film.samples += 1;
-        Ok(())
-    }
-
-    /// Tonemap `film`'s accumulated average into its display buffer:
-    /// exposure (in stops), the ACES display transform, sRGB encode, RGBA8
-    /// pack — everything [`crate::gpu::Presenter::present`] needs.
+    /// Resolve `film`'s running sums into its linear average: one dispatch
+    /// dividing each pixel's sum by the sample count. Separate from
+    /// [`Renderer::accumulate`] on purpose — the threaded viewer accumulates
+    /// flat out and resolves only when it publishes a frame, so resolving
+    /// must not ride every sample.
     ///
     /// # Errors
     ///
@@ -398,13 +390,13 @@ impl Renderer {
     ///
     /// # Panics
     ///
-    /// If the film has no samples — there is no average to show, so calling
-    /// order is a programmer bug.
-    pub fn tonemap(&self, gpu: &Context, film: &Film, exposure: f32) -> Result<()> {
-        assert!(film.samples > 0, "tonemapping an empty film");
-        let params = tonemap_params(film, exposure, film.samples);
+    /// If the film has no samples — there is no average to resolve, so
+    /// calling order is a programmer bug.
+    pub fn resolve(&self, gpu: &Context, film: &Film) -> Result<()> {
+        assert!(film.samples > 0, "resolving an empty film");
+        let params = resolve_params(film);
         gpu.dispatch(
-            &self.tonemap,
+            &self.resolve,
             None,
             bytemuck::bytes_of(&params),
             workgroups(film.width, film.height),
@@ -421,15 +413,113 @@ impl Renderer {
             group_counts: workgroups(params.width, params.height),
         }
     }
+}
 
-    /// The tonemap dispatch as a [`Pass`], like [`Renderer::accumulate_pass`].
-    fn tonemap_pass<'a>(&'a self, params: &'a TonemapParams) -> Pass<'a> {
-        Pass::Dispatch {
-            pipeline: &self.tonemap,
-            scene: None,
-            push_constants: bytemuck::bytes_of(params),
-            group_counts: workgroups(params.width, params.height),
+/// The consumer's view transform: exposure, the ACES display transform, the
+/// sRGB transfer curve, and a pack to the RGBA8 bytes the presenter blits —
+/// turning a [`Film`]'s resolved linear average into a displayable frame.
+///
+/// This is the estimator/view split's consumer half. The CLI never builds
+/// one: batch EXRs stay linear `ACEScg`. The viewer owns one permanently and
+/// drives it each frame, so the tonemap is *downstream* of the render — the
+/// same place Hydra puts color correction, after the render buffer.
+pub struct Tonemap {
+    pipeline: ComputePipeline,
+    /// The RGBA8 output, sized to the last [`Tonemap::apply`] and grown when
+    /// a larger frame arrives — the pipeline itself is size-independent, so
+    /// only this buffer tracks the window.
+    display: Option<Buffer>,
+}
+
+impl Tonemap {
+    /// Build the view transform from the embedded tonemap kernel. The
+    /// display buffer is allocated lazily by [`Tonemap::apply`], since its
+    /// size is the frame's, not known here.
+    ///
+    /// # Errors
+    ///
+    /// Any [`crate::Error`] from pipeline creation.
+    pub fn new(gpu: &Context) -> Result<Self> {
+        let kernels = Kernels::embedded();
+        Ok(Self {
+            pipeline: gpu.create_compute_pipeline(
+                &kernels.tonemap.spirv,
+                kernels.tonemap.entry,
+                size_of::<TonemapParams>() as u32,
+                Bindings::None,
+            )?,
+            display: None,
+        })
+    }
+
+    /// Tonemap a `width`×`height` linear `average` into the display buffer:
+    /// exposure (in stops), the ACES display transform, sRGB encode, RGBA8
+    /// pack — everything [`crate::gpu::Presenter::present`] needs. Read the
+    /// result with [`Tonemap::display`].
+    ///
+    /// # Errors
+    ///
+    /// Any [`crate::Error`] from buffer creation or submission.
+    ///
+    /// # Panics
+    ///
+    /// On a zero-sized frame — callers validate their inputs, so this is a
+    /// programmer bug.
+    pub fn apply(
+        &mut self,
+        gpu: &Context,
+        average: &Buffer,
+        width: u32,
+        height: u32,
+        exposure: f32,
+    ) -> Result<()> {
+        assert!(width > 0 && height > 0, "zero-sized tonemap");
+        let display = self.ensure_display(gpu, width, height)?.device_address();
+        let params = TonemapParams {
+            average: average.device_address(),
+            display,
+            width,
+            height,
+            exposure_scale: exposure.exp2(),
+            _pad0: 0.0,
+        };
+        gpu.dispatch(
+            &self.pipeline,
+            None,
+            bytemuck::bytes_of(&params),
+            workgroups(width, height),
+        )
+    }
+
+    /// The last tonemapped frame — packed RGBA8, sRGB-encoded, exactly what
+    /// [`crate::gpu::Presenter::present`] expects. Hand it over right after
+    /// [`Tonemap::apply`].
+    ///
+    /// # Panics
+    ///
+    /// Before the first [`Tonemap::apply`], when no frame exists yet.
+    #[must_use]
+    pub fn display(&self) -> &Buffer {
+        self.display.as_ref().expect("apply has not run yet")
+    }
+
+    /// The display buffer sized for `width`×`height`, allocating or growing
+    /// it when the frame outgrows it. The pipeline is size-independent, so
+    /// this lazy buffer is all that tracks the window.
+    fn ensure_display(&mut self, gpu: &Context, width: u32, height: u32) -> Result<&Buffer> {
+        let bytes = u64::from(width) * u64::from(height) * 4;
+        let stale = self.display.as_ref().is_none_or(|d| d.size() < bytes);
+        if stale {
+            self.display = Some(gpu.create_buffer(
+                "tonemap.display",
+                bytes,
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                    | vk::BufferUsageFlags::TRANSFER_SRC,
+                MemoryLocation::GpuOnly,
+            )?);
         }
+        Ok(self.display.as_ref().expect("just created above"))
     }
 }
 
@@ -446,17 +536,15 @@ fn accumulate_params(film: &Film) -> AccumulateParams {
     }
 }
 
-/// The tonemap kernel's push constants: `film.sum`, averaged over `samples`
-/// and exposure-scaled, into `film.display`. `samples` is a parameter
-/// because the folded path ([`Renderer::accumulate_and_tonemap`]) divides by
-/// the count *after* its own accumulate lands, one past [`Film::samples`].
-fn tonemap_params(film: &Film, exposure: f32, samples: u32) -> TonemapParams {
-    TonemapParams {
+/// The resolve kernel's push constants: `film.sum` divided by the sample
+/// count into `film.average`.
+fn resolve_params(film: &Film) -> ResolveParams {
+    ResolveParams {
         sum: film.sum.device_address(),
-        display: film.display.device_address(),
+        average: film.average.device_address(),
         width: film.width,
         height: film.height,
-        scale: exposure.exp2() / samples as f32,
+        samples: film.samples as f32,
         _pad0: 0.0,
     }
 }
@@ -927,48 +1015,34 @@ mod tests {
         assert_eq!(download_f32(&gpu, &film.sum), single);
     }
 
-    /// The viewer's folded path — trace, accumulate, and tonemap in one
-    /// submission — must produce the exact same display buffer as running
-    /// the three as separate fence-waited submissions: a barrier between
-    /// passes orders the writes a fence would. Both films trace the same
-    /// sample sequence, and the fold divides by the count *including* its
-    /// own sample, so the average and the tonemap match bit for bit.
+    /// The GPU resolve must land the same average as the host
+    /// [`Film::average`] readback — same sums, same divisor. GPU division is
+    /// only correctly rounded to a couple of ULP (Vulkan's precision floor),
+    /// so the two agree to floating-point noise, not bit for bit; a real bug
+    /// (wrong divisor, transposed indices) misses by far more than that.
+    /// This is what lets the viewer and the CLI claim to show the same image.
     #[test]
-    fn folded_frame_matches_separate_passes() {
+    fn resolve_matches_host_average() {
         let Some(gpu) = crate::gpu::test_context() else {
             return;
         };
         let scene = Scene::demo(&gpu).expect("demo scene");
         let renderer = Renderer::new(&gpu).expect("renderer");
-        let exposure = 0.5;
-
-        // Separate: three accumulations, then a standalone tonemap.
-        let mut separate = Film::new(&gpu, 64, 64).expect("film");
+        let mut film = Film::new(&gpu, 64, 64).expect("film");
         for _ in 0..3 {
             renderer
-                .accumulate(&gpu, &scene, &mut separate)
+                .accumulate(&gpu, &scene, &mut film)
                 .expect("accumulate");
         }
-        renderer
-            .tonemap(&gpu, &separate, exposure)
-            .expect("tonemap");
-        let expected = gpu.download_buffer(separate.display()).expect("download");
-
-        // Folded: the third sample's accumulate and the tonemap ride the wave.
-        let mut folded = Film::new(&gpu, 64, 64).expect("film");
-        for _ in 0..2 {
-            renderer
-                .accumulate(&gpu, &scene, &mut folded)
-                .expect("accumulate");
+        renderer.resolve(&gpu, &film).expect("resolve");
+        let gpu_average = download_f32(&gpu, film.average_buffer());
+        let host_average = film.average(&gpu).expect("host average");
+        for (gpu, host) in gpu_average.iter().zip(&host_average) {
+            assert!(
+                (gpu - host).abs() <= 1e-5 * host.abs().max(1.0),
+                "resolve diverged from the host average: {gpu} vs {host}"
+            );
         }
-        renderer
-            .accumulate_and_tonemap(&gpu, &scene, &mut folded, exposure)
-            .expect("accumulate and tonemap");
-        assert_eq!(folded.samples(), 3);
-        assert_eq!(
-            gpu.download_buffer(folded.display()).expect("download"),
-            expected
-        );
     }
 
     /// The accumulation kernel's finite guard: a NaN or Inf in any channel
@@ -1032,40 +1106,42 @@ mod tests {
     }
 
     /// The tonemap kernel against a CPU mirror of the same transform:
-    /// average + exposure scale, `ACEScg` → `Rec.709`, Hill's ACES fit, sRGB
-    /// encode, RGBA8 pack. A transposed matrix or wrong constant shows up
-    /// as more than the ±1 quantization step allowed here.
+    /// exposure scale, `ACEScg` → `Rec.709`, Hill's ACES fit, sRGB encode,
+    /// RGBA8 pack. It reads a resolved linear average now, so the fixture is
+    /// the average directly (no ÷ samples here — that is the resolve
+    /// kernel's job). A transposed matrix or wrong constant shows up as more
+    /// than the ±1 quantization step allowed here.
     #[test]
     fn tonemap_matches_the_cpu_reference() {
         let Some(gpu) = crate::gpu::test_context() else {
             return;
         };
-        let renderer = Renderer::new(&gpu).expect("renderer");
-        let mut film = Film::new(&gpu, 6, 1).expect("film");
-        let sums: [f32; 24] = [
-            0.0, 0.0, 0.0, 2.0, // black stays black
-            0.36, 0.36, 0.36, 2.0, // mid grey (0.18 after ÷ samples)
-            2.0, 2.0, 2.0, 2.0, // white
-            20.0, 4.0, 1.0, 2.0, // hot highlight, compressed not clipped
-            -1.0, 0.4, 0.4, 2.0, // negative clamps to zero, not garbage
-            2.0, 0.2, 0.1, 2.0, // saturated red
+        let mut tonemap = Tonemap::new(&gpu).expect("tonemap");
+        let averages: [f32; 24] = [
+            0.0, 0.0, 0.0, 1.0, // black stays black
+            0.18, 0.18, 0.18, 1.0, // mid grey
+            1.0, 1.0, 1.0, 1.0, // white
+            10.0, 2.0, 0.5, 1.0, // hot highlight, compressed not clipped
+            -0.5, 0.2, 0.2, 1.0, // negative clamps to zero, not garbage
+            1.0, 0.1, 0.05, 1.0, // saturated red
         ];
-        film.sum = gpu
+        let average = gpu
             .upload_buffer(
-                "film.sum.synthetic",
-                bytemuck::bytes_of(&sums),
+                "tonemap.average.synthetic",
+                bytemuck::bytes_of(&averages),
                 vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
             )
             .expect("upload");
-        film.samples = 2;
         let exposure = 0.5;
-        renderer.tonemap(&gpu, &film, exposure).expect("tonemap");
+        tonemap
+            .apply(&gpu, &average, 6, 1, exposure)
+            .expect("tonemap");
 
-        let display = gpu.download_buffer(&film.display).expect("download");
-        let scale = exposure.exp2() / 2.0;
+        let display = gpu.download_buffer(tonemap.display()).expect("download");
+        let scale = exposure.exp2();
         for (index, texel) in display.chunks_exact(4).enumerate() {
-            let sum = &sums[index * 4..index * 4 + 3];
-            let rgb = aces_display([sum[0] * scale, sum[1] * scale, sum[2] * scale]);
+            let avg = &averages[index * 4..index * 4 + 3];
+            let rgb = aces_display([avg[0] * scale, avg[1] * scale, avg[2] * scale]);
             for channel in 0..3 {
                 let expected = (srgb_encode(rgb[channel]) * 255.0).round() as i16;
                 let difference = (i16::from(texel[channel]) - expected).abs();

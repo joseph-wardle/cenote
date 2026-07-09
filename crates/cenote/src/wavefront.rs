@@ -451,9 +451,9 @@ impl Wavefront {
     /// same submission, sharing its single fence. The full memory barrier
     /// [`Context::submit_passes`] places between passes flushes the wave's
     /// radiance writes before the first trailing pass reads them, so folding
-    /// the film's accumulate and tonemap in here spends one GPU round-trip
-    /// per sample instead of three — bit-for-bit as if they ran as separate
-    /// submissions, since a barrier orders the same writes a fence does.
+    /// the film's accumulate in here spends one GPU round-trip per sample
+    /// instead of two — bit-for-bit as if they ran as separate submissions,
+    /// since a barrier orders the same writes a fence does.
     ///
     /// # Errors
     ///

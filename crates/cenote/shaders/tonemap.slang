@@ -1,8 +1,9 @@
-// Tonemap kernel: turn the film's linear ACEScg sums into the displayable
-// frame. Per pixel: average (÷ sample count) and expose (× 2^stops) — both
-// folded into one host-computed scale — then the ACES display transform,
-// the sRGB transfer curve, and a pack to the RGBA8 bytes the presenter
-// blits to the swapchain.
+// Tonemap kernel: turn the film's resolved linear ACEScg average into the
+// displayable frame. Per pixel: expose (× 2^stops), then the ACES display
+// transform, the sRGB transfer curve, and a pack to the RGBA8 bytes the
+// presenter blits to the swapchain. The average-over-samples already
+// happened in the resolve kernel — this is the pure view transform, the
+// consumer's half of the estimator/view split.
 //
 // The ACES transform is Stephen Hill's analytic RRT+ODT fit (BakingLab,
 // github.com/TheRealMJP/BakingLab), the shader-friendly stand-in the ACES
@@ -14,11 +15,11 @@
 
 // Everything the kernel reads, visible in one struct.
 struct Params {
-    float4* sum;   // the film's running sums, row-major width×height
-    uint* display; // packed RGBA8 output, sRGB-encoded, same layout
+    float4* average;    // the film's resolved linear average, row-major width×height
+    uint* display;      // packed RGBA8 output, sRGB-encoded, same layout
     uint width;
     uint height;
-    float scale;   // exp2(exposure stops) / sample count
+    float exposureScale; // exp2(exposure stops)
     float pad0;
 };
 
@@ -88,7 +89,7 @@ void tonemap(uint3 tid: SV_DispatchThreadID) {
     }
     uint pixel = tid.y * params.width + tid.x;
 
-    let color = acesDisplay(params.sum[pixel].rgb * params.scale);
+    let color = acesDisplay(params.average[pixel].rgb * params.exposureScale);
     let encoded = float3(srgbEncode(color.r), srgbEncode(color.g), srgbEncode(color.b));
     params.display[pixel] = packRgba8(encoded, 1.0);
 }

@@ -8,13 +8,14 @@
 /// `rng.slang`, `openpbr.slang`, `lights.slang`, `environment.slang`,
 /// `scene.slang`) compile into their importers, and test-only fixtures
 /// (`rng_test.slang`) compile at test time.
-pub const KERNELS: [&str; 7] = [
+pub const KERNELS: [&str; 8] = [
     "raygen",
     "intersect",
     "shade_miss",
     "shade_surface",
     "trace_shadow",
     "accumulate",
+    "resolve",
     "tonemap",
 ];
 

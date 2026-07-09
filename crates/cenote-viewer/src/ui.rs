@@ -13,8 +13,8 @@ use winit::window::Window;
 /// Numbers the panel displays, measured by the redraw loop.
 #[derive(Default)]
 pub struct FrameStats {
-    /// The last wave — primary trace, film add, and tonemap folded into one
-    /// fence-waited submission — and the size it rendered at.
+    /// The last frame's render work — trace, film add, resolve, and tonemap —
+    /// and the size it rendered at.
     pub sample: Duration,
     pub size: (u32, u32),
     /// The last present.
@@ -47,7 +47,7 @@ impl Gui {
         }
     }
 
-    /// Exposure in stops, for [`cenote::render::Renderer::tonemap`].
+    /// Exposure in stops, for [`cenote::render::Tonemap::apply`].
     pub fn exposure(&self) -> f32 {
         self.exposure
     }
