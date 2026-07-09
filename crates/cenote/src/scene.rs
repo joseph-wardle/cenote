@@ -534,10 +534,11 @@ struct GpuEnvironment {
 /// integral over the sphere, which is a flux per unit receiver area — the
 /// comparison implicitly stands in a ~1 m² receiver. Both approximations
 /// (the one-face flux, the unit receiver) only steer noise: the MIS
-/// weights stay exact whatever this probability is. The exact-0/exact-1 endpoints *are* load-bearing: the shader
-/// walks the quad list whenever its draw lands above `selection`, so a
-/// lightless scene must pin it to 1, and a black environment (with no
-/// quads either) disables next-event estimation entirely.
+/// weights stay exact whatever this probability is. The exact-0/exact-1
+/// endpoints *are* load-bearing: the shader walks the quad list whenever
+/// its draw lands above `select_prob`, so a lightless scene must pin it to
+/// 1, and a black environment (with no quads either) disables next-event
+/// estimation entirely.
 fn upload_environment(
     gpu: &Context,
     environment: &Environment,

@@ -779,3 +779,61 @@ deterministically without a fault-injection hook the crate doesn't have, and the
 existing GPU-gated session test still exercises the actor end to end. The change
 is in paths the type system and Vulkan validation now police (the queue lock)
 and in an error path that reuses the join the actor already had.
+
+## 2026-07-09 — Second M1 review pass, after the decoupling
+
+### D-051: Review polish, and four deferrals recorded so they read as chosen
+A second review of the whole M1 body — estimator, wavefront engine, film,
+session actor, viewer — along D-043's three axes (readability, architecture
+against Cycles X / MoonRay / current research, discoverability), now
+covering everything the decoupling arc (D-044–D-050) added. The estimator
+and the architecture came through unchanged: the algorithm choices (EON,
+spherical-cap VNDF, Turquin compensation over regenerated fits,
+Sobol-Burley padding, van Antwerpen offsets, alias-table selection, dilated
+environment CDFs) are current practice, and the actor shape matches the
+production pattern it was modeled on. The outputs were polish, shipped with
+this entry:
+
+- `Session::peek` became `Session::take_frame` — it consumes (two calls in
+  a row answer differently), and `peek` in Rust means it wouldn't. The
+  prose still calls the pattern peeking; the method now says what it does.
+- `Tonemap` moved to its own `render/tonemap.rs` (with its params mirror
+  and CPU-reference test), so the module tree states the estimator/view
+  split the docs describe.
+- The publish buffers are typed as the pair they are (`[Arc<Buffer>; 2]`,
+  from `publish_buffers`), and the film and its pair now rebuild together
+  as one value.
+- The render thread logs its lifecycle at debug level — start, stop, film
+  rebuild, camera adoption — the difference between a one-minute and a
+  one-hour diagnosis of "why did the image stop updating".
+- A panic whose payload isn't a string no longer reports "render thread
+  panicked: render thread panicked".
+- Stale comments swept: `FILM_WORKGROUP_SIZE` names all three film kernels;
+  `submit.rs`'s header no longer implies the render loop hasn't arrived;
+  `upload_environment`'s doc uses the field's post-rename name.
+- The session test asserts samples strictly climb (`>`, matching its own
+  doc), and `Tonemap::apply` validates its input buffer's size as
+  `Renderer::resolve` already did.
+
+Four deferrals were recorded rather than acted on:
+
+- **The strong-count reuse protocol assumes blocking submits.** The render
+  thread resolves into a publish buffer whose `Arc` strong count is 1 —
+  sound today because every consumer submission blocks before its `Frame`
+  drops, so a "free" buffer can have no in-flight GPU reader. The pre-M3
+  timeline-pacing pass (D-043) must revisit this invariant along with the
+  fences it removes; `session.rs`'s module doc now says so where the
+  protocol is defined.
+- **Wave tails idle without path regeneration.** Cycles X refills dead
+  lanes mid-wave with the next sample's camera rays; cenote ends the wave
+  and dispatches near-empty tail rounds. Same pre-M3 performance pass,
+  measured before acted on.
+- **The viewer session accumulates forever.** No sample cap, no
+  convergence idle: a long-converged image still pins the GPU at 100%. A
+  `max_samples` input (and possibly Cycles-style publish-interval growth
+  and a resolution divider during navigation) belongs to M3's
+  interactivity work, where the frame loop is the subject.
+- **No firefly clamp, deliberately.** The estimator carries only the
+  NaN/Inf guard; direct/indirect clamping is a knob every production
+  renderer exposes, but it is a bias knob — cenote adds it when a real
+  scene demands it, as an explicit decision, not silently.

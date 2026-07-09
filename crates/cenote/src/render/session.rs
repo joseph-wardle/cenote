@@ -23,7 +23,11 @@
 //! means "in the pool alone"), and if both are busy it simply skips that
 //! publish and keeps accumulating. So a slow consumer can never see a buffer
 //! torn by an in-flight resolve, and the renderer never blocks on the
-//! consumer.
+//! consumer. The strong count is a sound "free" test only because every
+//! consumer submission blocks: a [`Frame`] drops strictly after the GPU work
+//! that read its buffer completed. The pre-M3 timeline-pacing pass, which
+//! removes those blocking fences, must revisit this reuse protocol with
+//! them.
 //!
 //! A render-thread failure is not swallowed. Its own errors — a GPU call
 //! failing mid-loop — ride back through the join as an ordinary `Err`; an
@@ -133,8 +137,8 @@ pub struct Session {
 impl Session {
     /// Spawn the render thread. It takes ownership of `scene`, `renderer`, and
     /// a `Context` handle, and starts accumulating `camera` at
-    /// `width`×`height` immediately; the first [`Session::peek`] to return
-    /// `Some` marks the first frame ready.
+    /// `width`×`height` immediately; the first [`Session::take_frame`] to
+    /// return `Some` marks the first frame ready.
     ///
     /// # Panics
     ///
@@ -196,14 +200,14 @@ impl Session {
     }
 
     /// Take the latest published frame, if the render thread has posted a new
-    /// one since the last peek. `None` means no fresh frame — the consumer
+    /// one since the last take. `None` means no fresh frame — the consumer
     /// keeps showing the one it already holds.
     ///
     /// # Panics
     ///
     /// If the render thread panicked while holding the publish lock.
     #[must_use]
-    pub fn peek(&self) -> Option<Frame> {
+    pub fn take_frame(&self) -> Option<Frame> {
         self.published
             .lock()
             .expect("published mutex poisoned")
@@ -271,7 +275,7 @@ fn join_render_thread(thread: JoinHandle<Result<()>>) -> Result<()> {
                 .downcast_ref::<&str>()
                 .map(|s| (*s).to_owned())
                 .or_else(|| panic.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "render thread panicked".to_owned());
+                .unwrap_or_else(|| "the panic payload was not a string".to_owned());
             Err(Error::RenderThreadPanicked(message))
         }
     }
@@ -287,11 +291,12 @@ fn render_loop(
     inputs: &Mutex<RenderInputs>,
     published: &Mutex<Option<Frame>>,
 ) -> Result<()> {
-    // The film and its pair of publish buffers, both sized to `applied_size`;
-    // rebuilt together when the requested size changes. `applied_generation`
-    // tracks which view is in the scene, so a bump restarts accumulation.
-    let mut film: Option<Film> = None;
-    let mut frames: Vec<Arc<Buffer>> = Vec::new();
+    log::debug!("render thread started");
+    // The render target: the film and its pair of publish buffers, sized
+    // together and rebuilt together when the requested size changes.
+    // `applied_generation` tracks which view is in the scene, so a bump
+    // restarts accumulation.
+    let mut target: Option<(Film, [Arc<Buffer>; 2])> = None;
     let mut applied_size = (0, 0);
     let mut applied_generation = 0;
     let mut last_publish: Option<Instant> = None;
@@ -299,6 +304,7 @@ fn render_loop(
     loop {
         let input = *inputs.lock().expect("inputs mutex poisoned");
         if !input.running {
+            log::debug!("render thread stopping");
             return Ok(());
         }
         let (width, height) = input.size;
@@ -308,22 +314,27 @@ fn render_loop(
             continue;
         }
 
-        // Match the film and publish buffers to the requested size, and adopt
-        // the latest view whenever it changed — a resize restarts by building
-        // a fresh (empty) film; a plain view change resets the existing one.
+        // A resize restarts by building a fresh (empty) film and publish
+        // buffers, adopting the latest view with them.
         if input.size != applied_size {
-            film = Some(Film::new(gpu, width, height)?);
-            frames = new_frames(gpu, width, height)?;
+            log::debug!("film rebuilt at {width}×{height}");
+            target = Some((
+                Film::new(gpu, width, height)?,
+                publish_buffers(gpu, width, height)?,
+            ));
             *scene.camera_mut() = input.camera;
             applied_size = input.size;
             applied_generation = input.generation;
             last_publish = None;
-        } else if input.generation != applied_generation {
+        }
+        let (film, frames) = target.as_mut().expect("sized by the resize branch above");
+        // A plain view change resets the existing film instead.
+        if input.generation != applied_generation {
+            log::debug!("camera adopted; accumulation restarts");
             *scene.camera_mut() = input.camera;
-            film.as_mut().expect("film exists once sized").reset();
+            film.reset();
             applied_generation = input.generation;
         }
-        let film = film.as_mut().expect("film exists once sized");
 
         let started = Instant::now();
         renderer.accumulate(gpu, &scene, film)?;
@@ -349,22 +360,21 @@ fn render_loop(
     }
 }
 
-/// The pair of publish buffers, each a full-frame linear RGBA f32 average —
-/// what the resolve kernel writes and a consumer's tonemap reads by device
-/// address.
-fn new_frames(gpu: &Context, width: u32, height: u32) -> Result<Vec<Arc<Buffer>>> {
+/// The pair of publish buffers — the double-buffer the render thread rotates
+/// through — each a full-frame linear RGBA f32 average: what the resolve
+/// kernel writes and a consumer's tonemap reads by device address.
+fn publish_buffers(gpu: &Context, width: u32, height: u32) -> Result<[Arc<Buffer>; 2]> {
     let bytes = u64::from(width) * u64::from(height) * 16;
     let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
-    (0..2)
-        .map(|_| {
-            Ok(Arc::new(gpu.create_buffer(
-                "session.frame",
-                bytes,
-                usage,
-                MemoryLocation::GpuOnly,
-            )?))
-        })
-        .collect()
+    let buffer = || -> Result<Arc<Buffer>> {
+        Ok(Arc::new(gpu.create_buffer(
+            "session.frame",
+            bytes,
+            usage,
+            MemoryLocation::GpuOnly,
+        )?))
+    };
+    Ok([buffer()?, buffer()?])
 }
 
 #[cfg(test)]
@@ -396,20 +406,20 @@ mod tests {
         assert!(first.samples() > 0, "first frame has no samples");
         let later = wait_for_frame(&session);
         assert!(
-            later.samples() >= first.samples(),
+            later.samples() > first.samples(),
             "accumulation stalled: {} then {}",
             first.samples(),
             later.samples()
         );
     }
 
-    /// Poll `peek` until a frame appears, with a generous timeout so a slow
+    /// Poll `take_frame` until one appears, with a generous timeout so a slow
     /// machine doesn't flake — the render thread posts its first frame within
     /// milliseconds on any real GPU.
     fn wait_for_frame(session: &Session) -> Frame {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            if let Some(frame) = session.peek() {
+            if let Some(frame) = session.take_frame() {
                 return frame;
             }
             assert!(Instant::now() < deadline, "no frame published in time");

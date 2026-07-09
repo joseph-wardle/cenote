@@ -1,7 +1,8 @@
 //! Command submission: record work into a command buffer, run it on the
-//! compute queue, block on a fence. Two entry points, both blocking — the
-//! crate keeps one submission in flight and has no timeline-semaphore
-//! pacing yet (that arrives with the wavefront render loop, not here):
+//! compute queue, block on a fence. Two entry points, both blocking — each
+//! submitting thread keeps one submission in flight and waits its own fence
+//! (timeline-semaphore pacing is deferred to the measured pre-M3
+//! performance pass):
 //!
 //! - [`Context::submit_once`] — one transient command buffer for a single
 //!   recorded job: uploads, readbacks, acceleration-structure builds.

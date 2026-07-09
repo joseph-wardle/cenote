@@ -220,7 +220,7 @@ impl Viewer {
         self.window.request_redraw();
     }
 
-    /// One display frame: peek the render thread's latest linear average (or
+    /// One display frame: take the render thread's latest linear average (or
     /// keep the one we hold), tonemap it at the panel's exposure, run the UI,
     /// present, and request the next redraw. The renderer accumulates
     /// independently; this loop just shows its most recent output, paced by
@@ -246,7 +246,7 @@ impl Viewer {
         // Take a fresher frame if the render thread posted one; otherwise
         // re-show the one we hold (so exposure still tracks). Nothing yet —
         // the very first frames — just pumps the loop.
-        if let Some(frame) = self.session.peek() {
+        if let Some(frame) = self.session.take_frame() {
             self.frame = Some(frame);
         }
         let Some(frame) = &self.frame else {
@@ -279,8 +279,8 @@ impl Viewer {
             .context("presenting the frame")?;
         self.stats.display = started.elapsed();
 
-        // Peek again next vblank: the render thread runs ahead of us, so
-        // there is almost always a newer frame waiting.
+        // Another redraw next vblank: the render thread runs ahead of us,
+        // so a newer frame is almost always waiting.
         self.window.request_redraw();
         Ok(())
     }
