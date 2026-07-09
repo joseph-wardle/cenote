@@ -24,15 +24,22 @@
 //! publish and keeps accumulating. So a slow consumer can never see a buffer
 //! torn by an in-flight resolve, and the renderer never blocks on the
 //! consumer.
+//!
+//! A render-thread failure is not swallowed. Its own errors — a GPU call
+//! failing mid-loop — ride back through the join as an ordinary `Err`; an
+//! actual panic on that thread comes back too. [`Session::check`] lets the
+//! consumer reap a thread that has ended early and surface the fault, rather
+//! than spin forever on a renderer that will post no more frames; the join in
+//! [`Session::drop`] is the backstop at shutdown.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use ash::vk;
 
 use super::{Film, Renderer};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::gpu::{Buffer, Context, MemoryLocation};
 use crate::scene::{Camera, Scene};
 
@@ -202,17 +209,70 @@ impl Session {
             .expect("published mutex poisoned")
             .take()
     }
+
+    /// Surface a render-thread failure to the consumer. While the thread runs
+    /// this is `Ok(())`; once it has ended early — a GPU error returned from
+    /// the loop, or a panic — it joins the thread and returns that, so the
+    /// viewer can exit reporting the fault instead of spinning on a renderer
+    /// that will publish no more frames. Idempotent: once it has reaped the
+    /// thread, later calls are `Ok(())`.
+    ///
+    /// The loop returns `Ok` only when asked to stop (which is [`Drop`]'s
+    /// job), so a thread found finished here has always failed.
+    ///
+    /// # Errors
+    ///
+    /// The [`crate::Error`] the render loop returned, or
+    /// [`crate::Error::RenderThreadPanicked`] if it panicked.
+    pub fn check(&mut self) -> Result<()> {
+        // Join only once the thread has actually ended, so this never blocks.
+        if self.thread.as_ref().is_some_and(JoinHandle::is_finished)
+            && let Some(thread) = self.thread.take()
+        {
+            return join_render_thread(thread);
+        }
+        Ok(())
+    }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        self.inputs.lock().expect("inputs mutex poisoned").running = false;
+        // Signal stop. A poisoned lock means the thread panicked mid-flight
+        // holding it; recover the guard rather than panicking again here in a
+        // Drop, since the join below is what surfaces that panic.
+        self.inputs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .running = false;
         if let Some(thread) = self.thread.take() {
             // Join so the thread's Renderer, Scene, Film, and Context handle
             // are dropped here — before this crate's owner drops the Context,
-            // which checks that nothing outlives it. A render-thread error
-            // surfaces through this join; wiring it to the app is next.
-            let _ = thread.join();
+            // which checks that nothing outlives it. `check` normally reaps a
+            // failed thread and hands the error to the viewer; if it died in
+            // the gap before shutdown there is no caller left to return to,
+            // so a leftover error is logged as the last word.
+            if let Err(err) = join_render_thread(thread) {
+                log::error!("render thread ended with an error: {err}");
+            }
+        }
+    }
+}
+
+/// Join the render thread and flatten its outcome: an error the loop returned
+/// passes straight through, while a panic becomes an
+/// [`Error::RenderThreadPanicked`] carrying whatever message the panic left.
+fn join_render_thread(thread: JoinHandle<Result<()>>) -> Result<()> {
+    match thread.join() {
+        Ok(result) => result,
+        Err(panic) => {
+            // A panic payload is usually the `&str` or `String` passed to
+            // `panic!`; anything else we can only name generically.
+            let message = panic
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_owned())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "render thread panicked".to_owned());
+            Err(Error::RenderThreadPanicked(message))
         }
     }
 }

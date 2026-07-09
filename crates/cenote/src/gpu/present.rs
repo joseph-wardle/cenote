@@ -548,14 +548,15 @@ impl Presenter {
     /// window (minimized) leaves the swapchain absent — [`Presenter::present`]
     /// no-ops — until a resize brings it back.
     fn recreate_swapchain(&mut self) -> Result<()> {
-        // Idle before destroying: strictly, the presentation engine's use of
-        // the old swapchain and semaphores isn't covered by wait_idle — the
-        // real fix is VK_EXT_swapchain_maintenance1 — but every driver
-        // tolerates this, and it's the ecosystem-standard shape.
-        unsafe {
-            self.device.device_wait_idle()?;
-            self.destroy_swapchain();
-        }
+        // Idle before destroying, under the queue lock so the render thread's
+        // submits can't race the wait — vkDeviceWaitIdle demands every queue
+        // be externally synchronized, and that thread submits to this same
+        // queue. (Strictly, the presentation engine's own use of the old
+        // swapchain and semaphores still isn't covered by wait_idle — the real
+        // fix is VK_EXT_swapchain_maintenance1 — but every driver tolerates
+        // this, and it's the ecosystem-standard shape.)
+        self.queue.wait_device_idle(&self.device)?;
+        unsafe { self.destroy_swapchain() };
         self.dirty = false;
 
         let capabilities = unsafe {

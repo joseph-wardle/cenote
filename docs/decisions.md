@@ -736,3 +736,46 @@ externally synchronized against queue submits. So the viewer drops the
 presenter tears down. The remaining `device_wait_idle` inside a *resize*'s
 swapchain rebuild still overlaps the running render thread; hardening that seam
 (and surfacing a render-thread panic through the join) is batch 4.
+
+### D-050: Resize and shutdown hardening for the render thread (completes D-046; batch 4)
+Batch 3 left two seams open where the render thread races or vanishes; batch 4
+closes both.
+
+**The resize-time device idle.** `Presenter::recreate_swapchain` waits for the
+device to idle before destroying the old swapchain, and a *resize* runs that on
+the viewer thread while the render thread submits to the same queue.
+`vkDeviceWaitIdle` requires every queue be externally synchronized, exactly as
+submission does — the queue mutex covered submits but not this wait. So the wait
+now goes through a new `Queue::wait_device_idle`, which holds the queue lock
+across `device_wait_idle`. It is the one place the lock spans a wait rather than
+just the submit call (D-047's rule), and deliberately so: idling the device is
+the point, and the render thread's next submit merely waits its brief turn,
+which an occasional resize can afford. The presenter's *teardown* idle and the
+`Context`'s final idle keep their raw calls — by then the render thread is
+already joined (the viewer drops the `Session` first, D-049), so nothing races
+them. This does not fix the loose-resize seam itself: the render thread keeps
+tracing at the old size across a resize and the presenter's blit rescales the
+mismatched frame until the film rebuilds — that visible-for-a-frame stretch is
+intended (no cross-thread handshake, no stall), only the wait needed guarding.
+
+**A render thread that fails or panics.** The loop returns `Ok` only when asked
+to stop (Drop's job), so a thread that ends on its own has always failed — a GPU
+call returned `Err`, or it panicked. Left alone, `peek` would just return `None`
+forever and the viewer would freeze on the last frame. `Session::check`, called
+at the top of every redraw, joins a thread that has already finished
+(`JoinHandle::is_finished`, so it never blocks) and returns its outcome: a
+returned error passes straight through, a panic becomes
+`Error::RenderThreadPanicked` carrying the payload's message. That travels up
+through `redraw` → `handle` into `App.error`, so `main` reports it and exits
+non-zero instead of the window hanging. `Session::drop` is the shutdown
+backstop: it still joins, logs any leftover error (Drop cannot return one), and
+now recovers a poisoned input lock instead of `expect`-ing on it — a panic that
+poisoned the lock must not double-panic in Drop and abort before the join can
+name it. In practice the locks are held only across trivial `Copy`/move-assigns
+that cannot panic, so poisoning is a defensive edge, not an expected path.
+
+No new test: a resize race and a thread panic are both hard to provoke
+deterministically without a fault-injection hook the crate doesn't have, and the
+existing GPU-gated session test still exercises the actor end to end. The change
+is in paths the type system and Vulkan validation now police (the queue lock)
+and in an error path that reuses the join the actor already had.

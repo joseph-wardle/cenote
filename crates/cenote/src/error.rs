@@ -45,6 +45,14 @@ pub enum Error {
     /// The shader-source watcher couldn't start, or its backend shut down.
     #[error("shader watch failed: {0}")]
     Watch(#[from] notify::Error),
+
+    /// The render thread panicked. Its own errors are ordinary `Err`s that
+    /// travel back through the join; this is the fallback for an actual
+    /// panic — an assertion or `unwrap` on that thread — carrying whatever
+    /// message it left, so the fault surfaces on the main thread instead of
+    /// vanishing with the thread.
+    #[error("render thread panicked: {0}")]
+    RenderThreadPanicked(String),
 }
 
 /// Crate-wide result alias.

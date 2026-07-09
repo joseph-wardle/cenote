@@ -17,7 +17,8 @@
 //! The one queue every submission funnels through is wrapped in [`Queue`],
 //! whose lock is where the render loop's traces and the presenter's blits
 //! take turns — Vulkan requires submission to a queue to be externally
-//! synchronized.
+//! synchronized, and the presenter's pre-rebuild device-idle wait takes the
+//! same lock for the same reason.
 
 use std::slice;
 use std::sync::{Arc, Mutex};
@@ -36,7 +37,10 @@ use crate::gpu::{Buffer, ComputePipeline, Context, SceneBindings};
 /// while the presenter blits on another, every submission must take this
 /// lock. It is held *only* around the submit call, never across the fence
 /// wait that follows: waiting under it would stall the other thread for a
-/// whole GPU frame.
+/// whole GPU frame. The one deliberate exception is
+/// [`Queue::wait_device_idle`]: `vkDeviceWaitIdle` needs the same external
+/// synchronization as submission, and idling the device *is* the point, so it
+/// holds the lock across the wait.
 ///
 /// Cloned rather than borrowed — the [`Context`] and its [`Presenter`] each
 /// hold a handle to the same lock, exactly as they share the allocator.
@@ -75,6 +79,19 @@ impl Queue {
     ) -> VkResult<()> {
         let queue = self.queue.lock().expect("queue mutex poisoned");
         unsafe { device.queue_submit2(*queue, submits, fence) }
+    }
+
+    /// Wait for the device to finish every outstanding submission, holding
+    /// the queue lock across the wait. `vkDeviceWaitIdle` requires every queue
+    /// be externally synchronized just as submission does, so the presenter —
+    /// which idles the device before rebuilding its swapchain — must fence out
+    /// the render thread's submits for the wait's duration. Unlike
+    /// [`Queue::submit`] the lock deliberately spans the whole wait; the render
+    /// thread's next submit merely waits its (brief) turn, which the resize
+    /// that triggers this can afford.
+    pub(super) fn wait_device_idle(&self, device: &ash::Device) -> VkResult<()> {
+        let _guard = self.queue.lock().expect("queue mutex poisoned");
+        unsafe { device.device_wait_idle() }
     }
 
     /// Present through `swapchain`. Locks only for the present call; the

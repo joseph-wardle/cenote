@@ -231,6 +231,11 @@ impl Viewer {
             return Ok(()); // minimized; the resize that restores us redraws
         }
 
+        // Surface a render-thread failure before doing any work: a dead
+        // renderer will never publish again, so exit reporting the fault
+        // rather than spin here presenting the last frame forever.
+        self.session.check()?;
+
         // The UI runs first so its exposure is current for this frame's
         // tonemap and an exposure drag lands this very frame. The stats it
         // shows are the previous frame's — one frame stale, imperceptible.
