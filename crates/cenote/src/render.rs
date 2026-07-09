@@ -5,12 +5,16 @@
 //! Two paths share the engine:
 //!
 //! - **One-shot** ([`Renderer::render`]): allocate a buffer, trace one
-//!   wave, read the linear pixels back — the CLI and test path.
-//! - **Progressive** ([`Renderer::accumulate`] + [`Renderer::tonemap`]):
-//!   each `accumulate` traces one sample into the [`Film`]'s running sums;
-//!   `tonemap` averages, exposes, and applies the ACES display transform
-//!   into the RGBA8 display buffer that [`crate::gpu::Presenter::present`]
-//!   shows. The viewer's redraw loop is one of each per frame.
+//!   wave, read the linear pixels back — the test and hot-reload-probe
+//!   path.
+//! - **Progressive** ([`Renderer::accumulate`]): each call traces one
+//!   sample into the [`Film`]'s running sums. The viewer follows with
+//!   [`Renderer::tonemap`] — average, exposure, the ACES display
+//!   transform — into the RGBA8 buffer that
+//!   [`crate::gpu::Presenter::present`] shows; the CLI instead reads the
+//!   linear average back with [`Film::average`] and writes it as the
+//!   batch EXR. Batch output and the viewer's converged image are the
+//!   same estimator by construction — they share the film.
 //!
 //! Every sample is a full path-traced estimate — jittered camera ray,
 //! MIS-weighted direct light sampling at every bounce (quad lights and the
@@ -79,7 +83,7 @@ pub struct Film {
     /// each wave and consumed by the accumulation kernel.
     sample: Buffer,
     /// The running sums. `TRANSFER_SRC` so the accumulated image can be
-    /// read back (tests now, batch EXR output in later steps).
+    /// read back — [`Film::average`] and the tests.
     sum: Buffer,
     /// The tonemap kernel's output: packed RGBA8, sRGB-encoded — exactly
     /// what [`crate::gpu::Presenter::present`] expects.
@@ -151,6 +155,25 @@ impl Film {
         &self.display
     }
 
+    /// Read back the accumulated average — linear `ACEScg` RGBA, row-major,
+    /// pixel (0, 0) top-left — the image the batch CLI writes. Each
+    /// channel is its sum divided by the sample count, so alpha comes out
+    /// exactly 1 and a one-sample average is bit-identical to the sample.
+    ///
+    /// # Errors
+    ///
+    /// Any [`crate::Error`] from the readback.
+    ///
+    /// # Panics
+    ///
+    /// If the film has no samples — there is no average yet, so calling
+    /// order is a programmer bug.
+    pub fn average(&self, gpu: &Context) -> Result<Vec<f32>> {
+        assert!(self.samples > 0, "averaging an empty film");
+        let sums: Vec<f32> = bytemuck::pod_collect_to_vec(&gpu.download_buffer(&self.sum)?);
+        Ok(sums.iter().map(|sum| sum / self.samples as f32).collect())
+    }
+
     /// Width in pixels.
     #[must_use]
     pub fn width(&self) -> u32 {
@@ -171,31 +194,46 @@ pub struct Renderer {
     wavefront: Wavefront,
     accumulate: ComputePipeline,
     tonemap: ComputePipeline,
+    /// The path-length cap the wavefront was built with, kept so
+    /// [`Renderer::reload`] rebuilds an identical engine.
+    max_bounces: u32,
 }
 
 impl Renderer {
-    /// Create the renderer from the embedded kernels.
+    /// Create the renderer from the embedded kernels, at the default
+    /// path-length cap.
     ///
     /// # Errors
     ///
     /// Any [`crate::Error`] from pipeline or buffer creation.
     pub fn new(gpu: &Context) -> Result<Self> {
-        Self::from_kernels(gpu, &Kernels::embedded())
+        Self::with_max_bounces(gpu, Wavefront::DEFAULT_MAX_BOUNCES)
     }
 
-    /// Build every pipeline from `kernels` — [`Renderer::new`] with the
-    /// embedded set, [`Renderer::reload`] with a recompiled one.
+    /// [`Renderer::new`] with an explicit path-length cap — the CLI's
+    /// `--depth`.
     ///
     /// # Errors
     ///
     /// Any [`crate::Error`] from pipeline or buffer creation.
-    pub fn from_kernels(gpu: &Context, kernels: &Kernels) -> Result<Self> {
+    ///
+    /// # Panics
+    ///
+    /// On zero bounces — callers validate their inputs, so this is a
+    /// programmer bug.
+    pub fn with_max_bounces(gpu: &Context, max_bounces: u32) -> Result<Self> {
+        Self::from_kernels(gpu, &Kernels::embedded(), max_bounces)
+    }
+
+    /// Build every pipeline from `kernels` — the constructors with the
+    /// embedded set, [`Renderer::reload`] with a recompiled one.
+    fn from_kernels(gpu: &Context, kernels: &Kernels, max_bounces: u32) -> Result<Self> {
         Ok(Self {
             wavefront: Wavefront::new(
                 gpu,
                 kernels,
                 Wavefront::DEFAULT_CAPACITY,
-                Wavefront::DEFAULT_MAX_BOUNCES,
+                max_bounces,
                 LightSampling::Mis,
             )?,
             accumulate: gpu.create_compute_pipeline(
@@ -210,6 +248,7 @@ impl Renderer {
                 size_of::<TonemapParams>() as u32,
                 Bindings::None,
             )?,
+            max_bounces,
         })
     }
 
@@ -223,7 +262,7 @@ impl Renderer {
     ///
     /// Any [`crate::Error`] from pipeline or buffer creation.
     pub fn reload(&mut self, gpu: &Context, kernels: &Kernels) -> Result<()> {
-        *self = Self::from_kernels(gpu, kernels)?;
+        *self = Self::from_kernels(gpu, kernels, self.max_bounces)?;
         Ok(())
     }
 
@@ -793,6 +832,11 @@ mod tests {
             .map(|((a, b), c)| a + b + c)
             .collect();
         assert_eq!(download_f32(&gpu, &film.sum), expected);
+
+        // The batch readback is those sums divided by the count — the same
+        // f32 division on both sides, so agreement is again bitwise.
+        let average: Vec<f32> = expected.iter().map(|sum| sum / 3.0).collect();
+        assert_eq!(film.average(&gpu).expect("average"), average);
     }
 
     /// After a reset, the next sample overwrites the stale sums — that *is*

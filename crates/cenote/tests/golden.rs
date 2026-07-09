@@ -18,7 +18,7 @@ use std::path::Path;
 
 use cenote::gpu::Context;
 use cenote::output::{read_exr, write_exr};
-use cenote::render::Renderer;
+use cenote::render::{Film, Renderer};
 use cenote::scene::Scene;
 
 /// Golden resolution. Small on purpose: enough pixels to pin every feature
@@ -31,10 +31,11 @@ const SIZE: u32 = 256;
 /// silhouette) lands well above it.
 const MAX_MEAN_FLIP: f32 = 0.01;
 
-/// The demo image at 1 spp: terracotta icosphere on a gray floor under the
-/// white sky and the warm quad light — path traced with MIS, so the golden
-/// pins the whole estimator (offsets, EON, NEE weights, sampler) at a
-/// fixed seed.
+/// The demo image at 1 spp: the metalness row of terracotta spheres on
+/// the glossy floor, cross-lit by the Kloofendal HDRI's sun and the warm
+/// quad — path traced with MIS, so the golden pins the whole estimator
+/// (offsets, `OpenPBR` lobes, NEE weights, environment tables, sampler)
+/// at a fixed seed.
 #[test]
 fn demo_scene_matches_golden() {
     let Some(gpu) = test_context() else {
@@ -44,6 +45,30 @@ fn demo_scene_matches_golden() {
     let renderer = Renderer::new(&gpu).expect("renderer");
     let actual = renderer.render(&gpu, &scene, SIZE, SIZE).expect("render");
     compare_with_golden("demo", &actual);
+}
+
+/// The step-11 checkpoint — batch and viewer agree because they are the
+/// same film. This golden is the demo accumulated to 64 spp and read back
+/// as its linear average: exactly the image `cenote-cli --spp 64` writes,
+/// and exactly the average the viewer is tonemapping 64 redraws after
+/// opening. Either path drifting from the other (or both from this
+/// reference) fails here.
+#[test]
+fn accumulated_demo_matches_golden() {
+    const SPP: u32 = 64;
+    let Some(gpu) = test_context() else {
+        return;
+    };
+    let scene = Scene::demo(&gpu).expect("demo scene");
+    let renderer = Renderer::new(&gpu).expect("renderer");
+    let mut film = Film::new(&gpu, SIZE, SIZE).expect("film");
+    for _ in 0..SPP {
+        renderer
+            .accumulate(&gpu, &scene, &mut film)
+            .expect("accumulate");
+    }
+    let actual = film.average(&gpu).expect("average");
+    compare_with_golden("demo-64spp", &actual);
 }
 
 /// GPU gate, mirroring the unit tests' `gpu::test_context`: `None` skips
@@ -121,9 +146,9 @@ fn compare_with_golden(name: &str, actual: &[f32]) {
 }
 
 /// FLIP consumes 8-bit RGB: clamp to [0, 1], quantize, drop alpha (always 1
-/// here). Quantization costs nothing this test cares about — the demo image
-/// is normals-as-color, already in [0, 1], and the threshold is far coarser
-/// than one 8-bit step.
+/// here). The renders are linear HDR, so this compares them as if displayed
+/// without exposure or tonemap — highlights above 1 clip to white on both
+/// sides — and the threshold is far coarser than one 8-bit step.
 fn flip_image(width: u32, height: u32, pixels: &[f32]) -> nv_flip::FlipImageRgb8 {
     let rgb: Vec<u8> = pixels
         .chunks_exact(4)

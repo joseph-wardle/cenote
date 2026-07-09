@@ -1,17 +1,30 @@
 //! EXR image input and output.
 //!
-//! M0 files are linear RGBA with no color transform: the renderer is
-//! writing *data* — geometric normals mapped to color — not color. `ACEScg`
-//! and real radiance arrive with M1. View results in `tev`, which
-//! auto-refreshes on file change. Reading exists for the golden-image
-//! tests, which compare fresh renders against checked-in EXRs.
+//! Written files are linear `ACEScg` radiance, and their headers say so:
+//! the chromaticities attribute carries the AP1 primaries, so a
+//! color-managed viewer (`tev`, Nuke) converts to its display correctly
+//! instead of assuming Rec. 709 and desaturating everything. Display
+//! transforms are the tonemap kernel's job and never touch disk. Reading
+//! exists for the golden-image tests and the demo environment, which
+//! arrive as EXRs too.
 
 use std::path::Path;
 
 use crate::error::Result;
 
+/// `ACEScg`'s color space on the CIE xy diagram — the AP1 primaries and
+/// the ACES white point (≈ D60), from ACES spec S-2014-004.
+const ACESCG_CHROMATICITIES: exr::meta::attribute::Chromaticities =
+    exr::meta::attribute::Chromaticities {
+        red: exr::math::Vec2(0.713, 0.293),
+        green: exr::math::Vec2(0.165, 0.830),
+        blue: exr::math::Vec2(0.128, 0.044),
+        white: exr::math::Vec2(0.321_68, 0.337_67),
+    };
+
 /// Write row-major RGBA `f32` pixels (pixel (0, 0) top-left, the crate-wide
-/// convention) to `path` as a linear EXR.
+/// convention) to `path` as a linear EXR tagged with the `ACEScg`
+/// chromaticities.
 ///
 /// # Errors
 ///
@@ -22,21 +35,25 @@ use crate::error::Result;
 /// If `pixels` doesn't hold exactly `width × height` RGBA quads — a
 /// programmer bug.
 pub fn write_exr(path: &Path, width: u32, height: u32, pixels: &[f32]) -> Result<()> {
+    use exr::prelude::{Image, SpecificChannels, Vec2, WritableImage};
     assert_eq!(
         pixels.len() as u64,
         u64::from(width) * u64::from(height) * 4,
         "pixel count doesn't match image dimensions"
     );
     let width = width as usize;
-    exr::prelude::write_rgba_file(path, width, height as usize, |x, y| {
-        let idx = (y * width + x) * 4;
+    let channels = SpecificChannels::rgba(|position: Vec2<usize>| {
+        let idx = (position.y() * width + position.x()) * 4;
         (
             pixels[idx],
             pixels[idx + 1],
             pixels[idx + 2],
             pixels[idx + 3],
         )
-    })?;
+    });
+    let mut image = Image::from_channels((width, height as usize), channels);
+    image.attributes.chromaticities = Some(ACESCG_CHROMATICITIES);
+    image.write().to_file(path)?;
     Ok(())
 }
 
@@ -103,5 +120,22 @@ mod tests {
         let (width, height, read_back) = read.expect("read");
         assert_eq!((width, height), (3, 2));
         assert_eq!(read_back, pixels);
+    }
+
+    /// Every written file declares what its numbers mean: the header must
+    /// carry the `ACEScg` chromaticities, or a color-managed viewer falls
+    /// back to assuming Rec. 709 (the EXR spec's default).
+    #[test]
+    fn written_headers_carry_acescg_chromaticities() {
+        let path = std::env::temp_dir().join(format!("cenote-chroma-{}.exr", std::process::id()));
+        write_exr(&path, 1, 1, &[0.0; 4]).expect("write");
+        let meta = exr::meta::MetaData::read_from_file(&path, false);
+        let _ = std::fs::remove_file(&path);
+
+        let chromaticities = meta.expect("read meta").headers[0]
+            .shared_attributes
+            .chromaticities
+            .expect("chromaticities attribute present");
+        assert_eq!(chromaticities, ACESCG_CHROMATICITIES);
     }
 }
