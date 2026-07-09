@@ -402,6 +402,7 @@ impl Scene {
 
 /// A pinhole camera, described by where it sits and what it looks at.
 /// World up is +Y (crate convention); the view axis must not be vertical.
+#[derive(Clone, Copy)]
 pub struct Camera {
     /// Eye position, meters.
     pub position: Vec3,

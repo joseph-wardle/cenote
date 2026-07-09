@@ -13,8 +13,9 @@ use winit::window::Window;
 /// Numbers the panel displays, measured by the redraw loop.
 #[derive(Default)]
 pub struct FrameStats {
-    /// The last frame's render work — trace, film add, resolve, and tonemap —
-    /// and the size it rendered at.
+    /// The render thread's last sample — trace plus film accumulate, timed on
+    /// that thread — and the size it rendered at. The viewer's own tonemap and
+    /// present are not in here; the present is the `display` line below.
     pub sample: Duration,
     pub size: (u32, u32),
     /// The last present.

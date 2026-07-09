@@ -691,3 +691,48 @@ a display image and irrelevant to the "same estimator" claim, which rests on the
 identical sums, not the final normalize; the new `resolve_matches_host_average`
 test asserts a ULP tolerance. The linear estimator itself is untouched, so both
 goldens pass unregenerated.
+
+### D-049: The render loop runs on its own thread; the viewer peeks a double-buffered frame (implements D-046; batch 3)
+The render loop becomes an actor. A `render::Session` spawns a thread that
+owns the `Renderer`, `Scene`, and `Film` and an `Arc<Context>` handle, and
+accumulates flat out — no longer paced by the viewer's vsync'd redraw. Two
+short-locked lanes cross the boundary, exactly as D-046 sketched:
+
+- **Inputs in** — an `Arc<Mutex<RenderInputs>>` latch (camera, size, a
+  `generation` counter, a running flag), latest-wins, snapshotted once per
+  sample. The viewer writes the camera on orbit (bumping the generation) and
+  the size on resize; the render thread adopts the camera and resets the film
+  when the generation moves, and rebuilds the film when the size changes — the
+  threaded stand-ins for the old direct `Film::reset` / film-replace. Exposure
+  is deliberately *not* in the latch: it stays with the consumer's tonemap.
+- **Frames out** — the resolved **linear** average behind a second mutex. The
+  render thread resolves into whichever of its two frame buffers no one else
+  references (an `Arc` strong count of one) and publishes an `Arc` to it; the
+  viewer `peek`s the latest and tonemaps it. The lock spans only the pointer
+  hand-off, never a GPU submit.
+
+Two buffers, not the triple-buffered mailbox an earlier sketch reached for: the
+render thread resolves only into a buffer with no outstanding reference, so a
+slow viewer can never see a buffer torn by an in-flight resolve, and if both
+are busy the thread simply skips that publish and keeps accumulating — it never
+blocks on the consumer. `Renderer::resolve` now takes the target buffer as an
+argument (the pair the session rotates through), so the `Film`'s own
+resolve-target buffer from D-048 is gone; the host `Film::average` the CLI uses
+is untouched. Publishing is throttled to just under a 60 Hz frame — resolving
+every sample would burn GPU time no display can show.
+
+The viewer becomes a thin consumer: feed inputs, `peek`, tonemap, present,
+repeat, paced by its FIFO present while the renderer runs ahead. It holds the
+last frame across redraws so an exposure drag re-tonemaps it even with no new
+render frame. `render.rs` splits into a `render/` directory (`mod.rs` for the
+renderer/film/tonemap, `session.rs` for the thread). A GPU-gated test spins a
+session up and asserts it publishes frames whose sample count climbs — the
+whole actor end to end, which no single-threaded test could reach.
+
+One teardown ordering falls out of the new thread: `Presenter` teardown (and
+its swapchain rebuild) waits for the device to idle, which Vulkan requires be
+externally synchronized against queue submits. So the viewer drops the
+`Session` *first* — joining the render thread stops its submits — before the
+presenter tears down. The remaining `device_wait_idle` inside a *resize*'s
+swapchain rebuild still overlaps the running render thread; hardening that seam
+(and surfacing a render-thread panic through the join) is batch 4.

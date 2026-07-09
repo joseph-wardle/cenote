@@ -16,7 +16,7 @@
 //! | `environment` | The equirect environment light: EXR load and the CDF sampling tables, built at prep |
 //! | `color`     | Authored `Rec.709` → `ACEScg` conversion at scene prep |
 //! | `wavefront` | The engine core: `SoA` path state, GPU stage queues, indirect dispatch — one [`wavefront::Wavefront::trace`] is one sample per pixel, written pixel-owned so renders are bitwise deterministic |
-//! | `render`    | Frame orchestration: one-shot linear frames for the CLI and tests, and the progressive path — [`render::Renderer`] accumulates samples into a [`render::Film`] and resolves the linear average; [`render::Tonemap`] is the consumer's downstream view transform (exposure + ACES), which the viewer owns and the CLI skips |
+//! | `render`    | Frame orchestration: one-shot linear frames for the CLI and tests, and the progressive path — [`render::Renderer`] accumulates samples into a [`render::Film`] and resolves the linear average. [`render::Session`] runs that loop on its own thread and publishes frames for a consumer to peek; [`render::Tonemap`] is the consumer's downstream view transform (exposure + ACES), which the viewer owns and the CLI skips |
 //! | `output`    | Linear EXR write + read (read exists for the golden-image tests and the demo environment) |
 //! | `error`     | The crate-wide [`enum@Error`] |
 //!

@@ -11,11 +11,11 @@
 //!   path.
 //! - **Progressive** ([`Renderer::accumulate`]): each call traces one
 //!   sample into the [`Film`]'s running sums. [`Renderer::resolve`] then
-//!   divides those sums by the sample count into the film's linear
+//!   divides those sums by the sample count into a caller-owned linear
 //!   average — the estimator's current best image. The CLI resolves on the
-//!   host with [`Film::average`] and writes the batch EXR; the viewer
-//!   resolves on the GPU and hands the average to [`Tonemap`], the
-//!   consumer's view transform. Batch output and the viewer's converged
+//!   host with [`Film::average`] and writes the batch EXR; the [`Session`]
+//!   resolves on the GPU into a published frame and hands it to a consumer's
+//!   [`Tonemap`] view transform. Batch output and the viewer's converged
 //!   image are the same estimator by construction — they share the film.
 //!
 //! [`Tonemap`] is the other half of that split: exposure, the ACES display
@@ -29,6 +29,14 @@
 //! film's sample count, so accumulation converges toward the true render:
 //! edges anti-alias, noise settles into soft shadows, color bleed, and
 //! contact darkening.
+//!
+//! [`Session`] wraps this progressive path in a render thread, so the viewer
+//! and the future Hydra delegate consume published frames without pacing the
+//! renderer to their own refresh — the actor that decouples the render loop.
+
+mod session;
+
+pub use session::{Frame, Session};
 
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
@@ -97,9 +105,13 @@ struct TonemapParams {
 }
 
 /// Progressive accumulation state for one render-target size: per-pixel
-/// linear RGBA f32 sums, the sample the current wave writes, and the linear
-/// average the sums resolve to. The sample count lives on the host — it is
-/// uniform across pixels by construction.
+/// linear RGBA f32 sums and the sample the current wave writes. The sample
+/// count lives on the host — it is uniform across pixels by construction.
+///
+/// The resolved average — the sums divided by the count — is written into a
+/// caller-owned buffer ([`Renderer::resolve`]) rather than held here, so the
+/// [`Session`] can double-buffer its published frames while the film keeps
+/// accumulating into these sums.
 ///
 /// Sized at creation; a resize means a new `Film`. A view change means
 /// [`Film::reset`].
@@ -110,10 +122,6 @@ pub struct Film {
     /// The running sums. `TRANSFER_SRC` so the accumulated image can be
     /// read back — [`Film::average`] and the tests.
     sum: Buffer,
-    /// [`Renderer::resolve`]'s output: the sums divided by the sample count,
-    /// linear `ACEScg` — the estimator's published image, which [`Tonemap`]
-    /// reads. `TRANSFER_SRC` so it can be read back for tests.
-    average: Buffer,
     width: u32,
     height: u32,
     samples: u32,
@@ -150,12 +158,6 @@ impl Film {
                 storage | vk::BufferUsageFlags::TRANSFER_SRC,
                 MemoryLocation::GpuOnly,
             )?,
-            average: gpu.create_buffer(
-                "film.average",
-                texels * 16,
-                storage | vk::BufferUsageFlags::TRANSFER_SRC,
-                MemoryLocation::GpuOnly,
-            )?,
             width,
             height,
             samples: 0,
@@ -172,14 +174,6 @@ impl Film {
     #[must_use]
     pub fn samples(&self) -> u32 {
         self.samples
-    }
-
-    /// The resolved linear average, valid after [`Renderer::resolve`] — the
-    /// image [`Tonemap::apply`] reads, and (in the threaded viewer) the
-    /// buffer published across the render/present seam.
-    #[must_use]
-    pub fn average_buffer(&self) -> &Buffer {
-        &self.average
     }
 
     /// Read back the accumulated average — linear `ACEScg` RGBA, row-major,
@@ -378,11 +372,13 @@ impl Renderer {
         Ok(())
     }
 
-    /// Resolve `film`'s running sums into its linear average: one dispatch
-    /// dividing each pixel's sum by the sample count. Separate from
-    /// [`Renderer::accumulate`] on purpose — the threaded viewer accumulates
-    /// flat out and resolves only when it publishes a frame, so resolving
-    /// must not ride every sample.
+    /// Resolve `film`'s running sums into `target` as a linear average: one
+    /// dispatch dividing each pixel's sum by the sample count. `target` is the
+    /// caller's — the [`Session`] rotates through a pair of them so it can
+    /// publish one frame while the film keeps accumulating. Separate from
+    /// [`Renderer::accumulate`] on purpose, too: the render thread accumulates
+    /// flat out and resolves only when it publishes, so resolving must not
+    /// ride every sample.
     ///
     /// # Errors
     ///
@@ -391,10 +387,15 @@ impl Renderer {
     /// # Panics
     ///
     /// If the film has no samples — there is no average to resolve, so
-    /// calling order is a programmer bug.
-    pub fn resolve(&self, gpu: &Context, film: &Film) -> Result<()> {
+    /// calling order is a programmer bug — or if `target` is smaller than the
+    /// film's `width`×`height` RGBA f32 texels.
+    pub fn resolve(&self, gpu: &Context, film: &Film, target: &Buffer) -> Result<()> {
         assert!(film.samples > 0, "resolving an empty film");
-        let params = resolve_params(film);
+        assert!(
+            target.size() >= u64::from(film.width) * u64::from(film.height) * 16,
+            "resolve target is smaller than the film"
+        );
+        let params = resolve_params(film, target);
         gpu.dispatch(
             &self.resolve,
             None,
@@ -537,11 +538,11 @@ fn accumulate_params(film: &Film) -> AccumulateParams {
 }
 
 /// The resolve kernel's push constants: `film.sum` divided by the sample
-/// count into `film.average`.
-fn resolve_params(film: &Film) -> ResolveParams {
+/// count into `target`.
+fn resolve_params(film: &Film, target: &Buffer) -> ResolveParams {
     ResolveParams {
         sum: film.sum.device_address(),
-        average: film.average.device_address(),
+        average: target.device_address(),
         width: film.width,
         height: film.height,
         samples: film.samples as f32,
@@ -1034,8 +1035,18 @@ mod tests {
                 .accumulate(&gpu, &scene, &mut film)
                 .expect("accumulate");
         }
-        renderer.resolve(&gpu, &film).expect("resolve");
-        let gpu_average = download_f32(&gpu, film.average_buffer());
+        let target = gpu
+            .create_buffer(
+                "test.average",
+                64 * 64 * 16,
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                    | vk::BufferUsageFlags::TRANSFER_SRC,
+                MemoryLocation::GpuOnly,
+            )
+            .expect("average buffer");
+        renderer.resolve(&gpu, &film, &target).expect("resolve");
+        let gpu_average = download_f32(&gpu, &target);
         let host_average = film.average(&gpu).expect("host average");
         for (gpu, host) in gpu_average.iter().zip(&host_average) {
             assert!(

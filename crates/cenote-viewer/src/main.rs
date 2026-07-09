@@ -6,15 +6,18 @@
 //! importance-sampled HDRI environment, so the image starts noisy and
 //! visibly converges as the spp counter climbs.
 //!
-//! Single-threaded, and self-scheduling once visible: every redraw
-//! accumulates one sample into the film, resolves the running average and
-//! tonemaps it (live exposure), presents, and requests the next redraw —
-//! vsync paces the loop, and the spp counter climbs forever. Camera motion
-//! resets the film; a resize replaces it.
+//! The render loop runs on its own thread — a [`cenote::render::Session`] —
+//! accumulating as fast as the GPU allows, unpaced by the display. The viewer
+//! is a thin consumer: it feeds the session camera and size changes, *peeks*
+//! at the latest published linear frame, tonemaps it (live exposure), and
+//! presents. Each redraw requests the next, so vsync paces the *display*
+//! while the renderer runs free behind it. Camera motion and resizes are just
+//! inputs the session picks up; it restarts or rebuilds accordingly.
 
 mod camera;
 mod ui;
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Context as _;
@@ -82,23 +85,28 @@ impl ApplicationHandler for App {
     }
 }
 
-/// The live viewer: window, GPU, scene, UI, and the input state driving the
-/// orbit camera.
+/// The live viewer: window, GPU, the render session, UI, and the input state
+/// driving the orbit camera.
 struct Viewer {
-    // Field order is drop order: GPU resources go down before their
-    // `Context`, and the surface-owning `Presenter` — like the `Gui`, whose
-    // clipboard handle talks to the display server — before the window.
+    // Field order is drop order, and the `Session` goes first: joining the
+    // render thread stops its queue submits before the `Presenter`'s
+    // teardown waits for the device to idle — the two would otherwise race
+    // the one queue. Then the surface-owning `Presenter` and the `Gui` (whose
+    // clipboard handle talks to the display server) drop before the window,
+    // and the shared `Context` drops last, once every buffer that borrows its
+    // allocator — including the frame we still hold — has been freed.
+    session: cenote::render::Session,
     presenter: cenote::gpu::Presenter,
-    renderer: cenote::render::Renderer,
-    /// The view transform: the film's linear average → the displayed frame,
+    /// The view transform: a published linear average → the displayed frame,
     /// at the panel's exposure. The consumer half of the estimator/view
     /// split, owned here and never by the renderer.
     tonemap: cenote::render::Tonemap,
-    scene: cenote::scene::Scene,
-    /// The accumulation target, created at window size by the first redraw
-    /// and replaced whenever the window size stops matching.
-    film: Option<cenote::render::Film>,
-    gpu: cenote::gpu::Context,
+    /// The frame currently on screen, held across redraws so an exposure drag
+    /// re-tonemaps it even when the render thread hasn't posted a new one.
+    /// Its `Arc` also keeps that publish buffer out of the render thread's
+    /// reuse pool while we display it.
+    frame: Option<cenote::render::Frame>,
+    gpu: Arc<cenote::gpu::Context>,
     gui: Gui,
     window: Window,
     camera: OrbitCamera,
@@ -118,7 +126,7 @@ impl Viewer {
                 .with_inner_size(LogicalSize::new(1280.0, 720.0)),
         )?;
         let display = window.display_handle()?.as_raw();
-        let gpu = cenote::gpu::Context::presentable(display)?;
+        let gpu = Arc::new(cenote::gpu::Context::presentable(display)?);
         let scene = cenote::scene::Scene::demo(&gpu)?;
         let camera = OrbitCamera::framing(scene.camera());
         let renderer = cenote::render::Renderer::new(&gpu)?;
@@ -131,14 +139,23 @@ impl Viewer {
             size.height,
         )?;
         let gui = Gui::new(&window);
+        // The session takes the scene and renderer onto its own thread and
+        // starts accumulating the initial view at once.
+        let session = cenote::render::Session::new(
+            Arc::clone(&gpu),
+            scene,
+            renderer,
+            camera.camera(),
+            size.width,
+            size.height,
+        );
         // Not every platform sends an initial redraw request unprompted.
         window.request_redraw();
         Ok(Self {
+            session,
             presenter,
-            renderer,
             tonemap,
-            scene,
-            film: None,
+            frame: None,
             gpu,
             gui,
             window,
@@ -157,6 +174,7 @@ impl Viewer {
         match *event {
             WindowEvent::Resized(size) => {
                 self.presenter.resize(size.width, size.height);
+                self.session.resize(size.width, size.height);
                 self.window.request_redraw();
             }
             WindowEvent::MouseInput {
@@ -195,36 +213,23 @@ impl Viewer {
         Ok(())
     }
 
-    /// The camera moved: the film's accumulated samples no longer match the
-    /// view, so the next sample starts a fresh average.
+    /// The camera moved: hand the new view to the render thread, which
+    /// restarts accumulation from it.
     fn view_changed(&mut self) {
-        if let Some(film) = &mut self.film {
-            film.reset();
-        }
+        self.session.set_camera(self.camera.camera());
         self.window.request_redraw();
     }
 
-    /// One frame: accumulate a sample into the film (replacing the film if
-    /// the window size changed), resolve the average, tonemap it at the
-    /// panel's exposure, run the UI, present, and request the next redraw —
-    /// accumulation never stops.
+    /// One display frame: peek the render thread's latest linear average (or
+    /// keep the one we hold), tonemap it at the panel's exposure, run the UI,
+    /// present, and request the next redraw. The renderer accumulates
+    /// independently; this loop just shows its most recent output, paced by
+    /// the FIFO present.
     fn redraw(&mut self) -> anyhow::Result<()> {
         let size = self.window.inner_size();
         if size.width == 0 || size.height == 0 {
             return Ok(()); // minimized; the resize that restores us redraws
         }
-        let stale = |film: &cenote::render::Film| {
-            film.width() != size.width || film.height() != size.height
-        };
-        if self.film.as_ref().is_none_or(stale) {
-            self.film = Some(
-                cenote::render::Film::new(&self.gpu, size.width, size.height)
-                    .context("creating the film")?,
-            );
-        }
-        let film = self.film.as_mut().expect("created just above");
-
-        *self.scene.camera_mut() = self.camera.camera();
 
         // The UI runs first so its exposure is current for this frame's
         // tonemap and an exposure drag lands this very frame. The stats it
@@ -233,44 +238,44 @@ impl Viewer {
             .gui
             .run(&self.window, self.gpu.device_summary(), &self.stats);
 
-        // Accumulate one sample, resolve the running average, tonemap it for
-        // display. Three submissions, not a single fold: it keeps the
-        // estimator (accumulate, resolve) cleanly apart from the view
-        // transform (tonemap) — the seam the threaded render loop splits at.
-        let started = Instant::now();
-        self.renderer
-            .accumulate(&self.gpu, &self.scene, film)
-            .context("accumulating a sample")?;
-        self.renderer
-            .resolve(&self.gpu, film)
-            .context("resolving the average")?;
+        // Take a fresher frame if the render thread posted one; otherwise
+        // re-show the one we hold (so exposure still tracks). Nothing yet —
+        // the very first frames — just pumps the loop.
+        if let Some(frame) = self.session.peek() {
+            self.frame = Some(frame);
+        }
+        let Some(frame) = &self.frame else {
+            self.window.request_redraw();
+            return Ok(());
+        };
+
         self.tonemap
             .apply(
                 &self.gpu,
-                film.average_buffer(),
-                film.width(),
-                film.height(),
+                frame.image(),
+                frame.width(),
+                frame.height(),
                 self.gui.exposure(),
             )
             .context("tonemapping the frame")?;
-        self.stats.sample = started.elapsed();
-        self.stats.size = (size.width, size.height);
-        self.stats.samples = film.samples();
+        self.stats.sample = frame.sample_time();
+        self.stats.size = (frame.width(), frame.height());
+        self.stats.samples = frame.samples();
 
         self.window.pre_present_notify();
         let started = Instant::now();
         self.presenter
             .present(
                 self.tonemap.display(),
-                film.width(),
-                film.height(),
+                frame.width(),
+                frame.height(),
                 Some(&gui_frame),
             )
             .context("presenting the frame")?;
         self.stats.display = started.elapsed();
 
-        // Progressive accumulation: there is always a next sample. FIFO
-        // (vsync) presents pace this loop at the refresh rate.
+        // Peek again next vblank: the render thread runs ahead of us, so
+        // there is almost always a newer frame waiting.
         self.window.request_redraw();
         Ok(())
     }
