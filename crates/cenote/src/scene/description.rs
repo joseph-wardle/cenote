@@ -31,7 +31,7 @@ use std::path::PathBuf;
 use glam::Mat4;
 use serde::{Deserialize, Serialize};
 
-use super::changeset::Dirty;
+use super::changeset::{Dirty, Kind};
 
 /// A material parameter that is either one value everywhere or a per-hit
 /// texture lookup.
@@ -445,8 +445,10 @@ pub struct Settings {
     pub spp: u32,
     /// Maximum path length in bounces.
     pub max_bounces: u32,
-    /// Sampler seed, decorrelating repeat renders; wired to the sampler
-    /// when scene loading reaches the render loop.
+    /// Sampler seed, decorrelating repeat renders. Carried by the format
+    /// but not yet wired into the sampler — a deferral with its ledger
+    /// entry, since honest decorrelation needs a seed input in the RNG,
+    /// not a sample-index offset.
     pub seed: u32,
 }
 
@@ -543,6 +545,83 @@ impl SceneDescription {
     pub fn take_dirty(&mut self) -> Dirty {
         std::mem::take(&mut self.dirty)
     }
+
+    /// Become `new`, recording the *difference* as dirty state — the
+    /// file-reload semantic. Where [`SceneDescription::apply`] overlays
+    /// edits, `replace` says the incoming description **is** the scene:
+    /// objects it lacks are removed (their residency retires), objects
+    /// whose values differ (or are new) are changed, and identical
+    /// objects contribute nothing — so re-saving an untouched file
+    /// rebuilds nothing. `new`'s own dirty state is discarded; only the
+    /// diff against `self` matters.
+    pub fn replace(&mut self, new: SceneDescription) {
+        let mut dirty = Dirty::default();
+        diff(
+            Kind::Mesh,
+            &self.objects.meshes,
+            &new.objects.meshes,
+            &mut dirty,
+        );
+        diff(
+            Kind::Instance,
+            &self.objects.instances,
+            &new.objects.instances,
+            &mut dirty,
+        );
+        diff(
+            Kind::Material,
+            &self.objects.materials,
+            &new.objects.materials,
+            &mut dirty,
+        );
+        diff(
+            Kind::Light,
+            &self.objects.lights,
+            &new.objects.lights,
+            &mut dirty,
+        );
+        diff(
+            Kind::Camera,
+            &self.objects.cameras,
+            &new.objects.cameras,
+            &mut dirty,
+        );
+        diff(
+            Kind::Environment,
+            &self.objects.environments,
+            &new.objects.environments,
+            &mut dirty,
+        );
+        diff(
+            Kind::Settings,
+            &self.objects.settings,
+            &new.objects.settings,
+            &mut dirty,
+        );
+        self.objects = new.objects;
+        self.dirty.merge(dirty);
+    }
+}
+
+/// One kind's contribution to a [`SceneDescription::replace`] diff:
+/// new-or-different names are changed, names only the old side holds are
+/// removed.
+fn diff<T: PartialEq>(
+    kind: Kind,
+    old: &BTreeMap<String, T>,
+    new: &BTreeMap<String, T>,
+    dirty: &mut Dirty,
+) {
+    for (name, value) in new {
+        if old.get(name) != Some(value) {
+            dirty.changed.insert((kind, name.clone()));
+        }
+    }
+    for name in old.keys() {
+        if !new.contains_key(name) {
+            dirty.removed.insert((kind, name.clone()));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -576,6 +655,68 @@ mod tests {
     #[test]
     fn default_transform_is_identity() {
         assert_eq!(Transform::default().to_mat4(), Mat4::IDENTITY);
+    }
+
+    /// `replace` dirt is the diff, not the file: unchanged objects are
+    /// silent, changed values and new names mark changed, and names the
+    /// incoming description lacks mark removed — how deleting an object
+    /// from a scene file retires its residency on reload.
+    #[test]
+    fn replace_dirties_exactly_the_difference() {
+        use crate::scene::changeset::{ChangeSet, MaterialPatch, Op, SettingsPatch};
+
+        let base = || ChangeSet {
+            ops: vec![
+                Op::Settings(SettingsPatch::new("main")),
+                Op::Material(Box::new(MaterialPatch::new("keep"))),
+                Op::Material(Box::new(MaterialPatch::new("gone"))),
+            ],
+        };
+        let mut description = SceneDescription::new();
+        description.apply(&base()).expect("valid");
+        description.take_dirty();
+
+        // The "file" now drops one material and retunes another.
+        let mut incoming = SceneDescription::new();
+        incoming
+            .apply(&ChangeSet {
+                ops: vec![
+                    Op::Settings(SettingsPatch::new("main")),
+                    Op::Material(Box::new(MaterialPatch {
+                        coat_weight: Some(1.0),
+                        ..MaterialPatch::new("keep")
+                    })),
+                ],
+            })
+            .expect("valid");
+        description.replace(incoming);
+
+        let dirty = description.take_dirty();
+        assert_eq!(
+            dirty.changed,
+            [(Kind::Material, "keep".to_owned())].into_iter().collect()
+        );
+        assert_eq!(
+            dirty.removed,
+            [(Kind::Material, "gone".to_owned())].into_iter().collect()
+        );
+        assert!(!description.materials().contains_key("gone"));
+
+        // Replacing with an identical description dirties nothing.
+        let mut identical = SceneDescription::new();
+        identical
+            .apply(&ChangeSet {
+                ops: vec![
+                    Op::Settings(SettingsPatch::new("main")),
+                    Op::Material(Box::new(MaterialPatch {
+                        coat_weight: Some(1.0),
+                        ..MaterialPatch::new("keep")
+                    })),
+                ],
+            })
+            .expect("valid");
+        description.replace(identical);
+        assert!(description.take_dirty().is_empty());
     }
 
     #[test]

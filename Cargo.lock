@@ -377,6 +377,7 @@ dependencies = [
  "env_logger",
  "glam",
  "log",
+ "notify",
  "winit",
 ]
 

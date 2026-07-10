@@ -18,7 +18,9 @@
 //!   leaves the description — and its dirty state — exactly as it was.
 //! - **Dirty accumulation**: every applied op records what prep must
 //!   rebuild, in [`Dirty`], until [`SceneDescription::take_dirty`] hands
-//!   it over.
+//!   it over. Equality gates the record: an op whose values are already
+//!   in place dirties nothing, so re-applying a scene file forces no
+//!   re-prep.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -410,17 +412,14 @@ fn apply_op(objects: &mut Objects, dirty: &mut Dirty, op: &Op) -> Result<()> {
         return Ok(());
     }
     let name = name.to_owned();
-    match op.clone() {
-        Op::Mesh(patch) => {
-            let mesh = objects.meshes.entry(name.clone()).or_default();
+    let changed = match op.clone() {
+        Op::Mesh(patch) => upsert(&mut objects.meshes, &name, |mesh| {
             merge!(mesh, patch; source);
-        }
-        Op::Instance(patch) => {
-            let instance = objects.instances.entry(name.clone()).or_default();
+        }),
+        Op::Instance(patch) => upsert(&mut objects.instances, &name, |instance| {
             merge!(instance, patch; mesh, material, transform, camera_visible);
-        }
-        Op::Material(patch) => {
-            let material = objects.materials.entry(name.clone()).or_default();
+        }),
+        Op::Material(patch) => upsert(&mut objects.materials, &name, |material| {
             merge!(material, patch;
                 base_color, base_diffuse_roughness, base_metalness,
                 specular_weight, specular_roughness, specular_ior,
@@ -430,31 +429,50 @@ fn apply_op(objects: &mut Objects, dirty: &mut Dirty, op: &Op) -> Result<()> {
                 emission_luminance, emission_color,
                 geometry_opacity, geometry_thin_walled, geometry_normal,
             );
-        }
-        Op::Light(patch) => {
-            let light = objects.lights.entry(name.clone()).or_default();
+        }),
+        Op::Light(patch) => upsert(&mut objects.lights, &name, |light| {
             if let Some(value) = patch.light {
                 *light = value;
             }
-        }
-        Op::Camera(patch) => {
-            let camera = objects.cameras.entry(name.clone()).or_default();
+        }),
+        Op::Camera(patch) => upsert(&mut objects.cameras, &name, |camera| {
             merge!(camera, patch;
                 position, look_at, up, vfov_degrees, focus_distance, aperture_radius,
             );
-        }
-        Op::Environment(patch) => {
-            let environment = objects.environments.entry(name.clone()).or_default();
+        }),
+        Op::Environment(patch) => upsert(&mut objects.environments, &name, |environment| {
             merge!(environment, patch; path);
-        }
-        Op::Settings(patch) => {
-            let settings = objects.settings.entry(name.clone()).or_default();
+        }),
+        Op::Settings(patch) => upsert(&mut objects.settings, &name, |settings| {
             merge!(settings, patch; resolution, spp, max_bounces, seed);
-        }
+        }),
         Op::Remove(..) => unreachable!("handled above"),
+    };
+    if changed {
+        dirty.changed.insert((kind, name));
     }
-    dirty.changed.insert((kind, name));
     Ok(())
+}
+
+/// Get-or-create `name` and run the patch merge over it; true when the
+/// object is new or the merge changed its value. This equality gate is
+/// what keeps a re-applied scene file from dirtying anything: a patch
+/// that lands values already in place forces no re-prep and no restart.
+fn upsert<T: Clone + Default + PartialEq>(
+    map: &mut std::collections::BTreeMap<String, T>,
+    name: &str,
+    merge: impl FnOnce(&mut T),
+) -> bool {
+    if let Some(existing) = map.get_mut(name) {
+        let before = existing.clone();
+        merge(existing);
+        *existing != before
+    } else {
+        let mut fresh = T::default();
+        merge(&mut fresh);
+        map.insert(name.to_owned(), fresh);
+        true
+    }
 }
 
 impl Objects {
@@ -729,6 +747,34 @@ mod tests {
         assert_eq!(material.specular_ior, 1.8);
         // Untouched fields keep OpenPBR defaults.
         assert_eq!(material.coat_ior, 1.6);
+    }
+
+    /// The equality gate: patches that land values already in place must
+    /// not dirty — a re-applied scene file would otherwise rebuild (and
+    /// restart) the world on every save.
+    #[test]
+    fn reapplying_a_set_dirties_nothing() {
+        let mut description = SceneDescription::new();
+        description.apply(&triangle_scene()).expect("valid set");
+        assert!(!description.take_dirty().is_empty());
+        description.apply(&triangle_scene()).expect("valid set");
+        assert!(description.take_dirty().is_empty());
+    }
+
+    /// …but creation always dirties, even when the created object holds
+    /// nothing beyond its defaults: prep must learn it exists.
+    #[test]
+    fn creation_dirties_even_at_defaults() {
+        let mut description = SceneDescription::new();
+        let set = ChangeSet {
+            ops: vec![Op::Settings(SettingsPatch::new("main"))],
+        };
+        description.apply(&set).expect("valid set");
+        let dirty = description.take_dirty();
+        assert!(dirty.changed.contains(&(Kind::Settings, "main".into())));
+        // The same all-default patch against the existing object: no-op.
+        description.apply(&set).expect("valid set");
+        assert!(description.take_dirty().is_empty());
     }
 
     #[test]

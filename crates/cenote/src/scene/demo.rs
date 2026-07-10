@@ -1,8 +1,8 @@
-//! The demo scene as data: [`ChangeSet::demo`] describes exactly the scene
-//! [`super::Scene::demo`] builds procedurally — the terracotta material
-//! chart under the warm key quad and the Kloofendal sky. Two spellings of
-//! one scene is a step-2 scaffold: the prep rewire (M2 step 3) makes the
-//! GPU build consume this change-set, and the goldens hold it to sameness.
+//! The demo scene — the terracotta material chart under the warm key quad
+//! and the Kloofendal sky. [`ChangeSet::demo`] is the scene as data, and
+//! [`Scene::demo`] is nothing but that change-set prepped: the demo
+//! exercises the whole production path (schema → apply → prep) every time
+//! a test builds it, and the goldens pin the image it lands.
 
 use std::path::Path;
 
@@ -10,11 +10,54 @@ use super::changeset::{
     CameraPatch, ChangeSet, EnvironmentPatch, InstancePatch, MaterialPatch, MeshPatch, Op,
     SettingsPatch,
 };
-use super::description::{MeshSource, Texturable, Transform};
+use super::description::{MeshSource, SceneDescription, Texturable, Transform};
 use super::{Mesh, Scene, ground_plane, icosphere};
+use crate::error::Result;
+use crate::gpu::Context;
+
+/// Grid columns: `specular_roughness` 0 → 1, left to right.
+const GRID_COLUMNS: usize = 5;
+/// Grid rows: `base_metalness` 0 → 1, back to front.
+const GRID_ROWS: usize = 5;
+
+impl Scene {
+    /// The demo environment's path, relative to the crate root — the
+    /// bundled Kloofendal sky (`assets/README.md` has provenance and
+    /// encoding notes). Loaded from the dev tree rather than embedded: at
+    /// 4k the asset is 43 MB, which no binary should carry.
+    pub const DEMO_ENVIRONMENT: &str = "assets/kloofendal_puresky.exr";
+
+    /// The demo scene: a terracotta material chart — a grid of spheres
+    /// laid across the floor, sweeping `specular_roughness` 0 → 1 left to
+    /// right and `base_metalness` 0 → 1 back to front, the same base
+    /// color read as a lacquered plastic's diffuse base in the back row
+    /// and a conductor's F0 in the front — on a lightly glossy gray floor
+    /// that mirrors the whole chart. A warm quad light overhead to the
+    /// left is the key (its soft shadow and warm cast are what next-event
+    /// estimation resolves), and the bundled Kloofendal sky fills, backs,
+    /// and reflects — its unclipped sun is the importance-sampling stress
+    /// case the environment tables exist for.
+    ///
+    /// # Errors
+    ///
+    /// Any [`crate::Error`] from prep — upload, decode, or
+    /// acceleration-structure builds.
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "the expect guards the built-in change-set applying to an empty \
+                  description, which a unit test pins — not a reachable panic"
+    )]
+    pub fn demo(gpu: &Context) -> Result<Self> {
+        let mut description = SceneDescription::new();
+        description
+            .apply(&ChangeSet::demo())
+            .expect("the demo change-set is valid");
+        Self::prep(gpu, &mut description)
+    }
+}
 
 /// A host mesh flattened into an inline geometry payload.
-fn inline(mesh: &Mesh) -> MeshSource {
+pub(super) fn inline(mesh: &Mesh) -> MeshSource {
     MeshSource::Inline {
         positions: mesh.positions.iter().map(glam::Vec3::to_array).collect(),
         normals: Some(mesh.normals.iter().map(glam::Vec3::to_array).collect()),
@@ -24,13 +67,11 @@ fn inline(mesh: &Mesh) -> MeshSource {
 }
 
 impl ChangeSet {
-    /// The demo scene — [`Scene::demo`]'s material chart, expressed as the
-    /// change-set that creates it from nothing. Colors are the authored
-    /// `Rec.709` values (the format's convention; prep converts), where the
-    /// procedural builder converts in code. Unlike the builder's 27 meshes,
-    /// the data form shares one icosphere across the chart and one unit
-    /// plane between floor and key light, scaled per instance — the
-    /// mesh/instance split doing its job.
+    /// The demo scene as the change-set that creates it from nothing —
+    /// what [`Scene::demo`] preps. Colors are authored `Rec.709` values
+    /// (the format's convention; prep converts). One icosphere is shared
+    /// across the whole chart and one unit plane between floor and key
+    /// light, scaled per instance — the mesh/instance split doing its job.
     #[must_use]
     pub fn demo() -> Self {
         let mut ops = vec![
@@ -93,17 +134,14 @@ impl ChangeSet {
         // base_metalness 0 → 1 back to front, one material and one
         // instance per sphere.
         let sweep = |step: usize, steps: usize| step as f32 / (steps - 1) as f32;
-        for row in 0..Scene::GRID_ROWS {
-            for column in 0..Scene::GRID_COLUMNS {
+        for row in 0..GRID_ROWS {
+            for column in 0..GRID_COLUMNS {
                 let name = format!("chart_r{row}c{column}");
                 ops.push(Op::Material(Box::new(MaterialPatch {
                     base_color: Some(Texturable::Constant([0.7, 0.22, 0.08])),
                     base_diffuse_roughness: Some(0.4),
-                    specular_roughness: Some(Texturable::Constant(sweep(
-                        column,
-                        Scene::GRID_COLUMNS,
-                    ))),
-                    base_metalness: Some(Texturable::Constant(sweep(row, Scene::GRID_ROWS))),
+                    specular_roughness: Some(Texturable::Constant(sweep(column, GRID_COLUMNS))),
+                    base_metalness: Some(Texturable::Constant(sweep(row, GRID_ROWS))),
                     ..MaterialPatch::new(name.clone())
                 })));
                 ops.push(Op::Instance(InstancePatch {

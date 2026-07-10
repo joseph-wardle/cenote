@@ -37,10 +37,15 @@ Requires: stable Rust, [`slangc`](https://github.com/shader-slang/slang) on PATH
 
 ```sh
 cargo run --release -p cenote-viewer   # orbit (drag), dolly (scroll), live exposure
+cargo run --release -p cenote-viewer -- scenes/example.ron   # open a scene file — and edit it live
 cargo run --release -p cenote-cli -- --spp 256 --out shot.exr
 ```
 
-The viewer accumulates forever and re-converges after every camera move.
+The viewer accumulates forever and re-converges after every camera move. An
+opened scene file is watched: save an edit — a color, a transform, the
+lamp's brightness — and the viewer re-preps exactly what changed and
+re-converges. A save that doesn't parse (or that this build can't render
+yet) is logged and the previous scene keeps rendering.
 The CLI accumulates `--spp` samples of the same estimator
 into the same film and writes the linear `ACEScg` average as an EXR
 (chromaticities declared in the header); with `--watch` it re-renders on
@@ -84,7 +89,8 @@ cargo test --workspace   # on the GPU machine — includes the goldens
 | `crates/cenote/` | The core renderer library — start at `src/lib.rs`, whose crate doc is the architecture map |
 | `crates/cenote/shaders/` | Slang GPU kernels — the heart of the renderer |
 | `crates/cenote-cli/` | Headless batch renderer binary |
-| `crates/cenote-viewer/` | Interactive viewer binary: live render in a window, orbit camera, progressive accumulation, stats/controls overlay |
+| `crates/cenote-viewer/` | Interactive viewer binary: live render in a window, orbit camera, progressive accumulation, stats/controls overlay, live-editable scene files |
+| `scenes/` | Hand-written example scene — the scene model in one readable `.ron` file |
 | `docs/charter.md` | Project charter: vision, locked decisions, milestone roadmap |
 | `docs/decisions.md` | Append-only log of every design decision and its rationale |
 | `docs/m0-plan.md` | The M0 implementation plan |

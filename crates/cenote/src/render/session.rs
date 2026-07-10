@@ -5,18 +5,31 @@
 //! the shape Cycles, `MoonRay`, and Karma all use: the path tracer runs on its
 //! own thread and the UI *peeks* at its output.
 //!
-//! Two lanes cross the thread boundary, each its own short-lived lock:
+//! Four lanes cross the thread boundary, each its own short-lived lock:
 //!
 //! - **Inputs in** — [`RenderInputs`] (camera, target size, a `generation`
 //!   counter, a running flag) behind a mutex, latest-wins. The viewer writes
 //!   the latest camera or size; the render thread snapshots the whole struct
 //!   once per sample. Exposure is *not* here: it belongs to the consumer's
 //!   view transform, downstream of the published frame.
+//! - **Edits in** — queued [`ChangeSet`]s ([`Session::apply`] overlays a
+//!   patch, [`Session::replace`] swaps in a whole scene — the file-reload
+//!   shape, where objects the new set lacks retire). Edits merge in arrival
+//!   order and land at the next wave boundary: the thread applies them to
+//!   its description, re-preps exactly what the dirty state names, and
+//!   restarts accumulation from sample 0 — the industry consensus
+//!   (`MoonRay` restarts on any edit).
 //! - **Frames out** — the resolved **linear** average, published behind a
 //!   second mutex. The render thread resolves into whichever of its two
 //!   frame buffers is free and hands over an [`Arc`] to it; the viewer takes
 //!   the latest and tonemaps it. The lock spans only the pointer hand-off,
 //!   never a GPU submit — the heavy accumulate runs lock-free.
+//! - **Faults out** — a rejected edit (invalid change-set, or a description
+//!   this build can't render) is *not* a render-thread failure: the thread
+//!   posts it for [`Session::take_edit_error`], keeps rendering its last
+//!   good scene, and retries the pending re-prep after the next applied
+//!   edit. Only device faults end the thread, surfacing via
+//!   [`Session::check`].
 //!
 //! Two frame buffers, not a triple-buffered mailbox: the render thread
 //! resolves only into a buffer no one else references (a strong-count of one
@@ -45,6 +58,8 @@ use ash::vk;
 use super::{Film, Renderer};
 use crate::error::{Error, Result};
 use crate::gpu::{Buffer, Context, MemoryLocation};
+use crate::scene::changeset::{ChangeSet, Dirty, Kind};
+use crate::scene::description::SceneDescription;
 use crate::scene::{Camera, Scene};
 
 /// The shortest gap between published frames. The render thread accumulates
@@ -74,6 +89,27 @@ struct RenderInputs {
     generation: u64,
     /// Cleared to stop the thread; checked at the top of every iteration.
     running: bool,
+}
+
+/// One queued scene edit — the two verbs a change-set can arrive as.
+enum SceneEdit {
+    /// Overlay onto the current description ([`SceneDescription::apply`]).
+    Apply(ChangeSet),
+    /// The set describes the whole scene from empty; the description
+    /// becomes it, diffing for dirt ([`SceneDescription::replace`]).
+    Replace(ChangeSet),
+}
+
+/// The four lanes between a consumer and the render thread — one shared
+/// allocation, each lane its own short-lived lock.
+struct Lanes {
+    inputs: Mutex<RenderInputs>,
+    edits: Mutex<Vec<SceneEdit>>,
+    /// The latest rejected edit, kept until the consumer takes it. A newer
+    /// rejection replaces an untaken older one — the consumer polling once
+    /// a frame sees the freshest fault, and the log carries the history.
+    edit_error: Mutex<Option<Error>>,
+    published: Mutex<Option<Frame>>,
 }
 
 /// A published frame: the estimator's current best image as a **linear**
@@ -125,20 +161,20 @@ impl Frame {
     }
 }
 
-/// Owns the render thread and the two lanes across to it. Dropping it stops
+/// Owns the render thread and the lanes across to it. Dropping it stops
 /// the thread and joins, so every GPU resource the thread holds is released
 /// before the shared [`Context`] is.
 pub struct Session {
-    inputs: Arc<Mutex<RenderInputs>>,
-    published: Arc<Mutex<Option<Frame>>>,
+    lanes: Arc<Lanes>,
     thread: Option<JoinHandle<Result<()>>>,
 }
 
 impl Session {
-    /// Spawn the render thread. It takes ownership of `scene`, `renderer`, and
-    /// a `Context` handle, and starts accumulating `camera` at
-    /// `width`×`height` immediately; the first [`Session::take_frame`] to
-    /// return `Some` marks the first frame ready.
+    /// Spawn the render thread. It takes ownership of `description`,
+    /// `scene` (its prepped residency), `renderer`, and a [`Context`]
+    /// handle, and starts accumulating `camera` at `width`×`height`
+    /// immediately; the first [`Session::take_frame`] to return `Some`
+    /// marks the first frame ready.
     ///
     /// # Panics
     ///
@@ -147,30 +183,33 @@ impl Session {
     #[must_use]
     pub fn new(
         gpu: Arc<Context>,
+        description: SceneDescription,
         scene: Scene,
         renderer: Renderer,
         camera: Camera,
         width: u32,
         height: u32,
     ) -> Self {
-        let inputs = Arc::new(Mutex::new(RenderInputs {
-            camera,
-            size: (width, height),
-            generation: 0,
-            running: true,
-        }));
-        let published = Arc::new(Mutex::new(None));
+        let lanes = Arc::new(Lanes {
+            inputs: Mutex::new(RenderInputs {
+                camera,
+                size: (width, height),
+                generation: 0,
+                running: true,
+            }),
+            edits: Mutex::new(Vec::new()),
+            edit_error: Mutex::new(None),
+            published: Mutex::new(None),
+        });
         let thread = {
-            let inputs = Arc::clone(&inputs);
-            let published = Arc::clone(&published);
+            let lanes = Arc::clone(&lanes);
             std::thread::Builder::new()
                 .name("cenote-render".into())
-                .spawn(move || render_loop(&gpu, scene, &renderer, &inputs, &published))
+                .spawn(move || render_loop(&gpu, description, scene, &renderer, &lanes))
                 .expect("spawning the render thread")
         };
         Self {
-            inputs,
-            published,
+            lanes,
             thread: Some(thread),
         }
     }
@@ -184,7 +223,7 @@ impl Session {
     /// If the render thread panicked while holding the input lock — a bug on
     /// that thread, surfaced here rather than silently ignored.
     pub fn set_camera(&self, camera: Camera) {
-        let mut inputs = self.inputs.lock().expect("inputs mutex poisoned");
+        let mut inputs = self.lanes.inputs.lock().expect("inputs mutex poisoned");
         inputs.camera = camera;
         inputs.generation += 1;
     }
@@ -196,7 +235,61 @@ impl Session {
     ///
     /// If the render thread panicked while holding the input lock.
     pub fn resize(&self, width: u32, height: u32) {
-        self.inputs.lock().expect("inputs mutex poisoned").size = (width, height);
+        self.lanes
+            .inputs
+            .lock()
+            .expect("inputs mutex poisoned")
+            .size = (width, height);
+    }
+
+    /// Queue a change-set to overlay onto the scene — the lookdev shape.
+    /// Edits merge in arrival order and land at the next wave boundary:
+    /// stop, apply, re-prep what the edit dirtied, restart accumulation.
+    /// A rejected set leaves the scene untouched and surfaces through
+    /// [`Session::take_edit_error`].
+    ///
+    /// # Panics
+    ///
+    /// If the render thread panicked while holding the edit lock.
+    pub fn apply(&self, set: ChangeSet) {
+        self.lanes
+            .edits
+            .lock()
+            .expect("edits mutex poisoned")
+            .push(SceneEdit::Apply(set));
+    }
+
+    /// Queue a whole-scene replacement — the file-reload shape: `set`
+    /// describes the entire scene from empty, and objects it no longer
+    /// contains are removed, retiring their GPU residency. Unchanged
+    /// objects re-prep nothing, so re-saving an untouched file is free.
+    /// Rejections behave as in [`Session::apply`].
+    ///
+    /// # Panics
+    ///
+    /// If the render thread panicked while holding the edit lock.
+    pub fn replace(&self, set: ChangeSet) {
+        self.lanes
+            .edits
+            .lock()
+            .expect("edits mutex poisoned")
+            .push(SceneEdit::Replace(set));
+    }
+
+    /// Take the latest rejected edit, if one hasn't been taken yet. The
+    /// render thread keeps rendering its previous scene through a
+    /// rejection — this is how a consumer learns the edit didn't land.
+    ///
+    /// # Panics
+    ///
+    /// If the render thread panicked while holding the edit-error lock.
+    #[must_use]
+    pub fn take_edit_error(&self) -> Option<Error> {
+        self.lanes
+            .edit_error
+            .lock()
+            .expect("edit-error mutex poisoned")
+            .take()
     }
 
     /// Take the latest published frame, if the render thread has posted a new
@@ -208,7 +301,8 @@ impl Session {
     /// If the render thread panicked while holding the publish lock.
     #[must_use]
     pub fn take_frame(&self) -> Option<Frame> {
-        self.published
+        self.lanes
+            .published
             .lock()
             .expect("published mutex poisoned")
             .take()
@@ -244,7 +338,8 @@ impl Drop for Session {
         // Signal stop. A poisoned lock means the thread panicked mid-flight
         // holding it; recover the guard rather than panicking again here in a
         // Drop, since the join below is what surfaces that panic.
-        self.inputs
+        self.lanes
+            .inputs
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .running = false;
@@ -282,14 +377,15 @@ fn join_render_thread(thread: JoinHandle<Result<()>>) -> Result<()> {
 }
 
 /// The render thread's body: accumulate `scene` into a film sized to the
-/// latest inputs, publishing a resolved average on the throttle. Returns when
-/// the running flag clears, or early on the first GPU error.
+/// latest inputs, folding queued edits in at wave boundaries and publishing
+/// a resolved average on the throttle. Returns when the running flag clears,
+/// or early on the first device fault.
 fn render_loop(
     gpu: &Context,
+    mut description: SceneDescription,
     mut scene: Scene,
     renderer: &Renderer,
-    inputs: &Mutex<RenderInputs>,
-    published: &Mutex<Option<Frame>>,
+    lanes: &Lanes,
 ) -> Result<()> {
     log::debug!("render thread started");
     // The render target: the film and its pair of publish buffers, sized
@@ -300,9 +396,13 @@ fn render_loop(
     let mut applied_size = (0, 0);
     let mut applied_generation = 0;
     let mut last_publish: Option<Instant> = None;
+    // Dirt whose re-prep was rejected (this build can't render the edited
+    // description). It survives here so the *next* applied edit retries the
+    // whole backlog — nothing goes silently stale.
+    let mut stale = Dirty::default();
 
     loop {
-        let input = *inputs.lock().expect("inputs mutex poisoned");
+        let input = *lanes.inputs.lock().expect("inputs mutex poisoned");
         if !input.running {
             log::debug!("render thread stopping");
             return Ok(());
@@ -310,6 +410,7 @@ fn render_loop(
         let (width, height) = input.size;
         if width == 0 || height == 0 {
             // Minimized: nothing to render until the window comes back.
+            // Edits queue meanwhile and land with the first visible wave.
             std::thread::sleep(IDLE_NAP);
             continue;
         }
@@ -328,6 +429,12 @@ fn render_loop(
             last_publish = None;
         }
         let (film, frames) = target.as_mut().expect("sized by the resize branch above");
+        // Queued edits land here, at the wave boundary: stop, apply,
+        // re-prep, restart accumulation from sample 0.
+        if apply_edits(gpu, lanes, &mut description, &mut scene, &mut stale)? {
+            film.reset();
+            last_publish = None;
+        }
         // A plain view change resets the existing film instead.
         if input.generation != applied_generation {
             log::debug!("camera adopted; accumulation restarts");
@@ -354,10 +461,73 @@ fn render_loop(
                 samples: film.samples(),
                 sample_time,
             };
-            *published.lock().expect("published mutex poisoned") = Some(frame);
+            *lanes.published.lock().expect("published mutex poisoned") = Some(frame);
             last_publish = Some(Instant::now());
         }
     }
+}
+
+/// Drain and apply the queued edits, re-prepping what they dirtied. True
+/// means the visible scene changed and accumulation must restart. A
+/// rejected change-set or re-prep posts to the edit-error lane and keeps
+/// the previous scene; the dirt it left in `stale` retries after the next
+/// edit that applies. Only device faults return `Err`.
+fn apply_edits(
+    gpu: &Context,
+    lanes: &Lanes,
+    description: &mut SceneDescription,
+    scene: &mut Scene,
+    stale: &mut Dirty,
+) -> Result<bool> {
+    let edits = std::mem::take(&mut *lanes.edits.lock().expect("edits mutex poisoned"));
+    if edits.is_empty() {
+        return Ok(false);
+    }
+    let mut applied = false;
+    for edit in edits {
+        let result = match edit {
+            SceneEdit::Apply(set) => description.apply(&set),
+            SceneEdit::Replace(set) => {
+                let mut fresh = SceneDescription::new();
+                fresh.apply(&set).map(|()| description.replace(fresh))
+            }
+        };
+        match result {
+            Ok(()) => applied = true,
+            Err(error) => post_edit_error(lanes, error),
+        }
+    }
+    stale.merge(description.take_dirty());
+    if !applied || stale.is_empty() {
+        return Ok(false);
+    }
+    // Settings carry no residency, so a settings-only edit must not throw
+    // away the accumulated image.
+    let visual = stale
+        .changed
+        .iter()
+        .chain(&stale.removed)
+        .any(|(kind, _)| *kind != Kind::Settings);
+    match scene.update(gpu, description, stale) {
+        Ok(()) => {
+            log::debug!("scene edits applied; accumulation restarts");
+            *stale = Dirty::default();
+            Ok(visual)
+        }
+        // This build can't render the edited description; the previous
+        // residency keeps rendering and `stale` holds the backlog.
+        Err(error @ Error::Scene(_)) => {
+            post_edit_error(lanes, error);
+            Ok(false)
+        }
+        Err(fatal) => Err(fatal),
+    }
+}
+
+/// Post a rejected edit for the consumer, latest-wins.
+fn post_edit_error(lanes: &Lanes, error: Error) {
+    log::debug!("scene edit rejected: {error}");
+    *lanes.edit_error.lock().expect("edit-error mutex poisoned") = Some(error);
 }
 
 /// The pair of publish buffers — the double-buffer the render thread rotates
@@ -382,6 +552,27 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+    use crate::scene::changeset::{MaterialPatch, Op};
+    use crate::scene::description::Texturable;
+
+    /// A demo session: the description, its prepped scene, and the thread
+    /// already accumulating.
+    fn demo_session(gpu: &Arc<Context>, size: u32) -> Session {
+        let mut description = SceneDescription::new();
+        description.apply(&ChangeSet::demo()).expect("demo applies");
+        let scene = Scene::prep(gpu, &mut description).expect("demo preps");
+        let camera = *scene.camera();
+        let renderer = Renderer::new(gpu).expect("renderer");
+        Session::new(
+            Arc::clone(gpu),
+            description,
+            scene,
+            renderer,
+            camera,
+            size,
+            size,
+        )
+    }
 
     /// The render thread runs and publishes: spin one up on the demo scene,
     /// and it must post a frame at the requested size with samples on it. This
@@ -393,10 +584,7 @@ mod tests {
             return;
         };
         let gpu = Arc::new(gpu);
-        let scene = Scene::demo(&gpu).expect("demo scene");
-        let camera = *scene.camera();
-        let renderer = Renderer::new(&gpu).expect("renderer");
-        let session = Session::new(Arc::clone(&gpu), scene, renderer, camera, 64, 64);
+        let session = demo_session(&gpu, 64);
 
         // Wait for the first publish, then for a later one — the sample count
         // must climb, proving the thread keeps accumulating, not just resolves
@@ -411,6 +599,69 @@ mod tests {
             first.samples(),
             later.samples()
         );
+    }
+
+    /// The edit channel end to end: a queued material edit lands at a wave
+    /// boundary and restarts accumulation — the sample counter, which only
+    /// ever climbs otherwise, must drop back and start over.
+    #[test]
+    fn an_edit_restarts_accumulation() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let gpu = Arc::new(gpu);
+        let session = demo_session(&gpu, 64);
+        let mut high = 0;
+        while high < 3 {
+            high = high.max(wait_for_frame(&session).samples());
+        }
+
+        session.apply(ChangeSet {
+            ops: vec![Op::Material(Box::new(MaterialPatch {
+                base_color: Some(Texturable::Constant([0.9, 0.1, 0.1])),
+                ..MaterialPatch::new("floor")
+            }))],
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let frame = wait_for_frame(&session);
+            if frame.samples() < high {
+                break; // accumulation restarted from the edited scene
+            }
+            high = high.max(frame.samples());
+            assert!(Instant::now() < deadline, "the edit never landed");
+        }
+        assert!(session.take_edit_error().is_none());
+    }
+
+    /// A rejected edit surfaces without stopping the renderer: the fault
+    /// arrives on the edit-error lane while frames keep flowing.
+    #[test]
+    fn a_rejected_edit_surfaces_and_rendering_continues() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let gpu = Arc::new(gpu);
+        let mut session = demo_session(&gpu, 64);
+        wait_for_frame(&session);
+
+        session.apply(ChangeSet {
+            ops: vec![Op::Remove(Kind::Material, "no-such-material".into())],
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let error = loop {
+            if let Some(error) = session.take_edit_error() {
+                break error;
+            }
+            assert!(Instant::now() < deadline, "the rejection never surfaced");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        assert!(error.to_string().contains("no-such-material"), "{error}");
+        // Still alive and still accumulating the previous scene.
+        session.check().expect("render thread survives a rejection");
+        let a = wait_for_frame(&session).samples();
+        let b = wait_for_frame(&session).samples();
+        assert!(b > a, "rendering stalled after a rejected edit");
     }
 
     /// Poll `take_frame` until one appears, with a generous timeout so a slow

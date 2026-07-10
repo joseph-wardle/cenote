@@ -33,7 +33,9 @@ pub struct OrbitCamera {
 
 impl OrbitCamera {
     /// Start where `camera` stands: orbit parameters recovered from its pose
-    /// so the first frame matches the scene's authored view.
+    /// so the first frame matches the scene's authored view. Any roll the
+    /// source camera carried is dropped — a turntable is level by
+    /// construction, so the first drag would cancel it anyway.
     pub fn framing(camera: &Camera) -> Self {
         let offset = camera.position - camera.look_at;
         let distance = offset.length();
@@ -68,6 +70,7 @@ impl OrbitCamera {
         Camera {
             position: self.target + toward_camera * self.distance,
             look_at: self.target,
+            up: Vec3::Y,
             vfov_degrees: self.vfov_degrees,
         }
     }
@@ -83,6 +86,7 @@ mod tests {
         Camera {
             position: Vec3::new(0.0, 1.8, 5.0),
             look_at: Vec3::new(0.0, 1.0, 0.0),
+            up: Vec3::Y,
             vfov_degrees: 40.0,
         }
     }

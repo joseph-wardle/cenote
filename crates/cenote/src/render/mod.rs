@@ -491,6 +491,7 @@ mod tests {
         let camera = Camera {
             position: center + Vec3::new(0.0, scale, 0.0),
             look_at: center + Vec3::new(0.0, 0.0, -scale),
+            up: Vec3::Y,
             vfov_degrees: 40.0,
         };
         Scene::new(
@@ -745,6 +746,7 @@ mod tests {
         let camera = Camera {
             position: Vec3::new(0.0, 1.8, 5.0),
             look_at: Vec3::new(0.0, 1.0, 0.0),
+            up: Vec3::Y,
             vfov_degrees: 40.0,
         };
         let scene =

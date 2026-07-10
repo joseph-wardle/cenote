@@ -1,28 +1,31 @@
-//! The scene, in two halves. The M2 scene model: [`description`] is the
-//! typed, named object schema and [`changeset`] its one edit path — what
-//! scene files, the pbrt importer, and lookdev edits all speak. And the M1
-//! GPU build below: meshes built into acceleration structures,
-//! per-instance materials, quad lights with their sampling table, a
-//! pinhole camera, and an equirect environment — still built procedurally,
-//! until the prep rewire (M2 step 3) makes it consume a description.
+//! The scene, in two halves. [`description`] is the typed, named object
+//! schema and [`changeset`] its one edit path — what scene files, the pbrt
+//! importer, and lookdev edits all speak. The private `prep` module joins
+//! that model to the GPU residency below — meshes built into acceleration
+//! structures, per-instance materials, quad lights with their sampling
+//! table, a pinhole camera, and an equirect environment. [`Scene::prep`]
+//! builds a description fresh; `Scene::update` follows its accumulated
+//! dirty state and rebuilds only what an edit touched. [`Scene::new`]
+//! remains as the procedural build the furnace and estimator tests speak
+//! (they need materials and environments no scene file can express).
 //!
 //! [`Scene::demo`] is the standing test subject — a grid of smooth-shaded
 //! spheres sweeping roughness × metalness across a glossy floor, where
 //! winding, handedness, shading-normal, or energy mistakes are instantly
-//! visible, under a warm quad light and the bundled Kloofendal sky.
-//! [`changeset::ChangeSet::demo`] is the same scene as data.
+//! visible, under a warm quad light and the bundled Kloofendal sky. It is
+//! [`changeset::ChangeSet::demo`] prepped: the demo scene is data first.
 
 pub mod changeset;
 mod demo;
 pub mod description;
+mod prep;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 
-use crate::color::acescg_from_rec709;
 use crate::environment::Environment;
 use crate::error::Result;
 use crate::gpu::{AccelerationStructure, Buffer, Context, SampledImage, TlasInstance};
@@ -121,21 +124,41 @@ pub struct Scene {
     environment: SampledImage,
     /// The one [`SceneTable`] every kernel reaches scene data through.
     table: Buffer,
-    /// The buffers `table` points into: geometry records, materials, light
-    /// records, and the environment's three sampling tables.
-    #[expect(dead_code, reason = "GPU residency: the buffers `table` points into")]
-    resident: [Buffer; 6],
-    #[expect(
-        dead_code,
-        reason = "GPU residency: the BLASes and the buffers the geometry records point into"
-    )]
-    meshes: Vec<GpuMesh>,
+    /// The buffers `table` points into, replaced piecewise as edits dirty
+    /// them.
+    resident: ResidentBuffers,
+    /// Mesh residency by name — prep rebuilds only the names an edit
+    /// dirtied. The procedural [`Scene::new`] path keys them by object
+    /// index and never updates.
+    meshes: BTreeMap<String, GpuMesh>,
     camera: Camera,
+    /// The environment's dimensions and emitted power, retained so a
+    /// light edit can rebuild the scene table (its selection probability
+    /// weighs the quads against the environment) without reloading the
+    /// image.
+    env_size: (u32, u32),
+    env_power: f64,
+}
+
+/// Every buffer the [`SceneTable`] points into: geometry records,
+/// materials, light records, and the environment's three sampling tables.
+/// Held to keep the residency alive; replaced piecewise by prep as edits
+/// dirty them.
+struct ResidentBuffers {
+    geometry: Buffer,
+    materials: Buffer,
+    lights: Buffer,
+    env_marginal: Buffer,
+    env_conditional: Buffer,
+    env_pdfs: Buffer,
 }
 
 impl Scene {
     /// Upload `objects` and build them into a traceable scene, lit by its
-    /// emissive objects and `environment`.
+    /// emissive objects and `environment` — the procedural build the
+    /// estimator tests speak. Production scenes go through
+    /// [`Scene::prep`], which builds the same residency from a
+    /// [`description::SceneDescription`].
     ///
     /// # Errors
     ///
@@ -144,8 +167,8 @@ impl Scene {
     /// # Panics
     ///
     /// On an empty scene, a non-invertible object transform, or an
-    /// emissive object whose mesh is not a parallelogram quad (all M1
-    /// lights are) — programmer bugs.
+    /// emissive object whose mesh is not a parallelogram quad (all lights
+    /// are, until triangle emitters land) — programmer bugs.
     pub fn new(
         gpu: &Context,
         objects: &[Object],
@@ -158,21 +181,6 @@ impl Scene {
             .enumerate()
             .map(|(index, object)| upload_mesh(gpu, &format!("scene.object{index}"), &object.mesh))
             .collect::<Result<Vec<GpuMesh>>>()?;
-        // One instance per object, with custom_index = position in
-        // `objects`, so a hit leads back to the right vertex data and
-        // material.
-        let instances: Vec<TlasInstance> = meshes
-            .iter()
-            .zip(objects)
-            .enumerate()
-            .map(|(index, (mesh, object))| TlasInstance {
-                blas: &mesh.blas,
-                transform: object.transform,
-                custom_index: index as u32,
-            })
-            .collect();
-        let tlas = gpu.build_tlas("scene.tlas", &instances)?;
-
         // The light list: every emissive object, validated and unpacked
         // into the world-space parallelogram next-event sampling draws
         // points from.
@@ -180,200 +188,61 @@ impl Scene {
             .iter()
             .enumerate()
             .filter(|(_, object)| object.material.emission != Vec3::ZERO)
-            .map(|(index, object)| light_quad(object, index as u32))
-            .collect();
-        let light_records = crate::lights::build(&quads);
-        let light_index = |instance: u32| {
-            quads
-                .iter()
-                .position(|quad| quad.instance == instance)
-                .map_or(LIGHT_NONE, |index| index as u32)
-        };
-
-        let records: Vec<GeometryRecord> = meshes
-            .iter()
-            .zip(objects)
-            .enumerate()
-            .map(|(index, (mesh, object))| {
-                let inverse = object.transform.inverse();
-                assert!(
-                    inverse.is_finite(),
-                    "object transform must be invertible, got {:?}",
-                    object.transform
-                );
-                GeometryRecord {
-                    positions: mesh.vertices.device_address(),
-                    normals: mesh.normals.device_address(),
-                    indices: mesh.indices.device_address(),
-                    object_to_world: transform_rows(object.transform),
-                    world_to_object: transform_rows(inverse),
-                    light: light_index(index as u32),
-                    _pad0: [0; 3],
-                }
+            .map(|(index, object)| {
+                light_quad(
+                    &object.mesh.positions,
+                    &object.mesh.triangles,
+                    object.transform,
+                    object.material.emission,
+                    index as u32,
+                )
+                .unwrap_or_else(|reason| panic!("emissive object {index}: {reason}"))
             })
             .collect();
-        let usage =
-            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
-        let geometry =
-            gpu.upload_buffer("scene.geometry", bytemuck::cast_slice(&records), usage)?;
-        let materials: Vec<Material> = objects.iter().map(|object| object.material).collect();
-        let materials =
-            gpu.upload_buffer("scene.materials", bytemuck::cast_slice(&materials), usage)?;
-        // Vulkan forbids empty buffers, so a lightless scene uploads one
-        // zeroed record the kernels never read (the table says count 0).
-        let padded = [Zeroable::zeroed()];
-        let lights = gpu.upload_buffer(
-            "scene.lights",
-            bytemuck::cast_slice(if light_records.is_empty() {
-                &padded
-            } else {
-                &light_records
-            }),
-            usage,
-        )?;
-
-        let env = upload_environment(gpu, environment, &quads)?;
-        let table = SceneTable {
-            geometry: geometry.device_address(),
-            materials: materials.device_address(),
-            lights: lights.device_address(),
-            env_marginal: env.marginal.device_address(),
-            env_conditional: env.conditional.device_address(),
-            env_pdfs: env.pdfs.device_address(),
-            env_width: environment.width(),
-            env_height: environment.height(),
-            env_select_prob: env.select_prob,
-            _pad0: 0,
-            light_count: light_records.len() as u32,
-            _pad1: 0,
+        let placements: Vec<Placement> = meshes
+            .iter()
+            .zip(objects)
+            .map(|(mesh, object)| Placement {
+                mesh,
+                transform: object.transform,
+                material: object.material,
+            })
+            .collect();
+        let tlas = build_scene_tlas(gpu, &placements)?;
+        let (geometry, materials, lights) = upload_instance_tables(gpu, &placements, &quads)?;
+        let env = upload_environment(gpu, environment)?;
+        let resident = ResidentBuffers {
+            geometry,
+            materials,
+            lights,
+            env_marginal: env.marginal,
+            env_conditional: env.conditional,
+            env_pdfs: env.pdfs,
         };
-        let table = gpu.upload_buffer("scene.table", bytemuck::bytes_of(&table), usage)?;
+        let env_size = (environment.width(), environment.height());
+        let table = upload_scene_table(
+            gpu,
+            &resident,
+            env_size,
+            select_probability(env.power, &quads),
+            quads.len() as u32,
+        )?;
 
         Ok(Self {
             tlas,
             environment: env.image,
             table,
-            resident: [
-                geometry,
-                materials,
-                lights,
-                env.marginal,
-                env.conditional,
-                env.pdfs,
-            ],
-            meshes,
+            resident,
+            meshes: meshes
+                .into_iter()
+                .enumerate()
+                .map(|(index, mesh)| (index.to_string(), mesh))
+                .collect(),
             camera,
+            env_size,
+            env_power: env.power,
         })
     }
-
-    /// Grid columns: `specular_roughness` 0 → 1, left to right.
-    const GRID_COLUMNS: usize = 5;
-    /// Grid rows: `metalness` 0 → 1, back to front.
-    const GRID_ROWS: usize = 5;
-
-    /// The demo scene: a terracotta material chart — a grid of spheres
-    /// laid across the floor, sweeping `specular_roughness` 0 → 1 left to
-    /// right and `metalness` 0 → 1 back to front, the same base color read
-    /// as a lacquered plastic's diffuse base in the back row and a
-    /// conductor's F0 in the front — on a lightly glossy gray floor that
-    /// mirrors the whole chart. A warm quad light overhead to the left is
-    /// the key (its soft shadow and warm cast are what next-event
-    /// estimation resolves), and the bundled Kloofendal sky (see
-    /// `assets/README.md`) fills, backs, and reflects — its unclipped sun
-    /// is the importance-sampling stress case the environment tables exist
-    /// for.
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from upload, decode, or acceleration-structure
-    /// builds.
-    pub fn demo(gpu: &Context) -> Result<Self> {
-        let terracotta = acescg_from_rec709(Vec3::new(0.7, 0.22, 0.08));
-        let mut objects: Vec<Object> = (0..Self::GRID_COLUMNS * Self::GRID_ROWS)
-            .map(|index| {
-                let (row, column) = (index / Self::GRID_COLUMNS, index % Self::GRID_COLUMNS);
-                let sweep = |step: usize, steps: usize| step as f32 / (steps - 1) as f32;
-                Object {
-                    // Subdivided until the silhouette reads round — the
-                    // *surface* is already smooth at any resolution, from
-                    // the interpolated sphere normals.
-                    mesh: icosphere(4),
-                    // Every sphere rests on the floor, so the chart reads
-                    // twice: in the spheres and in their reflections.
-                    transform: Mat4::from_translation(Vec3::new(
-                        1.2 * (column as f32 - 2.0),
-                        0.5,
-                        1.2 * (row as f32 - 2.0),
-                    )) * Mat4::from_scale(Vec3::splat(0.5)),
-                    material: Material::glossy(terracotta, 0.4, sweep(column, Self::GRID_COLUMNS))
-                        .with_metalness(sweep(row, Self::GRID_ROWS)),
-                }
-            })
-            .collect();
-        objects.push(Object {
-            // Large enough that the frame's bottom edge still lands on it
-            // from the pulled-back camera below.
-            mesh: ground_plane(12.0),
-            transform: Mat4::IDENTITY,
-            material: Material::glossy(acescg_from_rec709(Vec3::splat(0.65)), 0.1, 0.15),
-        });
-        // A 1.5 m × 1.5 m quad, up and off to the *left* — opposite the
-        // HDRI's sun (up-right-behind, 48° elevation), so the spheres are
-        // cross-lit warm/cool. Above the camera's downward-pitched frame,
-        // and high enough that the shadow it cuts out of the sunlight
-        // lands outside the frame too, instead of reading as a dark
-        // artifact.
-        objects.push(Object {
-            mesh: ground_plane(0.75),
-            transform: Mat4::from_translation(Vec3::new(-3.5, 5.4, 1.0)),
-            material: Material::emitter(acescg_from_rec709(Vec3::new(1.0, 0.85, 0.6)) * 18.0),
-        });
-        // Above and in front, pitched down at the chart's center so the
-        // rows separate, pulled back until the corner spheres just fit a
-        // square frame (the goldens' — wider targets only gain margin),
-        // with sky along the top edge.
-        let camera = Camera {
-            position: Vec3::new(0.0, 5.5, 11.0),
-            look_at: Vec3::ZERO,
-            vfov_degrees: 40.0,
-        };
-        // Loaded from the dev tree rather than embedded: at 4k the asset
-        // is 43 MB, which no binary should carry. Real scene I/O (and
-        // installable assets) is M2's job; this matches how shader hot
-        // reload already finds its sources.
-        let load = || -> Result<Environment> {
-            let path =
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(Self::DEMO_ENVIRONMENT);
-            Environment::from_equirect_exr(&std::fs::read(path)?)
-        };
-        // The lib test suite builds this scene dozens of times per process,
-        // and the 4k decode plus table build is seconds of debug-profile
-        // CPU each — so tests share one copy. Outside tests a process
-        // builds the demo once, and shouldn't pin ~200 MB of host-side
-        // copies for its lifetime.
-        #[cfg(test)]
-        {
-            static DEMO_SKY: std::sync::OnceLock<Environment> = std::sync::OnceLock::new();
-            // Two steps rather than `get_or_init(load)`: the load can fail,
-            // and only a loaded environment may be stored.
-            let sky = if let Some(sky) = DEMO_SKY.get() {
-                sky
-            } else {
-                let loaded = load()?;
-                DEMO_SKY.get_or_init(|| loaded)
-            };
-            Self::new(gpu, &objects, camera, sky)
-        }
-        #[cfg(not(test))]
-        {
-            Self::new(gpu, &objects, camera, &load()?)
-        }
-    }
-
-    /// The demo environment's path, relative to the crate root — the
-    /// bundled Kloofendal sky (`assets/README.md` has provenance and
-    /// encoding notes).
-    pub const DEMO_ENVIRONMENT: &str = "assets/kloofendal_puresky.exr";
 
     /// The scene's TLAS, ready to bind for ray queries.
     #[must_use]
@@ -408,14 +277,18 @@ impl Scene {
     }
 }
 
-/// A pinhole camera, described by where it sits and what it looks at.
-/// World up is +Y (crate convention); the view axis must not be vertical.
+/// A pinhole camera, described by where it sits, what it looks at, and
+/// which way is up on screen.
 #[derive(Clone, Copy)]
 pub struct Camera {
     /// Eye position, meters.
     pub position: Vec3,
     /// The point the view axis passes through.
     pub look_at: Vec3,
+    /// Which way is up on screen — the roll control. Usually world up
+    /// ([`Vec3::Y`]); need not be perpendicular to the view axis, just
+    /// not parallel to it.
+    pub up: Vec3,
     /// Vertical field of view, degrees.
     pub vfov_degrees: f32,
 }
@@ -439,14 +312,16 @@ impl Camera {
     ///
     /// # Panics
     ///
-    /// On a degenerate camera — `position == look_at`, or a view axis
-    /// parallel to world up. Both are programmer bugs.
+    /// On a degenerate camera — `position == look_at`, or `up` parallel
+    /// to the view axis. Both are programmer bugs: description-driven
+    /// cameras were validated at apply, and the viewer's orbit control
+    /// clamps away from the poles.
     #[must_use]
     pub fn basis(&self, aspect: f32) -> RayBasis {
         let forward = (self.look_at - self.position).normalize();
         assert!(forward.is_finite(), "camera position and look_at coincide");
-        let right = forward.cross(Vec3::Y).normalize();
-        assert!(right.is_finite(), "camera view axis is vertical");
+        let right = forward.cross(self.up).normalize();
+        assert!(right.is_finite(), "camera up is parallel to the view axis");
         let up = right.cross(forward);
         let half_height = (self.vfov_degrees.to_radians() / 2.0).tan();
         RayBasis {
@@ -457,28 +332,149 @@ impl Camera {
     }
 }
 
-/// Unpack an emissive object into the world-space parallelogram all M1
-/// lights must be, validating that the mesh really is one: next-event
-/// estimation samples points on this analytic quad, so it has to describe
-/// exactly the surface shadow rays trace against — a mismatch would let
-/// the light-sampling and BSDF-sampling strategies disagree about where
-/// the light is.
+/// One instance as the GPU assembly reads it: the resident mesh it
+/// places, where it stands, and its finished GPU material — what
+/// [`Scene::new`] lowers objects into and prep lowers a description into,
+/// so both build the same residency through the same helpers.
+struct Placement<'a> {
+    mesh: &'a GpuMesh,
+    transform: Mat4,
+    material: Material,
+}
+
+/// Build the TLAS: one instance per placement, with `custom_index` =
+/// position, so a hit leads back to the right geometry record and
+/// material.
+fn build_scene_tlas(gpu: &Context, placements: &[Placement]) -> Result<AccelerationStructure> {
+    let instances: Vec<TlasInstance> = placements
+        .iter()
+        .enumerate()
+        .map(|(index, placement)| TlasInstance {
+            blas: &placement.mesh.blas,
+            transform: placement.transform,
+            custom_index: index as u32,
+        })
+        .collect();
+    gpu.build_tlas("scene.tlas", &instances)
+}
+
+/// Upload the per-instance tables: geometry records (each carrying its
+/// instance's light index or [`LIGHT_NONE`]), the material array, and the
+/// light records.
+fn upload_instance_tables(
+    gpu: &Context,
+    placements: &[Placement],
+    quads: &[QuadLight],
+) -> Result<(Buffer, Buffer, Buffer)> {
+    let light_records = crate::lights::build(quads);
+    let light_index = |instance: u32| {
+        quads
+            .iter()
+            .position(|quad| quad.instance == instance)
+            .map_or(LIGHT_NONE, |index| index as u32)
+    };
+    let records: Vec<GeometryRecord> = placements
+        .iter()
+        .enumerate()
+        .map(|(index, placement)| {
+            let inverse = placement.transform.inverse();
+            assert!(
+                inverse.is_finite(),
+                "instance transform must be invertible, got {:?}",
+                placement.transform
+            );
+            GeometryRecord {
+                positions: placement.mesh.vertices.device_address(),
+                normals: placement.mesh.normals.device_address(),
+                indices: placement.mesh.indices.device_address(),
+                object_to_world: transform_rows(placement.transform),
+                world_to_object: transform_rows(inverse),
+                light: light_index(index as u32),
+                _pad0: [0; 3],
+            }
+        })
+        .collect();
+    let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
+    let geometry = gpu.upload_buffer("scene.geometry", bytemuck::cast_slice(&records), usage)?;
+    let materials: Vec<Material> = placements
+        .iter()
+        .map(|placement| placement.material)
+        .collect();
+    let materials =
+        gpu.upload_buffer("scene.materials", bytemuck::cast_slice(&materials), usage)?;
+    // Vulkan forbids empty buffers, so a lightless scene uploads one
+    // zeroed record the kernels never read (the table says count 0).
+    let padded = [Zeroable::zeroed()];
+    let lights = gpu.upload_buffer(
+        "scene.lights",
+        bytemuck::cast_slice(if light_records.is_empty() {
+            &padded
+        } else {
+            &light_records
+        }),
+        usage,
+    )?;
+    Ok((geometry, materials, lights))
+}
+
+/// Upload the [`SceneTable`] — the one buffer of addresses every kernel
+/// reaches scene data through, rebuilt whenever anything it points at
+/// moved.
+fn upload_scene_table(
+    gpu: &Context,
+    resident: &ResidentBuffers,
+    env_size: (u32, u32),
+    env_select_prob: f32,
+    light_count: u32,
+) -> Result<Buffer> {
+    let table = SceneTable {
+        geometry: resident.geometry.device_address(),
+        materials: resident.materials.device_address(),
+        lights: resident.lights.device_address(),
+        env_marginal: resident.env_marginal.device_address(),
+        env_conditional: resident.env_conditional.device_address(),
+        env_pdfs: resident.env_pdfs.device_address(),
+        env_width: env_size.0,
+        env_height: env_size.1,
+        env_select_prob,
+        _pad0: 0,
+        light_count,
+        _pad1: 0,
+    };
+    let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
+    gpu.upload_buffer("scene.table", bytemuck::bytes_of(&table), usage)
+}
+
+/// Unpack an emissive instance into the world-space parallelogram all
+/// current lights must be, validating that the mesh really is one:
+/// next-event estimation samples points on this analytic quad, so it has
+/// to describe exactly the surface shadow rays trace against — a mismatch
+/// would let the light-sampling and BSDF-sampling strategies disagree
+/// about where the light is. (Triangle emitters retire this shape rule.)
 ///
-/// # Panics
+/// # Errors
 ///
-/// If the mesh is not two triangles tiling a parallelogram.
-fn light_quad(object: &Object, instance: u32) -> QuadLight {
-    let mesh = &object.mesh;
-    assert!(
-        mesh.positions.len() == 4 && mesh.triangles.len() == 2,
-        "M1 lights are parallelogram quads; instance {instance} has {} vertices, {} triangles",
-        mesh.positions.len(),
-        mesh.triangles.len()
-    );
+/// A plain reason string when the mesh is not two triangles tiling a
+/// parallelogram — scene files can author one, so this is user data, and
+/// callers add the instance's identity.
+fn light_quad(
+    positions: &[Vec3],
+    triangles: &[[u32; 3]],
+    transform: Mat4,
+    emission: Vec3,
+    instance: u32,
+) -> Result<QuadLight, String> {
+    if positions.len() != 4 || triangles.len() != 2 {
+        return Err(format!(
+            "the mesh has {} vertices and {} triangles, not a quad's 4 and 2",
+            positions.len(),
+            triangles.len()
+        ));
+    }
     // Vertex 0 is a corner of any parallelogram. Its opposite vertex is
     // the one that equals the sum of 0's two neighbors minus vertex 0;
     // trying each candidate identifies the layout.
-    let p = &mesh.positions;
+    let p = positions;
     let others = |opposite: usize| match opposite {
         1 => [2usize, 3],
         2 => [1, 3],
@@ -491,74 +487,51 @@ fn light_quad(object: &Object, instance: u32) -> QuadLight {
         (p[candidate] - expected).length() <= tolerance
     });
     let Some(opposite) = opposite else {
-        panic!("emissive mesh of instance {instance} is not a parallelogram");
+        return Err("the four vertices do not form a parallelogram".to_owned());
     };
     let [b, c] = others(opposite);
 
     // The two triangles must tile the quad: all four vertices used, and
     // the shared edge on one of the diagonals (two triangles sharing a
     // *side* would overlap instead of tiling).
-    let mut used: Vec<u32> = mesh.triangles.iter().flatten().copied().collect();
+    let mut used: Vec<u32> = triangles.iter().flatten().copied().collect();
     used.sort_unstable();
     used.dedup();
-    let shared: Vec<u32> = mesh.triangles[0]
+    let shared: Vec<u32> = triangles[0]
         .iter()
-        .filter(|vertex| mesh.triangles[1].contains(vertex))
+        .filter(|vertex| triangles[1].contains(vertex))
         .copied()
         .collect();
     let on_diagonal =
         shared.len() == 2 && (shared.contains(&0) == shared.contains(&(opposite as u32)));
-    assert!(
-        used == [0, 1, 2, 3] && on_diagonal,
-        "emissive mesh of instance {instance} does not tile its quad"
-    );
+    if used != [0, 1, 2, 3] || !on_diagonal {
+        return Err("the two triangles do not tile the parallelogram".to_owned());
+    }
 
-    let world = |vertex: Vec3| object.transform.transform_point3(vertex);
+    let world = |vertex: Vec3| transform.transform_point3(vertex);
     let corner = world(p[0]);
-    QuadLight {
+    Ok(QuadLight {
         corner,
         edge1: world(p[b]) - corner,
         edge2: world(p[c]) - corner,
-        emission: object.material.emission,
+        emission,
         instance,
-    }
+    })
 }
 
 /// The environment's GPU half: the radiance image, the three sampling
-/// tables, and the next-event selection probability.
+/// tables, and the emitted power the selection probability weighs.
 struct GpuEnvironment {
     image: SampledImage,
     marginal: Buffer,
     conditional: Buffer,
     pdfs: Buffer,
-    select_prob: f32,
+    power: f64,
 }
 
-/// Upload the environment's image and sampling tables, and weigh it
-/// against the quad lights: the power-proportional probability that
-/// next-event estimation samples the environment rather than a quad.
-/// Quads weigh π × luminance × area — one face's exitance-weighted flux,
-/// though the quad emits from both; the environment weighs its luminance
-/// integral over the sphere, which is a flux per unit receiver area — the
-/// comparison implicitly stands in a ~1 m² receiver. Both approximations
-/// (the one-face flux, the unit receiver) only steer noise: the MIS
-/// weights stay exact whatever this probability is. The exact-0/exact-1
-/// endpoints *are* load-bearing: the shader walks the quad list whenever
-/// its draw lands above `select_prob`, so a lightless scene must pin it to
-/// 1, and a black environment (with no quads either) disables next-event
-/// estimation entirely.
-fn upload_environment(
-    gpu: &Context,
-    environment: &Environment,
-    quads: &[QuadLight],
-) -> Result<GpuEnvironment> {
+/// Upload the environment's image and sampling tables.
+fn upload_environment(gpu: &Context, environment: &Environment) -> Result<GpuEnvironment> {
     let tables = environment.tables();
-    let quad_power = std::f64::consts::PI * crate::lights::total_power(quads);
-    let select_prob = if quad_power == 0.0 {
-        f32::from(u8::from(tables.power > 0.0))
-    } else {
-        (tables.power / (tables.power + quad_power)) as f32
-    };
     let image = gpu.upload_sampled_image(
         "scene.environment",
         environment.width(),
@@ -579,8 +552,30 @@ fn upload_environment(
             usage,
         )?,
         pdfs: gpu.upload_buffer("scene.env.pdfs", bytemuck::cast_slice(&tables.pdfs), usage)?,
-        select_prob,
+        power: tables.power,
     })
+}
+
+/// Weigh the environment against the quad lights: the power-proportional
+/// probability that next-event estimation samples the environment rather
+/// than a quad. Quads weigh π × luminance × area — one face's
+/// exitance-weighted flux, though the quad emits from both; the
+/// environment weighs its luminance integral over the sphere, which is a
+/// flux per unit receiver area — the comparison implicitly stands in a
+/// ~1 m² receiver. Both approximations (the one-face flux, the unit
+/// receiver) only steer noise: the MIS weights stay exact whatever this
+/// probability is. The exact-0/exact-1 endpoints *are* load-bearing: the
+/// shader walks the quad list whenever its draw lands above
+/// `select_prob`, so a lightless scene must pin it to 1, and a black
+/// environment (with no quads either) disables next-event estimation
+/// entirely.
+fn select_probability(env_power: f64, quads: &[QuadLight]) -> f32 {
+    let quad_power = std::f64::consts::PI * crate::lights::total_power(quads);
+    if quad_power == 0.0 {
+        f32::from(u8::from(env_power > 0.0))
+    } else {
+        (env_power / (env_power + quad_power)) as f32
+    }
 }
 
 /// The top three rows of an affine transform, in the kernels' `float4[3]`
@@ -811,6 +806,7 @@ mod tests {
         let camera = Camera {
             position: Vec3::new(0.0, 2.0, 5.0),
             look_at: Vec3::new(0.0, 1.0, 0.0),
+            up: Vec3::Y,
             vfov_degrees: 90.0,
         };
         let basis = camera.basis(2.0);
@@ -823,6 +819,28 @@ mod tests {
         assert!((basis.right.length() - 2.0).abs() < 1e-6);
         assert!(basis.up.y > 0.0);
         assert!(basis.right.x > 0.0);
+    }
+
+    /// `up` carries roll: flipping it upside down while looking down −Z
+    /// must flip the screen — up and right both negate. This is the
+    /// orientation the format's camera op commits to (`up` is the roll
+    /// control), so the basis has to honor it, not just world +Y.
+    #[test]
+    fn camera_up_carries_roll() {
+        let level = Camera {
+            position: Vec3::new(0.0, 0.0, 5.0),
+            look_at: Vec3::ZERO,
+            up: Vec3::Y,
+            vfov_degrees: 60.0,
+        };
+        let inverted = Camera {
+            up: -Vec3::Y,
+            ..level
+        };
+        let (a, b) = (level.basis(1.0), inverted.basis(1.0));
+        assert!((a.up + b.up).length() < 1e-6, "{} vs {}", a.up, b.up);
+        assert!((a.right + b.right).length() < 1e-6);
+        assert!((a.forward - b.forward).length() < 1e-6);
     }
 
     #[test]

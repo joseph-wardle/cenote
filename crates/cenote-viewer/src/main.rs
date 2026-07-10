@@ -6,18 +6,27 @@
 //! importance-sampled HDRI environment, so the image starts noisy and
 //! visibly converges as the spp counter climbs.
 //!
+//! `cenote-viewer [scene.ron]` opens a scene file (the bundled demo scene
+//! without one) and *watches* it: saving the file reloads it through the
+//! session's edit channel, re-preps only what actually changed, and
+//! restarts accumulation — edit a material in your editor, watch the
+//! render re-converge. A save that doesn't parse, or that this build can't
+//! render, is logged and the previous scene keeps rendering.
+//!
 //! The render loop runs on its own thread — a [`cenote::render::Session`] —
 //! accumulating as fast as the GPU allows, unpaced by the display. The viewer
 //! is a thin consumer: it feeds the session camera and size changes, *peeks*
 //! at the latest published linear frame, tonemaps it (live exposure), and
 //! presents. Each redraw requests the next, so vsync paces the *display*
-//! while the renderer runs free behind it. Camera motion and resizes are just
-//! inputs the session picks up; it restarts or rebuilds accordingly.
+//! while the renderer runs free behind it. Camera motion, resizes, and
+//! scene edits are just inputs the session picks up; it restarts or
+//! rebuilds accordingly.
 
 mod camera;
 mod ui;
 
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 use anyhow::Context as _;
@@ -33,10 +42,17 @@ use crate::ui::{FrameStats, Gui};
 
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // The one argument: a scene file to open and watch. Absent means the
+    // bundled demo scene.
+    let scene_path = std::env::args_os().nth(1).map(PathBuf::from);
     let event_loop = EventLoop::new()?;
     // Sleep between events — redraws happen on request, not on a timer.
     event_loop.set_control_flow(ControlFlow::Wait);
-    let mut app = App::default();
+    let mut app = App {
+        scene_path,
+        viewer: None,
+        error: None,
+    };
     event_loop.run_app(&mut app)?;
     app.error.map_or(Ok(()), Err)
 }
@@ -44,8 +60,8 @@ fn main() -> anyhow::Result<()> {
 /// The winit application shell: the [`Viewer`] is absent until `resumed`
 /// hands us a window, and a failure anywhere parks its error here for
 /// `main` to report after the loop unwinds.
-#[derive(Default)]
 struct App {
+    scene_path: Option<PathBuf>,
     viewer: Option<Viewer>,
     error: Option<anyhow::Error>,
 }
@@ -57,7 +73,7 @@ impl ApplicationHandler for App {
         if self.viewer.is_some() {
             return;
         }
-        match Viewer::new(event_loop) {
+        match Viewer::new(event_loop, self.scene_path.as_deref()) {
             Ok(viewer) => self.viewer = Some(viewer),
             Err(err) => {
                 self.error = Some(err);
@@ -111,6 +127,9 @@ struct Viewer {
     window: Window,
     camera: OrbitCamera,
     stats: FrameStats,
+    /// The scene file under watch, when one was opened — saving it reloads
+    /// the scene through the session's edit channel.
+    scene_watch: Option<SceneWatch>,
     /// Left mouse button held (and not claimed by the UI) — cursor motion
     /// orbits.
     orbiting: bool,
@@ -119,7 +138,7 @@ struct Viewer {
 }
 
 impl Viewer {
-    fn new(event_loop: &ActiveEventLoop) -> anyhow::Result<Self> {
+    fn new(event_loop: &ActiveEventLoop, scene_path: Option<&Path>) -> anyhow::Result<Self> {
         let window = event_loop.create_window(
             Window::default_attributes()
                 .with_title("cenote")
@@ -127,9 +146,32 @@ impl Viewer {
         )?;
         let display = window.display_handle()?.as_raw();
         let gpu = Arc::new(cenote::gpu::Context::presentable(display)?);
-        let scene = cenote::scene::Scene::demo(&gpu)?;
+
+        // The scene: the named file, or the bundled demo — either way a
+        // change-set applied to an empty description, then prepped.
+        let (set, scene_watch) = match scene_path {
+            Some(path) => (
+                cenote::format::load(path)
+                    .with_context(|| format!("loading scene {}", path.display()))?,
+                Some(SceneWatch::new(path)?),
+            ),
+            None => (cenote::scene::changeset::ChangeSet::demo(), None),
+        };
+        let mut description = cenote::scene::description::SceneDescription::new();
+        description.apply(&set).context("scene rejected")?;
+        let scene =
+            cenote::scene::Scene::prep(&gpu, &mut description).context("preparing the scene")?;
         let camera = OrbitCamera::framing(scene.camera());
-        let renderer = cenote::render::Renderer::new(&gpu)?;
+        // Prep guaranteed exactly one settings object; the viewer honors
+        // its path-length cap (spp and resolution govern batch renders).
+        let settings = description
+            .settings()
+            .values()
+            .next()
+            .expect("prep enforces one settings")
+            .clone();
+        let renderer = cenote::render::Renderer::with_max_bounces(&gpu, settings.max_bounces)?;
+
         let tonemap = cenote::render::Tonemap::new(&gpu)?;
         let size = window.inner_size();
         let presenter = gpu.create_presenter(
@@ -139,10 +181,11 @@ impl Viewer {
             size.height,
         )?;
         let gui = Gui::new(&window);
-        // The session takes the scene and renderer onto its own thread and
-        // starts accumulating the initial view at once.
+        // The session takes the scene (residency and description) and the
+        // renderer onto its own thread and starts accumulating at once.
         let session = cenote::render::Session::new(
             Arc::clone(&gpu),
+            description,
             scene,
             renderer,
             camera.camera(),
@@ -161,6 +204,7 @@ impl Viewer {
             window,
             camera,
             stats: FrameStats::default(),
+            scene_watch,
             orbiting: false,
             cursor: None,
         })
@@ -236,16 +280,37 @@ impl Viewer {
         // rather than spin here presenting the last frame forever.
         self.session.check()?;
 
-        // The UI runs first so its exposure is current for this frame's
-        // tonemap and an exposure drag lands this very frame. The stats it
-        // shows are the previous frame's — one frame stale, imperceptible.
-        let gui_frame = self
-            .gui
-            .run(&self.window, self.gpu.device_summary(), &self.stats);
+        // Scene-file edits ride the continuous redraw loop: a save reloads
+        // the file and hands it to the render thread as a whole-scene
+        // replacement (deleted objects retire). A file that doesn't parse —
+        // including one caught mid-save — keeps the previous scene; the
+        // next event retries.
+        if let Some(watch) = &self.scene_watch
+            && watch.events.try_iter().count() > 0
+        {
+            match cenote::format::load(&watch.path) {
+                Ok(set) => {
+                    log::info!("scene file changed; reloading {}", watch.path.display());
+                    self.session.replace(set);
+                }
+                Err(err) => {
+                    log::error!("scene reload failed — keeping the previous scene: {err}");
+                }
+            }
+        }
+        // A reload the render thread rejected (a description this build
+        // can't render) also keeps the previous scene; say so.
+        if let Some(err) = self.session.take_edit_error() {
+            log::error!("scene edit rejected — keeping the previous scene: {err}");
+        }
 
         // Take a fresher frame if the render thread posted one; otherwise
         // re-show the one we hold (so exposure still tracks). Nothing yet —
-        // the very first frames — just pumps the loop.
+        // the very first frames — just pumps the loop, and must do so before
+        // running the UI: egui emits its font-atlas delta exactly once, so a
+        // gui frame produced here and dropped would strand that texture, and
+        // the renderer would later draw meshes referencing an atlas it never
+        // received.
         if let Some(frame) = self.session.take_frame() {
             self.frame = Some(frame);
         }
@@ -253,6 +318,13 @@ impl Viewer {
             self.window.request_redraw();
             return Ok(());
         };
+
+        // The UI runs first so its exposure is current for this frame's
+        // tonemap and an exposure drag lands this very frame. The stats it
+        // shows are the previous frame's — one frame stale, imperceptible.
+        let gui_frame = self
+            .gui
+            .run(&self.window, self.gpu.device_summary(), &self.stats);
 
         self.tonemap
             .apply(
@@ -283,5 +355,56 @@ impl Viewer {
         // so a newer frame is almost always waiting.
         self.window.request_redraw();
         Ok(())
+    }
+}
+
+/// A watch on the opened scene file. Watches the file's *directory* and
+/// filters by name: editors save atomically (write a temp file, rename it
+/// over the target), which replaces the inode a direct file watch would
+/// follow into oblivion.
+struct SceneWatch {
+    /// The scene file, absolute — what reloads read.
+    path: PathBuf,
+    /// One `()` per relevant filesystem event; drained each redraw, so a
+    /// burst of events from one save collapses into one reload.
+    events: mpsc::Receiver<()>,
+    /// Owns the OS watch; dropping it ends the event stream.
+    _watcher: notify::RecommendedWatcher,
+}
+
+impl SceneWatch {
+    fn new(path: &Path) -> anyhow::Result<Self> {
+        use notify::Watcher as _;
+        let path = std::path::absolute(path)?;
+        // An absolute path to an openable file always has both halves.
+        let directory = path.parent().context("scene path has no directory")?;
+        let file_name = path
+            .file_name()
+            .context("scene path has no file name")?
+            .to_owned();
+        let (tx, events) = mpsc::channel();
+        let mut watcher =
+            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                if let Ok(event) = event
+                    && matches!(
+                        event.kind,
+                        notify::EventKind::Create(_)
+                            | notify::EventKind::Modify(_)
+                            | notify::EventKind::Remove(_)
+                    )
+                    && event
+                        .paths
+                        .iter()
+                        .any(|path| path.file_name() == Some(&file_name))
+                {
+                    let _ = tx.send(());
+                }
+            })?;
+        watcher.watch(directory, notify::RecursiveMode::NonRecursive)?;
+        Ok(Self {
+            path,
+            events,
+            _watcher: watcher,
+        })
     }
 }

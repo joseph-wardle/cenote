@@ -105,9 +105,17 @@ shadergen degrades SSS to diffuse. (D-059)
   Cycles ships it on by default at 1.0) plus Tokuyoshi–Kaplanyan specular AA (NDF
   filtering against normal-map variance). Both are bias knobs: explicit, off by
   default, the D-051 firefly-clamp template. (D-073)
-- **Per-ray-type visibility flags** *(revisit: production lighting workflows)* —
-  Today: `camera_visible` on emitters only (D-072). Production shape: the full
+- **Per-ray-type visibility flags** *(revisit: production lighting workflows;
+  the schema's `camera_visible` gets its kernel wiring — a TLAS instance mask on
+  camera rays — with M2's triangle emitters, where invisible lights first
+  matter)* — Today: `camera_visible` on instances only (D-072), carried by the
+  format but warned-and-ignored at prep. Production shape: the full
   camera/diffuse/glossy/shadow set MoonRay and Cycles carry. (D-073)
+- **Sampler seed** *(revisit: when repeat batch renders need decorrelation —
+  the CLI's `render` on scene files, M2 step 7 era)* — Today: `Settings.seed`
+  is format data prep never reads. Production shape: a seed input hashed into
+  the RNG stream, not a sample-index offset (overlapping index ranges share
+  samples, which is not decorrelation). (D-075)
 - **Cryptomatte / object-ID AOVs** *(revisit: the M4 compositing story)* — Today:
   beauty/albedo/normal/depth. Production compositing's first ask once real
   pipelines touch the output. (D-073)

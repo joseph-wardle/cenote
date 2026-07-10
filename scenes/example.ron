@@ -1,0 +1,123 @@
+// A small hand-written scene — something to open in the viewer and edit
+// live:
+//
+//     cargo run -p cenote-viewer -- scenes/example.ron
+//
+// The viewer watches this file: save any change (a base_color, a
+// translate, the lamp's luminance) and it re-preps exactly what changed
+// and re-converges. A save that doesn't parse keeps the previous scene.
+//
+// This is the whole scene model in one file: a scene file is an ordered
+// list of ops applied to an empty scene. Each op patches a named object
+// of one of seven kinds (mesh, instance, material, light, camera,
+// environment, settings), creating it on first mention; any field left
+// unmentioned keeps its default — material fields default to OpenPBR's.
+// Conventions: right-handed, Y-up, meters, linear Rec.709 colors,
+// vertical fov in degrees. Relative paths resolve against this file's
+// own directory, never the working directory.
+(
+    version: 1,
+    ops: [
+        Settings((name: "main")),
+        Camera((
+            name: "main",
+            position: Some((0.0, 2.2, 6.5)),
+            look_at: Some((0.0, 1.0, 0.0)),
+            vfov_degrees: Some(35.0),
+        )),
+        Environment((
+            name: "sky",
+            path: Some("../crates/cenote/assets/kloofendal_puresky.exr"),
+        )),
+
+        // One unit plane, shared by every instance below at its own
+        // scale and orientation — meshes carry geometry, instances place
+        // it. Surfaces are two-sided throughout.
+        Mesh((
+            name: "plane",
+            source: Some(Inline(
+                positions: [
+                    (-1.0, 0.0, -1.0),
+                    (-1.0, 0.0, 1.0),
+                    (1.0, 0.0, 1.0),
+                    (1.0, 0.0, -1.0),
+                ],
+                normals: Some([
+                    (0.0, 1.0, 0.0),
+                    (0.0, 1.0, 0.0),
+                    (0.0, 1.0, 0.0),
+                    (0.0, 1.0, 0.0),
+                ]),
+                triangles: [(0, 1, 2), (0, 2, 3)],
+            )),
+        )),
+
+        Material((
+            name: "floor",
+            base_color: Some(Constant((0.6, 0.6, 0.6))),
+            specular_roughness: Some(Constant(0.2)),
+        )),
+        Instance((
+            name: "floor",
+            mesh: Some("plane"),
+            material: Some("floor"),
+            transform: Some(Trs(scale: (8.0, 1.0, 8.0))),
+        )),
+
+        // A standing terracotta panel, facing the camera.
+        Material((
+            name: "terracotta",
+            base_color: Some(Constant((0.7, 0.22, 0.08))),
+            base_diffuse_roughness: Some(0.4),
+            specular_roughness: Some(Constant(0.5)),
+        )),
+        Instance((
+            name: "panel_back",
+            mesh: Some("plane"),
+            material: Some("terracotta"),
+            transform: Some(Trs(
+                translate: (0.0, 1.2, -1.5),
+                rotate_degrees: (90.0, 0.0, 0.0),
+                scale: (1.2, 1.0, 1.2),
+            )),
+        )),
+
+        // A leaning chrome panel — a metal reads base_color as F0, its
+        // normal-incidence reflectivity.
+        Material((
+            name: "chrome",
+            base_color: Some(Constant((0.9, 0.9, 0.9))),
+            base_metalness: Some(Constant(1.0)),
+            specular_roughness: Some(Constant(0.1)),
+        )),
+        Instance((
+            name: "panel_left",
+            mesh: Some("plane"),
+            material: Some("chrome"),
+            transform: Some(Trs(
+                translate: (-2.0, 1.0, 0.0),
+                rotate_degrees: (90.0, -35.0, 0.0),
+            )),
+        )),
+
+        // The warm lamp overhead. An emissive material makes its instance
+        // a light; area lights must be parallelogram quads until triangle
+        // emitters land.
+        Material((
+            name: "lamp",
+            base_color: Some(Constant((0.0, 0.0, 0.0))),
+            specular_weight: Some(0.0),
+            emission_color: Some(Constant((1.0, 0.85, 0.6))),
+            emission_luminance: Some(14.0),
+        )),
+        Instance((
+            name: "lamp",
+            mesh: Some("plane"),
+            material: Some("lamp"),
+            transform: Some(Trs(
+                translate: (1.5, 3.5, 1.0),
+                scale: (0.5, 1.0, 0.5),
+            )),
+        )),
+    ],
+)

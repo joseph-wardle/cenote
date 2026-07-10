@@ -275,6 +275,19 @@ mod tests {
         assert_eq!(description.settings()["main"].resolution, [1280, 720]);
     }
 
+    /// The repo's example scene stays in step with the schema: it must
+    /// load, apply, and reference files that exist — the file the viewer's
+    /// live-edit walkthrough opens can never silently rot.
+    #[test]
+    fn the_example_scene_loads_and_applies() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scenes/example.ron");
+        let set = load(&path).expect("example scene loads");
+        let mut description = crate::scene::description::SceneDescription::new();
+        description.apply(&set).expect("example scene applies");
+        assert!(!description.instances().is_empty());
+        assert_eq!(description.cameras().len(), 1);
+    }
+
     #[test]
     fn paths_survive_serialization() {
         let set = ChangeSet {

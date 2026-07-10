@@ -1166,3 +1166,56 @@ payload sharing (Arc) as the known optimization if lookdev edit-rate
 profiling ever asks. Dirty state is two name sets — `changed` (rebuild)
 and `removed` (retire, idempotent) — where a newer removal supersedes an
 older change but remove-then-recreate keeps both.
+
+## 2026-07-09 — M2 step 3: the prep rewire and the edit channel
+
+### D-075: Leaf decisions made while rewiring prep
+SceneDescription → GPU residency is now the one dirty-driven prep path
+(`Scene::prep` fresh, `Scene::update` incremental), the Session carries the
+edit channel, and the viewer loads and watches `.ron` scenes; `Scene::demo`
+is `ChangeSet::demo` prepped, and the goldens passed *unregenerated* — the
+data path renders the image the procedural builder did. The calls the code
+forced: (1) *Prep errors split into recoverable vs fatal by construction*:
+everything that can fail on user data (decodes, capability checks, shape
+rules) runs host-side before the first GPU call and returns `Error::Scene`,
+which guarantees residency untouched — so a live session keeps rendering
+its last good scene through a bad edit; any other error is a device fault
+and ends the render thread. Dirt whose re-prep was rejected is retained and
+retried after the next applied edit, so nothing goes silently stale. (2)
+*File reload is replace-diff, not overlay*: `SceneDescription::replace`
+computes dirty as the per-object difference against the incoming
+description, so deleting an object from a scene file retires its residency
+(exercising D-069's removal semantics with a real client) and re-saving an
+untouched file rebuilds nothing. `Session::apply` keeps the overlay shape
+for the lookdev panel. (3) *Apply's dirty accounting is equality-gated*: a
+patch that lands values already in place dirties nothing (creation always
+dirties), so redundant edits force no re-prep and no accumulation restart.
+(4) *Unwired features warn by name and render without* — textured slots,
+delta lights, aperture, `camera_visible = false`, non-default closure
+params — gated on the dirty set so a long edit session doesn't repeat
+itself; things with no honest render (PLY geometry until the reader lands,
+non-quad emitters until triangle emitters, singleton violations, an
+environment that won't decode) are hard `Error::Scene`s. (5) *Rebuild
+granularity*: per-name BLAS on mesh dirt, TLAS on any mesh/instance dirt,
+environment image + tables on environment dirt; the small buffers
+(geometry records, materials, lights, scene table) rebuild on any dirt —
+they're the cheap tail, and light indices live inside geometry records
+anyway. The scene retains the environment's power so a light edit can
+recompute the NEE selection probability without reloading the image. (6)
+*The core camera gained `up`* — D-072 committed the format to roll, and
+honoring it is one basis change; aperture/focus stay warned until step 4's
+thin-lens work. A camera edit snaps the view to the authored pose, but a
+non-camera edit never touches the interactive camera. (7) *Settings-only
+edits don't restart accumulation* (no residency, no visual change), though
+they still validate — a second settings object is caught at update. (8)
+Prep-time singleton rules (exactly one camera and settings, at most one
+environment, at least one instance) live in prep per D-074(8); no
+environment means a black sky, degenerating NEE cleanly to the quads. (9)
+`Scene::new` (procedural objects + any `Environment`) survives as the
+estimator-test path — furnace tests need constant-radiance environments and
+exact GPU materials no scene file can express; it shares every assembly
+helper with prep, so the two can't drift. `scenes/example.ron` is the
+repo's hand-written walkthrough scene, pinned by a format test so it can't
+rot. Ledger additions (deferrals.md): sampler seed wiring; the
+`camera_visible` kernel gap folds into the existing per-ray-type visibility
+entry.
