@@ -1015,3 +1015,115 @@ the entry into a new dated decision here and deletes it there. *Why:* the
 interview repeatedly produced "right long-term answer, too much now" options;
 scattered across decision entries they rot, and a single living ledger turns
 each trigger firing into a plan we already made rather than a rediscovery.
+
+## 2026-07-09 — M2 plan review (adversarial, sourced)
+
+The locked plan got the D-043 treatment before any code: three parallel review
+tracks attacked it against Hydra's delegate requirements + MoonRay's actual
+API surface, Cycles' shipped kernel source, and 2024–2026 research. No
+decision was reversed; the findings were two missing decisions, one wrong
+mechanism, a set of format-freezing fields, and seven deferral-ledger
+entries — folded into [m2-plan.md](m2-plan.md) §1b/§2 and
+[deferrals.md](deferrals.md) with this batch. Notably, every correction made
+M2 smaller or safer: the review is why the plan is trusted, not a tax on it.
+
+### D-068: The review itself, and what held
+Method: one track per reference body, each instructed to *break* decisions,
+not affirm them. Confirmed sound without amendment: C ABI deferral (D-052),
+static schema (D-053), RON (D-055, with hygiene notes), PLY-by-reference
+(D-056), triangle emitters/delta lights/DoF (D-058), mip-cap policy (D-060),
+specular pass-through guides (D-062), OIDN host-copy (D-063), the edit
+channel's batch-per-wave shape (D-064, matching hdMoonray's UpdateGuard
+pattern), and the cenote-pbrt crate boundary (D-066). Checked and discarded:
+OpenPBR 1.2 fields to reserve (spec is v1.1; in-progress additions have
+unfinalized names), DLSS-RR-class denoising (covered by the temporal-denoise
+deferral), pbrt-v4's stochastic layered BxDF (not the GPU shape).
+
+### D-069: Change-sets gain Remove ops (amends D-054)
+`Remove(kind, name)` joins the op set in step 2, with dirty semantics that
+retire GPU residency (BLAS slot, light-table entry, texture references),
+even though the M2 viewer never emits one. *Why:* the get-or-create + patch
+set was RDL2's exact shape — including its most infamous wart: RDL2 cannot
+delete objects, and hdMoonray fakes removal with visibility flags. Hydra,
+our M4 milestone, requires real deletion (`DestroyRprim` is a mandatory
+render-delegate virtual; renames arrive as remove + re-insert). Designing
+residency retirement now is cheap; retrofitting deletion into an API whose
+dirty tracking and file format assumed append-only is the expensive path.
+With Remove in the schema, the identity contract is complete: names are
+stable identities, rename = remove + create.
+
+### D-070: Lobe selection is one-sample MIS with a path-state lobe tag
+shade_surface picks one closure per bounce proportional to its
+albedo-estimate weight via a CDF — rescaling the used random number to
+preserve stratification — then evaluates *all* lobes and combines pdfs as
+the one-sample balance heuristic `pdf = Σ(pdfᵢ·wᵢ)/Σwᵢ`. The sampled-lobe
+tag becomes an M2 path-state field. *Why:* the closure grows from three
+lobes to ~seven and the plan never said how one gets picked — this is
+Cycles' shipped answer, verified in `surface_shader.h`
+(`surface_shader_bsdf_bssrdf_pick` + `_surface_shader_bsdf_eval_mis`). The
+lobe tag pays three times: it drives D-062's specular pass-through ramp, it
+is the per-bounce technique record M1 earmarked for M3's GRIS random replay,
+and it makes sampled-lobe debugging visualizations free.
+
+### D-071: Energy compensation via E/E_avg tables + analytic Fresnel (amends D-059)
+The interviewed "Turquin fits gain an IOR axis" was the wrong mechanism.
+Verified in Cycles `bsdf_microfacet.h`: reflection lobes use Fresnel-free
+directional-albedo tables E(roughness, cosθ) + E_avg(roughness), with
+Fresnel entering analytically in the multiple-scattering term
+`Fms = Fss·E_avg/(1 − Fss(1 − E_avg))` — closed-form `Fss` for both
+dielectrics and conductors, so variable IOR costs *no* table axis on
+reflection. Only the coupled reflection+refraction (transmission) lobe needs
+IOR-dependent tables: 3D glass tables (roughness × cosθ × IOR-remap
+√|(η−1)/(η+1)|, separate η<1 branch), 16³–32³ f32 baked offline and embedded
+(≈16–128 KB; Blender's 2025 furnace fix showed 32³ needed at high
+roughness). Coat reuses the same tables — darkening stays analytic — and
+gains the spec's base-roughness remap under nonzero coat roughness, added
+here so it isn't discovered in a conformance diff. *Why this is a win:*
+less work than inventing an IOR-axis fit, furnace-provable, and exactly the
+shipped shape of the renderer we benchmark against.
+
+### D-072: Format-freezing fields locked before the schema ships
+Four things that would each cost a format version bump if discovered after
+step 2: (1) the native format commits to the code's conventions — Y-up,
+right-handed, meters, vertical-fov degrees — stated in the schema module
+doc, and the pbrt importer converts *into* them (including shorter-axis fov
+→ vfov through the tangent when aspect < 1); (2) the camera op carries full
+orientation (pbrt `LookAt` can roll; a position+look_at schema silently
+drops it) plus `focus_distance` and `aperture_radius` — the fields D-058's
+thin-lens DoF requires, which existed in no schema; (3) texture references
+carry a color-space field: slot-derived default (color slots sRGB for 8-bit
+inputs, linear for float; data/normal always linear) with an explicit
+override — someone must own sRGB-vs-linear, and pbrt's rules need a target
+to map onto; (4) emitters carry `camera_visible` (default true, matching
+pbrt) — lookdev always wants invisible lights, and the full per-ray-type
+set is ledgered. Companion contract sentences recorded in m2-plan §2:
+validate-then-apply atomicity (a mid-set failure leaves the description
+untouched), after-the-set name resolution (forward references legal),
+scene-file-relative paths.
+
+### D-073: Review leaf defaults and the ledger's seven additions
+Leaf defaults recorded in m2-plan §2, each from a review finding:
+shadow-ray transparency is *deterministic* multiplicative attenuation in
+trace_shadow while bounce rays use stochastic pass-through (Cycles'
+`shade_shadow.h` split — alpha cards cast correct shadows, the shadow
+kernel stays RNG-free), with a transparent-bounce cap separate from path
+depth; depth AOV = camera-space perpendicular z at first hit,
+lens-sample-averaged, +∞ on miss — and OIDN takes no depth input, so the
+AOV serves compositing only; EXR layers use the Nuke-safe convention (bare
+`R/G/B/A` beauty, bare `Z`, no dots in layer names, f16 color / f32 depth);
+emission maps are LDR BC7-sRGB × float emission scale with BC6H as the HDR
+escape hatch; bindless slots key by (canonical path, usage class) and the
+DDS cache invalidates by content hash, not mtime; the importer subset gains
+`disk` (the killeroo scene family uses one; ~20 lines beside the sphere
+tessellator); the corpus bar is "permissively licensed, license text
+vendored" — strictly-CC0 pbrt scenes barely exist (amends D-065's wording);
+RON is version-pinned and the schema avoids `untagged`/`flatten` (its
+documented weak spots); the OIDN prefilter path is spiked in step 9 (the
+Rust crate has no dedicated prefilter call; noisy-aux weights are the
+honest fallback). Ledger additions (deferrals.md): specular regularization
+(Filter-Glossy path regularization + Tokuyoshi–Kaplanyan specular AA — the
+one deferral whose trigger is *expected to fire during M2 step 7*, so the
+mechanism is pre-agreed), UDIM + multiple UV sets, neural texture
+compression (RTXNTC is public beta — watch, don't build), per-ray-type
+visibility flags, cryptomatte/object-ID AOVs, array instancer op, and
+deform-only BLAS refit.

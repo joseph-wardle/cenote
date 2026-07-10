@@ -31,6 +31,10 @@ here. An entry's D-reference points at the decision that created the deferral.
   attribute tables with per-attribute metadata. Only a third-party-extensible
   renderer needs this; if the charter's no-plugin stance ever changes, this is the
   first consequence. (D-053)
+- **Array instancer op** *(revisit: M4 Hydra instancers / M5 landscape-class
+  scenes)* — Today: N named instance objects. Production shape: a native op
+  carrying per-instance transform arrays, the form Hydra instancers deliver and
+  vegetation-scale scenes need. (D-073)
 
 ## Importer coverage
 
@@ -78,6 +82,14 @@ shadergen degrades SSS to diffuse. (D-059)
   5.2-style demand-loaded tiles. Only scenes that exceed VRAM budgets force this.
 - **Bump & displacement** *(bump: on demand; displacement: M5 geometry depth)* —
   Today: skipped at import with a warning; normal maps cover the corpus. (D-061)
+- **UDIM tiles + multiple UV sets** *(revisit: first production asset — M4/M5
+  era)* — Today: one UV set, one image per reference. Production must-haves the
+  corpus never exercises; the texture-reference schema grows a tile pattern and
+  the mesh schema a second UV stream when a real asset arrives. (D-073)
+- **Neural texture compression** *(revisit: VRAM pressure + cross-vendor
+  maturity)* — Today: BC through `intel_tex_2`. NVIDIA's RTXNTC SDK is public
+  beta (Vulkan-supported, ~85% VRAM reduction claimed) with no shipping adoption
+  yet — watch, don't build. (D-073)
 
 ## Estimator & film
 
@@ -85,6 +97,20 @@ shadergen degrades SSS to diffuse. (D-059)
   now that the denoiser exists)* — Today: NaN/Inf guard only. Production shape:
   direct/indirect clamp knobs (Cycles defaults indirect to 10.0). It is a bias knob;
   it arrives as an explicit decision, off by default, never silently.
+- **Specular regularization** *(revisit: first corpus scene with specular
+  fireflies — expected during M2 step 7)* — Today: nothing; no mips + normal maps
+  + low roughness is the firefly recipe. Production shape, pre-agreed so the
+  trigger firing mid-milestone is a plan and not an improvisation: Filter-Glossy
+  path regularization (roughness clamp on glossy lobes after blurry bounces —
+  Cycles ships it on by default at 1.0) plus Tokuyoshi–Kaplanyan specular AA (NDF
+  filtering against normal-map variance). Both are bias knobs: explicit, off by
+  default, the D-051 firefly-clamp template. (D-073)
+- **Per-ray-type visibility flags** *(revisit: production lighting workflows)* —
+  Today: `camera_visible` on emitters only (D-072). Production shape: the full
+  camera/diffuse/glossy/shadow set MoonRay and Cycles carry. (D-073)
+- **Cryptomatte / object-ID AOVs** *(revisit: the M4 compositing story)* — Today:
+  beauty/albedo/normal/depth. Production compositing's first ask once real
+  pipelines touch the output. (D-073)
 - **Sample cap / convergence idle** *(carried from D-051; revisit: M3 interactivity
   work)* — a long-converged viewer still pins the GPU at 100%; `max_samples`,
   publish-interval growth, and a navigation resolution divider belong where the
@@ -100,6 +126,10 @@ shadergen degrades SSS to diffuse. (D-059)
   strong-count invariant (D-051) — the reuse protocol assumes blocking submits.
 - **Wave-tail path regeneration** *(carried from D-051)* — Cycles X refills dead
   lanes mid-wave with the next sample's camera rays; we end the wave. Measure first.
+- **Deform-only BLAS refit** *(revisit: animation — M5 era)* — Today: any topology
+  or vertex change rebuilds the BLAS. Production shape: Cycles' split — refit for
+  deformation, rebuild only on topology change. Matters the moment anything
+  animates per frame. (D-073)
 - **OIDN zero-copy interop** — Today: host-copy (download guides, denoise, upload).
   Production shape: `oidnNewSharedBufferFromFD` against exported VkDeviceMemory,
   vendor-matched device. It shares external-semaphore machinery with the timeline
