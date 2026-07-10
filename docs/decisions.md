@@ -837,3 +837,181 @@ Four deferrals were recorded rather than acted on:
   NaN/Inf guard; direct/indirect clamping is a knob every production
   renderer exposes, but it is a bias knob — cenote adds it when a real
   scene demands it, as an explicit decision, not silently.
+
+## 2026-07-09 — M2 structural decisions (interview session)
+
+Locked after a sourced research pass over Cycles X, MoonRay/RDL2, pbrt-v4, the
+OpenPBR v1.1.1 spec, and OIDN 2.5. The working plan is
+[m2-plan.md](m2-plan.md); the consciously-not-yet options are in
+[deferrals.md](deferrals.md) (see D-067).
+
+### D-052: C ABI deferred to M4; M2's boundary is the pure-Rust change-set API
+Amends the charter's M2 line, which named the C ABI here. *Why:* the research
+settled what the ABI's real job is — transporting *serialized change-sets*, not
+exposing per-attribute setters. MoonRay ships no C API at all; its process
+boundary is RDLMessage (a serialized delta: manifest + payload + sync id).
+Freezing an ABI before its first real consumer (the M4 render server + Hydra
+delegate) exists would lock in guesses; the text format proves the
+serializability the ABI will rely on. M2's API consumers are the importer, the
+CLI, and the viewer — all in-process Rust.
+
+### D-053: Static typed scene schema, closed kind set, named objects
+Object kinds (mesh, instance, material, light, camera, environment, render
+settings) are ordinary Rust types; objects carry string names resolved to
+handles; adding an attribute is a code change. *Why:* RDL2's runtime attribute
+registry earns its complexity by serving a plugin SDK — a charter non-goal.
+A closed schema gets exhaustive `match`, serde derives, and compiler-checked
+refactors for free. The condition that would revive the dynamic option is
+recorded in deferrals.md.
+
+### D-054: Change-sets are first-class values; `apply()` is the only mutation path
+A change-set is an ordered list of typed patches — one `Option` per attribute —
+with get-or-create-by-name semantics on apply. Applying is the *sole* way a
+SceneDescription changes, and it accumulates the dirty state (material /
+transform / topology / lights / environment) that drives minimal re-prep.
+*Why:* RDL2's load-is-a-delta insight — get-or-create makes loading a file and
+applying an edit the same operation, so the file format, the future wire
+format, and the viewer's edit stream are one code path with one dirty-tracking
+story. The builder API (`set.material("floor").base_color(…)`) keeps call
+sites readable.
+
+### D-055: Scene text format is RON via serde, version field first
+*Why:* the serde derive on the schema *is* the parser — format and schema
+cannot drift. RON reads like Rust literals (right for a Rust-shaped schema)
+and diffs cleanly. `serde` + `ron` clear the D-011 bar: a hand-rolled parser
+of this schema is 400+ lines that must be updated with every schema change.
+A binary codec for the M4 wire is a drop-in later because it serializes the
+same value (deferrals.md).
+
+### D-056: Bulk geometry inline or by PLY reference; hand-rolled PLY reader in core
+The mesh op's payload is an enum: `Inline { positions, normals, uvs,
+triangles }` or a relative-path PLY reference. Environments stay
+EXR-by-reference. *Why:* small scenes stay single-file and diffable; heavy
+geometry stays in the format the corpus already uses (pbrt scenes are
+dominated by `plymesh`). The PLY reader is ~200 lines of well-specified
+format — under the D-011 write-it-yourself bar — and lives in core because
+cenote's own format references PLY, not just the importer.
+
+### D-057: pbrt-v4 importer — the subset, and the five fidelity traps
+Supported: `trianglemesh`/`plymesh`/`sphere` (tessellated at import)/
+`ObjectInstance`; `diffuse`/`coateddiffuse`/`conductor`/`dielectric`/
+`thindielectric`; `area`/`infinite`/`distant` (+`point`) lights;
+`imagemap`/`constant`/`scale` textures; `perspective` camera. Everything else
+warns by token name — silence never means "handled". Fidelity commitments,
+each with a targeted test: (1) photometric normalization — pbrt divides every
+light scale by `SpectrumToPhotometric(L)`, so `rgb L [1 1 1]` is ~1 nit, and
+RGB illuminants are D65-tinted; (2) `alpha = sqrt(roughness)` under the
+default `remaproughness`; (3) `fov` is the full angle of the *shorter* image
+axis; (4) left-handed coordinates, with `ReverseOrientation` XOR
+transform-swaps-handedness flipping normals and emission side; (5) infinite
+lights use square equal-area *octahedral* images, resampled to equirect at
+import. *Why this subset:* it covers the real corpus (pbrt-v4's published
+scenes are overwhelmingly triangle meshes with these materials); each skip
+maps to the milestone that makes it honest to support (deferrals.md).
+
+### D-058: Estimator gains triangle emitters, delta lights, and thin-lens DoF
+Triangle emitters replace the quad special case: the alias table is built over
+(light, triangle) pairs weighted by area × power, sampling is uniform on the
+triangle, and the parallelogram path retires. Distant and point lights are
+NEE-only delta lights with MIS weight 1 (a BSDF sample hits them with
+probability zero). Thin-lens DoF adds two named RNG dimensions and a lens
+sample in raygen; pinhole is radius 0. *Why:* imported scenes need all four,
+and M3's many-light work wants one general emissive-geometry path — growing
+the quad hack would create exactly the second code path M1's light design
+avoided (D-023's reasoning, continued).
+
+### D-059: The full-look closure cut — six additions, five precedented deferrals
+Added: coat (GGX with base-IOR remap η_s and the analytic darkening factor
+from the spec), fuzz (Zeltner LTC sheen via the published 32×32 tables),
+transmission (rough dielectric BTDF, Beer–Lambert interior via
+μ_t = −ln(T)/λ, one current-medium slot in path state), thin-walled mode,
+variable specular IOR (the Turquin energy-compensation fits gain an IOR axis
+— Cycles' pattern), stochastic opacity in the intersect loop, and emission in
+its OpenPBR stack position (coat-attenuated: L_e = lerp(1, T_coat, C)·E).
+Deferred with shipping precedent (deferrals.md): SSS random walk (M7 —
+`subsurface_color` degrades onto diffuse, the MaterialX-shadergen fallback),
+dispersion, thin-film, anisotropy, transmission scatter. *Why:* this is
+OpenPBR's own renderer-ready decomposition — the spec's slab tree flattens to
+a lobe mixture with closed-form weights, and this cut is the portion whose
+energy story we can prove in the furnace matrix now.
+
+### D-060: Mip policy — cap at prep, one BC level, hardware bilinear
+The mip-cap downscale happens at prep; exactly one BC level uploads; sampling
+is hardware bilinear at LOD 0. *Why:* Cycles shipped this shape for 15 years
+(mipmapping arrived only with the 2026 texture cache), and the estimator makes
+it sound: jittered accumulation integrates the pixel footprint, so the
+converged frame is unbiased — mip selection is a bandwidth optimization, not a
+correctness feature. Ray-cone LOD and full chains are recorded for the
+pre-M3 measured perf pass (deferrals.md).
+
+### D-061: Texturable parameter set + tangent-space normal maps
+Texturable: base_color, specular_roughness, metalness, emission, opacity.
+Normal maps: tangent-space, BC5 two-channel with in-shader Z reconstruction,
+per-hit UV-derived tangents, horizon-clamped perturbation. pbrt bump and
+displacement are skipped with import warnings. *Why:* this is the set the
+corpus actually uses, and normal maps are the highest look-per-line feature
+in the whole milestone; authored-tangent quality work belongs with anisotropy
+(deferrals.md), and displacement belongs to M5's geometry depth.
+
+### D-062: Denoiser guides — Cycles-style specular pass-through AOVs
+Albedo and normal guides pass through near-specular hits (roughness ramp
+0–0.15), recording what mirrors and glass *show* rather than their own
+surface; implemented as two path-state fields (feature throughput + written
+flag) via the schema seam. Albedo/normal/depth accumulate in separate
+pixel-owned film buffers — never atomics — preserving the bitwise-determinism
+invariant. *Why:* OIDN's own guidance and Cycles' shipped behavior: a mirror
+whose guide says "flat gray" denoises to mush; the ramp avoids a hard
+roughness cliff in the guides.
+
+### D-063: OIDN via host-copy, behind a `denoise` feature
+Download resolved beauty + albedo + normal, run OIDN's DEFAULT device through
+the safe `oidn` crate, upload the result. CLI `--denoise` runs final-frame at
+HIGH quality with prefiltered guides (`cleanAux`); the viewer toggle runs
+~1 Hz at BALANCED — Cycles' cadence split. Denoised output is a second,
+labeled EXR; raw estimator output is never silently replaced. *Why:* OIDN has
+no Vulkan device, so zero-copy means exported VkDeviceMemory + external
+semaphores — machinery that belongs to the timeline-semaphore pass (D-043),
+recorded together in deferrals.md. The feature gate keeps the heavy native
+dependency out of default builds.
+
+### D-064: Lookdev panel — the change-set API's first interactive consumer
+The viewer loads scenes (.ron or .pbrt), lists objects, and exposes the
+selected object's OpenPBR parameters as egui widgets that emit change-sets
+into a Session edit channel: pending edits merge in order, apply at the wave
+boundary (stop → apply with minimal re-prep → restart from sample 0). No
+gizmos, no transform editing, no creation UI (deferrals.md: M4's usdview
+supplies authoring wholesale). *Why:* this closes the loop the milestone
+exists to prove — an edit path from UI event to converged pixels through the
+same value type the file format serializes; restart-from-zero is the
+industry consensus (MoonRay restarts on any edit), and instant re-convergence
+is the thesis demo (D-042's promise lands here).
+
+### D-065: Tiered regression corpus
+Tier 1: 3–4 small CC0 pbrt scenes vendored under `tests/scenes` with goldens;
+CI imports, renders, and FLIP-compares every run. Tier 2: a checksummed fetch
+script for showcase scenes (bathroom-class) — never in the repo, never in CI.
+The corpus README pins the reference pbrt-v4 commit and states the caveat:
+pbrt renders spectrally, cenote in RGB ACEScg, so comparisons are perceptual
+(FLIP), not pixel-exact. *Why:* hermetic fast CI with real end-to-end
+coverage, showcase weight kept out of the clone, and the honesty caveat
+written where a future reader will trip over the difference.
+
+### D-066: `cenote-pbrt` is its own leaf crate
+`.pbrt` in → `ChangeSet` out, consuming only cenote's public API; the pbrt
+tokenizer/parser is hand-rolled there (~straightforward recursive descent over
+a well-documented grammar — under the D-011 bar). Core's new dependencies:
+`serde`, `ron`, `image` (PNG/JPEG decode), `intel_tex_2` (ISPC BC encoders),
+`ddsfile`, `oidn` (feature-gated) — each cleared against D-011 in the plan.
+*Why:* the importer is a *client* of the scene API, and the crate boundary
+mechanically enforces that the public API is sufficient — the same forcing
+function the M4 ABI will need, two milestones early and for free.
+
+### D-067: The deferral ledger
+[deferrals.md](deferrals.md) now holds every consciously-deferred production
+solution — what we do instead today, the production shape, and the trigger
+that revives it — including the four D-051 deferrals, which are carried there
+unchanged. Unlike this log it is not append-only: picking up a deferral moves
+the entry into a new dated decision here and deletes it there. *Why:* the
+interview repeatedly produced "right long-term answer, too much now" options;
+scattered across decision entries they rot, and a single living ledger turns
+each trigger firing into a plan we already made rather than a rediscovery.
