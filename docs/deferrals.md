@@ -158,6 +158,17 @@ shadergen degrades SSS to diffuse. (D-059)
 - **Cryptomatte / object-ID AOVs** *(revisit: the M4 compositing story)* — Today:
   beauty/albedo/normal/depth. Production compositing's first ask once real
   pipelines touch the output. (D-073)
+- **Alpha as coverage (transparent sky, holdouts)** *(revisit: the M4 compositing
+  story)* — Today: the beauty alpha is exactly 1 everywhere — it is the
+  "every pixel finished once" counter, and the multi-layer EXR writes it as-is.
+  Production shape: camera-ray escapes contribute alpha 0 and stochastic opacity
+  its coverage fraction, so renders composite over backplates. Cheap at the
+  shade_miss/intersect seam once something consumes it. (D-080)
+- **Arbitrary AOVs / light-path expressions** *(revisit: production lighting
+  workflows, alongside per-ray-type visibility)* — Today: the four fixed AOVs,
+  each hand-wired through the film. Production shape: LPE-selected containers
+  (MoonRay/Arnold) or Cycles' pass matrix — a registry the wavefront writes
+  through, not four more hand-built buffer pairs. (D-080)
 - **Sample cap / convergence idle** *(carried from D-051; revisit: M3 interactivity
   work)* — a long-converged viewer still pins the GPU at 100%; `max_samples`,
   publish-interval growth, and a navigation resolution divider belong where the

@@ -14,6 +14,12 @@
 // renders bitwise deterministic. The one *terminal* add per path carries
 // alpha 1 (here or in shade_miss): "every pixel finished exactly once"
 // stays mechanically checkable.
+//
+// When the wave carries AOV targets, this kernel also feeds the denoiser
+// guides: the first hit writes the depth AOV, and the albedo/normal
+// guides record here — unless the sampled lobe is near-specular, in
+// which case they ride the path's feature throughput to whatever the
+// mirror or glass shows. Same pixel-owned adds, same determinism.
 
 import lights;
 import openpbr;
@@ -29,10 +35,12 @@ struct Params {
     Queue<ShadowRay> shadows; // next-event connections, for trace_shadow
     SceneTable* scene;
     float4* radiance;         // the film's per-pixel accumulator for this wave
+    AovTable* aov;            // the wave's AOV targets; enabled = 0 skips them
     uint sampleIndex; // which sample of every pixel's sequence this wave is
-    uint bounce;      // which bounce of the wave this dispatch shades
-    uint maxBounces;  // path-length cap: the last bounce never continues
-    uint lightSampling; // LIGHT_SAMPLING_*: which strategies reach the lights
+    // bounce | maxBounces << 8 | lightSampling << 16. Packed because this
+    // block sits exactly at Vulkan's guaranteed 128 push-constant bytes:
+    // the AOV pointer's 8 bytes come out of these three small scalars.
+    uint packed;
 };
 
 [vk::push_constant]
@@ -43,6 +51,16 @@ Params params;
 // From here on, paths gamble survival against their throughput and the
 // survivors are reweighted to keep the estimate unbiased.
 static const uint ROULETTE_START = 3;
+
+// Record the denoiser guides for this pixel: `weight` of the surface's
+// albedo estimate and shading normal, added to the wave's zero-filled
+// per-pixel accumulators. Pixel-owned like every radiance write — one
+// path per pixel — so guide order never reaches the image.
+void recordGuides(AovTable* aov, uint pixel, float3 weight, float3 albedo,
+                  float3 normal) {
+    aov.albedo[pixel] += float4(weight * albedo, 0.0);
+    aov.normal[pixel] += float4(weight * normal, 0.0);
+}
 
 // One float3 out of a tightly packed vertex-attribute buffer.
 float3 fetch3(float* attributes, uint vertex) {
@@ -213,10 +231,14 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     if (tid.x >= params.hits.count()) {
         return;
     }
+    let bounce = params.packed & 0xff;
+    let maxBounces = (params.packed >> 8) & 0xff;
+    let lightSampling = params.packed >> 16;
     uint path = params.hits.entries[tid.x];
     uint pixel = params.paths.pixel[path];
     Hit hit = params.paths.hit[path];
-    let direction = params.paths.direction[path].xyz;
+    let direction4 = params.paths.direction[path];
+    let direction = direction4.xyz;
     let origin = params.paths.origin[path].xyz;
     GeometryRecord mesh = params.scene.geometry[hit.instance];
     // Textured parameters resolve at the hit's UV once; everything below
@@ -232,7 +254,7 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     // anything at this vertex spends it. A zero transmission depth means
     // no interior — the tint sat on the interface instead. Camera rays
     // start in vacuum, so bounce 0 never reads the (unwritten) state.
-    var medium = params.bounce == 0 ? MEDIUM_NONE
+    var medium = bounce == 0 ? MEDIUM_NONE
                : pathStateMedium(params.paths.state[path]);
     if (medium != MEDIUM_NONE) {
         Material interior = params.scene.materials[medium];
@@ -251,9 +273,9 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     if (mesh.light != LIGHT_NONE) {
         var weight = 1.0;
         if (throughput.w > 0.0) {
-            if (params.lightSampling == LIGHT_SAMPLING_NEE) {
+            if (lightSampling == LIGHT_SAMPLING_NEE) {
                 weight = 0.0;
-            } else if (params.lightSampling == LIGHT_SAMPLING_MIS) {
+            } else if (lightSampling == LIGHT_SAMPLING_MIS) {
                 let delta = spawn.position - origin;
                 let cosLight = abs(dot(spawn.normal, direction));
                 // The full next-event pdf: choose the light list over the
@@ -269,16 +291,6 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
         contribution = throughput.xyz * material.emission * weight;
     }
 
-    // The depth cap: the path ends at this vertex, so this is its pixel's
-    // terminal add. No next-event estimation here — an NEE connection from
-    // this vertex would be one segment longer than any path BSDF sampling
-    // can trace, and the two strategies must cover the same path lengths
-    // to converge to the same image.
-    if (params.bounce + 1 >= params.maxBounces) {
-        params.radiance[pixel] += float4(contribution, 1.0);
-        return;
-    }
-
     // The BSDF lives in the shading frame — the interpolated normal,
     // perturbed by the normal map where the material carries one —
     // resolved once per vertex against the view direction. A hit on the
@@ -288,7 +300,8 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     // the geometric horizon) are rejected at each use below — the
     // standard shading-normal trade: a sliver of energy lost near
     // silhouettes, never light through walls, and the same treatment for
-    // every strategy so MIS stays consistent.
+    // every strategy so MIS stays consistent. Resolved before the depth
+    // cap because a path ending there still records its open guides.
     var shading = spawn.shading;
     if (material.normalTexture != TEXTURE_NONE) {
         shading = mappedShadingNormal(mesh, hit, uv, material.normalTexture, spawn);
@@ -297,6 +310,39 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     let wo = frame.toLocal(-direction);
     let closure = resolveClosure(params.scene.bsdfTables, material, wo,
                                  medium == hit.instance);
+
+    // The denoiser guides' remaining feature throughput: fully open on a
+    // camera ray (which never reads the buffer), whatever the specular
+    // pass-throughs so far left otherwise. A path that ends at this
+    // vertex records it all here; one that continues splits it below by
+    // the sampled lobe's ramp. The albedo estimate is clamped: a guide
+    // wants a reflectance, and the estimate can drift just past 1.
+    let aovOn = params.aov.enabled != 0;
+    var guide = float3(0.0);
+    if (aovOn) {
+        guide = bounce == 0 ? float3(1.0) : params.aov.guide[pixel].xyz;
+        if (bounce == 0) {
+            // First hit: camera-plane z, via the cosine raygen stashed in
+            // direction.w. First hits only — depth never passes through a
+            // mirror, unlike the guides.
+            params.aov.depth[pixel] += distance(origin, spawn.position)
+                                     * direction4.w;
+        }
+    }
+    let aovAlbedo = saturate(closure.aovAlbedo);
+
+    // The depth cap: the path ends at this vertex, so this is its pixel's
+    // terminal add. No next-event estimation here — an NEE connection from
+    // this vertex would be one segment longer than any path BSDF sampling
+    // can trace, and the two strategies must cover the same path lengths
+    // to converge to the same image.
+    if (bounce + 1 >= maxBounces) {
+        if (aovOn && any(guide > 0.0)) {
+            recordGuides(params.aov, pixel, guide, aovAlbedo, shading);
+        }
+        params.radiance[pixel] += float4(contribution, 1.0);
+        return;
+    }
 
     // Next-event estimation: connect this vertex to one candidate — a
     // direction toward the environment or a light from the list, chosen
@@ -307,12 +353,12 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     // the surface. The contribution is fully weighted here; trace_shadow
     // just adds it if the connection is unoccluded.
     let envProb = params.scene.env.selectProb;
-    if (params.lightSampling != LIGHT_SAMPLING_BSDF
+    if (lightSampling != LIGHT_SAMPLING_BSDF
         && (params.scene.lightCount > 0 || envProb > 0.0)) {
         let uLight = sample_1d(pixel, params.sampleIndex,
-                               bounceDimension(params.bounce, NEE_LIGHT));
+                               bounceDimension(bounce, NEE_LIGHT));
         let uPoint = sample_2d(pixel, params.sampleIndex,
-                               bounceDimension(params.bounce, NEE_POINT));
+                               bounceDimension(bounce, NEE_POINT));
         ShadowRay shadow;
         shadow.pixel = pixel;
         shadow.pad0 = 0;
@@ -330,7 +376,7 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
                 && (wiLight.z < 0.0) == throughSurface) {
                 let neePdf = envProb * candidate.pdf;
                 let scatterPdf = bsdfPdf(closure, wiLight, wo);
-                let weight = params.lightSampling == LIGHT_SAMPLING_MIS
+                let weight = lightSampling == LIGHT_SAMPLING_MIS
                            ? powerHeuristic(neePdf, scatterPdf)
                            : 1.0;
                 unshadowed = throughput.xyz * candidate.radiance
@@ -372,7 +418,7 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
                 // zero: its weight is 1 under every mode.
                 let neePdf = (1.0 - envProb) * candidate.pdf;
                 let weight = !candidate.delta
-                          && params.lightSampling == LIGHT_SAMPLING_MIS
+                          && lightSampling == LIGHT_SAMPLING_MIS
                            ? powerHeuristic(neePdf, bsdfPdf(closure, wiLight, wo))
                            : 1.0;
                 unshadowed = throughput.xyz * candidate.radiance
@@ -397,9 +443,9 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     // mixture pdf. The sidedness guard requires the scattered ray to
     // leave through the same geometric face the shading frame put it on.
     let uLobe = sample_1d(pixel, params.sampleIndex,
-                          bounceDimension(params.bounce, BSDF_LOBE));
+                          bounceDimension(bounce, BSDF_LOBE));
     let u = sample_2d(pixel, params.sampleIndex,
-                      bounceDimension(params.bounce, BSDF_DIR));
+                      bounceDimension(bounce, BSDF_DIR));
     let scatter = sampleBsdf(closure, wo, uLobe, u);
     let wiWorld = frame.toWorld(scatter.wi);
     var scattered = float3(0.0);
@@ -414,18 +460,37 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     // just trace dead rays until roulette noticed.
     var survival = max(scattered.r, max(scattered.g, scattered.b));
     if (survival <= 0.0) {
+        if (aovOn && any(guide > 0.0)) {
+            recordGuides(params.aov, pixel, guide, aovAlbedo, shading);
+        }
         params.radiance[pixel] += float4(contribution, 1.0);
         return;
     }
 
-    if (params.bounce >= ROULETTE_START) {
+    if (bounce >= ROULETTE_START) {
         survival = min(1.0, survival);
         if (sample_1d(pixel, params.sampleIndex,
-                      bounceDimension(params.bounce, RR)) >= survival) {
+                      bounceDimension(bounce, RR)) >= survival) {
+            if (aovOn && any(guide > 0.0)) {
+                recordGuides(params.aov, pixel, guide, aovAlbedo, shading);
+            }
             params.radiance[pixel] += float4(contribution, 1.0);
             return;
         }
         scattered /= survival;
+    }
+
+    // The path continues: the sampled lobe decides how much of the open
+    // guides record this surface and how much rides along the scattered
+    // ray, tinted by the lobe it passed through. Never reweighted by
+    // roulette survival — a guide wants low noise, not unbiasedness.
+    if (aovOn) {
+        let record = aovRecordFraction(closure, scatter.lobe);
+        if (record > 0.0 && any(guide > 0.0)) {
+            recordGuides(params.aov, pixel, guide * record, aovAlbedo, shading);
+        }
+        params.aov.guide[pixel] =
+            float4(guide * (1.0 - record) * aovPassTint(closure, scatter.lobe), 0.0);
     }
 
     // A transmission through a closed surface crosses into (or out of) its

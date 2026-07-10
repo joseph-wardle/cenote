@@ -22,8 +22,10 @@ MIS-weighted next-event estimation of emissive meshes, delta lights, and an
 importance-sampled HDRI, thin-lens depth of field, live-editable scene
 files, a pbrt-v4 importer (`cenote-cli import`, or open a `.pbrt` in the
 viewer directly) with a CC0 regression corpus rendered and FLIP-compared in
-CI, a progressive viewer, and a batch CLI that writes exactly the image the
-viewer converges to.
+CI, AOVs (denoiser albedo/normal guides with Cycles-style specular
+pass-through, first-hit depth) accumulated beside the beauty and written as
+one multi-layer EXR, a progressive viewer, and a batch CLI that writes
+exactly the image the viewer converges to.
 
 ![A 5×5 grid of terracotta spheres resting on a glossy gray floor — roughness increasing left to right, metalness back to front — under a blue sky](docs/demo.png)
 
@@ -58,8 +60,9 @@ re-converges. A save that doesn't parse (or that this build can't render
 yet) is logged and the previous scene keeps rendering.
 `cenote-cli render` takes a scene file too (`.ron`, or a `.pbrt` imported
 on the fly), accumulates `--spp` samples of the same estimator into the
-same film, and writes the linear `ACEScg` average as an EXR
-(chromaticities declared in the header); with `--watch` it re-renders on
+same film, and writes one multi-layer EXR — linear `ACEScg` beauty
+(chromaticities declared in the header), the denoiser's albedo and normal
+guides, and first-hit depth as `Z`; with `--watch` it re-renders on
 every shader edit, recompiling from the source checkout in under a second.
 `import` converts pbrt-v4 scenes, printing every fidelity warning —
 anything the importer drops or degrades is named, never silent.

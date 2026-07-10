@@ -151,14 +151,17 @@ struct ShadeMissParams {
     scene: vk::DeviceAddress,
     /// Device address of the wave's per-pixel radiance target (`float4*`).
     radiance: vk::DeviceAddress,
+    /// Device address of the wave's [`AovTable`] — escapes close the
+    /// denoiser guides and stamp first-hit misses' depth.
+    aov: vk::DeviceAddress,
     /// Which strategies reach the lights — a [`LightSampling`] as `u32`.
     light_sampling: u32,
     _pad0: u32,
 }
 
 /// Push constants for the surface-shading kernel
-/// (`shaders/shade_surface.slang`). One instance per bounce — `bounce` is
-/// the only field that varies.
+/// (`shaders/shade_surface.slang`). One instance per bounce — the bounce
+/// inside `packed` is the only field that varies.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct ShadeSurfaceParams {
@@ -172,14 +175,22 @@ struct ShadeSurfaceParams {
     /// the closure's lookup tables).
     scene: vk::DeviceAddress,
     radiance: vk::DeviceAddress,
+    /// Device address of the wave's [`AovTable`].
+    aov: vk::DeviceAddress,
     /// Which sample of every pixel's sequence this wave traces.
     sample_index: u32,
-    /// Which bounce of the wave this dispatch shades.
-    bounce: u32,
-    /// Path-length cap: the dispatch at `max_bounces - 1` never continues.
-    max_bounces: u32,
-    /// Which strategies reach the lights — a [`LightSampling`] as `u32`.
-    light_sampling: u32,
+    /// `bounce | max_bounces << 8 | light_sampling << 16` — see
+    /// [`pack_shade_surface`]. Packed because this block sits exactly at
+    /// Vulkan's guaranteed 128 push-constant bytes: the AOV pointer's
+    /// 8 bytes come out of these three small scalars.
+    packed: u32,
+}
+
+/// Pack `ShadeSurfaceParams::packed`, mirrored by the unpack at the top of
+/// `shade_surface.slang`. Both byte-wide fields are asserted in range by
+/// [`Wavefront::new`].
+fn pack_shade_surface(bounce: u32, max_bounces: u32, light_sampling: LightSampling) -> u32 {
+    bounce | max_bounces << 8 | (light_sampling as u32) << 16
 }
 
 /// Push constants for the shadow-ray kernel (`shaders/trace_shadow.slang`).
@@ -344,6 +355,68 @@ impl Queues {
     }
 }
 
+/// The GPU-side AOV table — `struct AovTable` in `shaders/pathstate.slang`,
+/// field for field: the wave's per-pixel AOV accumulators and the guides'
+/// feature-throughput scratch, behind one pointer because the
+/// surface-shading kernel's push constants sit at Vulkan's guaranteed
+/// 128-byte limit.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct AovTableData {
+    albedo: vk::DeviceAddress,
+    normal: vk::DeviceAddress,
+    depth: vk::DeviceAddress,
+    guide: vk::DeviceAddress,
+    enabled: u32,
+    _pad0: u32,
+}
+
+/// The per-pixel AOV buffers a wave writes, owned by the film and handed
+/// to [`Wavefront::trace_then`]: the three accumulators (zero-filled at
+/// wave start, exactly like radiance; sized `width × height` at 16, 16,
+/// and 4 bytes per pixel), and the uploaded table the kernels read them
+/// through. The guides' feature-throughput scratch rides inside the table
+/// only — it needs no fill (see `AovTable` in `shaders/pathstate.slang`).
+pub struct AovTargets<'a> {
+    /// The wave's albedo-guide accumulator, RGBA f32 per pixel.
+    pub albedo: &'a Buffer,
+    /// The wave's normal-guide accumulator, RGBA f32 per pixel.
+    pub normal: &'a Buffer,
+    /// The wave's first-hit depth, one f32 per pixel.
+    pub depth: &'a Buffer,
+    /// The uploaded table ([`upload_aov_table`]) naming all of the above.
+    pub table: &'a Buffer,
+}
+
+/// Upload an [`AovTable`](AovTableData) pointing at the film's per-pixel
+/// AOV buffers (`albedo`/`normal` RGBA f32, `depth` f32, `guide` RGBA f32
+/// scratch), for [`AovTargets::table`].
+///
+/// # Errors
+///
+/// Any [`crate::Error`] from buffer creation.
+pub(crate) fn upload_aov_table(
+    gpu: &Context,
+    albedo: &Buffer,
+    normal: &Buffer,
+    depth: &Buffer,
+    guide: &Buffer,
+) -> Result<Buffer> {
+    let table = AovTableData {
+        albedo: albedo.device_address(),
+        normal: normal.device_address(),
+        depth: depth.device_address(),
+        guide: guide.device_address(),
+        enabled: 1,
+        _pad0: 0,
+    };
+    gpu.upload_buffer(
+        "film.aov.table",
+        bytemuck::bytes_of(&table),
+        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+    )
+}
+
 /// Which sampling strategies reach the lights. [`LightSampling::Mis`] is
 /// the renderer; the single-strategy modes exist because the strongest
 /// test of the MIS weights is that either strategy alone converges to the
@@ -376,6 +449,10 @@ pub struct Wavefront {
     trace_shadow: ComputePipeline,
     paths: PathPool,
     queues: Queues,
+    /// The all-zero [`AovTableData`] a wave binds when the caller brings
+    /// no AOV targets — `enabled` 0, so the kernels skip every guide read
+    /// and write.
+    aov_disabled: Buffer,
     capacity: u32,
     max_bounces: u32,
     light_sampling: LightSampling,
@@ -404,7 +481,8 @@ impl Wavefront {
     ///
     /// # Panics
     ///
-    /// On zero capacity or zero bounces — programmer bugs.
+    /// On zero capacity or a bounce cap outside 1..=255 (the cap shares a
+    /// packed push-constant byte) — programmer bugs.
     pub fn new(
         gpu: &Context,
         kernels: &Kernels,
@@ -414,6 +492,10 @@ impl Wavefront {
     ) -> Result<Self> {
         assert!(capacity > 0, "zero-capacity path pool");
         assert!(max_bounces > 0, "zero-bounce wavefront");
+        assert!(
+            max_bounces <= 255,
+            "a bounce cap above 255 doesn't fit its packed push-constant byte"
+        );
         let pipeline = |kernel: &Kernel, push_constant_size: usize, bindings| {
             gpu.create_compute_pipeline(
                 &kernel.spirv,
@@ -446,6 +528,11 @@ impl Wavefront {
             )?,
             paths: PathPool::new(gpu, capacity)?,
             queues: Queues::new(gpu, capacity)?,
+            aov_disabled: gpu.upload_buffer(
+                "wavefront.aov.disabled",
+                bytemuck::bytes_of(&AovTableData::zeroed()),
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            )?,
             capacity,
             max_bounces,
             light_sampling,
@@ -487,7 +574,7 @@ impl Wavefront {
         height: u32,
         sample: u32,
     ) -> Result<()> {
-        self.trace_then(gpu, scene, radiance, width, height, sample, &[])
+        self.trace_then(gpu, scene, radiance, width, height, sample, None, &[])
     }
 
     /// [`Wavefront::trace`], then `trailing` — extra passes appended to the
@@ -498,6 +585,12 @@ impl Wavefront {
     /// instead of two — bit-for-bit as if they ran as separate submissions,
     /// since a barrier orders the same writes a fence does.
     ///
+    /// With `aovs`, the wave also feeds the film's AOV accumulators —
+    /// zero-filled at wave start like radiance, written by the shading
+    /// kernels (first-hit depth, and the albedo/normal denoiser guides
+    /// with their specular pass-through). Without, the kernels skip every
+    /// AOV read and write.
+    ///
     /// # Errors
     ///
     /// Any [`crate::Error`] from submission.
@@ -506,8 +599,8 @@ impl Wavefront {
     ///
     /// As [`Wavefront::trace`]: on a zero-sized target or a `radiance`
     /// buffer smaller than it.
-    // The target (radiance, width, height), which sample, and the passes to
-    // append: exactly `trace`'s parameters plus the trailing slice. A struct
+    // The target (radiance, width, height), which sample, and the AOV and
+    // trailing extensions: exactly `trace`'s parameters plus two. A struct
     // would only scatter the call — every caller already hands these same
     // values to `trace`.
     #[allow(clippy::too_many_arguments)]
@@ -519,6 +612,7 @@ impl Wavefront {
         width: u32,
         height: u32,
         sample: u32,
+        aovs: Option<&AovTargets>,
         trailing: &[Pass],
     ) -> Result<()> {
         assert!(width > 0 && height > 0, "zero-sized trace target");
@@ -527,8 +621,9 @@ impl Wavefront {
             radiance.size() >= pixels * 16,
             "radiance buffer smaller than the target"
         );
-        let params = self.wave_params(scene, radiance, width, height, sample);
-        let mut passes = self.record_wave(scene, radiance, pixels, &params);
+        let aov_table = aovs.map_or(&self.aov_disabled, |aov| aov.table);
+        let params = self.wave_params(scene, radiance, aov_table, width, height, sample);
+        let mut passes = self.record_wave(scene, radiance, aovs, pixels, &params);
         passes.extend_from_slice(trailing);
         gpu.submit_passes(&passes)
     }
@@ -539,6 +634,7 @@ impl Wavefront {
         &self,
         scene: &Scene,
         radiance: &Buffer,
+        aov_table: &Buffer,
         width: u32,
         height: u32,
         sample: u32,
@@ -600,6 +696,7 @@ impl Wavefront {
                 misses: self.queues.addresses(queue::MISS, &self.queues.miss),
                 scene: scene.table().device_address(),
                 radiance: radiance.device_address(),
+                aov: aov_table.device_address(),
                 light_sampling: self.light_sampling as u32,
                 _pad0: 0,
             },
@@ -611,10 +708,9 @@ impl Wavefront {
                     shadows: self.queues.addresses(queue::SHADOW, &self.queues.shadow),
                     scene: scene.table().device_address(),
                     radiance: radiance.device_address(),
+                    aov: aov_table.device_address(),
                     sample_index: sample,
-                    bounce,
-                    max_bounces: self.max_bounces,
-                    light_sampling: self.light_sampling as u32,
+                    packed: pack_shade_surface(bounce, self.max_bounces, self.light_sampling),
                 })
                 .collect(),
             trace_shadow: TraceShadowParams {
@@ -625,12 +721,14 @@ impl Wavefront {
         }
     }
 
-    /// Record one wave's pass sequence: zero the radiance target, then per
-    /// pixel range, raygen and the bounce loop.
+    /// Record one wave's pass sequence: zero the radiance target (and the
+    /// AOV accumulators, when the wave carries them), then per pixel
+    /// range, raygen and the bounce loop.
     fn record_wave<'a>(
         &'a self,
         scene: &'a Scene,
         radiance: &'a Buffer,
+        aovs: Option<&AovTargets<'a>>,
         pixels: u64,
         params: &'a WaveParams,
     ) -> Vec<Pass<'a>> {
@@ -668,6 +766,20 @@ impl Wavefront {
             size: pixels * 16,
             value: 0,
         }];
+        // The AOV accumulators likewise: a pixel's guides can land at any
+        // bounce (the specular pass-through), so they too are plain adds
+        // onto zero. The guide scratch inside the table needs no fill —
+        // bounce 0 never reads it.
+        if let Some(aov) = aovs {
+            for (buffer, texel) in [(aov.albedo, 16), (aov.normal, 16), (aov.depth, 4)] {
+                passes.push(Pass::Fill {
+                    buffer,
+                    offset: 0,
+                    size: pixels * texel,
+                    value: 0,
+                });
+            }
+        }
         for raygen in &params.ranges {
             passes.push(fill(queue::RAY));
             passes.push(Pass::Dispatch {

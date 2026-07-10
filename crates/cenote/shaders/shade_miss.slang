@@ -3,7 +3,9 @@
 // strategy's way of reaching the sky, competing with the next-event
 // environment samples shade_surface sends. Camera rays keep weight 1 (no
 // other strategy competed). Escape is terminal: this add carries the
-// pixel's alpha 1.
+// pixel's alpha 1 — and, when the wave carries AOV targets, closes the
+// pixel's denoiser guides (white albedo, no normal) and stamps a
+// first-hit miss's depth as +inf.
 
 import lights;
 import pathstate;
@@ -14,6 +16,7 @@ struct Params {
     Queue<uint> misses;
     SceneTable* scene;
     float4* radiance;   // the film's per-pixel accumulator for this wave
+    AovTable* aov;      // the wave's AOV targets; enabled = 0 skips them
     uint lightSampling; // LIGHT_SAMPLING_*: which strategies reach the lights
     uint pad;
 };
@@ -46,9 +49,27 @@ void shade_miss(uint3 tid: SV_DispatchThreadID) {
         }
     }
 
+    uint pixel = params.paths.pixel[path];
+    if (params.aov.enabled != 0) {
+        // throughput.w = 0 marks a camera ray — the same test the MIS
+        // weight above leans on.
+        let cameraRay = throughput.w == 0.0;
+        if (cameraRay) {
+            // Nothing was hit, so the pixel has no depth: +inf, the
+            // value the film's guard deliberately lets through.
+            params.aov.depth[pixel] += asfloat(0x7f800000);
+        }
+        // Whatever feature throughput the specular chain left records the
+        // environment: albedo white (OIDN's own guidance for the
+        // background — the sky's radiance is signal, not reflectance),
+        // and no surface means no normal.
+        let guide = cameraRay ? float3(1.0) : params.aov.guide[pixel].xyz;
+        params.aov.albedo[pixel] += float4(guide, 0.0);
+    }
+
     let contribution = throughput.xyz * params.scene.env.radiance(direction) * weight;
     // Pixel-owned add — each pixel has exactly one path per wave, and a
     // path escapes at most once — so the nondeterministic queue order
     // never reaches the image.
-    params.radiance[params.paths.pixel[path]] += float4(contribution, 1.0);
+    params.radiance[pixel] += float4(contribution, 1.0);
 }

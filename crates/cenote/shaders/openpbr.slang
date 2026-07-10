@@ -335,6 +335,8 @@ public struct Closure {
     float wSpec;
     float wDiffuse;
     float wTotal;
+    // The denoiser albedo guide's value at this vertex — see resolveClosure.
+    public float3 aovAlbedo;
 };
 
 float average(float3 v) {
@@ -560,7 +562,63 @@ public Closure resolveClosure(float* tables, Material m, float3 wo, bool exiting
         c.wSpec = 1.0;
     }
     c.wTotal = c.wFuzz + c.wCoat + c.wSpec + c.wDiffuse;
+
+    // The denoiser albedo guide's estimate of this surface: the same
+    // technique estimates the weights above average into scalars, kept as
+    // colors and summed — roughly what the beauty divides by. Computed
+    // beside the weights but never feeding them, so sampling (and every
+    // pinned image) is untouched by the guides existing.
+    let glassColor = thin ? c.thinR + c.thinT
+                          : float3(c.specE) + (1.0 - c.specE) * c.glassTint;
+    if (exiting) {
+        c.aovAlbedo = glassColor;
+    } else {
+        let dielectricColor = lerp(float3(c.specE), glassColor, m.transmissionWeight);
+        let specColor = c.hasSpecular
+                      ? lerp(dielectricColor, metalE, m.metalness)
+                      : float3(0.0);
+        c.aovAlbedo = m.fuzzWeight * c.fuzzR * m.fuzzColor
+                    + c.fuzzAtten * m.coatWeight * c.coatE
+                    + c.baseWeight * (specColor
+                        + (1.0 - m.metalness) * (1.0 - m.transmissionWeight)
+                          * (1.0 - c.specE) * m.baseColor);
+    }
     return c;
+}
+
+// The guides' specular pass-through ramp, driven by the technique that
+// actually scattered: a mirror-smooth lobe records nothing at its own
+// surface (the guides ride along to whatever the reflection shows — a
+// mirror whose guides said "flat gray" would denoise its reflection to
+// mush), a lobe at roughness 0.15 or above records fully, and the linear
+// ramp between avoids a hard roughness cliff in the guides. Diffuse and
+// fuzz scatters always record.
+public float aovRecordFraction(Closure c, uint lobe) {
+    float alpha;
+    if (lobe == LOBE_COAT) {
+        alpha = c.coatAlpha;
+    } else if (lobe == LOBE_SPECULAR) {
+        alpha = c.alpha;
+    } else if (lobe == LOBE_TRANSMISSION) {
+        alpha = c.m.thinWalled != 0 ? c.thinAlpha : c.alpha;
+    } else {
+        return 1.0;
+    }
+    return saturate(sqrt(alpha) / 0.15);
+}
+
+// What a pass-through multiplies onto the guides' feature throughput: the
+// passed lobe's reflectance tint, so a gold mirror's guides show a
+// gold-tinted reflection. Coat and dielectric reflections are untinted;
+// transmission carries the interface tint.
+public float3 aovPassTint(Closure c, uint lobe) {
+    if (lobe == LOBE_TRANSMISSION) {
+        return c.glassTint;
+    }
+    if (lobe == LOBE_SPECULAR) {
+        return lerp(float3(1.0), c.m.baseColor, c.m.metalness);
+    }
+    return float3(1.0);
 }
 
 // -- The lobes --------------------------------------------------------------

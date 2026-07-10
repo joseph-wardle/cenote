@@ -54,7 +54,13 @@ public uint pathStateLobe(uint state) {
 // The SoA path pool: one pointer per logical field, indexed by path slot.
 public struct Paths {
     public float4* origin; // xyz = ray origin
-    public float4* direction; // xyz = unit ray direction
+    // xyz = unit ray direction; w = the ray's cosine against the camera
+    // forward axis, written by raygen and read once at the first hit —
+    // hit distance × w is the camera-plane z the depth AOV records, with
+    // no camera data in any shading kernel's push constants (they have no
+    // room). Scatters write 0: only camera rays have a camera to measure
+    // against.
+    public float4* direction;
     public uint* pixel; // the film pixel this path contributes to
     public Hit* hit; // written by intersect, read by shade_surface
     // xyz = the path's accumulated weight; w = the solid-angle pdf of the
@@ -71,6 +77,32 @@ public struct Paths {
     // scatters: bounce 0 knows a camera ray starts in vacuum with no lobe,
     // so raygen never touches it.
     public uint* state;
+};
+
+// The wave's AOV targets, one indirection behind the shading kernels'
+// push constants (shade_surface sits exactly at Vulkan's guaranteed 128
+// bytes, so the block lives in memory and costs one pointer). The first
+// three are per-pixel accumulators for the wave, zero-filled at wave
+// start like radiance; every write is a pixel-owned add, keeping renders
+// bitwise deterministic. `enabled` = 0 is the one-shot render path: no
+// AOV buffers exist and the kernels skip every guide read and write.
+public struct AovTable {
+    public float4* albedo; // xyz = denoiser albedo guide
+    public float4* normal; // xyz = world-space shading normal, post-map
+    public float* depth;   // camera-plane z at the first hit; +inf on miss
+    // The guides' feature throughput: the weight with which the
+    // albedo/normal AOVs will record whatever surface the pixel's path
+    // reaches next, tinted by every near-specular interface passed
+    // through — mirrors record what they show. Weight zero means the
+    // guides already recorded (the "written" flag folded into the value).
+    // Logically path state, indexed by pixel — legal because a wave
+    // carries exactly one path per pixel, and what freed the pool pointer
+    // the push-constant budget couldn't fit. Written only by scatters; a
+    // camera ray's guides are fully open, weight 1, which bounce 0 knows
+    // without reading — so this never needs clearing between waves.
+    public float4* guide;
+    public uint enabled;
+    public uint pad;
 };
 
 // A queue header. groupsX/Y/Z sit contiguous so the host can aim an

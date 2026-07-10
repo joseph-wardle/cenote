@@ -1487,3 +1487,57 @@ corpus README documents — an undocumented degradation fails CI.
 links only `cenote`'s public surface, and the one addition core needed
 was `ChangeSet::relativize_paths` — the inverse of `rebase_paths`, so an
 apply-ready absolute-path set becomes a portable scene file.
+
+## 2026-07-10 — M2 step 8: AOVs
+
+### D-080: Leaf decisions made while building the AOV film
+
+Status: accepted. The film grows from one buffer to four — beauty plus
+D-062's denoiser guides (albedo, normal) and first-hit depth — through
+the same accumulate/resolve path, the same pixel-owned determinism
+invariant, and zero change to the beauty estimator (the step-8 diff
+leaves every golden byte-identical). Six leaf decisions:
+
+(1) *The guides' state is pixel-indexed, not path-indexed.* The plan
+predicted "two path-state fields via the schema seam"; reality:
+`shade_surface`'s push constants already sat at exactly Vulkan's
+guaranteed 128 bytes, so a seventh path-pool pointer couldn't fit. The
+feature throughput (with the written flag folded in — weight zero means
+recorded) lives instead in a per-pixel scratch inside the film's
+`AovTable`, one indirection behind a single pointer that fits by packing
+bounce/max-bounces/light-sampling into one word. Pixel-indexing is
+equivalent by construction — a wave carries exactly one path per pixel —
+and the scratch needs no clearing because bounce 0 knows a camera ray's
+guides are open without reading.
+
+(2) *Depth costs no camera data in any shading kernel:* raygen stashes
+each ray's cosine against the camera forward axis in the direction
+buffer's spare `w` lane, so first-hit camera-plane z is just hit distance
+× w — exact under the thin lens too, since the lens disk spans the camera
+plane itself. The AOV probe test pins this by construction: a
+fronto-parallel quad must read the same depth at every pixel, which
+Euclidean distance fails off-axis.
+
+(3) *The pass-through ramp rides the sampled lobe* (D-070's tag, used at
+the vertex that wrote it): a continuing path records `saturate(√α/0.15)`
+of its open guides at this surface and passes the rest along the
+scattered ray, tinted by the passed lobe's reflectance; any terminal
+vertex records everything it still holds; escapes record white albedo
+(OIDN's background convention) and no normal. Guides are never
+roulette-reweighted — a guide wants low noise, not unbiasedness.
+
+(4) *The guide albedo is the closure's own technique estimates, kept as
+colors:* the same expressions the one-sample-MIS weights average into
+scalars, summed as float3 and saturated — computed beside the weights but
+never feeding them, so sampling is untouched by the guides existing.
+
+(5) *Depth is the finite-guard's deliberate exception:* +∞ *is* its miss
+value (only NaN drops), it accumulates and resolves as ±∞ correctly, and
+the f32 `Z` channel carries it to disk exactly — pinned end-to-end by
+tests.
+
+(6) *One multi-layer EXR, Nuke-shaped:* bare `R/G/B/A` beauty in f16,
+bare f32 `Z`, `albedo.RGB`/`normal.XYZ` in f16, zip scanlines, ACEScg
+chromaticities in the header; the published `Frame` gained
+albedo/normal/depth accessors resolved from the same publish slot as the
+beauty, `TRANSFER_SRC` already in place for step 9's host-copy denoise.

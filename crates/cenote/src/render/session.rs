@@ -55,7 +55,7 @@ use std::time::{Duration, Instant};
 
 use ash::vk;
 
-use super::{Film, Renderer};
+use super::{Film, Renderer, ResolveTargets};
 use crate::error::{Error, Result};
 use crate::gpu::{Buffer, Context, MemoryLocation};
 use crate::scene::changeset::{ChangeSet, Dirty, Kind};
@@ -112,13 +112,25 @@ struct Lanes {
     published: Mutex<Option<Frame>>,
 }
 
+/// One publish slot's buffers: the film's four resolved linear averages,
+/// rotated as a unit so a frame's beauty and its guides always come from
+/// the same resolve. `TRANSFER_SRC` on each: the denoise pass is a host
+/// copy (OIDN has no Vulkan device), and the tests read them back.
+struct FrameBuffers {
+    beauty: Buffer,
+    albedo: Buffer,
+    normal: Buffer,
+    depth: Buffer,
+}
+
 /// A published frame: the estimator's current best image as a **linear**
-/// average, plus the metadata a consumer needs to tonemap and present it
-/// without reaching back into the renderer. The buffer is shared by [`Arc`]
-/// so the render thread can tell — by its strong count — when the consumer
-/// has let go and the buffer is free to resolve into again.
+/// average — plus its AOVs (the denoiser guides and first-hit depth, from
+/// the same resolve) and the metadata a consumer needs to tonemap and
+/// present it without reaching back into the renderer. The buffers are
+/// shared by [`Arc`] so the render thread can tell — by its strong count —
+/// when the consumer has let go and the slot is free to resolve into again.
 pub struct Frame {
-    image: Arc<Buffer>,
+    buffers: Arc<FrameBuffers>,
     width: u32,
     height: u32,
     /// Samples in the average, for the spp readout.
@@ -132,7 +144,27 @@ impl Frame {
     /// The linear `ACEScg` average, ready for a [`super::Tonemap`] to read.
     #[must_use]
     pub fn image(&self) -> &Buffer {
-        &self.image
+        &self.buffers.beauty
+    }
+
+    /// The denoiser albedo guide — linear RGBA f32, alpha unused.
+    #[must_use]
+    pub fn albedo(&self) -> &Buffer {
+        &self.buffers.albedo
+    }
+
+    /// The denoiser normal guide — world-space shading normals, post
+    /// normal-map, RGBA f32 (averaged unnormalized; alpha unused).
+    #[must_use]
+    pub fn normal(&self) -> &Buffer {
+        &self.buffers.normal
+    }
+
+    /// Camera-plane z at the first hit, one f32 per pixel; +∞ where every
+    /// sample missed.
+    #[must_use]
+    pub fn depth(&self) -> &Buffer {
+        &self.buffers.depth
     }
 
     /// Width in pixels.
@@ -392,7 +424,7 @@ fn render_loop(
     // together and rebuilt together when the requested size changes.
     // `applied_generation` tracks which view is in the scene, so a bump
     // restarts accumulation.
-    let mut target: Option<(Film, [Arc<Buffer>; 2])> = None;
+    let mut target: Option<(Film, [Arc<FrameBuffers>; 2])> = None;
     let mut applied_size = (0, 0);
     let mut applied_generation = 0;
     let mut last_publish: Option<Instant> = None;
@@ -453,9 +485,18 @@ fn render_loop(
         if last_publish.is_none_or(|at| at.elapsed() >= PUBLISH_INTERVAL)
             && let Some(free) = frames.iter().find(|frame| Arc::strong_count(frame) == 1)
         {
-            renderer.resolve(gpu, film, free)?;
+            renderer.resolve(
+                gpu,
+                film,
+                &ResolveTargets {
+                    beauty: &free.beauty,
+                    albedo: &free.albedo,
+                    normal: &free.normal,
+                    depth: &free.depth,
+                },
+            )?;
             let frame = Frame {
-                image: Arc::clone(free),
+                buffers: Arc::clone(free),
                 width,
                 height,
                 samples: film.samples(),
@@ -530,21 +571,26 @@ fn post_edit_error(lanes: &Lanes, error: Error) {
     *lanes.edit_error.lock().expect("edit-error mutex poisoned") = Some(error);
 }
 
-/// The pair of publish buffers — the double-buffer the render thread rotates
-/// through — each a full-frame linear RGBA f32 average: what the resolve
-/// kernel writes and a consumer's tonemap reads by device address.
-fn publish_buffers(gpu: &Context, width: u32, height: u32) -> Result<[Arc<Buffer>; 2]> {
-    let bytes = u64::from(width) * u64::from(height) * 16;
-    let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
-    let buffer = || -> Result<Arc<Buffer>> {
-        Ok(Arc::new(gpu.create_buffer(
-            "session.frame",
-            bytes,
-            usage,
-            MemoryLocation::GpuOnly,
-        )?))
+/// The pair of publish slots — the double-buffer the render thread rotates
+/// through — each the film's four full-frame linear averages: what the
+/// resolve kernel writes and a consumer reads by device address.
+fn publish_buffers(gpu: &Context, width: u32, height: u32) -> Result<[Arc<FrameBuffers>; 2]> {
+    let texels = u64::from(width) * u64::from(height);
+    let usage = vk::BufferUsageFlags::STORAGE_BUFFER
+        | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+        | vk::BufferUsageFlags::TRANSFER_SRC;
+    let buffer = |name: &str, bytes: u64| -> Result<Buffer> {
+        gpu.create_buffer(name, bytes, usage, MemoryLocation::GpuOnly)
     };
-    Ok([buffer()?, buffer()?])
+    let slot = || -> Result<Arc<FrameBuffers>> {
+        Ok(Arc::new(FrameBuffers {
+            beauty: buffer("session.frame", texels * 16)?,
+            albedo: buffer("session.frame.albedo", texels * 16)?,
+            normal: buffer("session.frame.normal", texels * 16)?,
+            depth: buffer("session.frame.depth", texels * 4)?,
+        }))
+    };
+    Ok([slot()?, slot()?])
 }
 
 #[cfg(test)]
@@ -598,6 +644,23 @@ mod tests {
             "accumulation stalled: {} then {}",
             first.samples(),
             later.samples()
+        );
+
+        // The frame carries its AOVs, resolved alongside the beauty: the
+        // demo's albedo guide is nowhere black (lit surfaces and a white-
+        // albedo sky), and every buffer is full-frame.
+        assert_eq!(later.albedo().size(), 64 * 64 * 16);
+        assert_eq!(later.normal().size(), 64 * 64 * 16);
+        assert_eq!(later.depth().size(), 64 * 64 * 4);
+        let albedo: Vec<f32> = bytemuck::pod_collect_to_vec(
+            &gpu.download_buffer(later.albedo())
+                .expect("download albedo"),
+        );
+        assert!(
+            albedo
+                .chunks_exact(4)
+                .all(|texel| texel[..3].iter().sum::<f32>() > 0.0),
+            "the demo's albedo guide should be lit everywhere"
         );
     }
 

@@ -1,12 +1,13 @@
 //! Headless command line: `render` accumulates a scene (a `.ron` file, a
 //! `.pbrt` file imported on the fly, or the built-in demo) to `--spp`
-//! samples and writes the linear average as an EXR — the film and the
-//! per-sample estimator are exactly the viewer's, so this writes the
-//! image the viewer converges to. `import` converts a pbrt-v4 scene to a
-//! `.ron` scene file, printing every fidelity warning the importer
-//! raises. `render --watch` stays alive and re-renders on every shader
-//! edit: recompile via `slangc`, swap the pipeline on success, keep the
-//! last good image on failure.
+//! samples and writes the linear averages as one multi-layer EXR —
+//! beauty, the denoiser's albedo and normal guides, and first-hit depth.
+//! The film and the per-sample estimator are exactly the viewer's, so the
+//! beauty layer is the image the viewer converges to. `import` converts a
+//! pbrt-v4 scene to a `.ron` scene file, printing every fidelity warning
+//! the importer raises. `render --watch` stays alive and re-renders on
+//! every shader edit: recompile via `slangc`, swap the pipeline on
+//! success, keep the last good image on failure.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -41,7 +42,7 @@ struct RenderArgs {
     height: Option<u32>,
 
     /// Maximum path length in bounces. Defaults to the scene's settings.
-    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=255))]
     depth: Option<u32>,
 
     /// Output EXR path.
@@ -153,8 +154,9 @@ fn render(args: &RenderArgs) -> anyhow::Result<()> {
     }
 }
 
-/// Accumulate the film to `spp` samples and write its linear average —
-/// the batch half of the thesis: the same estimator the viewer shows
+/// Accumulate the film to `spp` samples and write its linear averages as
+/// one multi-layer EXR (beauty + albedo/normal guides + depth) — the
+/// batch half of the thesis: the same estimator the viewer shows
 /// progressively, run to a fixed sample count and written to disk.
 fn render_frame(
     gpu: &cenote::gpu::Context,
@@ -167,10 +169,18 @@ fn render_frame(
     for _ in 0..spp {
         renderer.accumulate(gpu, scene, film)?;
     }
-    let pixels = film.average(gpu)?;
-    cenote::output::write_exr(out, film.width(), film.height(), &pixels)?;
+    let averages = film.averages(gpu)?;
+    cenote::output::write_aov_exr(
+        out,
+        film.width(),
+        film.height(),
+        &averages.beauty,
+        &averages.albedo,
+        &averages.normal,
+        &averages.depth,
+    )?;
     println!(
-        "wrote {} ({}×{}, {} spp)",
+        "wrote {} ({}×{}, {} spp; layers: beauty, albedo, normal, Z)",
         out.display(),
         film.width(),
         film.height(),

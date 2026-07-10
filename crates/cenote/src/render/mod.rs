@@ -23,6 +23,12 @@
 //! the presenter blits. The viewer owns one and drives it each frame; the
 //! CLI never touches it, since EXR output stays linear.
 //!
+//! The film carries four buffers, not one: beauty plus the AOVs — the
+//! denoiser's albedo and normal guides (with their specular pass-through:
+//! mirrors record what they show) and first-hit depth. All four share the
+//! accumulate/resolve path and the pixel-owned determinism invariant; the
+//! CLI writes them as one multi-layer EXR, and OIDN consumes the guides.
+//!
 //! Every sample is a full path-traced estimate — jittered camera ray,
 //! MIS-weighted direct light sampling at every bounce (emissive geometry,
 //! delta lights, and the importance-sampled environment), `OpenPBR`
@@ -48,7 +54,7 @@ use crate::error::Result;
 use crate::gpu::{Bindings, Buffer, ComputePipeline, Context, MemoryLocation, Pass};
 use crate::scene::Scene;
 use crate::shaders::Kernels;
-use crate::wavefront::{LightSampling, Wavefront};
+use crate::wavefront::{AovTargets, LightSampling, Wavefront, upload_aov_table};
 
 /// Workgroup width/height — must match `[numthreads(8, 8, 1)]` in the film
 /// kernels (`accumulate.slang`, `resolve.slang`, `tonemap.slang`). Named
@@ -57,14 +63,22 @@ use crate::wavefront::{LightSampling, Wavefront};
 const FILM_WORKGROUP_SIZE: u32 = 8;
 
 /// Push constants for the accumulation kernel; mirrors `struct Params` in
-/// `shaders/accumulate.slang`.
+/// `shaders/accumulate.slang` — one sample/sum address pair per film
+/// buffer: beauty and the three AOVs.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct AccumulateParams {
-    /// Device address of the new sample (`float4*`).
+    /// Device address of the new beauty sample (`float4*`).
     sample: vk::DeviceAddress,
-    /// Device address of the film's running sums (`float4*`).
+    /// Device address of the film's running beauty sums (`float4*`).
     sum: vk::DeviceAddress,
+    albedo_sample: vk::DeviceAddress,
+    albedo_sum: vk::DeviceAddress,
+    normal_sample: vk::DeviceAddress,
+    normal_sum: vk::DeviceAddress,
+    /// The depth pair is `float*` — one channel per pixel.
+    depth_sample: vk::DeviceAddress,
+    depth_sum: vk::DeviceAddress,
     width: u32,
     height: u32,
     /// Bool: overwrite the sums instead of adding — the first sample after
@@ -74,41 +88,93 @@ struct AccumulateParams {
 }
 
 /// Push constants for the resolve kernel; mirrors `struct Params` in
-/// `shaders/resolve.slang`.
+/// `shaders/resolve.slang` — one sum/average address pair per film buffer.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct ResolveParams {
-    /// Device address of the film's running sums (`float4*`).
+    /// Device address of the film's running beauty sums (`float4*`).
     sum: vk::DeviceAddress,
-    /// Device address of the linear average target (`float4*`).
+    /// Device address of the linear beauty average target (`float4*`).
     average: vk::DeviceAddress,
+    albedo_sum: vk::DeviceAddress,
+    albedo_average: vk::DeviceAddress,
+    normal_sum: vk::DeviceAddress,
+    normal_average: vk::DeviceAddress,
+    /// The depth pair is `float*` — one channel per pixel.
+    depth_sum: vk::DeviceAddress,
+    depth_average: vk::DeviceAddress,
     width: u32,
     height: u32,
     /// The sample count to divide by, as an `f32`. The host
-    /// [`Film::average`] divides by the same count, so the two averages
+    /// [`Film::averages`] divides by the same count, so the two averages
     /// agree to a few ULP (GPU division is only approximately rounded).
     samples: f32,
     _pad0: f32,
 }
 
+/// One film buffer's accumulation pair: the per-pixel target a wave writes
+/// its sample into (`TRANSFER_DST`: each wave starts by zero-filling it),
+/// and the running sums the accumulation kernel folds it into
+/// (`TRANSFER_SRC`: the accumulated image reads back — [`Film::averages`]
+/// and the tests).
+struct Accumulation {
+    sample: Buffer,
+    sum: Buffer,
+}
+
+impl Accumulation {
+    fn new(gpu: &Context, name: &str, bytes: u64) -> Result<Self> {
+        let storage =
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
+        Ok(Self {
+            sample: gpu.create_buffer(
+                &format!("{name}.sample"),
+                bytes,
+                storage | vk::BufferUsageFlags::TRANSFER_DST,
+                MemoryLocation::GpuOnly,
+            )?,
+            sum: gpu.create_buffer(
+                &format!("{name}.sum"),
+                bytes,
+                storage | vk::BufferUsageFlags::TRANSFER_SRC,
+                MemoryLocation::GpuOnly,
+            )?,
+        })
+    }
+}
+
 /// Progressive accumulation state for one render-target size: per-pixel
-/// linear RGBA f32 sums and the sample the current wave writes. The sample
-/// count lives on the host — it is uniform across pixels by construction.
+/// linear f32 sums and the samples the current wave writes — beauty plus
+/// the three AOVs (the denoiser's albedo and normal guides and first-hit
+/// depth), each its own pixel-owned pair so the bitwise-determinism
+/// invariant covers them all. The sample count lives on the host — it is
+/// uniform across pixels and buffers by construction.
 ///
-/// The resolved average — the sums divided by the count — is written into a
-/// caller-owned buffer ([`Renderer::resolve`]) rather than held here, so the
-/// [`Session`] can double-buffer its published frames while the film keeps
-/// accumulating into these sums.
+/// The resolved averages — the sums divided by the count — are written into
+/// caller-owned buffers ([`Renderer::resolve`]) rather than held here, so
+/// the [`Session`] can double-buffer its published frames while the film
+/// keeps accumulating into these sums.
 ///
 /// Sized at creation; a resize means a new `Film`. A view change means
 /// [`Film::reset`].
 pub struct Film {
-    /// One sample's radiance, written by the wavefront's shading kernels
-    /// each wave and consumed by the accumulation kernel.
-    sample: Buffer,
-    /// The running sums. `TRANSFER_SRC` so the accumulated image can be
-    /// read back — [`Film::average`] and the tests.
-    sum: Buffer,
+    /// One sample's radiance, RGBA f32.
+    beauty: Accumulation,
+    /// The denoiser albedo guide, RGBA f32 (alpha unused).
+    albedo: Accumulation,
+    /// The denoiser normal guide — world-space shading normals, post
+    /// normal-map — RGBA f32 (alpha unused).
+    normal: Accumulation,
+    /// Camera-plane z at the first hit, f32; +∞ on miss.
+    depth: Accumulation,
+    /// The guides' per-pixel feature-throughput scratch, alive within one
+    /// wave — see `AovTable` in `shaders/pathstate.slang`. Reached only by
+    /// GPU address through that table; held here for its lifetime.
+    #[expect(dead_code, reason = "reached only by GPU address, via aov_table")]
+    guide: Buffer,
+    /// The uploaded table the shading kernels reach the four buffers
+    /// above through.
+    aov_table: Buffer,
     width: u32,
     height: u32,
     samples: u32,
@@ -129,26 +195,39 @@ impl Film {
     pub fn new(gpu: &Context, width: u32, height: u32) -> Result<Self> {
         assert!(width > 0 && height > 0, "zero-sized film");
         let texels = u64::from(width) * u64::from(height);
-        let storage =
-            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
+        let albedo = Accumulation::new(gpu, "film.albedo", texels * 16)?;
+        let normal = Accumulation::new(gpu, "film.normal", texels * 16)?;
+        let depth = Accumulation::new(gpu, "film.depth", texels * 4)?;
+        let guide = gpu.create_buffer(
+            "film.aov.guide",
+            texels * 16,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            MemoryLocation::GpuOnly,
+        )?;
+        let aov_table =
+            upload_aov_table(gpu, &albedo.sample, &normal.sample, &depth.sample, &guide)?;
         Ok(Self {
-            // TRANSFER_DST: each wave starts by zero-filling its target.
-            sample: gpu.create_buffer(
-                "film.sample",
-                texels * 16,
-                storage | vk::BufferUsageFlags::TRANSFER_DST,
-                MemoryLocation::GpuOnly,
-            )?,
-            sum: gpu.create_buffer(
-                "film.sum",
-                texels * 16,
-                storage | vk::BufferUsageFlags::TRANSFER_SRC,
-                MemoryLocation::GpuOnly,
-            )?,
+            beauty: Accumulation::new(gpu, "film", texels * 16)?,
+            albedo,
+            normal,
+            depth,
+            guide,
+            aov_table,
             width,
             height,
             samples: 0,
         })
+    }
+
+    /// The wave-facing halves of the AOV buffers, for
+    /// [`Wavefront::trace_then`].
+    fn aov_targets(&self) -> AovTargets<'_> {
+        AovTargets {
+            albedo: &self.albedo.sample,
+            normal: &self.normal.sample,
+            depth: &self.depth.sample,
+            table: &self.aov_table,
+        }
     }
 
     /// Start over (the view changed): the next sample overwrites the sums
@@ -163,10 +242,10 @@ impl Film {
         self.samples
     }
 
-    /// Read back the accumulated average — linear `ACEScg` RGBA, row-major,
-    /// pixel (0, 0) top-left — the image the batch CLI writes. Each
-    /// channel is its sum divided by the sample count, so alpha comes out
-    /// exactly 1 and a one-sample average is bit-identical to the sample.
+    /// Read back the accumulated beauty average — linear `ACEScg` RGBA,
+    /// row-major, pixel (0, 0) top-left. Each channel is its sum divided
+    /// by the sample count, so alpha comes out exactly 1 and a one-sample
+    /// average is bit-identical to the sample.
     ///
     /// # Errors
     ///
@@ -178,7 +257,35 @@ impl Film {
     /// order is a programmer bug.
     pub fn average(&self, gpu: &Context) -> Result<Vec<f32>> {
         assert!(self.samples > 0, "averaging an empty film");
-        let sums: Vec<f32> = bytemuck::pod_collect_to_vec(&gpu.download_buffer(&self.sum)?);
+        self.averaged(gpu, &self.beauty)
+    }
+
+    /// Read back every accumulated average — the beauty of
+    /// [`Film::average`] plus the three AOVs, all in the same row-major
+    /// layout (RGBA quads except depth, one `f32` per pixel) — what the
+    /// batch CLI writes as one multi-layer EXR.
+    ///
+    /// # Errors
+    ///
+    /// Any [`crate::Error`] from the readbacks.
+    ///
+    /// # Panics
+    ///
+    /// If the film has no samples — there is no average yet, so calling
+    /// order is a programmer bug.
+    pub fn averages(&self, gpu: &Context) -> Result<FilmAverages> {
+        assert!(self.samples > 0, "averaging an empty film");
+        Ok(FilmAverages {
+            beauty: self.averaged(gpu, &self.beauty)?,
+            albedo: self.averaged(gpu, &self.albedo)?,
+            normal: self.averaged(gpu, &self.normal)?,
+            depth: self.averaged(gpu, &self.depth)?,
+        })
+    }
+
+    /// One buffer's sums, downloaded and divided by the sample count.
+    fn averaged(&self, gpu: &Context, accumulation: &Accumulation) -> Result<Vec<f32>> {
+        let sums: Vec<f32> = bytemuck::pod_collect_to_vec(&gpu.download_buffer(&accumulation.sum)?);
         Ok(sums.iter().map(|sum| sum / self.samples as f32).collect())
     }
 
@@ -193,6 +300,22 @@ impl Film {
     pub fn height(&self) -> u32 {
         self.height
     }
+}
+
+/// Every accumulated average of a [`Film`], read back to the host
+/// ([`Film::averages`]): row-major, pixel (0, 0) top-left; RGBA `f32`
+/// quads except `depth`, one `f32` per pixel (+∞ where every sample
+/// missed). `albedo` and `normal` are the denoiser guides; `normal` is
+/// the world-space shading normal, averaged unnormalized.
+pub struct FilmAverages {
+    /// Linear `ACEScg` radiance, RGBA (alpha exactly 1).
+    pub beauty: Vec<f32>,
+    /// The denoiser albedo guide, RGBA (alpha unused).
+    pub albedo: Vec<f32>,
+    /// The denoiser normal guide, RGBA (alpha unused).
+    pub normal: Vec<f32>,
+    /// Camera-plane z at the first hit, one `f32` per pixel.
+    pub depth: Vec<f32>,
 }
 
 /// The renderer: the wavefront engine plus the film kernels, ready to
@@ -337,9 +460,10 @@ impl Renderer {
     /// Trace the film's next sample of `scene` and add it to its sums (the
     /// first sample after creation or a reset overwrites them). One
     /// submission: the wave — at sample index [`Film::samples`], so a reset
-    /// replays the exact same sequence — into the film's sample buffer, then
-    /// the accumulation kernel, with its unconditional NaN/Inf guard, folded
-    /// into the same fence, into the sums.
+    /// replays the exact same sequence — into the film's sample buffers
+    /// (beauty and the three AOVs), then the accumulation kernel, with its
+    /// unconditional NaN/Inf guard, folded into the same fence, into the
+    /// sums.
     ///
     /// # Errors
     ///
@@ -349,23 +473,24 @@ impl Renderer {
         self.wavefront.trace_then(
             gpu,
             scene,
-            &film.sample,
+            &film.beauty.sample,
             film.width,
             film.height,
             film.samples,
+            Some(&film.aov_targets()),
             &[self.accumulate_pass(&accumulate)],
         )?;
         film.samples += 1;
         Ok(())
     }
 
-    /// Resolve `film`'s running sums into `target` as a linear average: one
-    /// dispatch dividing each pixel's sum by the sample count. `target` is the
-    /// caller's — the [`Session`] rotates through a pair of them so it can
-    /// publish one frame while the film keeps accumulating. Separate from
-    /// [`Renderer::accumulate`] on purpose, too: the render thread accumulates
-    /// flat out and resolves only when it publishes, so resolving must not
-    /// ride every sample.
+    /// Resolve `film`'s running sums into `targets` as linear averages: one
+    /// dispatch dividing each pixel's sums — beauty and the three AOVs — by
+    /// the sample count. The targets are the caller's — the [`Session`]
+    /// rotates through a pair of them so it can publish one frame while the
+    /// film keeps accumulating. Separate from [`Renderer::accumulate`] on
+    /// purpose, too: the render thread accumulates flat out and resolves
+    /// only when it publishes, so resolving must not ride every sample.
     ///
     /// # Errors
     ///
@@ -374,15 +499,23 @@ impl Renderer {
     /// # Panics
     ///
     /// If the film has no samples — there is no average to resolve, so
-    /// calling order is a programmer bug — or if `target` is smaller than the
-    /// film's `width`×`height` RGBA f32 texels.
-    pub fn resolve(&self, gpu: &Context, film: &Film, target: &Buffer) -> Result<()> {
+    /// calling order is a programmer bug — or if any target is smaller than
+    /// the film's `width`×`height` at its texel size.
+    pub fn resolve(&self, gpu: &Context, film: &Film, targets: &ResolveTargets) -> Result<()> {
         assert!(film.samples > 0, "resolving an empty film");
-        assert!(
-            target.size() >= u64::from(film.width) * u64::from(film.height) * 16,
-            "resolve target is smaller than the film"
-        );
-        let params = resolve_params(film, target);
+        let texels = u64::from(film.width) * u64::from(film.height);
+        for (target, texel) in [
+            (targets.beauty, 16),
+            (targets.albedo, 16),
+            (targets.normal, 16),
+            (targets.depth, 4),
+        ] {
+            assert!(
+                target.size() >= texels * texel,
+                "a resolve target is smaller than the film"
+            );
+        }
+        let params = resolve_params(film, targets);
         gpu.dispatch(
             &self.resolve,
             None,
@@ -403,12 +536,32 @@ impl Renderer {
     }
 }
 
-/// The accumulation kernel's push constants: `film.sample` into `film.sum`,
-/// overwriting when the film is empty.
+/// The caller-owned buffers one [`Renderer::resolve`] writes: the film's
+/// four linear averages, each in its accumulation buffer's own layout
+/// (RGBA f32 quads; `depth` one f32 per pixel).
+pub struct ResolveTargets<'a> {
+    /// Linear `ACEScg` radiance, RGBA f32.
+    pub beauty: &'a Buffer,
+    /// The denoiser albedo guide, RGBA f32.
+    pub albedo: &'a Buffer,
+    /// The denoiser normal guide, RGBA f32.
+    pub normal: &'a Buffer,
+    /// Camera-plane z at the first hit, one f32 per pixel.
+    pub depth: &'a Buffer,
+}
+
+/// The accumulation kernel's push constants: each film buffer's sample
+/// into its sums, overwriting when the film is empty.
 fn accumulate_params(film: &Film) -> AccumulateParams {
     AccumulateParams {
-        sample: film.sample.device_address(),
-        sum: film.sum.device_address(),
+        sample: film.beauty.sample.device_address(),
+        sum: film.beauty.sum.device_address(),
+        albedo_sample: film.albedo.sample.device_address(),
+        albedo_sum: film.albedo.sum.device_address(),
+        normal_sample: film.normal.sample.device_address(),
+        normal_sum: film.normal.sum.device_address(),
+        depth_sample: film.depth.sample.device_address(),
+        depth_sum: film.depth.sum.device_address(),
         width: film.width,
         height: film.height,
         reset: u32::from(film.samples == 0),
@@ -416,12 +569,18 @@ fn accumulate_params(film: &Film) -> AccumulateParams {
     }
 }
 
-/// The resolve kernel's push constants: `film.sum` divided by the sample
-/// count into `target`.
-fn resolve_params(film: &Film, target: &Buffer) -> ResolveParams {
+/// The resolve kernel's push constants: each film buffer's sums divided by
+/// the sample count into its target.
+fn resolve_params(film: &Film, targets: &ResolveTargets) -> ResolveParams {
     ResolveParams {
-        sum: film.sum.device_address(),
-        average: target.device_address(),
+        sum: film.beauty.sum.device_address(),
+        average: targets.beauty.device_address(),
+        albedo_sum: film.albedo.sum.device_address(),
+        albedo_average: targets.albedo.device_address(),
+        normal_sum: film.normal.sum.device_address(),
+        normal_average: targets.normal.device_address(),
+        depth_sum: film.depth.sum.device_address(),
+        depth_average: targets.depth.device_address(),
         width: film.width,
         height: film.height,
         samples: film.samples as f32,
@@ -471,7 +630,7 @@ mod tests {
                 .accumulate(gpu, scene, &mut film)
                 .expect("accumulate");
         }
-        download_f32(gpu, &film.sum)
+        download_f32(gpu, &film.beauty.sum)
     }
 
     /// A furnace scene: one big plane of the given material, scaled by
@@ -1540,6 +1699,181 @@ mod tests {
         );
     }
 
+    /// The AOVs' ground truth, pinned on a quad facing the camera dead-on.
+    /// A pure-diffuse surface records its guides at the first hit, so the
+    /// albedo AOV must equal the material's base color *exactly* (prep's
+    /// `ACEScg` conversion and all — the guide is what the beauty divides
+    /// by), the normal AOV the quad's +z. Depth is the sharp one: the
+    /// quad's plane is perpendicular to the camera forward, so every quad
+    /// pixel must read exactly the camera distance — hit *distance* grows
+    /// off-axis while the stashed forward cosine shrinks, and only their
+    /// product is constant, which pins the camera-plane-z convention
+    /// against a Euclidean-distance regression. Sky pixels: albedo white
+    /// (OIDN's background convention), no normal, depth +∞.
+    #[test]
+    fn aovs_record_albedo_normal_and_depth() {
+        use crate::scene::changeset::{
+            CameraPatch, ChangeSet, InstancePatch, MaterialPatch, MeshPatch, Op, SettingsPatch,
+        };
+        use crate::scene::description::{MeshSource, SceneDescription, Texturable};
+
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let mut description = SceneDescription::new();
+        description
+            .apply(&ChangeSet {
+                ops: vec![
+                    Op::Settings(SettingsPatch::new("main")),
+                    Op::Camera(CameraPatch {
+                        position: Some([0.0, 0.0, 2.0]),
+                        look_at: Some([0.0; 3]),
+                        // 2·atan(1/2): a ±1 quad at distance 2 would fill
+                        // the frame; this ±0.6 one leaves sky at the edges.
+                        vfov_degrees: Some(53.130_1),
+                        ..CameraPatch::new("main")
+                    }),
+                    // No environment: black sky — the guides don't care.
+                    Op::Mesh(MeshPatch {
+                        source: Some(MeshSource::Inline {
+                            positions: vec![
+                                [-0.6, -0.6, 0.0],
+                                [0.6, -0.6, 0.0],
+                                [0.6, 0.6, 0.0],
+                                [-0.6, 0.6, 0.0],
+                            ],
+                            normals: Some(vec![[0.0, 0.0, 1.0]; 4]),
+                            uvs: None,
+                            triangles: vec![[0, 1, 2], [0, 2, 3]],
+                        }),
+                        ..MeshPatch::new("quad")
+                    }),
+                    Op::Material(Box::new(MaterialPatch {
+                        base_color: Some(Texturable::Constant([0.7, 0.2, 0.1])),
+                        specular_weight: Some(0.0),
+                        ..MaterialPatch::new("matte")
+                    })),
+                    Op::Instance(InstancePatch {
+                        mesh: Some("quad".into()),
+                        material: Some("matte".into()),
+                        ..InstancePatch::new("quad")
+                    }),
+                ],
+            })
+            .expect("valid scene");
+        let scene = Scene::prep(&gpu, &mut description).expect("prep");
+        let renderer = Renderer::new(&gpu).expect("renderer");
+        let size = 64;
+        let mut film = Film::new(&gpu, size, size).expect("film");
+        for _ in 0..4 {
+            renderer
+                .accumulate(&gpu, &scene, &mut film)
+                .expect("accumulate");
+        }
+        let averages = film.averages(&gpu).expect("averages");
+
+        let expected_albedo = crate::color::acescg_from_rec709(Vec3::new(0.7, 0.2, 0.1)).to_array();
+        // Quad pixels: the center, and one well off-axis (the quad spans
+        // ±19 px around center 32) where distance ≠ perpendicular z.
+        for (x, y) in [(32, 32), (44, 32), (32, 22)] {
+            let index = ((y * size + x) * 4) as usize;
+            for (channel, expected) in expected_albedo.iter().enumerate() {
+                let got = averages.albedo[index + channel];
+                assert!(
+                    (got - expected).abs() < 1e-5,
+                    "albedo at ({x},{y}) channel {channel}: {got} vs {expected}"
+                );
+            }
+            let normal = &averages.normal[index..index + 3];
+            assert!(
+                normal[0].abs() < 1e-5 && normal[1].abs() < 1e-5 && (normal[2] - 1.0).abs() < 1e-5,
+                "normal at ({x},{y}): {normal:?} vs +z"
+            );
+            let depth = averages.depth[(y * size + x) as usize];
+            assert!(
+                (depth - 2.0).abs() < 1e-3,
+                "depth at ({x},{y}): {depth} vs the camera plane's 2.0"
+            );
+        }
+
+        // A corner pixel sees only sky.
+        let corner = ((2 * size + 2) * 4) as usize;
+        for channel in 0..3 {
+            let albedo = averages.albedo[corner + channel];
+            assert!(
+                (albedo - 1.0).abs() < 1e-5,
+                "sky albedo should be white: {albedo}"
+            );
+            assert!(
+                averages.normal[corner + channel].abs() < 1e-5,
+                "sky has no normal"
+            );
+        }
+        let sky_depth = averages.depth[(2 * size + 2) as usize];
+        assert!(
+            sky_depth.is_infinite() && sky_depth.is_sign_positive(),
+            "sky depth should be +inf: {sky_depth}"
+        );
+    }
+
+    /// The specular pass-through ramp, pinned by the normal guide. A
+    /// mirror-smooth metal floor scatters every path through
+    /// `LOBE_SPECULAR` at the roughness floor (0.035), so only
+    /// 0.035/0.15 of the guide records the floor's own normal — the rest
+    /// rides the reflection to the sky, whose albedo is white and whose
+    /// normal is nothing. The same floor at roughness 0.5 sits past the
+    /// ramp's end and records fully. Both are per-sample exact: the
+    /// record fraction is deterministic and the floor normal is exactly
+    /// +y, so the assertions are equalities, not statistics.
+    #[test]
+    fn specular_guides_pass_through_to_what_mirrors_show() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let renderer = Renderer::new(&gpu).expect("renderer");
+        let normal_y = |roughness: f32| -> f32 {
+            let scene = furnace_scene(
+                &gpu,
+                Material::metal(Vec3::ONE, roughness),
+                Vec3::ZERO,
+                1.0,
+                None,
+            );
+            let size = 16;
+            let mut film = Film::new(&gpu, size, size).expect("film");
+            for _ in 0..2 {
+                renderer
+                    .accumulate(&gpu, &scene, &mut film)
+                    .expect("accumulate");
+            }
+            let averages = film.averages(&gpu).expect("averages");
+            let center = ((size / 2 * size + size / 2) * 4) as usize;
+            // Sanity alongside: white metal or white sky, the albedo
+            // guide reads ~1 either way, and the floor's depth is finite.
+            assert!(
+                (averages.albedo[center] - 1.0).abs() < 1e-3,
+                "white-metal albedo guide should be ~1: {}",
+                averages.albedo[center]
+            );
+            let depth = averages.depth[(size / 2 * size + size / 2) as usize];
+            assert!(depth.is_finite() && depth > 0.0, "floor depth: {depth}");
+            averages.normal[center + 1]
+        };
+
+        let mirror = normal_y(0.0);
+        let expected = 0.035 / 0.15; // the roughness floor, into the ramp
+        assert!(
+            (mirror - expected).abs() < 1e-3,
+            "a mirror should record only the ramp floor of its normal: \
+             {mirror} vs {expected}"
+        );
+        let rough = normal_y(0.5);
+        assert!(
+            (rough - 1.0).abs() < 1e-3,
+            "roughness past the ramp should record fully: {rough}"
+        );
+    }
+
     /// The hot-reload swap end to end, minus the file watch: recompile the
     /// unmodified kernel set through the runtime `slangc` path, swap it in,
     /// and require a pixel-identical frame — same source, same compiler,
@@ -1624,7 +1958,7 @@ mod tests {
             .zip(&s2)
             .map(|((a, b), c)| a + b + c)
             .collect();
-        assert_eq!(download_f32(&gpu, &film.sum), expected);
+        assert_eq!(download_f32(&gpu, &film.beauty.sum), expected);
 
         // The batch readback is those sums divided by the count — the same
         // f32 division on both sides, so agreement is again bitwise.
@@ -1655,7 +1989,7 @@ mod tests {
         assert_eq!(film.samples(), 1);
 
         let single = renderer.render(&gpu, &scene, 64, 64).expect("render");
-        assert_eq!(download_f32(&gpu, &film.sum), single);
+        assert_eq!(download_f32(&gpu, &film.beauty.sum), single);
     }
 
     /// The GPU resolve must land the same average as the host
@@ -1677,24 +2011,47 @@ mod tests {
                 .accumulate(&gpu, &scene, &mut film)
                 .expect("accumulate");
         }
-        let target = gpu
-            .create_buffer(
-                "test.average",
-                64 * 64 * 16,
+        let target = |name: &str, bytes: u64| {
+            gpu.create_buffer(
+                name,
+                bytes,
                 vk::BufferUsageFlags::STORAGE_BUFFER
                     | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
                     | vk::BufferUsageFlags::TRANSFER_SRC,
                 MemoryLocation::GpuOnly,
             )
-            .expect("average buffer");
-        renderer.resolve(&gpu, &film, &target).expect("resolve");
-        let gpu_average = download_f32(&gpu, &target);
-        let host_average = film.average(&gpu).expect("host average");
-        for (gpu, host) in gpu_average.iter().zip(&host_average) {
-            assert!(
-                (gpu - host).abs() <= 1e-5 * host.abs().max(1.0),
-                "resolve diverged from the host average: {gpu} vs {host}"
-            );
+            .expect("average buffer")
+        };
+        let beauty = target("test.average", 64 * 64 * 16);
+        let albedo = target("test.average.albedo", 64 * 64 * 16);
+        let normal = target("test.average.normal", 64 * 64 * 16);
+        let depth = target("test.average.depth", 64 * 64 * 4);
+        let targets = ResolveTargets {
+            beauty: &beauty,
+            albedo: &albedo,
+            normal: &normal,
+            depth: &depth,
+        };
+        renderer.resolve(&gpu, &film, &targets).expect("resolve");
+        let host = film.averages(&gpu).expect("host averages");
+        for (label, resolved, averaged) in [
+            ("beauty", download_f32(&gpu, &beauty), host.beauty),
+            ("albedo", download_f32(&gpu, &albedo), host.albedo),
+            ("normal", download_f32(&gpu, &normal), host.normal),
+            ("depth", download_f32(&gpu, &depth), host.depth),
+        ] {
+            for (gpu_value, host_value) in resolved.iter().zip(&averaged) {
+                // Depth averages can be +inf on both sides — inf − inf is
+                // NaN, so bit equality covers what the ULP bound can't.
+                if gpu_value.to_bits() == host_value.to_bits() {
+                    continue;
+                }
+                assert!(
+                    (gpu_value - host_value).abs() <= 1e-5 * host_value.abs().max(1.0),
+                    "{label} resolve diverged from the host average: \
+                     {gpu_value} vs {host_value}"
+                );
+            }
         }
     }
 
@@ -1728,7 +2085,7 @@ mod tests {
         ];
         // Swap in a hand-poisoned sample; the usual writer (the primary
         // kernel) can't produce one.
-        film.sample = gpu
+        film.beauty.sample = gpu
             .upload_buffer(
                 "film.sample.poisoned",
                 bytemuck::bytes_of(&poisoned),
@@ -1748,13 +2105,13 @@ mod tests {
             0.0, 0.0, 0.0, 0.0, //
             0.25, 0.5, 0.75, 1.0,
         ];
-        assert_eq!(download_f32(&gpu, &film.sum), expected_once);
+        assert_eq!(download_f32(&gpu, &film.beauty.sum), expected_once);
 
         film.samples = 1;
         let additive = accumulate_params(&film);
         gpu.submit_passes(&[renderer.accumulate_pass(&additive)])
             .expect("additive path");
         let doubled: Vec<f32> = expected_once.iter().map(|value| 2.0 * value).collect();
-        assert_eq!(download_f32(&gpu, &film.sum), doubled);
+        assert_eq!(download_f32(&gpu, &film.beauty.sum), doubled);
     }
 }

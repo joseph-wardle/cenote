@@ -57,6 +57,85 @@ pub fn write_exr(path: &Path, width: u32, height: u32, pixels: &[f32]) -> Result
     Ok(())
 }
 
+/// Write a frame and its AOVs as one multi-layer EXR — the batch CLI's
+/// output. Nuke-safe naming: beauty is the bare `R`/`G`/`B`/`A`, depth the
+/// bare de-facto-standard `Z`, the denoiser guides `albedo.R/G/B` and
+/// `normal.X/Y/Z` — no dots *within* a layer name. Color channels store
+/// f16 (compositing's convention; the quantization is display-invisible),
+/// `Z` stays f32 (depths span orders of magnitude, and +∞ marks the sky).
+/// `beauty`/`albedo`/`normal` are row-major RGBA `f32` quads, `depth` one
+/// `f32` per pixel — exactly [`crate::render::FilmAverages`]'s layout.
+///
+/// # Errors
+///
+/// [`crate::Error::Image`] if encoding or the underlying I/O fails.
+///
+/// # Panics
+///
+/// If any slice doesn't hold exactly `width × height` of its layout — a
+/// programmer bug.
+pub fn write_aov_exr(
+    path: &Path,
+    width: u32,
+    height: u32,
+    beauty: &[f32],
+    albedo: &[f32],
+    normal: &[f32],
+    depth: &[f32],
+) -> Result<()> {
+    use exr::image::{Encoding, Image, Layer};
+    use exr::prelude::{AnyChannel, AnyChannels, FlatSamples, SmallVec, WritableImage, f16};
+
+    let texels = (u64::from(width) * u64::from(height)) as usize;
+    for (label, quads) in [("beauty", beauty), ("albedo", albedo), ("normal", normal)] {
+        assert_eq!(
+            quads.len(),
+            texels * 4,
+            "{label} pixel count doesn't match image dimensions"
+        );
+    }
+    assert_eq!(
+        depth.len(),
+        texels,
+        "depth pixel count doesn't match image dimensions"
+    );
+
+    let f16_channel = |quads: &[f32], offset: usize| {
+        FlatSamples::F16(
+            quads
+                .iter()
+                .skip(offset)
+                .step_by(4)
+                .map(|value| f16::from_f32(*value))
+                .collect(),
+        )
+    };
+    let mut channels = SmallVec::new();
+    for (name, offset) in [("R", 0), ("G", 1), ("B", 2), ("A", 3)] {
+        channels.push(AnyChannel::new(name, f16_channel(beauty, offset)));
+    }
+    channels.push(AnyChannel::new("Z", FlatSamples::F32(depth.to_vec())));
+    for (name, offset) in [("albedo.R", 0), ("albedo.G", 1), ("albedo.B", 2)] {
+        channels.push(AnyChannel::new(name, f16_channel(albedo, offset)));
+    }
+    for (name, offset) in [("normal.X", 0), ("normal.Y", 1), ("normal.Z", 2)] {
+        channels.push(AnyChannel::new(name, f16_channel(normal, offset)));
+    }
+
+    let layer = Layer::new(
+        (width as usize, height as usize),
+        exr::meta::header::LayerAttributes::default(),
+        // Zip scanlines: what a production render would ship — the default
+        // is RLE tiles, ~2× the size on real frames.
+        Encoding::SMALL_LOSSLESS,
+        AnyChannels::sort(channels),
+    );
+    let mut image = Image::from_layer(layer);
+    image.attributes.chromaticities = Some(ACESCG_CHROMATICITIES);
+    image.write().to_file(path)?;
+    Ok(())
+}
+
 /// Read an EXR's first layer back as `(width, height, pixels)` in the same
 /// row-major RGBA `f32` layout that [`write_exr`] takes — `f32` channels
 /// round-trip losslessly.
@@ -120,6 +199,81 @@ mod tests {
         let (width, height, read_back) = read.expect("read");
         assert_eq!((width, height), (3, 2));
         assert_eq!(read_back, pixels);
+    }
+
+    /// The multi-layer EXR carries exactly the channels the plan names, in
+    /// the types it names: beauty as bare `R/G/B/A` and the guides as
+    /// `albedo.*`/`normal.*` in f16, depth as the bare f32 `Z` — where +∞
+    /// (a sky pixel) must survive the trip exactly. And the header still
+    /// declares `ACEScg`, like every file this module writes.
+    #[test]
+    fn aov_exr_layers_carry_the_named_channels() {
+        use exr::prelude::{ReadChannels, ReadLayers, f16};
+
+        let beauty: Vec<f32> = (0..8).map(|i| i as f32 * 0.25).collect();
+        let albedo = vec![0.5_f32; 8];
+        let normal = vec![0.25_f32; 8];
+        let depth = vec![1.5_f32, f32::INFINITY];
+        let path = std::env::temp_dir().join(format!("cenote-aov-{}.exr", std::process::id()));
+        write_aov_exr(&path, 2, 1, &beauty, &albedo, &normal, &depth).expect("write");
+
+        let image = exr::prelude::read()
+            .no_deep_data()
+            .largest_resolution_level()
+            .all_channels()
+            .first_valid_layer()
+            .all_attributes()
+            .from_file(&path);
+        let _ = std::fs::remove_file(&path);
+        let image = image.expect("read");
+        assert_eq!(
+            image.attributes.chromaticities,
+            Some(ACESCG_CHROMATICITIES),
+            "the multi-layer file must declare ACEScg too"
+        );
+
+        let channels = &image.layer_data.channel_data.list;
+        let names: Vec<String> = channels
+            .iter()
+            .map(|channel| channel.name.to_string())
+            .collect();
+        // Alphabetical — the EXR spec's required channel order.
+        assert_eq!(
+            names,
+            [
+                "A", "B", "G", "R", "Z", "albedo.B", "albedo.G", "albedo.R", "normal.X",
+                "normal.Y", "normal.Z"
+            ]
+        );
+        let samples = |name: &str| {
+            &channels
+                .iter()
+                .find(|channel| channel.name.eq(name))
+                .expect("channel present")
+                .sample_data
+        };
+        let f16s = |name: &str| match samples(name) {
+            exr::prelude::FlatSamples::F16(values) => values.clone(),
+            other => panic!("{name} should store f16, holds {other:?}"),
+        };
+        assert_eq!(f16s("R"), [f16::from_f32(0.0), f16::from_f32(1.0)]);
+        assert_eq!(f16s("albedo.G"), [f16::from_f32(0.5); 2]);
+        assert_eq!(f16s("normal.Z"), [f16::from_f32(0.25); 2]);
+        match samples("Z") {
+            exr::prelude::FlatSamples::F32(values) => {
+                assert_eq!(
+                    values[0].to_bits(),
+                    1.5_f32.to_bits(),
+                    "f32 depth round-trips exactly"
+                );
+                assert!(
+                    values[1].is_infinite() && values[1].is_sign_positive(),
+                    "+inf depth must survive: {}",
+                    values[1]
+                );
+            }
+            other => panic!("Z should store f32, holds {other:?}"),
+        }
     }
 
     /// Every written file declares what its numbers mean: the header must

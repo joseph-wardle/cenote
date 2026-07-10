@@ -96,7 +96,14 @@ void raygen(uint3 tid: SV_DispatchThreadID) {
     }
 
     params.origin[tid.x] = float4(origin, 0.0);
-    params.direction[tid.x] = float4(direction, 0.0);
+    // w carries the ray's cosine against the camera's forward axis: hit
+    // distance × w is camera-plane z, so the depth AOV needs no camera in
+    // the shading kernels. Normalized here because an open aperture
+    // pre-scales the whole basis to the focal plane. A lens ray starts on
+    // the lens disk, which spans the camera plane itself, so the product
+    // is the perpendicular z for it too.
+    params.direction[tid.x] = float4(direction,
+                                     dot(direction, normalize(params.cameraForward)));
     params.pixel[tid.x] = pixel;
     // w = 0: a camera ray has no scatter pdf, which tells the first
     // surface's emission that no light-sampling strategy competed for it.
