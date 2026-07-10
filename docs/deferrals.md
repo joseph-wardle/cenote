@@ -43,13 +43,34 @@ makes it honest to support. (D-057)
 
 - **`curve` shapes** *(revisit: M5 geometry depth)* — needs a real curve primitive,
   not a tessellation hack.
-- **`subsurface` materials** *(revisit: M7)* — today `subsurface_color` maps onto
-  diffuse at import, with a warning; real random-walk SSS is M7's whole subject.
-- **Participating media / `MakeNamedMedium`** *(revisit: M8 volumes)*.
+- **`subsurface` materials** *(revisit: M7)* — today: warned and imported as the
+  default surface; real random-walk SSS is M7's whole subject.
+- **Participating media / `MakeNamedMedium`** *(revisit: M8 volumes)* — today the
+  corpus teapot's tea imports as colorless glass, warned.
 - **`spot` lights** *(revisit: first corpus scene that uses one — trivial)*.
 - **`measured`/`mix` materials, `realistic` camera** *(no milestone; revisit on
   demand)* — measured BRDFs and lens tables serve research comparisons, not the
   production path.
+- **Spectral light and IOR data** *(revisit: on demand)* — Today: named/file/inline
+  spectra degrade with a warning (lights to white at their photometric scale,
+  dispersive IORs to 1.5, conductor spectra outside the four-metal F0 table to
+  copper). Production shape: spectral upsampling projected to RGB at import —
+  meaningful only alongside the closure's own spectral ambitions (dispersion).
+  (D-057)
+- **One-sided emission** *(revisit: a corpus scene where back-face emission visibly
+  wrongs the light transport)* — Today: cenote emitters are two-sided by design
+  (D-023); one-sided pbrt area lights import with a counted warning, and flush
+  ceiling panels leak a little light above themselves. Production shape: an
+  emission-sidedness flag on the material, honored by both light-sampling
+  strategies. (D-079)
+- **Gzipped PLY (`.ply.gz`)** *(revisit: first showcase scene that ships one —
+  lte-orb does)* — Today: the PLY reader reads plain files only. Production shape:
+  a gzip wrapper over the same reader via the `miniz_oxide` already in the tree.
+  (D-056)
+- **Area-light `power` normalization** *(revisit: first scene that uses it)* —
+  Today: warned, the plain photometric scale applies. Needs the shape's surface
+  area (and an image integral for textured emitters) at import — pbrt's own
+  `k_e` computation, straightforward once wanted. (D-057)
 
 ## Closure (OpenPBR)
 
@@ -89,6 +110,17 @@ shadergen degrades SSS to diffuse. (D-059)
   5.2-style demand-loaded tiles. Only scenes that exceed VRAM budgets force this.
 - **Bump & displacement** *(bump: on demand; displacement: M5 geometry depth)* —
   Today: skipped at import with a warning; normal maps cover the corpus. (D-061)
+- **UV transforms on texture references** *(revisit: first corpus scene that
+  tiles — pbrt's `uscale`/`vscale`/`udelta`/`vdelta`)* — Today: warned, authored
+  UVs sample directly (the vendored teapot pre-tiles its checkerboard instead).
+  Production shape: a 2×3 UV transform on the texture reference, applied at
+  sampling. (D-057)
+- **Remap curves on textured roughness** *(revisit: first corpus scene whose look
+  visibly needs it)* — Today: pbrt's `remaproughness` applies to constants only;
+  a roughness *map* imports with its texels read as OpenPBR roughness directly,
+  warned (the α conventions differ: pbrt remapped is `α = √r`, OpenPBR is
+  `α = r²`). Production shape: a per-reference value transform baked at texture
+  prep, alongside the existing usage classes. (D-079)
 - **UDIM tiles + multiple UV sets** *(revisit: first production asset — M4/M5
   era)* — Today: one UV set, one image per reference. Production must-haves the
   corpus never exercises; the texture-reference schema grows a tile pattern and

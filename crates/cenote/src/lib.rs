@@ -16,6 +16,7 @@
 //! | `lights`    | The light list — emissive triangles and delta lights — and its power-proportional alias table, built at prep |
 //! | `environment` | The equirect environment light: EXR load and the CDF sampling tables, built at prep |
 //! | `color`     | Authored `Rec.709` → `ACEScg` conversion at scene prep |
+//! | `ply`       | Hand-rolled PLY reader — the mesh schema's bulk-geometry payload, resolved at prep |
 //! | `tables`    | The closure's baked lookup tables — GGX energy data (regenerable from its own QMC baker) and the vendored LTC sheen fit — embedded, uploaded with the scene's resident buffers |
 //! | `texture`   | Texture prep: decode → mip-cap → BC encode, cached as a DDS beside the source; scene prep uploads the results into the bindless table |
 //! | `wavefront` | The engine core: `SoA` path state, GPU stage queues, indirect dispatch — one [`wavefront::Wavefront::trace`] is one sample per pixel, written pixel-owned so renders are bitwise deterministic |
@@ -49,6 +50,7 @@ pub mod gpu;
 pub mod lights;
 pub mod material;
 pub mod output;
+mod ply;
 pub mod render;
 pub mod scene;
 pub mod shaders;

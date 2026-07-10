@@ -364,8 +364,21 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "cenote",
+ "cenote-pbrt",
  "clap",
  "env_logger",
+ "log",
+]
+
+[[package]]
+name = "cenote-pbrt"
+version = "0.0.1"
+dependencies = [
+ "cenote",
+ "env_logger",
+ "glam",
+ "log",
+ "nv-flip",
 ]
 
 [[package]]
@@ -374,6 +387,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "cenote",
+ "cenote-pbrt",
  "egui",
  "egui-winit",
  "env_logger",

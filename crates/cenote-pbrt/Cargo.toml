@@ -1,0 +1,24 @@
+[package]
+name = "cenote-pbrt"
+description = "pbrt-v4 scene importer: .pbrt in, a cenote ChangeSet out"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The importer is a *client* of the scene API: it consumes only cenote's
+# public surface, so the crate boundary proves that surface is sufficient.
+# The pbrt tokenizer/parser is hand-rolled here — recursive descent over a
+# well-documented grammar, under the write-it-yourself bar.
+[dependencies]
+cenote = { path = "../cenote" }
+glam = { version = "0.33.2" }
+log = "0.4.33"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+env_logger = "0.11.11"
+nv-flip = "0.1.2"

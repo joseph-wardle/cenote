@@ -1,61 +1,132 @@
-//! Headless batch renderer: bring up the GPU, accumulate `--spp` samples of
-//! the demo scene, write the linear average as an EXR. The film and the
-//! per-sample estimator are exactly the viewer's, so this writes the image
-//! the viewer converges to. With `--watch`, stays alive and re-renders on
-//! every shader edit: recompile via `slangc`, swap the pipeline on success,
-//! keep the last good image on failure.
+//! Headless command line: `render` accumulates a scene (a `.ron` file, a
+//! `.pbrt` file imported on the fly, or the built-in demo) to `--spp`
+//! samples and writes the linear average as an EXR — the film and the
+//! per-sample estimator are exactly the viewer's, so this writes the
+//! image the viewer converges to. `import` converts a pbrt-v4 scene to a
+//! `.ron` scene file, printing every fidelity warning the importer
+//! raises. `render --watch` stays alive and re-renders on every shader
+//! edit: recompile via `slangc`, swap the pipeline on success, keep the
+//! last good image on failure.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use anyhow::Context as _;
 use clap::Parser;
 
 #[derive(Parser)]
-#[command(
-    version,
-    about = "Cenote headless renderer: render one frame to an EXR"
-)]
-struct Args {
-    /// Output width in pixels.
-    #[arg(long, default_value_t = 1280, value_parser = clap::value_parser!(u32).range(1..))]
-    width: u32,
+#[command(version, about = "Cenote: a GPU path tracer")]
+enum Command {
+    /// Render a scene to an EXR (the built-in demo when none is named).
+    Render(RenderArgs),
+    /// Convert a pbrt-v4 scene to a cenote .ron scene file.
+    Import(ImportArgs),
+}
 
-    /// Output height in pixels.
-    #[arg(long, default_value_t = 720, value_parser = clap::value_parser!(u32).range(1..))]
-    height: u32,
+#[derive(clap::Args)]
+struct RenderArgs {
+    /// Scene file, `.ron` or `.pbrt`. Omitted renders the built-in demo.
+    scene: Option<PathBuf>,
 
-    /// Samples per pixel to accumulate.
-    #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u32).range(1..))]
-    spp: u32,
+    /// Samples per pixel. Defaults to the scene's settings (demo: 64).
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    spp: Option<u32>,
 
-    /// Maximum path length, in bounces.
-    #[arg(
-        long,
-        default_value_t = cenote::wavefront::Wavefront::DEFAULT_MAX_BOUNCES,
-        value_parser = clap::value_parser!(u32).range(1..),
-    )]
-    depth: u32,
+    /// Output width in pixels. Defaults to the scene's settings.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    width: Option<u32>,
+
+    /// Output height in pixels. Defaults to the scene's settings.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    height: Option<u32>,
+
+    /// Maximum path length in bounces. Defaults to the scene's settings.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    depth: Option<u32>,
 
     /// Output EXR path.
     #[arg(long, default_value = "render.exr")]
     out: PathBuf,
 
-    /// Re-render whenever a shader source is edited (hot reload). Compiles
-    /// kernels from the source checkout; a broken edit prints the compiler's
-    /// diagnostics and keeps the last good image.
+    /// Re-render whenever a shader source is edited (hot reload).
+    /// Compiles kernels from the source checkout; a broken edit prints
+    /// the compiler's diagnostics and keeps the last good image.
     #[arg(long)]
     watch: bool,
 }
 
+#[derive(clap::Args)]
+struct ImportArgs {
+    /// The pbrt-v4 scene file.
+    scene: PathBuf,
+
+    /// Output .ron path. Derived assets (a resampled sky) are written
+    /// beside it, and the scene's references are relativized against it.
+    #[arg(long)]
+    out: PathBuf,
+}
+
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let args = Args::parse();
+    match Command::parse() {
+        Command::Render(args) => render(&args),
+        Command::Import(args) => import(&args),
+    }
+}
 
+/// Load a scene file as a change-set: `.pbrt` through the importer
+/// (derived assets go to a temp directory that lives as long as this
+/// process cares), anything else as `.ron`.
+fn load_scene(path: &Path) -> anyhow::Result<cenote::scene::changeset::ChangeSet> {
+    if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pbrt"))
+    {
+        let generated = std::env::temp_dir().join("cenote-pbrt-generated");
+        let imported = cenote_pbrt::import(path, &generated)
+            .with_context(|| format!("importing {}", path.display()))?;
+        for warning in &imported.warnings {
+            log::warn!("{warning}");
+        }
+        Ok(imported.set)
+    } else {
+        cenote::format::load(path).with_context(|| format!("loading scene {}", path.display()))
+    }
+}
+
+fn render(args: &RenderArgs) -> anyhow::Result<()> {
     let gpu = cenote::gpu::Context::new()?;
-    let scene = cenote::scene::Scene::demo(&gpu)?;
-    let mut renderer = cenote::render::Renderer::with_max_bounces(&gpu, args.depth)?;
-    let mut film = cenote::render::Film::new(&gpu, args.width, args.height)?;
-    render_frame(&gpu, &scene, &renderer, &mut film, &args)?;
+    // The scene and the settings that fill in unspecified flags: the
+    // named file's, or the demo with its schema defaults (which match
+    // the flags' historical defaults).
+    let (scene, settings) = match &args.scene {
+        Some(path) => {
+            let set = load_scene(path)?;
+            let mut description = cenote::scene::description::SceneDescription::new();
+            description.apply(&set).context("scene rejected")?;
+            let settings = description
+                .settings()
+                .values()
+                .next()
+                .cloned()
+                .unwrap_or_default();
+            let scene = cenote::scene::Scene::prep(&gpu, &mut description)
+                .context("preparing the scene")?;
+            (scene, settings)
+        }
+        None => (
+            cenote::scene::Scene::demo(&gpu)?,
+            cenote::scene::description::Settings::default(),
+        ),
+    };
+    let width = args.width.unwrap_or(settings.resolution[0]);
+    let height = args.height.unwrap_or(settings.resolution[1]);
+    let spp = args.spp.unwrap_or(settings.spp);
+    let depth = args.depth.unwrap_or(settings.max_bounces);
+
+    let mut renderer = cenote::render::Renderer::with_max_bounces(&gpu, depth)?;
+    let mut film = cenote::render::Film::new(&gpu, width, height)?;
+    render_frame(&gpu, &scene, &renderer, &mut film, spp, &args.out)?;
     if !args.watch {
         return Ok(());
     }
@@ -77,12 +148,12 @@ fn main() -> anyhow::Result<()> {
         // A reset replays the same sample sequence, so an unchanged kernel
         // reproduces the previous image bit for bit.
         film.reset();
-        render_frame(&gpu, &scene, &renderer, &mut film, &args)?;
+        render_frame(&gpu, &scene, &renderer, &mut film, spp, &args.out)?;
         println!("reloaded in {} ms", start.elapsed().as_millis());
     }
 }
 
-/// Accumulate the film to `--spp` samples and write its linear average —
+/// Accumulate the film to `spp` samples and write its linear average —
 /// the batch half of the thesis: the same estimator the viewer shows
 /// progressively, run to a fixed sample count and written to disk.
 fn render_frame(
@@ -90,19 +161,47 @@ fn render_frame(
     scene: &cenote::scene::Scene,
     renderer: &cenote::render::Renderer,
     film: &mut cenote::render::Film,
-    args: &Args,
+    spp: u32,
+    out: &Path,
 ) -> anyhow::Result<()> {
-    for _ in 0..args.spp {
+    for _ in 0..spp {
         renderer.accumulate(gpu, scene, film)?;
     }
     let pixels = film.average(gpu)?;
-    cenote::output::write_exr(&args.out, args.width, args.height, &pixels)?;
+    cenote::output::write_exr(out, film.width(), film.height(), &pixels)?;
     println!(
         "wrote {} ({}×{}, {} spp)",
-        args.out.display(),
-        args.width,
-        args.height,
-        args.spp
+        out.display(),
+        film.width(),
+        film.height(),
+        spp
+    );
+    Ok(())
+}
+
+fn import(args: &ImportArgs) -> anyhow::Result<()> {
+    let out = std::path::absolute(&args.out)?;
+    let out_dir = out.parent().context("--out has no parent directory")?;
+    let imported = cenote_pbrt::import(&args.scene, out_dir)
+        .with_context(|| format!("importing {}", args.scene.display()))?;
+    for warning in &imported.warnings {
+        eprintln!("warning: {warning}");
+    }
+    // Prove the scene applies — a dangling texture or PLY reference
+    // surfaces here, at import, not at first render.
+    let mut description = cenote::scene::description::SceneDescription::new();
+    description
+        .apply(&imported.set)
+        .context("the imported scene does not apply")?;
+
+    let mut set = imported.set;
+    set.relativize_paths(out_dir);
+    std::fs::write(&out, cenote::format::to_ron(&set)?)?;
+    println!(
+        "wrote {} ({} ops, {} warnings)",
+        out.display(),
+        set.ops.len(),
+        imported.warnings.len()
     );
     Ok(())
 }

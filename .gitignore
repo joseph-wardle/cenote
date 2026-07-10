@@ -4,3 +4,6 @@
 
 # Texture-prep caches, written beside their source images
 *.dds
+
+# Tier-2 showcase scenes, pulled by tests/scenes/fetch-showcase.sh
+/tests/scenes/showcase/

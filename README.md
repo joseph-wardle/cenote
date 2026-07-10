@@ -20,8 +20,10 @@ beside each source, sRGB decoded in hardware, converted to the working
 space in-shader) including tangent-space normal maps and per-texel opacity,
 MIS-weighted next-event estimation of emissive meshes, delta lights, and an
 importance-sampled HDRI, thin-lens depth of field, live-editable scene
-files, a progressive viewer, and a batch CLI that writes exactly the image
-the viewer converges to.
+files, a pbrt-v4 importer (`cenote-cli import`, or open a `.pbrt` in the
+viewer directly) with a CC0 regression corpus rendered and FLIP-compared in
+CI, a progressive viewer, and a batch CLI that writes exactly the image the
+viewer converges to.
 
 ![A 5×5 grid of terracotta spheres resting on a glossy gray floor — roughness increasing left to right, metalness back to front — under a blue sky](docs/demo.png)
 
@@ -45,7 +47,8 @@ Requires: stable Rust, [`slangc`](https://github.com/shader-slang/slang) on PATH
 ```sh
 cargo run --release -p cenote-viewer   # orbit (drag), dolly (scroll), live exposure
 cargo run --release -p cenote-viewer -- scenes/example.ron   # open a scene file — and edit it live
-cargo run --release -p cenote-cli -- --spp 256 --out shot.exr
+cargo run --release -p cenote-cli -- render --spp 256 --out shot.exr
+cargo run --release -p cenote-cli -- import scene.pbrt --out scene.ron   # pbrt-v4 in, cenote scene out
 ```
 
 The viewer accumulates forever and re-converges after every camera move. An
@@ -53,10 +56,13 @@ opened scene file is watched: save an edit — a color, a transform, the
 lamp's brightness — and the viewer re-preps exactly what changed and
 re-converges. A save that doesn't parse (or that this build can't render
 yet) is logged and the previous scene keeps rendering.
-The CLI accumulates `--spp` samples of the same estimator
-into the same film and writes the linear `ACEScg` average as an EXR
+`cenote-cli render` takes a scene file too (`.ron`, or a `.pbrt` imported
+on the fly), accumulates `--spp` samples of the same estimator into the
+same film, and writes the linear `ACEScg` average as an EXR
 (chromaticities declared in the header); with `--watch` it re-renders on
 every shader edit, recompiling from the source checkout in under a second.
+`import` converts pbrt-v4 scenes, printing every fidelity warning —
+anything the importer drops or degrades is named, never silent.
 
 ## Tests and goldens
 
@@ -76,7 +82,8 @@ After an **intentional** image change, regenerate the goldens and eyeball them
 before committing:
 
 ```sh
-UPDATE_GOLDENS=1 cargo test -p cenote --test golden
+UPDATE_GOLDENS=1 cargo test -p cenote --test golden        # the demo scene
+UPDATE_GOLDENS=1 cargo test -p cenote-pbrt --test corpus   # the pbrt corpus
 ```
 
 ### Pre-push ritual
@@ -95,9 +102,11 @@ cargo test --workspace   # on the GPU machine — includes the goldens
 |---|---|
 | `crates/cenote/` | The core renderer library — start at `src/lib.rs`, whose crate doc is the architecture map |
 | `crates/cenote/shaders/` | Slang GPU kernels — the heart of the renderer |
-| `crates/cenote-cli/` | Headless batch renderer binary |
+| `crates/cenote-cli/` | Headless binary: batch renders, pbrt import |
+| `crates/cenote-pbrt/` | pbrt-v4 importer library — a client of the core's public scene API |
 | `crates/cenote-viewer/` | Interactive viewer binary: live render in a window, orbit camera, progressive accumulation, stats/controls overlay, live-editable scene files |
 | `scenes/` | Hand-written example scene — the scene model in one readable `.ron` file |
+| `tests/scenes/` | The vendored CC0 pbrt corpus (see its README for provenance) and the showcase fetch script |
 | `docs/charter.md` | Project charter: vision, locked decisions, milestone roadmap |
 | `docs/decisions.md` | Append-only log of every design decision and its rationale |
 | `docs/m0-plan.md` | The M0 implementation plan |

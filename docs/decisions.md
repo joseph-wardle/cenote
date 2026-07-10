@@ -1425,3 +1425,65 @@ last good residency); a cache that fails to write only warns. (9) *The
 geometry record grew a fourth pointer* (per-vertex UVs, zeros when
 unauthored) — which lands its transform rows on 16-byte alignment and
 retires M1's PhysicalStorageBuffer validation nag as a side effect.
+
+## 2026-07-10 — M2 step 7: the pbrt importer
+
+### D-079: cenote-pbrt ships with the five traps pinned — and a sixth found
+The importer landed as planned (D-057/D-065/D-066): a hand-rolled
+tokenizer and recursive-descent parser (spans, `file:line` diagnostics,
+`Include` spliced through a stack, every parameter's consumption tracked
+so unconsumed ones warn by name), a graphics-state mapper onto the
+change-set schema, the PLY reader in core, `cenote-cli import`/`render`
+subcommands, the viewer opening `.pbrt` directly, and a three-scene CC0
+corpus (Bitterli's cornell-box, veach-mis, teapot-full — converted from
+his pbrt-v3 exports, changes documented in the corpus README) with FLIP
+goldens in CI. Decisions the work forced:
+
+(1) *Photometric normalization is subtler than "divide by luminance":*
+pbrt's `SpectrumToPhotometric` on an RGB spectrum considers only the
+color space's illuminant, never the RGB multiplier — so **RGB light
+values import verbatim as nit-valued radiance** (`rgb L [4 4 4]` is 4
+nits, color unnormalized), while `blackbody` emitters *are* normalized
+(chromaticity at luminance 1 × scale). Verified against pbrt-v4's source
+at `5f7a606`, along with every other contract this step encodes
+(`RoughnessToAlpha = √r`, conductor defaults to copper, `eta` not `ior`,
+instancing composes the full declaration-time CTM with no ObjectBegin
+inverse, `k_e` factors for `power`/`illuminance`).
+
+(2) *Handedness is a per-scene decision, not a constant.* pbrt's
+left-handed projection imports through a `diag(1, 1, −1)` conjugation of
+every world-space transform, which maps pbrt's camera space exactly onto
+cenote's — for scenes whose camera transform is a proper rotation
+(anything authored with `LookAt`). But Tungsten-converted exports (the
+entire Bitterli corpus) bake their own handedness fix into a *reflective*
+world-to-camera matrix, under which pbrt's projection already behaves
+right-handed — conjugating those mirrors the image, which the vendored
+cornell box catches on sight (red wall left, green right). The mapper
+picks per scene at `WorldBegin` by the camera transform's determinant.
+Found by the corpus within minutes of it existing — the reason D-065
+wanted real scenes and not synthetic ones.
+
+(3) *ReverseOrientation XOR mirror-CTM applies to the data, not the
+shading:* the flip negates authored normals and reverses winding (which
+also steers derived normals); since cenote shades and emits two-sided,
+sidedness itself reduces to one honest, counted warning per import
+(deferrals: one-sided emission).
+
+(4) *The equal-area octahedral resample is Clarberg's mapping verbatim*
+(exact `atan` in place of pbrt's polynomial), bilinear with pbrt's own
+seam-wrap, light-space orientation and photometric scale baked into the
+output equirect because the environment object carries neither; image-
+less infinite lights become a two-texel constant EXR. Derived assets go
+to an explicit generated-assets directory — beside the output `.ron` for
+`import`, a temp directory for direct `.pbrt` rendering — never beside
+vendored sources.
+
+(5) *Fidelity warnings are values, not log lines:* `import` returns the
+change-set plus its warning list; the CLI prints them, the viewer logs
+them, and the corpus harness asserts the list matches exactly what the
+corpus README documents — an undocumented degradation fails CI.
+
+(6) *The importer proved the public API sufficient* (D-066's point): it
+links only `cenote`'s public surface, and the one addition core needed
+was `ChangeSet::relativize_paths` — the inverse of `rebase_paths`, so an
+apply-ready absolute-path set becomes a portable scene file.

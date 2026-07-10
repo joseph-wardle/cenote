@@ -57,6 +57,27 @@ fn main() -> anyhow::Result<()> {
     app.error.map_or(Ok(()), Err)
 }
 
+/// Load a scene file as a change-set: `.pbrt` imports through
+/// cenote-pbrt (fidelity warnings logged, derived assets in a temp
+/// directory), anything else parses as `.ron`. Reloads-on-save take the
+/// same path, so editing a watched `.pbrt` re-imports it live.
+fn load_scene(path: &Path) -> anyhow::Result<cenote::scene::changeset::ChangeSet> {
+    if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pbrt"))
+    {
+        let generated = std::env::temp_dir().join("cenote-pbrt-generated");
+        let imported = cenote_pbrt::import(path, &generated)
+            .with_context(|| format!("importing {}", path.display()))?;
+        for warning in &imported.warnings {
+            log::warn!("{warning}");
+        }
+        Ok(imported.set)
+    } else {
+        cenote::format::load(path).with_context(|| format!("loading scene {}", path.display()))
+    }
+}
+
 /// The winit application shell: the [`Viewer`] is absent until `resumed`
 /// hands us a window, and a failure anywhere parks its error here for
 /// `main` to report after the loop unwinds.
@@ -150,11 +171,7 @@ impl Viewer {
         // The scene: the named file, or the bundled demo — either way a
         // change-set applied to an empty description, then prepped.
         let (set, scene_watch) = match scene_path {
-            Some(path) => (
-                cenote::format::load(path)
-                    .with_context(|| format!("loading scene {}", path.display()))?,
-                Some(SceneWatch::new(path)?),
-            ),
+            Some(path) => (load_scene(path)?, Some(SceneWatch::new(path)?)),
             None => (cenote::scene::changeset::ChangeSet::demo(), None),
         };
         let mut description = cenote::scene::description::SceneDescription::new();
@@ -288,7 +305,7 @@ impl Viewer {
         if let Some(watch) = &self.scene_watch
             && watch.events.try_iter().count() > 0
         {
-            match cenote::format::load(&watch.path) {
+            match load_scene(&watch.path) {
                 Ok(set) => {
                     log::info!("scene file changed; reloading {}", watch.path.display());
                     self.session.replace(set);

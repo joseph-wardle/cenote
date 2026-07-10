@@ -12,8 +12,8 @@
 //! legal but almost certainly a scene bug (a textured material over a
 //! UV-less mesh) — is *warned by name* and rendered anyway, so a skipped
 //! feature is never silent. Anything with no honest render at all is an
-//! error: PLY geometry (no reader yet), a texture that doesn't read or
-//! decode, or a description without its one camera and settings.
+//! error: a PLY or texture file that doesn't read or decode, or a
+//! description without its one camera and settings.
 //! [`Error::Scene`] from here means *the description is fine but this
 //! build can't render it* — residency is untouched, so a live session
 //! keeps its last good scene and reports the edit instead of dying.
@@ -52,9 +52,9 @@ impl Scene {
     ///
     /// [`Error::Scene`] when this build can't render the description —
     /// not exactly one camera and settings, more than one environment, no
-    /// instances, PLY geometry, or an environment image that doesn't read
-    /// or decode. Any other error is a GPU fault from upload or
-    /// acceleration-structure builds.
+    /// instances, or a referenced file (PLY, texture, environment) that
+    /// doesn't read or decode. Any other error is a GPU fault from upload
+    /// or acceleration-structure builds.
     #[expect(
         clippy::missing_panics_doc,
         reason = "the expects state all-dirty invariants — a fresh build always carries \
@@ -328,7 +328,7 @@ fn host_phase(
     warn_textured_without_uvs(description, dirty);
 
     let delta_lights = lower_delta_lights(description);
-    let (instances, triangle_lights) = lower_instances(description, &materials)?;
+    let (instances, triangle_lights) = lower_instances(description, &materials, &meshes)?;
 
     let touched = |kind: Kind| {
         dirty
@@ -425,24 +425,23 @@ fn lower_delta_lights(description: &SceneDescription) -> Vec<DeltaLight> {
 fn lower_instances(
     description: &SceneDescription,
     materials: &BTreeMap<&str, Material>,
+    resolved: &BTreeMap<String, Mesh>,
 ) -> Result<(Vec<InstanceSpec>, Vec<TriangleLight>)> {
     let mut instances = Vec::with_capacity(description.instances().len());
     let mut triangle_lights = Vec::new();
-    for (index, (name, instance)) in description.instances().iter().enumerate() {
+    for (index, instance) in description.instances().values().enumerate() {
         // Apply validated the references and the transform, so lookups
         // can't miss and the inverse the records need exists.
         let material = materials[instance.material.as_str()];
         let transform = instance.transform.to_mat4();
         if luminance(material.emission) > 0.0 {
-            let (positions, triangles) = inline_geometry(&description.meshes()[&instance.mesh])
-                .ok_or_else(|| {
-                    scene_error(format!(
-                        "instance \"{name}\" emits from PLY geometry, which is not yet supported"
-                    ))
-                })?;
+            let (positions, triangles) = emissive_geometry(
+                resolved.get(&instance.mesh),
+                &description.meshes()[&instance.mesh],
+            )?;
             triangle_lights.extend(emissive_triangles(
                 &positions,
-                triangles,
+                &triangles,
                 transform,
                 material.emission,
                 index as u32,
@@ -594,7 +593,9 @@ fn warn_textured_without_uvs(description: &SceneDescription, dirty: &Dirty) {
         }
         let has_uvs = match &description.meshes()[&instance.mesh].source {
             MeshSource::Inline { uvs, .. } => uvs.is_some(),
-            // PLY meshes answer this when the reader lands.
+            // This warning reads the description only; whether a PLY file
+            // carries UVs is known after resolution, so a UV-less one gets
+            // the benefit of the doubt (its lookups still read texel (0, 0)).
             MeshSource::Ply { .. } => true,
         };
         let touched = |kind: Kind, target: &str| dirty.changed.contains(&(kind, target.to_owned()));
@@ -673,11 +674,24 @@ fn resolve_mesh(name: &str, mesh: &description::Mesh) -> Result<Mesh> {
                 triangles: triangles.clone(),
             })
         }
-        MeshSource::Ply { path } => Err(scene_error(format!(
-            "mesh \"{name}\" references \"{}\": PLY geometry is not yet supported — \
-             inline the mesh for now",
-            path.display()
-        ))),
+        MeshSource::Ply { path } => {
+            let ply = crate::ply::read(path).map_err(|error| match error {
+                Error::Scene(message) => scene_error(format!("mesh \"{name}\": {message}")),
+                other => other,
+            })?;
+            let normals = ply
+                .normals
+                .unwrap_or_else(|| smooth_normals(&ply.positions, &ply.triangles));
+            let uvs = ply
+                .uvs
+                .unwrap_or_else(|| vec![Vec2::ZERO; ply.positions.len()]);
+            Ok(Mesh {
+                positions: ply.positions,
+                normals,
+                uvs,
+                triangles: ply.triangles,
+            })
+        }
     }
 }
 
@@ -701,18 +715,32 @@ fn smooth_normals(positions: &[Vec3], triangles: &[[u32; 3]]) -> Vec<Vec3> {
         .collect()
 }
 
-/// A mesh's inline geometry, or `None` for a PLY reference.
-fn inline_geometry(mesh: &description::Mesh) -> Option<(Vec<Vec3>, &[[u32; 3]])> {
+/// A mesh's positions and triangles for the light table. The resolved
+/// copy serves when this round already loaded the mesh; otherwise inline
+/// geometry converts from the description and a PLY reference re-reads
+/// its file — an emissive PLY mesh pays a re-read when a *non-mesh* edit
+/// rebuilds the lights, which is rare enough (emitters are almost always
+/// simple quads) to not be worth a host-side geometry cache.
+fn emissive_geometry(
+    resolved: Option<&Mesh>,
+    mesh: &description::Mesh,
+) -> Result<(Vec<Vec3>, Vec<[u32; 3]>)> {
+    if let Some(mesh) = resolved {
+        return Ok((mesh.positions.clone(), mesh.triangles.clone()));
+    }
     match &mesh.source {
         MeshSource::Inline {
             positions,
             triangles,
             ..
-        } => Some((
+        } => Ok((
             positions.iter().copied().map(Vec3::from).collect(),
-            triangles,
+            triangles.clone(),
         )),
-        MeshSource::Ply { .. } => None,
+        MeshSource::Ply { path } => {
+            let ply = crate::ply::read(path)?;
+            Ok((ply.positions, ply.triangles))
+        }
     }
 }
 
@@ -985,6 +1013,67 @@ mod tests {
         let error = host_error(&description);
         assert!(error.to_string().contains("texture"), "{error}");
         assert!(error.to_string().contains("decode"), "{error}");
+    }
+
+    /// A PLY mesh resolves through the host phase like inline geometry:
+    /// its streams load, missing normals derive, and — because the
+    /// resolved copy is on hand — its triangles feed the light table when
+    /// the material emits.
+    #[test]
+    fn a_ply_mesh_resolves_and_can_emit() {
+        let dir = std::env::temp_dir().join(format!("cenote-prep-ply-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let path = dir.join("quad.ply");
+        std::fs::write(
+            &path,
+            "ply\nformat ascii 1.0\nelement vertex 4\n\
+             property float x\nproperty float y\nproperty float z\n\
+             property float u\nproperty float v\n\
+             element face 1\nproperty list uchar int vertex_indices\nend_header\n\
+             0 0 0 0 0\n1 0 0 1 0\n1 1 0 1 1\n0 1 0 0 1\n4 0 1 2 3\n",
+        )
+        .expect("write fixture");
+
+        let mut description = triangle_description();
+        description
+            .apply(&ChangeSet {
+                ops: vec![
+                    Op::Mesh(MeshPatch {
+                        source: Some(MeshSource::Ply { path: path.clone() }),
+                        ..MeshPatch::new("tri")
+                    }),
+                    Op::Material(Box::new(MaterialPatch {
+                        emission_luminance: Some(3.0),
+                        ..MaterialPatch::new("gray")
+                    })),
+                ],
+            })
+            .expect("valid data");
+        let host = host(&description).expect("a PLY mesh preps");
+        let mesh = &host.meshes["tri"];
+        assert_eq!(mesh.positions.len(), 4);
+        assert_eq!(mesh.triangles.len(), 2);
+        // No authored normals: derived, and this quad's winding faces +Z.
+        assert!(mesh.normals.iter().all(|n| n.abs_diff_eq(Vec3::Z, 1e-6)));
+        assert_eq!(mesh.uvs[2], Vec2::new(1.0, 1.0));
+        assert_eq!(host.triangle_lights.len(), 2);
+
+        // A file that exists but isn't PLY is a host-phase rejection that
+        // names the mesh, not a crash or a silent skip.
+        description
+            .apply(&ChangeSet {
+                ops: vec![Op::Mesh(MeshPatch {
+                    source: Some(MeshSource::Ply {
+                        path: concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml").into(),
+                    }),
+                    ..MeshPatch::new("tri")
+                })],
+            })
+            .expect("valid data");
+        let error = host_error(&description);
+        assert!(error.to_string().contains("mesh \"tri\""), "{error}");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

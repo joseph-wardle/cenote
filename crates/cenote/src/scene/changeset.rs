@@ -295,26 +295,42 @@ impl ChangeSet {
     /// `crate::format::load` with the scene file's directory, so that
     /// paths mean file-relative and never working-directory-relative.
     pub fn rebase_paths(&mut self, base: &Path) {
-        let rebase = |path: &mut PathBuf| {
+        self.for_each_path(|path| {
             if path.is_relative() {
                 *path = base.join(&path);
             }
-        };
+        });
+    }
+
+    /// The inverse of [`ChangeSet::rebase_paths`]: strip `base` from
+    /// every path under it, leaving the rest absolute — how an importer's
+    /// apply-ready (all-absolute) set becomes a portable scene file whose
+    /// references travel with it.
+    pub fn relativize_paths(&mut self, base: &Path) {
+        self.for_each_path(|path| {
+            if let Ok(relative) = path.strip_prefix(base) {
+                *path = relative.to_owned();
+            }
+        });
+    }
+
+    /// Every filesystem path the set references, one visit each.
+    fn for_each_path(&mut self, mut visit: impl FnMut(&mut PathBuf)) {
         for op in &mut self.ops {
             match op {
                 Op::Mesh(patch) => {
                     if let Some(MeshSource::Ply { path }) = &mut patch.source {
-                        rebase(path);
+                        visit(path);
                     }
                 }
                 Op::Material(patch) => {
                     for texture in patch.textures_mut() {
-                        rebase(&mut texture.path);
+                        visit(&mut texture.path);
                     }
                 }
                 Op::Environment(patch) => {
                     if let Some(path) = &mut patch.path {
-                        rebase(path);
+                        visit(path);
                     }
                 }
                 _ => {}
@@ -1035,6 +1051,52 @@ mod tests {
             Some(&TextureRef {
                 path: "/scenes/wood.png".into(),
                 color_space: None
+            })
+        );
+    }
+
+    #[test]
+    fn relativize_strips_exactly_the_base() {
+        let mut set = ChangeSet {
+            ops: vec![
+                Op::Mesh(MeshPatch {
+                    source: Some(MeshSource::Ply {
+                        path: "/scenes/geo/mesh.ply".into(),
+                    }),
+                    ..MeshPatch::new("m")
+                }),
+                Op::Environment(EnvironmentPatch {
+                    path: Some("/elsewhere/sky.exr".into()),
+                    ..EnvironmentPatch::new("sky")
+                }),
+            ],
+        };
+        set.relativize_paths(Path::new("/scenes"));
+        let Op::Mesh(mesh) = &set.ops[0] else {
+            unreachable!()
+        };
+        assert_eq!(
+            mesh.source,
+            Some(MeshSource::Ply {
+                path: "geo/mesh.ply".into()
+            })
+        );
+        // A path outside the base stays absolute — still correct, just
+        // not portable.
+        let Op::Environment(environment) = &set.ops[1] else {
+            unreachable!()
+        };
+        assert_eq!(environment.path, Some("/elsewhere/sky.exr".into()));
+
+        // Round trip: rebasing against the same directory restores it.
+        set.rebase_paths(Path::new("/scenes"));
+        let Op::Mesh(mesh) = &set.ops[0] else {
+            unreachable!()
+        };
+        assert_eq!(
+            mesh.source,
+            Some(MeshSource::Ply {
+                path: "/scenes/geo/mesh.ply".into()
             })
         );
     }
