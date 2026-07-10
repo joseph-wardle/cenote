@@ -46,6 +46,17 @@ pub enum Error {
     #[error("shader watch failed: {0}")]
     Watch(#[from] notify::Error),
 
+    /// A change-set failed validation and was not applied — the scene
+    /// description is untouched. The payload names the offending object.
+    #[error("change-set rejected: {0}")]
+    Scene(String),
+
+    /// A scene file couldn't be understood: not RON, an unknown field
+    /// (typos fail loudly, never silently no-op), or a format version this
+    /// build doesn't read.
+    #[error("scene file rejected: {0}")]
+    SceneFormat(String),
+
     /// The render thread panicked. Its own errors are ordinary `Err`s that
     /// travel back through the join; this is the fallback for an actual
     /// panic — an assertion or `unwrap` on that thread — carrying whatever

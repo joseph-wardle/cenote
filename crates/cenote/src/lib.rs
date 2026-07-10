@@ -10,7 +10,8 @@
 //! |-------------|------|
 //! | `gpu`       | Unsafe-Vulkan quarantine: device context, buffers, submits, pipelines, acceleration structures, window presentation, the viewer's egui overlay pass. Code outside this module does not touch raw `vk` handles. |
 //! | `shaders`   | Embedded SPIR-V registry, `slangc` runtime recompile, hot-reload watching |
-//! | `scene`     | Procedural test geometry, materials, lights, camera, environment (real scene I/O arrives in M2) |
+//! | `scene`     | The scene model — `scene::description` is the typed named-object schema, `scene::changeset` its only edit path — plus the M1 procedural GPU scene build (the prep rewire that joins the two is M2 step 3) |
+//! | `format`    | The `.ron` scene-file boundary: versioned RON serialization of change-sets |
 //! | `material`  | `OpenPBR` surface parameters — the host half of the material schema |
 //! | `lights`    | The quad-light list and its power-proportional alias table, built at prep |
 //! | `environment` | The equirect environment light: EXR load and the CDF sampling tables, built at prep |
@@ -41,6 +42,7 @@
 pub mod color;
 pub mod environment;
 pub mod error;
+pub mod format;
 pub mod gpu;
 pub mod lights;
 pub mod material;

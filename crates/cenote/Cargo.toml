@@ -24,6 +24,10 @@ gpu-allocator = "0.28.0"
 log = "0.4.33"
 notify = "8.2.0"
 raw-window-handle = "0.6.2"
+# Pinned exactly: ron routinely ships breaking changes in semver-minor
+# releases, and the scene format's stability rides on it.
+ron = "=0.12.2"
+serde = { version = "1.0.228", features = ["derive"] }
 thiserror = "2.0.18"
 
 [lints]

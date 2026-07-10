@@ -1127,3 +1127,42 @@ mechanism is pre-agreed), UDIM + multiple UV sets, neural texture
 compression (RTXNTC is public beta — watch, don't build), per-ray-type
 visibility flags, cryptomatte/object-ID AOVs, array instancer op, and
 deform-only BLAS refit.
+
+## 2026-07-09 — M2 step 2: the change-set schema lands
+
+### D-074: Leaf decisions made while implementing the schema
+The schema shipped as planned (D-052…D-056, D-069, D-072); these are the
+calls the code forced that the plan hadn't spelled out. (1) *Format color
+constants are linear Rec.709*, converted to ACEScg at prep — extending
+D-072's texture color-space ownership rule to constants: storage stays in
+source space, conversion happens on the way in. The demo change-set carries
+raw authored values where the procedural builder converts in code. (2)
+*Relative paths are rejected at apply*: `format::load` rebases against the
+scene file's directory and is the only place a relative path gains meaning,
+so the CWD can mechanically never leak into resolution. (3) *Unknown fields
+are parse errors* (`deny_unknown_fields`): a typo'd parameter silently
+skipped would be a wrong render with no error message — the worst outcome a
+scene format can produce. The compatibility cost is nil because the version
+field owns compatibility. (4) *No RON extensions*: `implicit_some` would
+serialize the `Some(None)` patches that clear an optional field (normal
+map, focus distance) as plain `None` and collapse two distinct meanings —
+explicit `Some` everywhere is uglier and correct. (5) The settings field is
+named `max_bounces` — the engine's actual quantity (`DEFAULT_MAX_BOUNCES`
+is its default) — rather than the plan's looser "max depth". (6) Delta
+lights patch *wholesale* (a light is a handful of numbers whose variant is
+its identity) and state their radiometry in the schema: distant carries
+irradiance (W/m² facing), point carries intensity (W/sr) — the pbrt
+importer converts *into* these, keeping trap #1 (photometric
+normalization) in one place. (7) `camera_visible` sits on the *instance*
+(visibility is a placement property, and area emitters are instances), not
+the material. (8) All seven kinds are uniform named maps; "exactly one
+camera and settings, at most one environment" is prep's constraint at
+render time, not the description's — Hydra delivers multi-camera scenes,
+and the description shouldn't pre-reject them. (9) Apply is
+clone-validate-swap: ops merge into a copy, validation sees the post-set
+state (forward references legal by construction), and only a fully valid
+outcome replaces the original — atomicity that is trivially correct, with
+payload sharing (Arc) as the known optimization if lookdev edit-rate
+profiling ever asks. Dirty state is two name sets — `changed` (rebuild)
+and `removed` (retire, idempotent) — where a newer removal supersedes an
+older change but remove-then-recreate keeps both.

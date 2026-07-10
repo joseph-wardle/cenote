@@ -26,3 +26,8 @@ opt-level = 3
 
 [profile.dev.package.miniz_oxide]
 opt-level = 3
+
+# The demo change-set round-trips ~500 KB of icosphere RON in tests;
+# unoptimized ron turns that into tens of seconds.
+[profile.dev.package.ron]
+opt-level = 3

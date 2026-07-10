@@ -1,12 +1,20 @@
-//! Scenes as the tracer consumes them: meshes built into acceleration
-//! structures, per-instance materials, quad lights with their sampling
-//! table, a pinhole camera, and an equirect environment. All geometry is
-//! procedural and the only file input is the environment EXR (real scene
-//! formats are M2's job); [`Scene::demo`] is the standing test subject — a
-//! grid of smooth-shaded spheres sweeping roughness × metalness across a
-//! glossy floor, where winding, handedness, shading-normal, or energy
-//! mistakes are instantly visible, under a warm quad light and the bundled
-//! Kloofendal sky.
+//! The scene, in two halves. The M2 scene model: [`description`] is the
+//! typed, named object schema and [`changeset`] its one edit path — what
+//! scene files, the pbrt importer, and lookdev edits all speak. And the M1
+//! GPU build below: meshes built into acceleration structures,
+//! per-instance materials, quad lights with their sampling table, a
+//! pinhole camera, and an equirect environment — still built procedurally,
+//! until the prep rewire (M2 step 3) makes it consume a description.
+//!
+//! [`Scene::demo`] is the standing test subject — a grid of smooth-shaded
+//! spheres sweeping roughness × metalness across a glossy floor, where
+//! winding, handedness, shading-normal, or energy mistakes are instantly
+//! visible, under a warm quad light and the bundled Kloofendal sky.
+//! [`changeset::ChangeSet::demo`] is the same scene as data.
+
+pub mod changeset;
+mod demo;
+pub mod description;
 
 use std::collections::HashMap;
 

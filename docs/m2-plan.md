@@ -57,7 +57,10 @@ kernel source, and 2024–2026 research. No decision reversed; four amendments l
   a change-set are legal. `apply()` is validate-then-apply: all I/O and reference
   resolution happens up front, mutation only after everything passes — a mid-set
   failure (missing PLY, bad EXR) leaves the description untouched. Relative paths
-  resolve against the scene file's directory, never the CWD.
+  resolve against the scene file's directory, never the CWD — enforced mechanically:
+  `format::load` is the only place relative paths gain a meaning, and `apply()`
+  rejects any path still relative. Unknown fields are parse errors, never skipped —
+  a typo'd parameter silently ignored would be a wrong render with no error.
 - **Render-settings op contents**: spp, max depth, resolution, seed — the minimal
   set, so the format doesn't churn in step 3. Material parameter names mirror
   OpenPBR's slugs exactly (`base_color`, `coat_weight`, …) — interop alignment as a
@@ -73,7 +76,9 @@ kernel source, and 2024–2026 research. No decision reversed; four amendments l
   for the exceptions — pbrt's 8-bit-defaults-sRGB rule maps straight onto it.
   Emission maps are LDR BC7-sRGB × a float emission scale (the glTF
   `emissive_strength` pattern; pbrt's `scale` texture maps onto it); BC6H is the
-  escape hatch for genuinely HDR emission images.
+  escape hatch for genuinely HDR emission images. Color *constants* in the format
+  are linear Rec.709, converted at prep — the same ownership rule as textures:
+  storage stays in source space, conversion happens on the way into the renderer.
 - **Prep pipeline**: decode → mip-cap downscale → BC encode → DDS cache written next
   to the source (Cycles `blender_tx` pattern); cache hit skips everything. Bindless
   slots are keyed by (canonical path, usage class) — two materials sharing a PNG
