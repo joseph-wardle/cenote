@@ -1219,3 +1219,55 @@ repo's hand-written walkthrough scene, pinned by a format test so it can't
 rot. Ledger additions (deferrals.md): sampler seed wiring; the
 `camera_visible` kernel gap folds into the existing per-ray-type visibility
 entry.
+
+## 2026-07-10 — M2 step 4: the estimator gaps
+
+### D-076: Leaf decisions made while closing the estimator gaps
+Triangle emitters retired the quad special case, distant and point lights
+joined the estimator, thin-lens depth of field landed in raygen, and the
+`camera_visible` flag got its kernel wiring — the deferral ledger had
+scheduled that wiring for exactly this step, and the trigger fired. The
+calls the code forced: (1) *One alias table for every light kind*: emissive
+triangles and delta lights are records of a single power-proportional
+Walker/Vose table, distinguished by a `kind` tag, so next-event estimation
+keeps one selection path (M3's many-light work replaces the table, not the
+shape). Per-kind power measures are frankly approximate — a triangle weighs
+one face's exitance flux, a distant light its flux onto the environment's
+conventional ~1 m² receiver, a point light its whole 4π sphere — and that
+is fine: selection probabilities only steer noise, never the answer. (2)
+*Hit-side pdf lookup is base + primitive*: an emissive instance gets one
+record per triangle, contiguous in primitive order, and its geometry record
+stores the first record's index — so a BSDF-sampled hit finds the exact pdf
+its MIS weight competes against in O(1). Degenerate triangles keep their
+slot (the indexing depends on it) with selection probability zero. (3)
+*Shadow-ray identity extended to (instance, primitive)*: a ray aimed at a
+point on a triangle meets that triangle's plane once, so the identity test
+stays epsilon-free — and becomes *exact on closed emitters*, where a ray
+toward a far-side sample hits the near side of the same instance and must
+count as occluded. The sphere-emitter MIS-agreement test was verified to
+catch the instance-only version (NEE-only biases high). Point lights bound
+the shadow ray by the exact distance instead — the light is not geometry,
+so anything committed nearer is a real occluder and no epsilon is needed.
+(4) *Delta lights are NEE-only with MIS weight 1* (a BSDF sample hits zero
+area with probability zero), which means BSDF-only mode cannot see them —
+documented on `LightSampling`, and their correctness is pinned analytically
+instead: a straight-down distant light on a white Lambert plane must render
+exactly (albedo/π)·E per sample, a hoisted point light exactly
+(albedo/π)·I/r². (5) *The thin lens is `Option<Lens>` on the core camera*
+(pinhole = `None`, matching "aperture 0 is a pinhole" in the format);
+prep resolves an unset `focus_distance` to |look_at − position|. The host
+pre-scales the ray basis by the focus distance so `forward + x·right +
+y·up` *is* each pixel's focal point, and raygen re-aims from a
+concentric-disk lens sample (`CAMERA_LENS`, the reserved pre-path RNG
+dimension) — the pinhole path is untouched down to the bit. A thin-lens
+white furnace pins that the lens sample carries weight 1. (6)
+*`camera_visible` is a TLAS mask bit*: camera rays (bounce 0) trace with
+the camera bit, everything else with all bits, so an invisible emitter
+still illuminates, occludes, and reflects — the intersect kernel gained a
+per-bounce ray mask and the first real per-ray-type visibility bit; the
+full set stays on the ledger. (7) *The viewer's orbit camera carries the
+authored lens* through every move — orbiting holds the subject distance,
+so authored focus stays meaningful. (8) The goldens were regenerated and
+eyeballed: same scene, same light, a different (equally valid) noise
+realization — the 64-spp golden had in fact survived unregenerated, only
+the 1-spp realization moved past the FLIP bound.

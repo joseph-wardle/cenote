@@ -24,10 +24,10 @@
 // of the same sequence (see below), keyed by a hash, so unused slots cost
 // nothing and spacing decisions apart never correlates them.
 
-// Pre-path dimensions, drawn once per camera ray. Only the sub-pixel jitter
-// is live; the block reserves room ahead of the bounces for lens sampling
-// (depth of field) and shutter time (motion blur).
+// Pre-path dimensions, drawn once per camera ray. The block reserves room
+// ahead of the bounces for shutter time (motion blur).
 public static const uint CAMERA_JITTER = 0; // sub-pixel ray position
+public static const uint CAMERA_LENS = 1;   // point on the thin-lens disk
 static const uint PATH_BASE = 8;            // first per-bounce dimension
 
 // Per-bounce decisions get one slot each in fixed-size blocks: bounce b's
@@ -37,8 +37,8 @@ static const uint PATH_BASE = 8;            // first per-bounce dimension
 // shifting the next bounce's block.
 public static const uint BSDF_LOBE = 0; // which sampling technique scatters
 public static const uint BSDF_DIR = 1;  // scattered direction
-public static const uint NEE_LIGHT = 2; // environment vs quads, and which quad
-public static const uint NEE_POINT = 3; // point on the quad, or env texel
+public static const uint NEE_LIGHT = 2; // environment vs the list, and which light
+public static const uint NEE_POINT = 3; // point on the light, or env texel
 public static const uint RR = 4;        // Russian-roulette survival
 static const uint BOUNCE_SLOTS = 8;     // 5 named + 3 reserved
 

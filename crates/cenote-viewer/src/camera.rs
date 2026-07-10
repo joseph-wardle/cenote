@@ -2,7 +2,7 @@
 //! converted to a core [`Camera`] each frame. Screen-space drag deltas map
 //! to yaw/pitch; scroll dollies along the view axis.
 
-use cenote::scene::Camera;
+use cenote::scene::{Camera, Lens};
 use glam::Vec3;
 
 /// Radians of orbit per pixel of drag — a full-width drag across the
@@ -29,6 +29,11 @@ pub struct OrbitCamera {
     /// Radians above the horizon, clamped to ±[`MAX_PITCH`].
     pitch: f32,
     vfov_degrees: f32,
+    /// The scene's authored lens, carried through every orbit move so a
+    /// depth-of-field scene keeps its look while navigating. Orbiting
+    /// around the target holds the subject distance, so the authored
+    /// focus stays meaningful; only a dolly walks away from it.
+    lens: Option<Lens>,
 }
 
 impl OrbitCamera {
@@ -45,6 +50,7 @@ impl OrbitCamera {
             yaw: offset.x.atan2(offset.z),
             pitch: (offset.y / distance).asin().clamp(-MAX_PITCH, MAX_PITCH),
             vfov_degrees: camera.vfov_degrees,
+            lens: camera.lens,
         }
     }
 
@@ -62,7 +68,7 @@ impl OrbitCamera {
             (self.distance * DOLLY_STEP.powf(notches)).clamp(DISTANCE_RANGE.0, DISTANCE_RANGE.1);
     }
 
-    /// The pinhole camera at the current orbit position.
+    /// The camera at the current orbit position, wearing the scene's lens.
     pub fn camera(&self) -> Camera {
         let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
         let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
@@ -72,6 +78,7 @@ impl OrbitCamera {
             look_at: self.target,
             up: Vec3::Y,
             vfov_degrees: self.vfov_degrees,
+            lens: self.lens,
         }
     }
 }
@@ -88,6 +95,7 @@ mod tests {
             look_at: Vec3::new(0.0, 1.0, 0.0),
             up: Vec3::Y,
             vfov_degrees: 40.0,
+            lens: None,
         }
     }
 

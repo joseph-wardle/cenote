@@ -13,7 +13,7 @@
 //! | `scene`     | The scene model — `scene::description` is the typed named-object schema, `scene::changeset` its only edit path — and the prep path that joins it to GPU residency: [`scene::Scene::prep`] builds a description fresh, and its dirty-driven update rebuilds only what an edit touched |
 //! | `format`    | The `.ron` scene-file boundary: versioned RON serialization of change-sets |
 //! | `material`  | `OpenPBR` surface parameters — the host half of the material schema |
-//! | `lights`    | The quad-light list and its power-proportional alias table, built at prep |
+//! | `lights`    | The light list — emissive triangles and delta lights — and its power-proportional alias table, built at prep |
 //! | `environment` | The equirect environment light: EXR load and the CDF sampling tables, built at prep |
 //! | `color`     | Authored `Rec.709` → `ACEScg` conversion at scene prep |
 //! | `wavefront` | The engine core: `SoA` path state, GPU stage queues, indirect dispatch — one [`wavefront::Wavefront::trace`] is one sample per pixel, written pixel-owned so renders are bitwise deterministic |

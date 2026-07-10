@@ -33,7 +33,7 @@ use glam::Vec3;
 
 use crate::error::Result;
 use crate::gpu::{Bindings, Buffer, ComputePipeline, Context, MemoryLocation, Pass, SceneBindings};
-use crate::scene::Scene;
+use crate::scene::{Scene, ray_mask};
 use crate::shaders::{Kernel, Kernels};
 
 /// Threads per workgroup of every 1D path-stage kernel — must match
@@ -58,7 +58,7 @@ const QUEUE_HEADER_SIZE: u64 = 16;
 const INDIRECT_OFFSET: u64 = 4;
 
 /// Byte size of one `ShadowRay` record (`shaders/pathstate.slang`).
-const SHADOW_RAY_SIZE: u64 = 48;
+const SHADOW_RAY_SIZE: u64 = 64;
 
 /// The path pool's field-buffer addresses — `struct Paths` in
 /// `shaders/pathstate.slang`, embedded in every stage's push constants.
@@ -92,9 +92,10 @@ struct RaygenParams {
     rays: QueueAddrs,
     /// Which sample of every pixel's sequence this wave traces.
     sample_index: u32,
-    /// Aligns the camera block to the 16-byte stride std430 gives its
-    /// `float3`s (`Pod` forbids implicit padding bytes).
-    _pad0: u32,
+    /// Thin-lens radius, meters; 0 takes the pinhole path (also keeping
+    /// the camera block 16-byte aligned, which `Pod` demands explicitly).
+    /// When open, the basis below arrives pre-scaled to the focal plane.
+    aperture_radius: f32,
     camera_position: Vec3,
     width: u32,
     camera_right: Vec3,
@@ -108,6 +109,8 @@ struct RaygenParams {
 }
 
 /// Push constants for the intersect kernel (`shaders/intersect.slang`).
+/// Two instances per wave: camera rays (bounce 0) trace with the camera
+/// visibility bit, every later bounce with all bits.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct IntersectParams {
@@ -115,6 +118,9 @@ struct IntersectParams {
     rays: QueueAddrs,
     hits: QueueAddrs,
     misses: QueueAddrs,
+    /// Which instances these rays see — a [`ray_mask`] value.
+    ray_mask: u32,
+    _pad0: u32,
 }
 
 /// Push constants for the miss-shading kernel (`shaders/shade_miss.slang`).
@@ -307,8 +313,11 @@ impl Queues {
 /// Which sampling strategies reach the lights. [`LightSampling::Mis`] is
 /// the renderer; the single-strategy modes exist because the strongest
 /// test of the MIS weights is that either strategy alone converges to the
-/// same image (the MIS-agreement test below). Values match the
-/// `LIGHT_SAMPLING_*` constants in `shaders/lights.slang`.
+/// same image (the MIS-agreement test below). Delta lights exist only
+/// through next-event connections — a BSDF sample hits zero area with
+/// probability zero — so [`LightSampling::BsdfOnly`] cannot see them, and
+/// agreement scenes stick to area lights and the environment. Values
+/// match the `LIGHT_SAMPLING_*` constants in `shaders/lights.slang`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u32)]
 pub enum LightSampling {
@@ -501,14 +510,24 @@ impl Wavefront {
         sample: u32,
     ) -> WaveParams {
         let pixels = u64::from(width) * u64::from(height);
-        let basis = scene.camera().basis(width as f32 / height as f32);
+        let mut basis = scene.camera().basis(width as f32 / height as f32);
+        // An open aperture scales the basis to the focal plane, making
+        // `forward + x·right + y·up` each pixel's focal point — the form
+        // the thin-lens raygen path re-aims lens rays at. A pinhole keeps
+        // the unit basis and the exact ray construction it always had.
+        let aperture_radius = scene.camera().lens.map_or(0.0, |lens| {
+            basis.right *= lens.focus_distance;
+            basis.up *= lens.focus_distance;
+            basis.forward *= lens.focus_distance;
+            lens.aperture_radius
+        });
         let ranges = (0..pixels)
             .step_by(self.capacity as usize)
             .map(|base| RaygenParams {
                 paths: self.paths.addresses(),
                 rays: self.queues.addresses(queue::RAY, &self.queues.ray),
                 sample_index: sample,
-                _pad0: 0,
+                aperture_radius,
                 camera_position: scene.camera().position,
                 width,
                 camera_right: basis.right,
@@ -519,14 +538,18 @@ impl Wavefront {
                 count: (pixels - base).min(u64::from(self.capacity)) as u32,
             })
             .collect();
+        let intersect = |mask: u32| IntersectParams {
+            paths: self.paths.addresses(),
+            rays: self.queues.addresses(queue::RAY, &self.queues.ray),
+            hits: self.queues.addresses(queue::HIT, &self.queues.hit),
+            misses: self.queues.addresses(queue::MISS, &self.queues.miss),
+            ray_mask: mask,
+            _pad0: 0,
+        };
         WaveParams {
             ranges,
-            intersect: IntersectParams {
-                paths: self.paths.addresses(),
-                rays: self.queues.addresses(queue::RAY, &self.queues.ray),
-                hits: self.queues.addresses(queue::HIT, &self.queues.hit),
-                misses: self.queues.addresses(queue::MISS, &self.queues.miss),
-            },
+            intersect_camera: intersect(ray_mask::CAMERA),
+            intersect_bounce: intersect(ray_mask::ALL),
             shade_miss: ShadeMissParams {
                 paths: self.paths.addresses(),
                 misses: self.queues.addresses(queue::MISS, &self.queues.miss),
@@ -616,7 +639,11 @@ impl Wavefront {
                 passes.push(fill(queue::SHADOW));
                 passes.push(indirect(
                     &self.intersect,
-                    bytemuck::bytes_of(&params.intersect),
+                    bytemuck::bytes_of(if bounce == 0 {
+                        &params.intersect_camera
+                    } else {
+                        &params.intersect_bounce
+                    }),
                     queue::RAY,
                 ));
                 // The ray queue was just consumed; empty it for this
@@ -650,7 +677,10 @@ impl Wavefront {
 struct WaveParams {
     /// One raygen instance per pool-sized pixel range.
     ranges: Vec<RaygenParams>,
-    intersect: IntersectParams,
+    /// Bounce 0: camera rays, tracing with the camera visibility bit.
+    intersect_camera: IntersectParams,
+    /// Every later bounce: all visibility bits set.
+    intersect_bounce: IntersectParams,
     shade_miss: ShadeMissParams,
     /// One instance per bounce.
     shade_surface: Vec<ShadeSurfaceParams>,
@@ -792,6 +822,7 @@ mod tests {
             look_at: Vec3::new(0.0, 0.5, 0.0),
             up: Vec3::Y,
             vfov_degrees: 40.0,
+            lens: None,
         };
         let scene = Scene::new(
             &gpu,
@@ -949,14 +980,110 @@ mod tests {
         assert_ne!(dump(0, 0), dump(0, 1), "dimensions must decorrelate");
     }
 
+    /// Depth of field, observed through the same exact-sky trick as the
+    /// jitter test: a pixel whose 16 samples ever saw both the constant
+    /// sky and a surface is a "mixed" pixel, and mixing happens exactly
+    /// where rays of one pixel disagree about what they hit. A pinhole
+    /// mixes only the one-jitter-wide silhouette ring; a wide aperture
+    /// focused far in front of the geometry swings each sample's ray
+    /// across the lens disk, so silhouettes smear over many more pixels.
+    /// The energy side of the lens is pinned exactly by the thin-lens
+    /// furnace in `render/mod.rs`; this is the geometry side.
+    #[test]
+    fn an_open_aperture_blurs_out_of_focus_silhouettes() {
+        const SKY: [f32; 4] = [0.4, 0.4, 0.4, 1.0];
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let objects = [
+            Object {
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::Y),
+                material: Material::matte(Vec3::splat(0.5), 0.3),
+            },
+            Object {
+                mesh: ground_plane(12.0),
+                transform: Mat4::IDENTITY,
+                material: Material::matte(Vec3::splat(0.5), 0.1),
+            },
+        ];
+        let camera = |lens| Camera {
+            position: Vec3::new(0.0, 2.0, 8.5),
+            look_at: Vec3::new(0.0, 0.5, 0.0),
+            up: Vec3::Y,
+            vfov_degrees: 40.0,
+            lens,
+        };
+        let kernels = Kernels::embedded();
+        let (width, height) = (32, 32);
+        let mixed_pixels = |lens: Option<crate::scene::Lens>| -> usize {
+            let scene = Scene::new(
+                &gpu,
+                &objects,
+                camera(lens),
+                &Environment::constant(Vec3::splat(0.4)),
+            )
+            .expect("scene");
+            let wavefront = Wavefront::new(
+                &gpu,
+                &kernels,
+                4096,
+                Wavefront::DEFAULT_MAX_BOUNCES,
+                LightSampling::Mis,
+            )
+            .expect("wavefront");
+            let radiance = radiance_buffer(&gpu, width, height);
+            let mut saw_sky = vec![false; (width * height) as usize];
+            let mut saw_surface = vec![false; (width * height) as usize];
+            for sample in 0..16 {
+                wavefront
+                    .trace(&gpu, &scene, &radiance, width, height, sample)
+                    .expect("trace");
+                let pixels: Vec<f32> = bytemuck::pod_collect_to_vec(
+                    &gpu.download_buffer(&radiance).expect("download"),
+                );
+                for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+                    if pixel == SKY {
+                        saw_sky[index] = true;
+                    } else {
+                        saw_surface[index] = true;
+                    }
+                }
+            }
+            saw_sky
+                .iter()
+                .zip(&saw_surface)
+                .filter(|(sky, surface)| **sky && **surface)
+                .count()
+        };
+
+        let pinhole = mixed_pixels(None);
+        let blurred = mixed_pixels(Some(crate::scene::Lens {
+            aperture_radius: 0.4,
+            focus_distance: 2.0, // the sphere sits ~7.7 m out: far out of focus
+        }));
+        assert!(pinhole > 0, "the silhouette ring itself should mix");
+        assert!(
+            blurred > 2 * pinhole,
+            "an out-of-focus silhouette should smear across far more pixels: \
+             {blurred} blurred vs {pinhole} pinhole"
+        );
+    }
+
     /// The step-8 checkpoint, and the test that catches wrong-but-plausible
     /// MIS: next-event-only, BSDF-only, and MIS renders of one scene must
     /// converge to the same mean. A pdf mismatch or a weight pair that
     /// doesn't sum to 1 biases the strategies apart (double-counting shows
     /// up as 2×); goldens can't see this — they'd normalize the bias into
     /// the reference. The sky is black, so every photon comes from the
-    /// quad, and the sphere really occludes it — broken shadow-ray
-    /// visibility shifts the next-event modes but not BSDF-only.
+    /// emitter, and the shaded sphere really occludes it — broken
+    /// shadow-ray visibility shifts the next-event modes but not
+    /// BSDF-only. The emitter is a *sphere* deliberately: hundreds of
+    /// triangle records through the alias table, curved-emitter cosines,
+    /// and — the sharp edge — next-event samples on its far side, which
+    /// must count as occluded by its own near side. An identity test that
+    /// stops at the instance (instead of the exact triangle) double-counts
+    /// those and biases NEE-only high, right here.
     #[test]
     fn light_sampling_strategies_agree() {
         let Some(gpu) = crate::gpu::test_context() else {
@@ -976,12 +1103,13 @@ mod tests {
                 material: Material::glossy(Vec3::splat(0.7), 0.0, 0.2),
             },
             Object {
-                // A 2 m × 2 m quad right above the sphere: big enough that
+                // An emissive ball right above the sphere: big enough that
                 // BSDF sampling finds it often (variance stays testable),
                 // low enough that its shadow occludes real floor.
-                mesh: ground_plane(1.0),
-                transform: Mat4::from_translation(Vec3::Y * 3.0),
-                material: Material::emitter(Vec3::splat(5.0)),
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::Y * 3.0)
+                    * Mat4::from_scale(Vec3::splat(0.7)),
+                material: Material::emitter(Vec3::splat(4.0)),
             },
         ];
         let camera = Camera {
@@ -989,6 +1117,7 @@ mod tests {
             look_at: Vec3::new(0.0, 1.0, 0.0),
             up: Vec3::Y,
             vfov_degrees: 45.0,
+            lens: None,
         };
         let scene =
             Scene::new(&gpu, &objects, camera, &Environment::constant(Vec3::ZERO)).expect("scene");
@@ -1026,6 +1155,7 @@ mod tests {
             look_at: Vec3::new(0.0, 1.0, 0.0),
             up: Vec3::Y,
             vfov_degrees: 45.0,
+            lens: None,
         };
         let (width, height) = (8, 4);
         let mut texels = vec![0.2_f32; (width * height * 4) as usize];

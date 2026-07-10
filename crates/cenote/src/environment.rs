@@ -199,7 +199,7 @@ impl Environment {
 
         // Emitted power ∝ the luminance integral over the sphere (exact
         // per-row solid angles, undilated — dilation is a sampling device,
-        // not energy). Weighs the environment against the quad lights.
+        // not energy). Weighs the environment against the light list.
         let mut power = 0.0_f64;
         for row in 0..h {
             let theta0 = row as f64 / h as f64 * std::f64::consts::PI;
@@ -228,7 +228,7 @@ pub(crate) struct Tables {
     /// Per-texel joint density over the unit (u, v) square; `height × width`.
     pub pdfs: Vec<f32>,
     /// Luminance integral over the sphere — the selection weight against
-    /// the quad lights.
+    /// the light list.
     pub power: f64,
 }
 

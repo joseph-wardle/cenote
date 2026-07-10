@@ -54,6 +54,11 @@ pub struct TlasInstance<'a> {
     /// 24-bit value the kernel reads back from a hit as the instance's
     /// custom index; Cenote uses it to index the geometry lookup table.
     pub custom_index: u32,
+    /// Visibility mask: a ray traversal sees this instance only when its
+    /// own 8-bit mask ANDs nonzero with this one. `0xFF` is visible to
+    /// every ray; the scene clears bits for per-ray-type visibility
+    /// (today, camera-invisible instances).
+    pub mask: u8,
 }
 
 impl Context {
@@ -280,8 +285,7 @@ fn raw_instance(instance: &TlasInstance<'_>) -> vk::AccelerationStructureInstanc
     let matrix: [f32; 12] = rows[..12].try_into().expect("3x4 of a 4x4");
     vk::AccelerationStructureInstanceKHR {
         transform: vk::TransformMatrixKHR { matrix },
-        // Mask 0xFF: visible to every ray.
-        instance_custom_index_and_mask: vk::Packed24_8::new(instance.custom_index, 0xFF),
+        instance_custom_index_and_mask: vk::Packed24_8::new(instance.custom_index, instance.mask),
         // No culling: the kernel flips geometric normals toward the ray, so
         // both faces of everything are hittable.
         instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(

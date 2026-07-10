@@ -24,8 +24,9 @@
 //! CLI never touches it, since EXR output stays linear.
 //!
 //! Every sample is a full path-traced estimate — jittered camera ray,
-//! MIS-weighted direct light sampling at every bounce (quad lights and the
-//! importance-sampled environment), `OpenPBR` bounces — keyed by the
+//! MIS-weighted direct light sampling at every bounce (emissive geometry,
+//! delta lights, and the importance-sampled environment), `OpenPBR`
+//! bounces — keyed by the
 //! film's sample count, so accumulation converges toward the true render:
 //! edges anti-alias, noise settles into soft shadows, color bleed, and
 //! contact darkening.
@@ -476,13 +477,21 @@ mod tests {
     /// A furnace scene: one big plane of the given material, scaled by
     /// `scale` and centered at `center`, under a half-intensity gray sky,
     /// with the camera just above looking obliquely down (the basis
-    /// forbids straight down) so every camera ray lands on it. A path hits
-    /// the plane, scatters upward, and escapes — so for a white material
-    /// the expected pixel value is exactly the sky radiance (the
-    /// energy-preservation property the EON and compensated-GGX lobes are
-    /// built around), and for a pure Lambert surface every individual
-    /// sample equals albedo × sky.
-    fn furnace_scene(gpu: &Context, material: Material, center: Vec3, scale: f32) -> Scene {
+    /// forbids straight down) so every camera ray lands on it — through
+    /// `lens` when one is given (the plane dwarfs any aperture, so lens
+    /// rays land on it all the same). A path hits the plane, scatters
+    /// upward, and escapes — so for a white material the expected pixel
+    /// value is exactly the sky radiance (the energy-preservation
+    /// property the EON and compensated-GGX lobes are built around), and
+    /// for a pure Lambert surface every individual sample equals
+    /// albedo × sky.
+    fn furnace_scene(
+        gpu: &Context,
+        material: Material,
+        center: Vec3,
+        scale: f32,
+        lens: Option<crate::scene::Lens>,
+    ) -> Scene {
         let object = Object {
             mesh: ground_plane(5.0),
             transform: Mat4::from_translation(center) * Mat4::from_scale(Vec3::splat(scale)),
@@ -493,6 +502,7 @@ mod tests {
             look_at: center + Vec3::new(0.0, 0.0, -scale),
             up: Vec3::Y,
             vfov_degrees: 40.0,
+            lens,
         };
         Scene::new(
             gpu,
@@ -617,7 +627,7 @@ mod tests {
         let renderer = Renderer::new(&gpu).expect("renderer");
         let sky = 0.5;
 
-        let lambert = furnace_scene(&gpu, Material::matte(Vec3::ONE, 0.0), Vec3::ZERO, 1.0);
+        let lambert = furnace_scene(&gpu, Material::matte(Vec3::ONE, 0.0), Vec3::ZERO, 1.0, None);
         let sum = bsdf_only_sum(&gpu, &lambert, 32, 4);
         for chunk in sum.chunks_exact(4) {
             for channel in &chunk[..3] {
@@ -629,7 +639,7 @@ mod tests {
             }
         }
 
-        let rough = furnace_scene(&gpu, Material::matte(Vec3::ONE, 1.0), Vec3::ZERO, 1.0);
+        let rough = furnace_scene(&gpu, Material::matte(Vec3::ONE, 1.0), Vec3::ZERO, 1.0, None);
         let samples = 64;
         let sum = accumulate_sum(&gpu, &renderer, &rough, 32, samples);
         let mean =
@@ -660,6 +670,7 @@ mod tests {
             Material::matte(Vec3::splat(0.5), 0.0),
             Vec3::new(1e4, 0.0, 1e4),
             1e3,
+            None,
         );
         let sum = bsdf_only_sum(&gpu, &scene, 32, 4);
         let expected = 0.5 * 0.5; // albedo × sky
@@ -669,6 +680,165 @@ mod tests {
                 assert!(
                     (value - expected).abs() < 1e-3,
                     "self-intersection at scale: {value} vs {expected}"
+                );
+            }
+        }
+    }
+
+    /// The furnace through a thin lens: with the aperture wide open, every
+    /// sample of every pixel must still equal albedo × sky exactly — a lens
+    /// ray is just a different ray, carrying weight 1. Any accidental
+    /// weighting by the lens sample (a pdf factor, a cosine, a
+    /// normalization slip) scales the whole image and fails loudly. The
+    /// blur itself is invisible here by construction — a uniform plane
+    /// looks the same from everywhere on the disk — which is exactly what
+    /// isolates the energy question from the geometry one (the viewer-side
+    /// blur test lives in `wavefront.rs`).
+    #[test]
+    fn the_furnace_closes_through_a_thin_lens() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let scene = furnace_scene(
+            &gpu,
+            Material::matte(Vec3::splat(0.5), 0.0),
+            Vec3::ZERO,
+            1.0,
+            Some(crate::scene::Lens {
+                aperture_radius: 0.05,
+                focus_distance: 1.5,
+            }),
+        );
+        let sum = bsdf_only_sum(&gpu, &scene, 32, 4);
+        let expected = 0.5 * 0.5; // albedo × sky
+        for chunk in sum.chunks_exact(4) {
+            for channel in &chunk[..3] {
+                let value = channel / 4.0;
+                assert!(
+                    (value - expected).abs() < 1e-3,
+                    "the lens carried weight: {value} vs {expected}"
+                );
+            }
+        }
+    }
+
+    /// A white Lambert plane under a black sky, lit by exactly one delta
+    /// light — built through the production path (description → prep), the
+    /// only route delta lights exist on. The single light means selection
+    /// probability 1, and a delta connection has MIS weight 1, so the
+    /// estimator collapses to a closed form per sample.
+    fn delta_light_scene(gpu: &Context, light: crate::scene::description::Light) -> Scene {
+        use crate::scene::changeset::{
+            CameraPatch, ChangeSet, InstancePatch, LightPatch, MaterialPatch, MeshPatch, Op,
+            SettingsPatch,
+        };
+        use crate::scene::description::{MeshSource, SceneDescription, Texturable};
+
+        let mut description = SceneDescription::new();
+        description
+            .apply(&ChangeSet {
+                ops: vec![
+                    Op::Settings(SettingsPatch::new("main")),
+                    // The furnace framing: just above the plane, looking
+                    // obliquely down, so every camera ray lands on it.
+                    Op::Camera(CameraPatch {
+                        position: Some([0.0, 1.0, 0.0]),
+                        look_at: Some([0.0, 0.0, -1.0]),
+                        ..CameraPatch::new("main")
+                    }),
+                    Op::Mesh(MeshPatch {
+                        source: Some(MeshSource::Inline {
+                            positions: vec![
+                                [-5.0, 0.0, -5.0],
+                                [-5.0, 0.0, 5.0],
+                                [5.0, 0.0, 5.0],
+                                [5.0, 0.0, -5.0],
+                            ],
+                            normals: Some(vec![[0.0, 1.0, 0.0]; 4]),
+                            uvs: None,
+                            triangles: vec![[0, 1, 2], [0, 2, 3]],
+                        }),
+                        ..MeshPatch::new("plane")
+                    }),
+                    Op::Material(Box::new(MaterialPatch {
+                        base_color: Some(Texturable::Constant([1.0; 3])),
+                        specular_weight: Some(0.0),
+                        ..MaterialPatch::new("lambert")
+                    })),
+                    Op::Instance(InstancePatch {
+                        mesh: Some("plane".into()),
+                        material: Some("lambert".into()),
+                        ..InstancePatch::new("floor")
+                    }),
+                    Op::Light(LightPatch {
+                        light: Some(light),
+                        ..LightPatch::new("the-light")
+                    }),
+                ],
+            })
+            .expect("valid scene data");
+        Scene::prep(gpu, &mut description).expect("prep")
+    }
+
+    /// The delta-light furnace: a distant light aimed straight down at the
+    /// white Lambert plane delivers cosθ = 1 everywhere, so every sample
+    /// of every pixel is exactly (albedo/π) · E — with E = π, exactly 1.
+    /// Anything off in the connection — the irradiance-vs-radiance
+    /// convention, a stray falloff, the selection probability, a shadow
+    /// ray that misses open sky — shifts every pixel and fails the bound.
+    #[test]
+    fn a_distant_light_is_analytically_exact() {
+        use crate::scene::description::Light;
+
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let scene = delta_light_scene(
+            &gpu,
+            Light::Distant {
+                direction: [0.0, -1.0, 0.0],
+                irradiance: [std::f32::consts::PI; 3],
+            },
+        );
+        let renderer = Renderer::new(&gpu).expect("renderer");
+        let pixels = renderer.render(&gpu, &scene, 16, 16).expect("render");
+        for chunk in pixels.chunks_exact(4) {
+            for channel in &chunk[..3] {
+                assert!(
+                    (channel - 1.0).abs() < 2e-3,
+                    "distant light off the closed form: {channel} vs 1"
+                );
+            }
+        }
+    }
+
+    /// The point-light sibling: hoisted 1000 m up with intensity π · 10⁶,
+    /// the plane's visible patch (a couple of meters) sees r² and cosθ
+    /// constant to ~10⁻⁵, so the inverse-square estimate
+    /// (albedo/π) · I / r² lands within rounding of 1 — pinning the
+    /// falloff and the bounded shadow-ray distance (an occluder test
+    /// against the light's own position would break here first).
+    #[test]
+    fn a_point_light_is_analytically_exact() {
+        use crate::scene::description::Light;
+
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let scene = delta_light_scene(
+            &gpu,
+            Light::Point {
+                position: [0.0, 1000.0, 0.0],
+                intensity: [std::f32::consts::PI * 1e6; 3],
+            },
+        );
+        let renderer = Renderer::new(&gpu).expect("renderer");
+        let pixels = renderer.render(&gpu, &scene, 16, 16).expect("render");
+        for chunk in pixels.chunks_exact(4) {
+            for channel in &chunk[..3] {
+                assert!(
+                    (channel - 1.0).abs() < 5e-3,
+                    "point light off the closed form: {channel} vs 1"
                 );
             }
         }
@@ -706,7 +876,7 @@ mod tests {
         ];
         let (sky, samples) = (0.5, 64);
         for (label, material) in configs {
-            let scene = furnace_scene(&gpu, material, Vec3::ZERO, 1.0);
+            let scene = furnace_scene(&gpu, material, Vec3::ZERO, 1.0, None);
             let sum = accumulate_sum(&gpu, &renderer, &scene, 32, samples);
             let mean = sum.chunks_exact(4).map(|chunk| chunk[0]).sum::<f32>()
                 / (32.0 * 32.0 * samples as f32);
@@ -748,6 +918,7 @@ mod tests {
             look_at: Vec3::new(0.0, 1.0, 0.0),
             up: Vec3::Y,
             vfov_degrees: 40.0,
+            lens: None,
         };
         let scene =
             Scene::new(&gpu, &objects, camera, &Environment::constant(Vec3::ONE)).expect("scene");

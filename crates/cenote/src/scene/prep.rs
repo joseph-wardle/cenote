@@ -9,11 +9,10 @@
 //!
 //! Prep is where the description meets what the renderer can currently
 //! express, under two rules. Anything not wired up yet is *warned by
-//! name* and rendered without — a texture reference, a delta light, an
-//! aperture — so a skipped feature is never silent. Anything with no
-//! honest render at all is an error: PLY geometry (no reader yet), an
-//! emissive instance that isn't the parallelogram the light sampler
-//! handles, or a description without its one camera and settings.
+//! name* and rendered without — a texture reference, an unwired material
+//! lobe — so a skipped feature is never silent. Anything with no honest
+//! render at all is an error: PLY geometry (no reader yet), or a
+//! description without its one camera and settings.
 //! [`Error::Scene`] from here means *the description is fine but this
 //! build can't render it* — residency is untouched, so a live session
 //! keeps its last good scene and reports the edit instead of dying.
@@ -32,15 +31,15 @@ use glam::{Mat4, Vec3};
 use super::changeset::{Dirty, Kind};
 use super::description::{self, MeshSource, SceneDescription, Texturable};
 use super::{
-    Camera, GpuMesh, Mesh, Placement, ResidentBuffers, Scene, build_scene_tlas, light_quad,
-    select_probability, upload_environment, upload_instance_tables, upload_mesh,
-    upload_scene_table,
+    Camera, GpuMesh, Lens, Mesh, Placement, ResidentBuffers, Scene, build_scene_tlas,
+    emissive_triangles, select_probability, upload_environment, upload_instance_tables,
+    upload_mesh, upload_scene_table,
 };
 use crate::color::{acescg_from_rec709, luminance};
 use crate::environment::Environment;
 use crate::error::{Error, Result};
 use crate::gpu::Context;
-use crate::lights::QuadLight;
+use crate::lights::{DeltaLight, TriangleLight};
 use crate::material::Material;
 
 impl Scene {
@@ -51,9 +50,8 @@ impl Scene {
     ///
     /// [`Error::Scene`] when this build can't render the description —
     /// not exactly one camera and settings, more than one environment, no
-    /// instances, PLY geometry, an emissive instance that isn't a
-    /// parallelogram quad, or an environment image that doesn't read or
-    /// decode. Any other error is a GPU fault from upload or
+    /// instances, PLY geometry, or an environment image that doesn't read
+    /// or decode. Any other error is a GPU fault from upload or
     /// acceleration-structure builds.
     #[expect(
         clippy::missing_panics_doc,
@@ -76,7 +74,8 @@ impl Scene {
         let env = upload_environment(gpu, environment)?;
         let placements = placements(&meshes, &host.instances);
         let tlas = build_scene_tlas(gpu, &placements)?;
-        let (geometry, materials, lights) = upload_instance_tables(gpu, &placements, &host.quads)?;
+        let (geometry, materials, lights) =
+            upload_instance_tables(gpu, &placements, &host.triangle_lights, &host.delta_lights)?;
         drop(placements);
         let resident = ResidentBuffers {
             geometry,
@@ -91,8 +90,8 @@ impl Scene {
             gpu,
             &resident,
             env_size,
-            select_probability(env.power, &host.quads),
-            host.quads.len() as u32,
+            select_probability(env.power, host.light_power()),
+            host.light_count(),
         )?;
         description.take_dirty();
         Ok(Self {
@@ -148,7 +147,8 @@ impl Scene {
         if host.geometry_dirty {
             self.tlas = build_scene_tlas(gpu, &placements)?;
         }
-        let (geometry, materials, lights) = upload_instance_tables(gpu, &placements, &host.quads)?;
+        let (geometry, materials, lights) =
+            upload_instance_tables(gpu, &placements, &host.triangle_lights, &host.delta_lights)?;
         drop(placements);
         self.resident.geometry = geometry;
         self.resident.materials = materials;
@@ -157,8 +157,8 @@ impl Scene {
             gpu,
             &self.resident,
             self.env_size,
-            select_probability(self.env_power, &host.quads),
-            host.quads.len() as u32,
+            select_probability(self.env_power, host.light_power()),
+            host.light_count(),
         )?;
         if let Some(camera) = host.camera {
             self.camera = camera;
@@ -178,8 +178,11 @@ struct HostScene {
     removed_meshes: Vec<String>,
     /// Every instance, in name order — custom index is position.
     instances: Vec<InstanceSpec>,
-    /// The quad lights, extracted from emissive instances.
-    quads: Vec<QuadLight>,
+    /// The emissive geometry, one entry per triangle of every emissive
+    /// instance.
+    triangle_lights: Vec<TriangleLight>,
+    /// The delta lights, lowered from the description's light objects.
+    delta_lights: Vec<DeltaLight>,
     /// Loaded when the environment changed (always, on a fresh build);
     /// `None` keeps the resident image and tables.
     environment: Option<Arc<Environment>>,
@@ -190,12 +193,25 @@ struct HostScene {
     geometry_dirty: bool,
 }
 
+impl HostScene {
+    /// Total records the light table will hold.
+    fn light_count(&self) -> u32 {
+        (self.triangle_lights.len() + self.delta_lights.len()) as u32
+    }
+
+    /// The list's selection weight against the environment.
+    fn light_power(&self) -> f64 {
+        crate::lights::total_power(&self.triangle_lights, &self.delta_lights)
+    }
+}
+
 /// One instance lowered from the description, resolved against the
 /// resident mesh map at assembly time.
 struct InstanceSpec {
     mesh: String,
     transform: Mat4,
     material: Material,
+    camera_visible: bool,
 }
 
 /// Derive everything the GPU phase consumes, validating as it goes. Warns
@@ -204,7 +220,7 @@ struct InstanceSpec {
 /// full build, which loads its environment even when no dirt names one —
 /// a description without an environment object leaves nothing to mark.
 fn host_phase(description: &SceneDescription, dirty: &Dirty, fresh: bool) -> Result<HostScene> {
-    let (camera_name, camera_source) = singleton(description.cameras(), "camera")?;
+    let (_, camera_source) = singleton(description.cameras(), "camera")?;
     singleton(description.settings(), "settings")?;
     if description.environments().len() > 1 {
         return Err(scene_error(format!(
@@ -237,11 +253,8 @@ fn host_phase(description: &SceneDescription, dirty: &Dirty, fresh: bool) -> Res
         );
     }
 
-    for name in names(&dirty.changed, Kind::Light) {
-        log::warn!("light \"{name}\": delta lights are not wired to the estimator yet; skipped");
-    }
-
-    let (instances, quads) = lower_instances(description, dirty, &materials)?;
+    let delta_lights = lower_delta_lights(description);
+    let (instances, triangle_lights) = lower_instances(description, &materials)?;
 
     let touched = |kind: Kind| {
         dirty
@@ -250,20 +263,7 @@ fn host_phase(description: &SceneDescription, dirty: &Dirty, fresh: bool) -> Res
             .chain(&dirty.removed)
             .any(|(entry, _)| *entry == kind)
     };
-    let camera = touched(Kind::Camera).then(|| {
-        if camera_source.aperture_radius > 0.0 {
-            log::warn!(
-                "camera \"{camera_name}\": aperture (depth of field) is not wired yet; \
-                 rendering a pinhole"
-            );
-        }
-        Camera {
-            position: camera_source.position.into(),
-            look_at: camera_source.look_at.into(),
-            up: camera_source.up.into(),
-            vfov_degrees: camera_source.vfov_degrees,
-        }
-    });
+    let camera = touched(Kind::Camera).then(|| lower_camera(camera_source));
     let environment = if fresh || touched(Kind::Environment) {
         Some(match description.environments().iter().next() {
             Some((name, environment)) => load_environment(name, &environment.path)?,
@@ -279,31 +279,78 @@ fn host_phase(description: &SceneDescription, dirty: &Dirty, fresh: bool) -> Res
         meshes,
         removed_meshes,
         instances,
-        quads,
+        triangle_lights,
+        delta_lights,
         environment,
         camera,
         geometry_dirty: touched(Kind::Mesh) || touched(Kind::Instance),
     })
 }
 
-/// Lower every instance into its placement spec, extracting the quad
-/// light of each emissive one — the shape rule holds until triangle
-/// emitters retire it.
+/// Lower the description's camera, resolving the thin lens: a positive
+/// aperture makes a [`Lens`], focused at `focus_distance` or — when the
+/// author left it unset — at `look_at`.
+fn lower_camera(source: &description::Camera) -> Camera {
+    let position = Vec3::from(source.position);
+    let look_at = Vec3::from(source.look_at);
+    Camera {
+        position,
+        look_at,
+        up: source.up.into(),
+        vfov_degrees: source.vfov_degrees,
+        lens: (source.aperture_radius > 0.0).then(|| Lens {
+            aperture_radius: source.aperture_radius,
+            focus_distance: source
+                .focus_distance
+                .unwrap_or_else(|| position.distance(look_at)),
+        }),
+    }
+}
+
+/// Lower the description's delta lights, in name order, converting their
+/// `Rec.709` colors to `ACEScg` (prep owns that conversion, as with
+/// materials). A powerless light is skipped outright — the get-or-create
+/// placeholder is a black point light, and a record that can never be
+/// selected would only pad the table.
+fn lower_delta_lights(description: &SceneDescription) -> Vec<DeltaLight> {
+    description
+        .lights()
+        .values()
+        .filter_map(|light| match light {
+            description::Light::Distant {
+                direction,
+                irradiance,
+            } => {
+                let irradiance = acescg_from_rec709(Vec3::from(*irradiance));
+                (luminance(irradiance) > 0.0).then(|| DeltaLight::Distant {
+                    // Validated nonzero at apply.
+                    direction: Vec3::from(*direction).normalize(),
+                    irradiance,
+                })
+            }
+            description::Light::Point {
+                position,
+                intensity,
+            } => {
+                let intensity = acescg_from_rec709(Vec3::from(*intensity));
+                (luminance(intensity) > 0.0).then(|| DeltaLight::Point {
+                    position: Vec3::from(*position),
+                    intensity,
+                })
+            }
+        })
+        .collect()
+}
+
+/// Lower every instance into its placement spec, unpacking each emissive
+/// one into its per-triangle lights.
 fn lower_instances(
     description: &SceneDescription,
-    dirty: &Dirty,
     materials: &BTreeMap<&str, Material>,
-) -> Result<(Vec<InstanceSpec>, Vec<QuadLight>)> {
-    let changed_instances = names(&dirty.changed, Kind::Instance);
+) -> Result<(Vec<InstanceSpec>, Vec<TriangleLight>)> {
     let mut instances = Vec::with_capacity(description.instances().len());
-    let mut quads = Vec::new();
+    let mut triangle_lights = Vec::new();
     for (index, (name, instance)) in description.instances().iter().enumerate() {
-        if changed_instances.contains(name.as_str()) && !instance.camera_visible {
-            log::warn!(
-                "instance \"{name}\": camera_visible is not wired to the kernels yet; \
-                 the instance stays visible"
-            );
-        }
         // Apply validated the references and the transform, so lookups
         // can't miss and the inverse the records need exists.
         let material = materials[instance.material.as_str()];
@@ -315,28 +362,22 @@ fn lower_instances(
                         "instance \"{name}\" emits from PLY geometry, which is not yet supported"
                     ))
                 })?;
-            let quad = light_quad(
+            triangle_lights.extend(emissive_triangles(
                 &positions,
                 triangles,
                 transform,
                 material.emission,
                 index as u32,
-            )
-            .map_err(|reason| {
-                scene_error(format!(
-                    "instance \"{name}\": emissive instances must be parallelogram quads \
-                     until triangle emitters land — {reason}"
-                ))
-            })?;
-            quads.push(quad);
+            ));
         }
         instances.push(InstanceSpec {
             mesh: instance.mesh.clone(),
             transform,
             material,
+            camera_visible: instance.camera_visible,
         });
     }
-    Ok((instances, quads))
+    Ok((instances, triangle_lights))
 }
 
 /// Lower an authoring-side material onto the GPU record, converting color
@@ -561,6 +602,7 @@ fn placements<'a>(
                 .expect("mesh residency tracks the description"),
             transform: spec.transform,
             material: spec.material,
+            camera_visible: spec.camera_visible,
         })
         .collect()
 }
@@ -730,8 +772,11 @@ mod tests {
         assert!(error.to_string().contains("tri"), "{error}");
     }
 
+    /// Any emissive mesh is a light — one record per triangle, in
+    /// primitive order (a single bare triangle was a hard error while the
+    /// light sampler only spoke parallelogram quads).
     #[test]
-    fn a_non_quad_emitter_is_rejected_by_name() {
+    fn any_emissive_mesh_is_a_light() {
         let mut description = triangle_description();
         description
             .apply(&ChangeSet {
@@ -741,9 +786,10 @@ mod tests {
                 }))],
             })
             .expect("valid data");
-        let error = host_error(&description);
-        assert!(error.to_string().contains("\"thing\""), "{error}");
-        assert!(error.to_string().contains("parallelogram"), "{error}");
+        let host = host(&description).expect("a triangle emitter renders");
+        assert_eq!(host.triangle_lights.len(), 1);
+        assert_eq!(host.triangle_lights[0].primitive, 0);
+        assert!(crate::color::luminance(host.triangle_lights[0].emission) > 0.0);
     }
 
     #[test]
@@ -762,16 +808,64 @@ mod tests {
         assert!(error.to_string().contains("decode"), "{error}");
     }
 
+    /// Delta lights lower into the light list — direction normalized,
+    /// colors converted — while the get-or-create placeholder (a black
+    /// point light) is skipped as powerless.
     #[test]
-    fn delta_lights_are_skipped_not_fatal() {
+    fn delta_lights_lower_into_the_light_list() {
+        use super::super::changeset::LightPatch;
+        use super::super::description::Light;
+
         let mut description = triangle_description();
         description
             .apply(&ChangeSet {
-                ops: vec![Op::Light(super::super::changeset::LightPatch::new("sun"))],
+                ops: vec![
+                    Op::Light(LightPatch {
+                        light: Some(Light::Distant {
+                            direction: [0.0, -2.0, 0.0],
+                            irradiance: [3.0; 3],
+                        }),
+                        ..LightPatch::new("sun")
+                    }),
+                    Op::Light(LightPatch::new("placeholder")),
+                ],
             })
             .expect("valid data");
-        let host = host(&description).expect("a delta light only warns");
-        assert!(host.quads.is_empty());
+        let host = host(&description).expect("delta lights render");
+        let [DeltaLight::Distant { direction, .. }] = host.delta_lights.as_slice() else {
+            panic!("expected exactly the one distant light to survive lowering");
+        };
+        assert!((*direction - Vec3::NEG_Y).length() < 1e-6, "{direction}");
+    }
+
+    /// A positive aperture lowers into a thin lens focused at `look_at`
+    /// when the author left `focus_distance` unset; aperture zero stays a
+    /// pinhole no matter the focus value.
+    #[test]
+    fn the_camera_lens_lowers_with_focus_at_look_at() {
+        let source = description::Camera {
+            position: [0.0, 0.0, 5.0],
+            look_at: [0.0, 0.0, 1.0],
+            aperture_radius: 0.25,
+            ..description::Camera::default()
+        };
+        let camera = lower_camera(&source);
+        let lens = camera.lens.expect("a positive aperture is a lens");
+        assert!((lens.aperture_radius - 0.25).abs() < 1e-6);
+        assert!((lens.focus_distance - 4.0).abs() < 1e-6);
+
+        let explicit = lower_camera(&description::Camera {
+            focus_distance: Some(2.5),
+            ..source.clone()
+        });
+        assert!((explicit.lens.expect("lens").focus_distance - 2.5).abs() < 1e-6);
+
+        let pinhole = lower_camera(&description::Camera {
+            aperture_radius: 0.0,
+            focus_distance: Some(2.5),
+            ..source
+        });
+        assert!(pinhole.lens.is_none());
     }
 
     #[test]
@@ -830,25 +924,14 @@ mod tests {
         description
     }
 
-    /// The step's core property: after any edit, the incrementally
-    /// updated scene renders bit-identically to a fresh prep of the same
-    /// description. One walk covers every re-prep path — material-only
+    /// Every re-prep path, one edit each — the walk
+    /// [`incremental_updates_match_a_fresh_build`] takes: material-only
     /// (buffer upload), emission (light tables), transform (TLAS),
-    /// topology (BLAS), removal (retired residency), environment swap,
-    /// and a camera move.
-    #[test]
-    fn incremental_updates_match_a_fresh_build() {
-        let Some(gpu) = crate::gpu::test_context() else {
-            return;
-        };
-        let sky = std::env::temp_dir().join(format!("cenote-prep-sky-{}.exr", std::process::id()));
-        crate::output::write_exr(&sky, 2, 2, &[0.3_f32; 16]).expect("test sky");
-
-        let mut history = vec![ChangeSet::demo()];
-        let mut description = replay(&history);
-        let mut scene = Scene::prep(&gpu, &mut description).expect("prep");
-
-        let edits: Vec<(&str, ChangeSet)> = vec![
+    /// topology (BLAS), removal (retired residency), environment swap, a
+    /// camera move, a delta light, and a camera-visibility flip (TLAS
+    /// masks).
+    fn edit_walk(sky: &std::path::Path) -> Vec<(&'static str, ChangeSet)> {
+        vec![
             (
                 "material",
                 ChangeSet {
@@ -902,7 +985,7 @@ mod tests {
                 "environment",
                 ChangeSet {
                     ops: vec![Op::Environment(EnvironmentPatch {
-                        path: Some(sky.clone()),
+                        path: Some(sky.to_owned()),
                         ..EnvironmentPatch::new("sky")
                     })],
                 },
@@ -916,8 +999,46 @@ mod tests {
                     })],
                 },
             ),
-        ];
-        for (label, set) in edits {
+            (
+                "delta light",
+                ChangeSet {
+                    ops: vec![Op::Light(super::super::changeset::LightPatch {
+                        light: Some(super::super::description::Light::Distant {
+                            direction: [0.2, -1.0, 0.1],
+                            irradiance: [1.5, 1.4, 1.2],
+                        }),
+                        ..super::super::changeset::LightPatch::new("sun")
+                    })],
+                },
+            ),
+            (
+                "camera visibility",
+                ChangeSet {
+                    ops: vec![Op::Instance(InstancePatch {
+                        camera_visible: Some(false),
+                        ..InstancePatch::new("key")
+                    })],
+                },
+            ),
+        ]
+    }
+
+    /// The prep rewrite's core property: after any edit, the
+    /// incrementally updated scene renders bit-identically to a fresh
+    /// prep of the same description, across the whole [`edit_walk`].
+    #[test]
+    fn incremental_updates_match_a_fresh_build() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let sky = std::env::temp_dir().join(format!("cenote-prep-sky-{}.exr", std::process::id()));
+        crate::output::write_exr(&sky, 2, 2, &[0.3_f32; 16]).expect("test sky");
+
+        let mut history = vec![ChangeSet::demo()];
+        let mut description = replay(&history);
+        let mut scene = Scene::prep(&gpu, &mut description).expect("prep");
+
+        for (label, set) in edit_walk(&sky) {
             description.apply(&set).expect(label);
             let dirty = description.take_dirty();
             scene
@@ -932,6 +1053,101 @@ mod tests {
             );
         }
         std::fs::remove_file(&sky).ok();
+    }
+
+    /// The classic invisible-emitter trick, wired through the TLAS camera
+    /// mask: a lamp with `camera_visible: false` must vanish from the
+    /// frame — camera rays traverse straight past it — while still
+    /// lighting the floor through next-event connections and bounces.
+    #[test]
+    fn an_invisible_emitter_lights_without_appearing() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        // A floor, and a lamp panel dead ahead of the camera with open
+        // (black) sky behind it: the lamp's pixels fall to ~0 when it
+        // goes camera-invisible, and the floor stays lamp-lit.
+        let scene_with = |visible: bool| {
+            let mut description = SceneDescription::new();
+            description
+                .apply(&ChangeSet {
+                    ops: vec![
+                        Op::Settings(SettingsPatch::new("main")),
+                        Op::Camera(CameraPatch {
+                            position: Some([0.0, 1.0, 4.0]),
+                            look_at: Some([0.0, 1.0, 0.0]),
+                            ..CameraPatch::new("main")
+                        }),
+                        Op::Mesh(MeshPatch {
+                            source: Some(MeshSource::Inline {
+                                positions: vec![
+                                    [-1.0, 0.0, -1.0],
+                                    [-1.0, 0.0, 1.0],
+                                    [1.0, 0.0, 1.0],
+                                    [1.0, 0.0, -1.0],
+                                ],
+                                normals: Some(vec![[0.0, 1.0, 0.0]; 4]),
+                                uvs: None,
+                                triangles: vec![[0, 1, 2], [0, 2, 3]],
+                            }),
+                            ..MeshPatch::new("plane")
+                        }),
+                        Op::Material(Box::new(MaterialPatch::new("gray"))),
+                        Op::Instance(InstancePatch {
+                            mesh: Some("plane".into()),
+                            material: Some("gray".into()),
+                            transform: Some(super::super::description::Transform::Trs {
+                                translate: [0.0; 3],
+                                rotate_degrees: [0.0; 3],
+                                scale: [8.0, 1.0, 8.0],
+                            }),
+                            ..InstancePatch::new("floor")
+                        }),
+                        Op::Material(Box::new(MaterialPatch {
+                            base_color: Some(Texturable::Constant([0.0; 3])),
+                            specular_weight: Some(0.0),
+                            emission_luminance: Some(10.0),
+                            ..MaterialPatch::new("lamp")
+                        })),
+                        Op::Instance(InstancePatch {
+                            mesh: Some("plane".into()),
+                            material: Some("lamp".into()),
+                            // Stood upright, facing the camera.
+                            transform: Some(super::super::description::Transform::Trs {
+                                translate: [0.0, 1.0, -1.0],
+                                rotate_degrees: [90.0, 0.0, 0.0],
+                                scale: [0.5, 1.0, 0.5],
+                            }),
+                            camera_visible: Some(visible),
+                            ..InstancePatch::new("lamp")
+                        }),
+                    ],
+                })
+                .expect("valid data");
+            Scene::prep(&gpu, &mut description).expect("prep")
+        };
+
+        let size = 64; // the shared render() helper's target size
+        let probe = |pixels: &[f32], x: u32, y: u32| pixels[((y * size + x) * 4) as usize];
+        let center = (size / 2, size / 2);
+        let floor = (size / 2, size - 2);
+
+        let seen = render(&gpu, &scene_with(true));
+        let hidden = render(&gpu, &scene_with(false));
+        assert!(
+            probe(&seen, center.0, center.1) > 5.0,
+            "the visible lamp should fill the frame center"
+        );
+        assert!(
+            probe(&hidden, center.0, center.1) < 0.5,
+            "the invisible lamp should leave only the sky behind it"
+        );
+        for (label, pixels) in [("visible", &seen), ("invisible", &hidden)] {
+            assert!(
+                probe(pixels, floor.0, floor.1) > 0.01,
+                "{label}: the lamp should light the floor either way"
+            );
+        }
     }
 
     /// The untouched-on-error contract: an update rejected in the host

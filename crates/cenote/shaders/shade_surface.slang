@@ -1,8 +1,8 @@
 // The surface-shading stage: reconstruct the hit, collect the surface's
 // emission (MIS-weighted — a BSDF-sampled path landing on a light competes
 // with next-event estimation for the same connection), send one shadow ray
-// toward the lights (a quad or the environment, chosen by power), and
-// scatter off the OpenPBR mixture — until the path escapes to the sky,
+// toward the lights (the light list or the environment, chosen by power),
+// and scatter off the OpenPBR mixture — until the path escapes to the sky,
 // hits the depth cap, or loses Russian roulette.
 //
 // Radiance bookkeeping: the wave's per-pixel accumulator starts at zero
@@ -179,10 +179,12 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
             } else if (params.lightSampling == LIGHT_SAMPLING_MIS) {
                 let delta = spawn.position - params.paths.origin[path].xyz;
                 let cosLight = abs(dot(spawn.normal, direction));
-                // The full next-event pdf: choose the quads over the
-                // environment, then this quad and this point.
+                // The full next-event pdf: choose the light list over the
+                // environment, then this triangle (records sit in
+                // primitive order from the instance's first) and this
+                // point on it.
                 let neePdf = (1.0 - params.scene.env.selectProb)
-                           * params.scene.lights[mesh.light].pdfArea
+                           * params.scene.lights[mesh.light + hit.primitive].pdf
                            * dot(delta, delta) / cosLight;
                 weight = powerHeuristic(throughput.w, neePdf);
             }
@@ -209,9 +211,9 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     let wo = frame.toLocal(-direction);
 
     // Next-event estimation: connect this vertex to one candidate — a
-    // direction toward the environment or a point on a quad light, chosen
+    // direction toward the environment or a light from the list, chosen
     // in proportion to their power (the choice rides the low end of the
-    // NEE_LIGHT draw; the quad branch remaps the leftover back to a full-
+    // NEE_LIGHT draw; the list branch remaps the leftover back to a full-
     // range uniform for the alias walk). The contribution is fully
     // weighted here; trace_shadow just adds it if the connection is
     // unoccluded.
@@ -225,7 +227,9 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
         ShadowRay shadow;
         shadow.origin = spawn.position;
         shadow.pixel = pixel;
-        shadow.pad = 0.0;
+        shadow.pad0 = 0;
+        shadow.pad1 = 0;
+        shadow.pad2 = 0;
         var unshadowed = float3(0.0);
         if (uLight < envProb) {
             // Environment: a direction, unoccluded iff the shadow ray hits
@@ -244,33 +248,36 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
                     * evalBsdf(material, wiLight, wo)
                     * wiLight.z * (weight / neePdf);
                 shadow.light = LIGHT_NONE;
+                shadow.primitive = 0;
                 shadow.direction = candidate.direction;
+                shadow.tmax = 1e30;
             }
         } else {
-            // A quad light. Scene prep pins envProb to exactly 1 when no
-            // quads exist, so this branch always has a light list to walk.
-            let uQuad = (uLight - envProb) / (1.0 - envProb);
-            let candidate = sampleLights(params.scene.lights,
-                                         params.scene.lightCount, uQuad, uPoint);
-            let delta = candidate.position - spawn.position;
-            let r2 = dot(delta, delta);
-            let wiWorld = delta * rsqrt(r2);
-            let wiLight = frame.toLocal(wiWorld);
-            let cosLight = abs(dot(candidate.normal, wiWorld));
-            if (r2 > 0.0 && wiLight.z > 0.0 && cosLight > 0.0
-                && dot(wiWorld, spawn.normal) > 0.0) {
-                // The candidate's pdf in solid angle at this vertex,
-                // against the pdf BSDF sampling would give the direction.
-                let neePdf = (1.0 - envProb) * candidate.pdfArea * r2 / cosLight;
-                let scatterPdf = bsdfPdf(material, wiLight, wo);
-                let weight = params.lightSampling == LIGHT_SAMPLING_MIS
-                           ? powerHeuristic(neePdf, scatterPdf)
+            // A light from the list. Scene prep pins envProb to exactly 1
+            // when the list is powerless, so this branch always has
+            // something to walk.
+            let uList = (uLight - envProb) / (1.0 - envProb);
+            let candidate = sampleLights(params.scene.lights, params.scene.lightCount,
+                                         uList, uPoint, spawn.position);
+            let wiLight = frame.toLocal(candidate.direction);
+            if (candidate.pdf > 0.0 && wiLight.z > 0.0
+                && dot(candidate.direction, spawn.normal) > 0.0) {
+                // The candidate's pdf at this vertex against the pdf BSDF
+                // sampling would give the direction — except at a delta
+                // light, which BSDF sampling reaches with probability
+                // zero: its weight is 1 under every mode.
+                let neePdf = (1.0 - envProb) * candidate.pdf;
+                let weight = !candidate.delta
+                          && params.lightSampling == LIGHT_SAMPLING_MIS
+                           ? powerHeuristic(neePdf, bsdfPdf(material, wiLight, wo))
                            : 1.0;
-                unshadowed = throughput.xyz * candidate.emission
+                unshadowed = throughput.xyz * candidate.radiance
                     * evalBsdf(material, wiLight, wo)
                     * wiLight.z * (weight / neePdf);
                 shadow.light = candidate.instance;
-                shadow.direction = wiWorld;
+                shadow.primitive = candidate.primitive;
+                shadow.direction = candidate.direction;
+                shadow.tmax = candidate.tmax;
             }
         }
         if (any(unshadowed > 0.0)) {

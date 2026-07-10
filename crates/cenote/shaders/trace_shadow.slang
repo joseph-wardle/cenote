@@ -30,15 +30,14 @@ void trace_shadow(uint3 tid: SV_DispatchThreadID) {
     ray.Origin = shadow.origin;
     ray.Direction = shadow.direction;
     ray.TMin = 0.0;
-    ray.TMax = 1e30;
+    ray.TMax = shadow.tmax;
 
-    // Closest hit, not accept-first: the ray is aimed at a point on the
-    // light, so the light is visible iff the nearest thing along the ray
-    // *is* that light (or nothing, when the ray numerically grazes past
-    // its silhouette). Testing identity instead of shortening TMax needs
-    // no distance epsilon — the sampled point lies exactly on the traced
-    // quad only in exact arithmetic. Environment rays carry LIGHT_NONE,
-    // which no instance's ID matches: they pass iff they hit nothing.
+    // Closest hit, not accept-first: the ray is aimed at a point on one
+    // triangle of the light, so the connection is visible iff the nearest
+    // thing along the ray *is* that (instance, primitive) — or nothing,
+    // when the ray numerically grazes past its silhouette, aims at the
+    // environment, or aims at a delta light within `tmax`. The identity
+    // test needs no distance epsilon (see `ShadowRay` in pathstate.slang).
     RayQuery<RAY_FLAG_NONE> query;
     query.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, ray);
     while (query.Proceed()) {
@@ -47,7 +46,8 @@ void trace_shadow(uint3 tid: SV_DispatchThreadID) {
     }
 
     if (query.CommittedStatus() == COMMITTED_NOTHING
-        || query.CommittedInstanceID() == shadow.light) {
+        || (query.CommittedInstanceID() == shadow.light
+            && query.CommittedPrimitiveIndex() == shadow.primitive)) {
         params.radiance[shadow.pixel] += float4(shadow.contribution, 0.0);
     }
 }

@@ -2,8 +2,9 @@
 //! schema and [`changeset`] its one edit path — what scene files, the pbrt
 //! importer, and lookdev edits all speak. The private `prep` module joins
 //! that model to the GPU residency below — meshes built into acceleration
-//! structures, per-instance materials, quad lights with their sampling
-//! table, a pinhole camera, and an equirect environment. [`Scene::prep`]
+//! structures, per-instance materials, emissive triangles and delta
+//! lights with their sampling table, a thin-lens camera, and an equirect
+//! environment. [`Scene::prep`]
 //! builds a description fresh; `Scene::update` follows its accumulated
 //! dirty state and rebuilds only what an edit touched. [`Scene::new`]
 //! remains as the procedural build the furnace and estimator tests speak
@@ -29,8 +30,19 @@ use glam::{Mat4, Vec3};
 use crate::environment::Environment;
 use crate::error::Result;
 use crate::gpu::{AccelerationStructure, Buffer, Context, SampledImage, TlasInstance};
-use crate::lights::{LIGHT_NONE, QuadLight};
+use crate::lights::{DeltaLight, LIGHT_NONE, TriangleLight};
 use crate::material::Material;
+
+/// Ray-visibility mask bits, matched by the mask each TLAS instance
+/// carries. Camera rays trace with [`ray_mask::CAMERA`]; every other ray
+/// (bounce, shadow) traces with [`ray_mask::ALL`], so a camera-invisible
+/// instance still bounces light, casts shadows, and — when emissive —
+/// illuminates. The full per-ray-type set (diffuse/glossy/shadow) is a
+/// ledger deferral; today only the camera bit is real.
+pub(crate) mod ray_mask {
+    pub const CAMERA: u32 = 0x01;
+    pub const ALL: u32 = 0xFF;
+}
 
 /// A triangle mesh on the host: tightly packed positions, matching shading
 /// normals, plus index triples.
@@ -84,8 +96,10 @@ struct GeometryRecord {
     /// Rows of the inverse: normals transform through it, and the
     /// spawn-point error bounds need both directions.
     world_to_object: [[f32; 4]; 3],
-    /// Index into the light list, or [`LIGHT_NONE`] — how a BSDF-sampled
-    /// hit on a light finds the pdf its MIS weight competes against.
+    /// Index of the instance's *first* light record, or [`LIGHT_NONE`] —
+    /// an emissive instance has one record per triangle, in primitive
+    /// order, so a BSDF-sampled hit finds the pdf its MIS weight competes
+    /// against at `light + primitive`.
     light: u32,
     _pad0: [u32; 3],
 }
@@ -106,8 +120,8 @@ struct SceneTable {
     env_pdfs: vk::DeviceAddress,
     env_width: u32,
     env_height: u32,
-    /// p(next-event estimation samples the environment rather than a quad) —
-    /// `selectProb` on the Slang side.
+    /// p(next-event estimation samples the environment rather than the
+    /// light list) — `selectProb` on the Slang side.
     env_select_prob: f32,
     _pad0: u32,
     light_count: u32,
@@ -134,8 +148,8 @@ pub struct Scene {
     camera: Camera,
     /// The environment's dimensions and emitted power, retained so a
     /// light edit can rebuild the scene table (its selection probability
-    /// weighs the quads against the environment) without reloading the
-    /// image.
+    /// weighs the light list against the environment) without reloading
+    /// the image.
     env_size: (u32, u32),
     env_power: f64,
 }
@@ -166,9 +180,8 @@ impl Scene {
     ///
     /// # Panics
     ///
-    /// On an empty scene, a non-invertible object transform, or an
-    /// emissive object whose mesh is not a parallelogram quad (all lights
-    /// are, until triangle emitters land) — programmer bugs.
+    /// On an empty scene or a non-invertible object transform —
+    /// programmer bugs.
     pub fn new(
         gpu: &Context,
         objects: &[Object],
@@ -181,22 +194,21 @@ impl Scene {
             .enumerate()
             .map(|(index, object)| upload_mesh(gpu, &format!("scene.object{index}"), &object.mesh))
             .collect::<Result<Vec<GpuMesh>>>()?;
-        // The light list: every emissive object, validated and unpacked
-        // into the world-space parallelogram next-event sampling draws
-        // points from.
-        let quads: Vec<QuadLight> = objects
+        // The light list: every triangle of every emissive object, in
+        // world space. The procedural path has no delta lights — those
+        // are description objects, exercised through prep.
+        let triangle_lights: Vec<TriangleLight> = objects
             .iter()
             .enumerate()
             .filter(|(_, object)| object.material.emission != Vec3::ZERO)
-            .map(|(index, object)| {
-                light_quad(
+            .flat_map(|(index, object)| {
+                emissive_triangles(
                     &object.mesh.positions,
                     &object.mesh.triangles,
                     object.transform,
                     object.material.emission,
                     index as u32,
                 )
-                .unwrap_or_else(|reason| panic!("emissive object {index}: {reason}"))
             })
             .collect();
         let placements: Vec<Placement> = meshes
@@ -206,10 +218,12 @@ impl Scene {
                 mesh,
                 transform: object.transform,
                 material: object.material,
+                camera_visible: true,
             })
             .collect();
         let tlas = build_scene_tlas(gpu, &placements)?;
-        let (geometry, materials, lights) = upload_instance_tables(gpu, &placements, &quads)?;
+        let (geometry, materials, lights) =
+            upload_instance_tables(gpu, &placements, &triangle_lights, &[])?;
         let env = upload_environment(gpu, environment)?;
         let resident = ResidentBuffers {
             geometry,
@@ -220,12 +234,13 @@ impl Scene {
             env_pdfs: env.pdfs,
         };
         let env_size = (environment.width(), environment.height());
+        let light_count = triangle_lights.len() as u32;
         let table = upload_scene_table(
             gpu,
             &resident,
             env_size,
-            select_probability(env.power, &quads),
-            quads.len() as u32,
+            select_probability(env.power, crate::lights::total_power(&triangle_lights, &[])),
+            light_count,
         )?;
 
         Ok(Self {
@@ -277,8 +292,8 @@ impl Scene {
     }
 }
 
-/// A pinhole camera, described by where it sits, what it looks at, and
-/// which way is up on screen.
+/// A camera, described by where it sits, what it looks at, and which way
+/// is up on screen — a pinhole unless it carries a [`Lens`].
 #[derive(Clone, Copy)]
 pub struct Camera {
     /// Eye position, meters.
@@ -291,6 +306,24 @@ pub struct Camera {
     pub up: Vec3,
     /// Vertical field of view, degrees.
     pub vfov_degrees: f32,
+    /// The thin lens, when depth of field is wanted; `None` is a pinhole
+    /// (everything sharp).
+    pub lens: Option<Lens>,
+}
+
+/// A thin lens: rays leave a disk instead of a point, and only the focal
+/// plane images sharply. Raygen consumes it by scaling the [`RayBasis`]
+/// to the focal plane — `position + forward + x·right + y·up` is then a
+/// pixel's focal *point* — and re-aiming each ray from a sampled point on
+/// the lens disk.
+#[derive(Clone, Copy)]
+pub struct Lens {
+    /// Lens radius, meters; larger blurs out-of-focus geometry more.
+    /// Zero is exactly a pinhole.
+    pub aperture_radius: f32,
+    /// Distance from the camera to the focal plane along the view axis,
+    /// meters. Must be positive.
+    pub focus_distance: f32,
 }
 
 /// A camera's ray-generation basis: the kernel builds each pixel's ray as
@@ -340,11 +373,16 @@ struct Placement<'a> {
     mesh: &'a GpuMesh,
     transform: Mat4,
     material: Material,
+    /// Whether camera rays see it — lowered into the instance's TLAS
+    /// visibility mask.
+    camera_visible: bool,
 }
 
 /// Build the TLAS: one instance per placement, with `custom_index` =
 /// position, so a hit leads back to the right geometry record and
-/// material.
+/// material. A camera-invisible placement drops [`ray_mask::CAMERA`]
+/// from its mask, so camera rays traverse past it while every other ray
+/// still sees it.
 fn build_scene_tlas(gpu: &Context, placements: &[Placement]) -> Result<AccelerationStructure> {
     let instances: Vec<TlasInstance> = placements
         .iter()
@@ -353,24 +391,32 @@ fn build_scene_tlas(gpu: &Context, placements: &[Placement]) -> Result<Accelerat
             blas: &placement.mesh.blas,
             transform: placement.transform,
             custom_index: index as u32,
+            mask: if placement.camera_visible {
+                ray_mask::ALL
+            } else {
+                ray_mask::ALL & !ray_mask::CAMERA
+            } as u8,
         })
         .collect();
     gpu.build_tlas("scene.tlas", &instances)
 }
 
-/// Upload the per-instance tables: geometry records (each carrying its
-/// instance's light index or [`LIGHT_NONE`]), the material array, and the
-/// light records.
+/// Upload the per-instance tables: geometry records (each carrying the
+/// index of its instance's *first* light record, or [`LIGHT_NONE`]), the
+/// material array, and the light records. An emissive instance's records
+/// sit contiguously in primitive order, so a hit's own record is
+/// `light + primitive`.
 fn upload_instance_tables(
     gpu: &Context,
     placements: &[Placement],
-    quads: &[QuadLight],
+    triangle_lights: &[TriangleLight],
+    delta_lights: &[DeltaLight],
 ) -> Result<(Buffer, Buffer, Buffer)> {
-    let light_records = crate::lights::build(quads);
+    let light_records = crate::lights::build(triangle_lights, delta_lights);
     let light_index = |instance: u32| {
-        quads
+        triangle_lights
             .iter()
-            .position(|quad| quad.instance == instance)
+            .position(|light| light.instance == instance)
             .map_or(LIGHT_NONE, |index| index as u32)
     };
     let records: Vec<GeometryRecord> = placements
@@ -445,78 +491,28 @@ fn upload_scene_table(
     gpu.upload_buffer("scene.table", bytemuck::bytes_of(&table), usage)
 }
 
-/// Unpack an emissive instance into the world-space parallelogram all
-/// current lights must be, validating that the mesh really is one:
-/// next-event estimation samples points on this analytic quad, so it has
-/// to describe exactly the surface shadow rays trace against — a mismatch
-/// would let the light-sampling and BSDF-sampling strategies disagree
-/// about where the light is. (Triangle emitters retire this shape rule.)
-///
-/// # Errors
-///
-/// A plain reason string when the mesh is not two triangles tiling a
-/// parallelogram — scene files can author one, so this is user data, and
-/// callers add the instance's identity.
-fn light_quad(
+/// Unpack an emissive instance into per-triangle lights: every triangle
+/// of the mesh, in primitive order, transformed to world space — the
+/// order (and the one-record-per-triangle rule, degenerate triangles
+/// included) is what lets a BSDF-sampled hit on the light find its own
+/// record at `GeometryRecord.light + primitive`.
+fn emissive_triangles(
     positions: &[Vec3],
     triangles: &[[u32; 3]],
     transform: Mat4,
     emission: Vec3,
     instance: u32,
-) -> Result<QuadLight, String> {
-    if positions.len() != 4 || triangles.len() != 2 {
-        return Err(format!(
-            "the mesh has {} vertices and {} triangles, not a quad's 4 and 2",
-            positions.len(),
-            triangles.len()
-        ));
-    }
-    // Vertex 0 is a corner of any parallelogram. Its opposite vertex is
-    // the one that equals the sum of 0's two neighbors minus vertex 0;
-    // trying each candidate identifies the layout.
-    let p = positions;
-    let others = |opposite: usize| match opposite {
-        1 => [2usize, 3],
-        2 => [1, 3],
-        _ => [1, 2],
-    };
-    let opposite = (1usize..4).find(|&candidate| {
-        let [b, c] = others(candidate);
-        let expected = p[b] + p[c] - p[0];
-        let tolerance = 1e-4 * (p[b] - p[0]).length().max((p[c] - p[0]).length());
-        (p[candidate] - expected).length() <= tolerance
-    });
-    let Some(opposite) = opposite else {
-        return Err("the four vertices do not form a parallelogram".to_owned());
-    };
-    let [b, c] = others(opposite);
-
-    // The two triangles must tile the quad: all four vertices used, and
-    // the shared edge on one of the diagonals (two triangles sharing a
-    // *side* would overlap instead of tiling).
-    let mut used: Vec<u32> = triangles.iter().flatten().copied().collect();
-    used.sort_unstable();
-    used.dedup();
-    let shared: Vec<u32> = triangles[0]
+) -> Vec<TriangleLight> {
+    triangles
         .iter()
-        .filter(|vertex| triangles[1].contains(vertex))
-        .copied()
-        .collect();
-    let on_diagonal =
-        shared.len() == 2 && (shared.contains(&0) == shared.contains(&(opposite as u32)));
-    if used != [0, 1, 2, 3] || !on_diagonal {
-        return Err("the two triangles do not tile the parallelogram".to_owned());
-    }
-
-    let world = |vertex: Vec3| transform.transform_point3(vertex);
-    let corner = world(p[0]);
-    Ok(QuadLight {
-        corner,
-        edge1: world(p[b]) - corner,
-        edge2: world(p[c]) - corner,
-        emission,
-        instance,
-    })
+        .enumerate()
+        .map(|(primitive, corners)| TriangleLight {
+            corners: corners.map(|vertex| transform.transform_point3(positions[vertex as usize])),
+            emission,
+            instance,
+            primitive: primitive as u32,
+        })
+        .collect()
 }
 
 /// The environment's GPU half: the radiance image, the three sampling
@@ -556,25 +552,22 @@ fn upload_environment(gpu: &Context, environment: &Environment) -> Result<GpuEnv
     })
 }
 
-/// Weigh the environment against the quad lights: the power-proportional
+/// Weigh the environment against the light list: the power-proportional
 /// probability that next-event estimation samples the environment rather
-/// than a quad. Quads weigh π × luminance × area — one face's
-/// exitance-weighted flux, though the quad emits from both; the
-/// environment weighs its luminance integral over the sphere, which is a
-/// flux per unit receiver area — the comparison implicitly stands in a
-/// ~1 m² receiver. Both approximations (the one-face flux, the unit
-/// receiver) only steer noise: the MIS weights stay exact whatever this
-/// probability is. The exact-0/exact-1 endpoints *are* load-bearing: the
-/// shader walks the quad list whenever its draw lands above
-/// `select_prob`, so a lightless scene must pin it to 1, and a black
-/// environment (with no quads either) disables next-event estimation
-/// entirely.
-fn select_probability(env_power: f64, quads: &[QuadLight]) -> f32 {
-    let quad_power = std::f64::consts::PI * crate::lights::total_power(quads);
-    if quad_power == 0.0 {
+/// than the list. The environment weighs its luminance integral over the
+/// sphere — a flux per unit receiver area, so the comparison implicitly
+/// stands in a ~1 m² receiver — against [`crate::lights::total_power`]'s
+/// per-kind flux measures. The approximations only steer noise: the MIS
+/// weights stay exact whatever this probability is. The exact-0/exact-1
+/// endpoints *are* load-bearing: the shader walks the light list
+/// whenever its draw lands above `select_prob`, so a scene whose list is
+/// powerless must pin it to 1, and a black environment (with no other
+/// lights either) disables next-event estimation entirely.
+fn select_probability(env_power: f64, light_power: f64) -> f32 {
+    if light_power == 0.0 {
         f32::from(u8::from(env_power > 0.0))
     } else {
-        (env_power / (env_power + quad_power)) as f32
+        (env_power / (env_power + light_power)) as f32
     }
 }
 
@@ -808,6 +801,7 @@ mod tests {
             look_at: Vec3::new(0.0, 1.0, 0.0),
             up: Vec3::Y,
             vfov_degrees: 90.0,
+            lens: None,
         };
         let basis = camera.basis(2.0);
         assert!((basis.forward.length() - 1.0).abs() < 1e-6);
@@ -832,6 +826,7 @@ mod tests {
             look_at: Vec3::ZERO,
             up: Vec3::Y,
             vfov_degrees: 60.0,
+            lens: None,
         };
         let inverted = Camera {
             up: -Vec3::Y,

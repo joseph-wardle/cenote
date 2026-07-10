@@ -15,6 +15,10 @@ struct Params {
     Queue<uint> rays;
     Queue<uint> hits;
     Queue<uint> misses;
+    uint rayMask; // which instances these rays see: camera rays carry the
+                  // camera bit, so camera-invisible instances skip them;
+                  // every later bounce traces with all bits set
+    uint pad;
 };
 
 [vk::push_constant]
@@ -35,7 +39,7 @@ void intersect(uint3 tid: SV_DispatchThreadID) {
     ray.TMax = 1e30;
 
     RayQuery<RAY_FLAG_NONE> query;
-    query.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, ray);
+    query.TraceRayInline(scene, RAY_FLAG_NONE, params.rayMask, ray);
     while (query.Proceed()) {
         // Nothing to consider: every BLAS is opaque, so traversal commits
         // triangle hits on its own.

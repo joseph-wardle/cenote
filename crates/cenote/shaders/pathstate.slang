@@ -78,12 +78,26 @@ public struct Queue<Entry> {
 // A queued shadow ray: self-contained (not fields of the launching path),
 // which keeps shade_surface fire-and-forget and is already the shape of a
 // separate shadow-path pool once multi-candidate NEE wants one.
+//
+// The visibility test is by identity, never by a distance epsilon: a ray
+// aimed at a point on triangle (light, primitive) hits that triangle only
+// at that point (a segment crosses a plane once), so the connection is
+// unoccluded iff the committed hit *is* the target triangle — exact even
+// on closed emitters, where a ray toward a far-side sample hits the near
+// side of the same instance first and must count as occluded. Connections
+// with nothing to hit (environment, delta lights) carry LIGHT_NONE, which
+// no instance's ID matches: they pass iff nothing commits within `tmax`
+// (open for the environment and distant lights; the distance itself for
+// point lights, where anything nearer is a real occluder).
 public struct ShadowRay {
     public float3 origin;
-    public uint light; // target light's TLAS custom index; LIGHT_NONE aims
-                       // at the environment (visible iff nothing is hit)
+    public uint light; // target light's TLAS custom index, or LIGHT_NONE
     public float3 direction;
-    public uint pixel;
+    public uint primitive; // target triangle within the light's mesh
     public float3 contribution; // unshadowed radiance, fully weighted
-    public float pad;
+    public float tmax;
+    public uint pixel;
+    public uint pad0;
+    public uint pad1;
+    public uint pad2;
 };
