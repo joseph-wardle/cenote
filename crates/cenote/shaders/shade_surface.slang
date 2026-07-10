@@ -1,9 +1,11 @@
-// The surface-shading stage: reconstruct the hit, collect the surface's
-// emission (MIS-weighted — a BSDF-sampled path landing on a light competes
-// with next-event estimation for the same connection), send one shadow ray
-// toward the lights (the light list or the environment, chosen by power),
-// and scatter off the OpenPBR mixture — until the path escapes to the sky,
-// hits the depth cap, or loses Russian roulette.
+// The surface-shading stage: reconstruct the hit, settle the interior
+// medium's Beer–Lambert absorption over the arriving segment, collect the
+// surface's emission (MIS-weighted — a BSDF-sampled path landing on a
+// light competes with next-event estimation for the same connection),
+// send one shadow ray toward the lights (the light list or the
+// environment, chosen by power), and scatter off the OpenPBR mixture —
+// reflection or, through the dielectric base, refraction — until the path
+// escapes to the sky, hits the depth cap, or loses Russian roulette.
 //
 // Radiance bookkeeping: the wave's per-pixel accumulator starts at zero
 // and every write below is a plain +=. A pixel has one path and a path
@@ -48,14 +50,16 @@ float3 fetch3(float* attributes, uint vertex) {
                   attributes[3 * vertex + 2]);
 }
 
-// A reconstructed hit: where the next ray segment starts, already nudged
-// off the surface, plus both unit normals. The interpolated shading normal
-// carries the BSDF frame — it is what makes a coarse sphere render smooth
-// — while the geometric normal keeps the jobs that must match the actual
-// triangle: the spawn offset, and the sidedness guards that reject
-// directions passing through the surface the shading frame pretends away.
+// A reconstructed hit: where the next ray segment starts — nudged off
+// either face, since refraction continues on the far side — plus both
+// unit normals. The interpolated shading normal carries the BSDF frame —
+// it is what makes a coarse sphere render smooth — while the geometric
+// normal keeps the jobs that must match the actual triangle: the spawn
+// offsets, and the sidedness guards that reject directions passing
+// through the surface the shading frame pretends away.
 struct SpawnPoint {
-    float3 position;
+    float3 position; // nudged toward the arriving ray — reflections
+    float3 below;    // nudged past the surface — transmissions
     float3 normal;  // geometric, facing the arriving ray
     float3 shading; // interpolated, flipped to the geometric side
 };
@@ -64,10 +68,11 @@ struct SpawnPoint {
 // the arriving ray (surfaces are two-sided), and offset the point along
 // the normal by a rigorous bound on its own floating-point reconstruction
 // error — so the next segment can trace with TMin 0 and still never hit
-// the triangle it left. Ported from the reference GLSL of "Solving
-// Self-Intersection Artifacts in DirectX Raytracing" (van Antwerpen,
-// NVIDIA, 2023). Never a magic epsilon: every term scales with the
-// coordinates it bounds, so this holds at any scene scale.
+// the triangle it left, whichever side it leaves from. Ported from the
+// reference GLSL of "Solving Self-Intersection Artifacts in DirectX
+// Raytracing" (van Antwerpen, NVIDIA, 2023). Never a magic epsilon: every
+// term scales with the coordinates it bounds, so this holds at any scene
+// scale.
 SpawnPoint spawnPoint(GeometryRecord mesh, Hit hit, float3 rayDirection) {
     uint base = 3 * hit.primitive;
     let v0 = fetch3(mesh.positions, mesh.indices[base]);
@@ -145,6 +150,7 @@ SpawnPoint spawnPoint(GeometryRecord mesh, Hit hit, float3 rayDirection) {
 
     SpawnPoint spawn;
     spawn.position = fma(float3(wldOffset), wldNormal, wldPosition);
+    spawn.below = fma(float3(-wldOffset), wldNormal, wldPosition);
     spawn.normal = wldNormal;
     spawn.shading = shading;
     return spawn;
@@ -160,11 +166,28 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     uint pixel = params.paths.pixel[path];
     Hit hit = params.paths.hit[path];
     let direction = params.paths.direction[path].xyz;
+    let origin = params.paths.origin[path].xyz;
     GeometryRecord mesh = params.scene.geometry[hit.instance];
     Material material = params.scene.materials[hit.instance];
     let spawn = spawnPoint(mesh, hit, direction);
     // xyz = the path's weight; w = the previous scatter's pdf (0: camera ray).
-    let throughput = params.paths.throughput[path];
+    var throughput = params.paths.throughput[path];
+
+    // The interior the segment crossed: Beer–Lambert absorption toward
+    // this medium's target color, folded into the throughput before
+    // anything at this vertex spends it. A zero transmission depth means
+    // no interior — the tint sat on the interface instead. Camera rays
+    // start in vacuum, so bounce 0 never reads the (unwritten) state.
+    var medium = params.bounce == 0 ? MEDIUM_NONE
+               : pathStateMedium(params.paths.state[path]);
+    if (medium != MEDIUM_NONE) {
+        Material interior = params.scene.materials[medium];
+        if (interior.transmissionDepth > 0.0) {
+            let sigma = -log(clamp(interior.transmissionColor, 1e-4, 1.0))
+                      / interior.transmissionDepth;
+            throughput.xyz *= exp(-sigma * distance(origin, spawn.position));
+        }
+    }
 
     // Emission. This hit is the BSDF strategy's way of reaching a light,
     // so it is weighted against the probability that next-event sampling
@@ -177,7 +200,7 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
             if (params.lightSampling == LIGHT_SAMPLING_NEE) {
                 weight = 0.0;
             } else if (params.lightSampling == LIGHT_SAMPLING_MIS) {
-                let delta = spawn.position - params.paths.origin[path].xyz;
+                let delta = spawn.position - origin;
                 let cosLight = abs(dot(spawn.normal, direction));
                 // The full next-event pdf: choose the light list over the
                 // environment, then this triangle (records sit in
@@ -202,21 +225,28 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
         return;
     }
 
-    // The BSDF lives in the shading frame. Directions that are valid there
-    // but pass through the real triangle (below the geometric horizon) are
-    // rejected at each use below — the standard shading-normal trade: a
-    // sliver of energy lost near silhouettes, never light through walls,
-    // and the same treatment for every strategy so MIS stays consistent.
+    // The BSDF lives in the shading frame, resolved once per vertex
+    // against the view direction. A hit on the far wall of the interior
+    // the path is inside sees the bare glass interface at the inverted
+    // IOR. Directions that are valid in the shading frame but pass
+    // through the real triangle (the wrong side of the geometric horizon)
+    // are rejected at each use below — the standard shading-normal trade:
+    // a sliver of energy lost near silhouettes, never light through
+    // walls, and the same treatment for every strategy so MIS stays
+    // consistent.
     let frame = Frame(spawn.shading);
     let wo = frame.toLocal(-direction);
+    let closure = resolveClosure(params.scene.bsdfTables, material, wo,
+                                 medium == hit.instance);
 
     // Next-event estimation: connect this vertex to one candidate — a
     // direction toward the environment or a light from the list, chosen
     // in proportion to their power (the choice rides the low end of the
     // NEE_LIGHT draw; the list branch remaps the leftover back to a full-
-    // range uniform for the alias walk). The contribution is fully
-    // weighted here; trace_shadow just adds it if the connection is
-    // unoccluded.
+    // range uniform for the alias walk). A candidate below the horizon is
+    // legal when the base transmits — the connection then leaves through
+    // the surface. The contribution is fully weighted here; trace_shadow
+    // just adds it if the connection is unoccluded.
     let envProb = params.scene.env.selectProb;
     if (params.lightSampling != LIGHT_SAMPLING_BSDF
         && (params.scene.lightCount > 0 || envProb > 0.0)) {
@@ -225,7 +255,6 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
         let uPoint = sample_2d(pixel, params.sampleIndex,
                                bounceDimension(params.bounce, NEE_POINT));
         ShadowRay shadow;
-        shadow.origin = spawn.position;
         shadow.pixel = pixel;
         shadow.pad0 = 0;
         shadow.pad1 = 0;
@@ -237,16 +266,18 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
             // reports pdf 0 and is skipped — it carries no usable density.
             let candidate = params.scene.env.sample(uPoint);
             let wiLight = frame.toLocal(candidate.direction);
-            if (candidate.pdf > 0.0 && wiLight.z > 0.0
-                && dot(candidate.direction, spawn.normal) > 0.0) {
+            let throughSurface = dot(candidate.direction, spawn.normal) < 0.0;
+            if (candidate.pdf > 0.0 && wiLight.z != 0.0
+                && (wiLight.z < 0.0) == throughSurface) {
                 let neePdf = envProb * candidate.pdf;
-                let scatterPdf = bsdfPdf(material, wiLight, wo);
+                let scatterPdf = bsdfPdf(closure, wiLight, wo);
                 let weight = params.lightSampling == LIGHT_SAMPLING_MIS
                            ? powerHeuristic(neePdf, scatterPdf)
                            : 1.0;
                 unshadowed = throughput.xyz * candidate.radiance
-                    * evalBsdf(material, wiLight, wo)
-                    * wiLight.z * (weight / neePdf);
+                    * evalBsdf(closure, wiLight, wo)
+                    * abs(wiLight.z) * (weight / neePdf);
+                shadow.origin = throughSurface ? spawn.below : spawn.position;
                 shadow.light = LIGHT_NONE;
                 shadow.primitive = 0;
                 shadow.direction = candidate.direction;
@@ -260,8 +291,9 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
             let candidate = sampleLights(params.scene.lights, params.scene.lightCount,
                                          uList, uPoint, spawn.position);
             let wiLight = frame.toLocal(candidate.direction);
-            if (candidate.pdf > 0.0 && wiLight.z > 0.0
-                && dot(candidate.direction, spawn.normal) > 0.0) {
+            let throughSurface = dot(candidate.direction, spawn.normal) < 0.0;
+            if (candidate.pdf > 0.0 && wiLight.z != 0.0
+                && (wiLight.z < 0.0) == throughSurface) {
                 // The candidate's pdf at this vertex against the pdf BSDF
                 // sampling would give the direction — except at a delta
                 // light, which BSDF sampling reaches with probability
@@ -269,11 +301,12 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
                 let neePdf = (1.0 - envProb) * candidate.pdf;
                 let weight = !candidate.delta
                           && params.lightSampling == LIGHT_SAMPLING_MIS
-                           ? powerHeuristic(neePdf, bsdfPdf(material, wiLight, wo))
+                           ? powerHeuristic(neePdf, bsdfPdf(closure, wiLight, wo))
                            : 1.0;
                 unshadowed = throughput.xyz * candidate.radiance
-                    * evalBsdf(material, wiLight, wo)
-                    * wiLight.z * (weight / neePdf);
+                    * evalBsdf(closure, wiLight, wo)
+                    * abs(wiLight.z) * (weight / neePdf);
+                shadow.origin = throughSurface ? spawn.below : spawn.position;
                 shadow.light = candidate.instance;
                 shadow.primitive = candidate.primitive;
                 shadow.direction = candidate.direction;
@@ -286,18 +319,22 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
         }
     }
 
-    // Scatter off the mixture: one technique (VNDF or cosine) drawn by
-    // BSDF_LOBE, the estimator divided by the full mixture pdf.
+    // Scatter off the mixture: one technique drawn by BSDF_LOBE (the
+    // pick's leftover, rescaled, drives the glass technique's
+    // reflect-or-refract branch), the estimator divided by the full
+    // mixture pdf. The sidedness guard requires the scattered ray to
+    // leave through the same geometric face the shading frame put it on.
     let uLobe = sample_1d(pixel, params.sampleIndex,
                           bounceDimension(params.bounce, BSDF_LOBE));
     let u = sample_2d(pixel, params.sampleIndex,
                       bounceDimension(params.bounce, BSDF_DIR));
-    let wi = sampleBsdf(material, wo, uLobe, u);
-    let wiWorld = frame.toWorld(wi.xyz);
+    let scatter = sampleBsdf(closure, wo, uLobe, u);
+    let wiWorld = frame.toWorld(scatter.wi);
     var scattered = float3(0.0);
-    if (wi.z > 0.0 && wi.w > 0.0 && dot(wiWorld, spawn.normal) > 0.0) {
-        scattered = throughput.xyz * evalBsdf(material, wi.xyz, wo)
-                  * (wi.z / wi.w);
+    if (scatter.pdf > 0.0 && scatter.wi.z != 0.0
+        && (scatter.wi.z > 0.0) == (dot(wiWorld, spawn.normal) > 0.0)) {
+        scattered = throughput.xyz * evalBsdf(closure, scatter.wi, wo)
+                  * (abs(scatter.wi.z) / scatter.pdf);
     }
 
     // A path that can carry nothing forward is done — lights themselves
@@ -319,9 +356,17 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
         scattered /= survival;
     }
 
-    params.paths.origin[path] = float4(spawn.position, 0.0);
+    // A transmission through a closed surface crosses into (or out of) its
+    // interior; thin walls have none. Reflections keep whatever medium the
+    // path was already in.
+    if (scatter.lobe == LOBE_TRANSMISSION && material.thinWalled == 0) {
+        medium = medium == hit.instance ? MEDIUM_NONE : hit.instance;
+    }
+    let transmitted = scatter.wi.z < 0.0;
+    params.paths.origin[path] = float4(transmitted ? spawn.below : spawn.position, 0.0);
     params.paths.direction[path] = float4(wiWorld, 0.0);
-    params.paths.throughput[path] = float4(scattered, wi.w);
+    params.paths.throughput[path] = float4(scattered, scatter.pdf);
+    params.paths.state[path] = packPathState(scatter.lobe, medium);
     params.rays.push(path);
 
     // The path continues, but its pixel keeps the emission found here.

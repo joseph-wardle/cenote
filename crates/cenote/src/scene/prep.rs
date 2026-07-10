@@ -9,10 +9,11 @@
 //!
 //! Prep is where the description meets what the renderer can currently
 //! express, under two rules. Anything not wired up yet is *warned by
-//! name* and rendered without — a texture reference, an unwired material
-//! lobe — so a skipped feature is never silent. Anything with no honest
-//! render at all is an error: PLY geometry (no reader yet), or a
-//! description without its one camera and settings.
+//! name* and rendered without — today that means texture references,
+//! until the texture pipeline lands — so a skipped feature is never
+//! silent. Anything with no honest render at all is an error: PLY
+//! geometry (no reader yet), or a description without its one camera and
+//! settings.
 //! [`Error::Scene`] from here means *the description is fine but this
 //! build can't render it* — residency is untouched, so a live session
 //! keeps its last good scene and reports the edit instead of dying.
@@ -81,6 +82,7 @@ impl Scene {
             geometry,
             materials,
             lights,
+            bsdf_tables: crate::tables::upload(gpu)?,
             env_marginal: env.marginal,
             env_conditional: env.conditional,
             env_pdfs: env.pdfs,
@@ -283,7 +285,10 @@ fn host_phase(description: &SceneDescription, dirty: &Dirty, fresh: bool) -> Res
         delta_lights,
         environment,
         camera,
-        geometry_dirty: touched(Kind::Mesh) || touched(Kind::Instance),
+        // Material dirt rebuilds the TLAS too: fractional opacity is baked
+        // into each instance's non-opaque flag, and the TLAS over a scene's
+        // handful of instances is the cheap structure (every BLAS stays).
+        geometry_dirty: touched(Kind::Mesh) || touched(Kind::Instance) || touched(Kind::Material),
     })
 }
 
@@ -382,14 +387,13 @@ fn lower_instances(
 
 /// Lower an authoring-side material onto the GPU record, converting color
 /// constants from the format's linear `Rec.709` into `ACEScg` — prep owns
-/// that conversion, the same way it owns texture color spaces later.
-/// Parameters the kernels can't express yet are collected and, when
-/// `warn` (the material changed this round), reported once by name.
-#[expect(
-    clippy::float_cmp,
-    reason = "the guards compare against exact schema defaults; any authored deviation, \
-              however small, deserves its warning"
-)]
+/// that conversion, the same way it owns texture color spaces later — and
+/// clamping weights into the ranges the kernel's lerps assume. The coat's
+/// tint on emission folds in here: it is a view-independent constant in
+/// this closure, and folding it keeps the light table and the shading
+/// kernel reading the same emitted radiance. Parameters the kernels can't
+/// express yet (texture references) are collected and, when `warn` (the
+/// material changed this round), reported once by name.
 fn lower_material(name: &str, source: &description::Material, warn: bool) -> Material {
     let mut skipped: Vec<String> = Vec::new();
     let base_color = color_constant(&mut skipped, "base_color", &source.base_color, [0.8; 3]);
@@ -406,25 +410,12 @@ fn lower_material(name: &str, source: &description::Material, warn: bool) -> Mat
         &source.emission_color,
         [1.0; 3],
     );
-    if source.specular_ior != 1.5 {
-        skipped.push("specular_ior (fixed at 1.5)".into());
-    }
-    if source.transmission_weight > 0.0 {
-        skipped.push("transmission".into());
-    }
-    if source.coat_weight > 0.0 {
-        skipped.push("coat".into());
-    }
-    if source.fuzz_weight > 0.0 {
-        skipped.push("fuzz".into());
-    }
-    match &source.geometry_opacity {
-        Texturable::Constant(opacity) if *opacity == 1.0 => {}
-        _ => skipped.push("geometry_opacity".into()),
-    }
-    if source.geometry_thin_walled {
-        skipped.push("geometry_thin_walled".into());
-    }
+    let opacity = scalar_constant(
+        &mut skipped,
+        "geometry_opacity",
+        &source.geometry_opacity,
+        1.0,
+    );
     if source.geometry_normal.is_some() {
         skipped.push("geometry_normal".into());
     }
@@ -435,14 +426,37 @@ fn lower_material(name: &str, source: &description::Material, warn: bool) -> Mat
         );
     }
 
+    let coat_weight = source.coat_weight.clamp(0.0, 1.0);
+    let coat_color = acescg_from_rec709(Vec3::from(source.coat_color)).max(Vec3::ZERO);
     let mut material = Material::matte(
         acescg_from_rec709(Vec3::from(base_color)),
-        source.base_diffuse_roughness,
+        source.base_diffuse_roughness.clamp(0.0, 1.0),
     );
-    material.metalness = metalness;
-    material.specular_weight = source.specular_weight;
+    material.metalness = metalness.clamp(0.0, 1.0);
+    material.specular_weight = source.specular_weight.max(0.0);
     material.specular_roughness = specular_roughness;
-    material.emission = acescg_from_rec709(Vec3::from(emission_color)) * source.emission_luminance;
+    material.specular_ior = source.specular_ior.max(1e-4);
+    material.transmission_weight = source.transmission_weight.clamp(0.0, 1.0);
+    // Transmittance above 1 would make Beer–Lambert *amplify*; the kernel
+    // guards the lower end (a hard 0 means an infinite extinction).
+    material.transmission_color =
+        acescg_from_rec709(Vec3::from(source.transmission_color)).clamp(Vec3::ZERO, Vec3::ONE);
+    material.transmission_depth = source.transmission_depth.max(0.0);
+    material.coat_color = coat_color;
+    material.coat_weight = coat_weight;
+    material.coat_roughness = source.coat_roughness.clamp(0.0, 1.0);
+    material.coat_ior = source.coat_ior.max(1.0);
+    material.coat_darkening = source.coat_darkening.clamp(0.0, 1.0);
+    material.fuzz_weight = source.fuzz_weight.clamp(0.0, 1.0);
+    material.fuzz_color = acescg_from_rec709(Vec3::from(source.fuzz_color)).max(Vec3::ZERO);
+    material.fuzz_roughness = source.fuzz_roughness.clamp(0.0, 1.0);
+    material.opacity = opacity.clamp(0.0, 1.0);
+    material.thin_walled = u32::from(source.geometry_thin_walled);
+    // Emission leaves through the coat: L_e = lerp(1, coat_color, C)·E,
+    // OpenPBR's reduction with its view-independent coat transmittance.
+    material.emission = acescg_from_rec709(Vec3::from(emission_color))
+        * source.emission_luminance
+        * Vec3::ONE.lerp(coat_color, coat_weight);
     material
 }
 
@@ -869,19 +883,50 @@ mod tests {
     }
 
     #[test]
-    fn unwired_material_features_lower_to_defaults() {
+    #[expect(
+        clippy::float_cmp,
+        reason = "lowering passes authored closure constants through untouched"
+    )]
+    fn textured_slots_lower_to_defaults_and_closure_params_carry() {
         let source = description::Material {
             base_color: Texturable::Texture(TextureRef {
                 path: "/wood.png".into(),
                 color_space: None,
             }),
             coat_weight: 0.5,
+            transmission_weight: 0.25,
+            specular_ior: 1.8,
+            geometry_thin_walled: true,
+            geometry_opacity: Texturable::Constant(0.5),
             ..description::Material::default()
         };
         let lowered = lower_material("m", &source, false);
-        // The textured slot falls back to OpenPBR's default constant; the
-        // unwired coat leaves no trace on the GPU record.
+        // The textured slot falls back to OpenPBR's default constant until
+        // the texture pipeline lands; every closure parameter reaches the
+        // GPU record as authored.
         assert_eq!(lowered.base_color, acescg_from_rec709(Vec3::splat(0.8)));
+        assert_eq!(lowered.coat_weight, 0.5);
+        assert_eq!(lowered.transmission_weight, 0.25);
+        assert_eq!(lowered.specular_ior, 1.8);
+        assert_eq!(lowered.thin_walled, 1);
+        assert_eq!(lowered.opacity, 0.5);
+    }
+
+    /// The coat's tint on emission folds in at lowering — the one place
+    /// both the light table and the shading kernel read from, so the two
+    /// can't disagree about an emitter's radiance.
+    #[test]
+    fn emission_lowers_through_its_coat() {
+        let source = description::Material {
+            emission_luminance: 10.0,
+            coat_weight: 1.0,
+            coat_color: [0.5, 1.0, 1.0],
+            ..description::Material::default()
+        };
+        let lowered = lower_material("m", &source, false);
+        let expected =
+            acescg_from_rec709(Vec3::ONE) * 10.0 * acescg_from_rec709(Vec3::new(0.5, 1.0, 1.0));
+        assert!((lowered.emission - expected).length() < 1e-5);
     }
 
     #[test]
@@ -928,8 +973,14 @@ mod tests {
     /// [`incremental_updates_match_a_fresh_build`] takes: material-only
     /// (buffer upload), emission (light tables), transform (TLAS),
     /// topology (BLAS), removal (retired residency), environment swap, a
-    /// camera move, a delta light, and a camera-visibility flip (TLAS
-    /// masks).
+    /// camera move, a delta light, a camera-visibility flip (TLAS masks),
+    /// and a closure edit with fractional opacity (materials plus the
+    /// TLAS opacity flags).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "a flat list of labeled edits, one per re-prep path — splitting it \
+                  would hide the walk's shape"
+    )]
     fn edit_walk(sky: &std::path::Path) -> Vec<(&'static str, ChangeSet)> {
         vec![
             (
@@ -1018,6 +1069,20 @@ mod tests {
                         camera_visible: Some(false),
                         ..InstancePatch::new("key")
                     })],
+                },
+            ),
+            (
+                "closure and opacity",
+                ChangeSet {
+                    ops: vec![Op::Material(Box::new(MaterialPatch {
+                        coat_weight: Some(1.0),
+                        coat_roughness: Some(0.2),
+                        // Fractional opacity flips the instance's TLAS
+                        // opacity flag — a material edit that must
+                        // rebuild the TLAS on both prep paths.
+                        geometry_opacity: Some(Texturable::Constant(0.5)),
+                        ..MaterialPatch::new("floor")
+                    }))],
                 },
             ),
         ]

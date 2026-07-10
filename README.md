@@ -11,11 +11,14 @@ Cenote makes the inverse bet: extreme single-GPU performance on scenes that fit 
 VRAM. Wavefront compute + ray queries, one integrator, everything resident.
 
 **Status: M1 complete, M2 underway** — the six-kernel wavefront engine
-(indirect dispatch, zero mid-frame readbacks), Sobol-Burley sampling,
-`OpenPBR` lobes with GGX energy compensation, MIS-weighted next-event
-estimation of emissive meshes, delta lights, and an importance-sampled HDRI,
-thin-lens depth of field, live-editable scene files, a progressive viewer,
-and a batch CLI that writes exactly the image the viewer converges to.
+(indirect dispatch, zero mid-frame readbacks), Sobol-Burley sampling, the
+full `OpenPBR` closure — coat, fuzz, rough glass with interior absorption,
+thin-walled surfaces, variable IOR, fractional opacity — energy-compensated
+against baked tables so a white furnace closes through every lobe,
+MIS-weighted next-event estimation of emissive meshes, delta lights, and an
+importance-sampled HDRI, thin-lens depth of field, live-editable scene
+files, a progressive viewer, and a batch CLI that writes exactly the image
+the viewer converges to.
 
 ![A 5×5 grid of terracotta spheres resting on a glossy gray floor — roughness increasing left to right, metalness back to front — under a blue sky](docs/demo.png)
 

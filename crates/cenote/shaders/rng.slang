@@ -120,6 +120,17 @@ float scrambledSobol(uint index, uint axis, uint seed) {
     return toUnitFloat(nestedUniformScramble(sobol(index, axis), seed));
 }
 
+// A stateless uniform for the transparency chain: stochastic pass-through
+// is pure visibility — stratification buys nothing across an unbounded,
+// traversal-ordered sequence of crossings — so it draws from a plain hash
+// stream rather than a Sobol dimension. Keyed by (pixel, sample, bounce,
+// crossing): every decision independent, every decision replayable.
+public float hashUniform(uint pixel, uint sampleIndex, uint bounce, uint crossing) {
+    var h = lowbias32(pixel ^ lowbias32(sampleIndex ^ 0x9e3779b9u));
+    h = lowbias32(h ^ (bounce << 8 | crossing));
+    return toUnitFloat(h);
+}
+
 // A dimension's 2D point for one pixel's sampleIndex-th sample. The index
 // shuffle gives every pixel its own ordering of an Owen-scrambled sequence:
 // each pixel's samples are individually well-stratified (so its average

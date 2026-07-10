@@ -16,6 +16,7 @@
 //! | `lights`    | The light list — emissive triangles and delta lights — and its power-proportional alias table, built at prep |
 //! | `environment` | The equirect environment light: EXR load and the CDF sampling tables, built at prep |
 //! | `color`     | Authored `Rec.709` → `ACEScg` conversion at scene prep |
+//! | `tables`    | The closure's baked lookup tables — GGX energy data (regenerable from its own QMC baker) and the vendored LTC sheen fit — embedded, uploaded with the scene's resident buffers |
 //! | `wavefront` | The engine core: `SoA` path state, GPU stage queues, indirect dispatch — one [`wavefront::Wavefront::trace`] is one sample per pixel, written pixel-owned so renders are bitwise deterministic |
 //! | `render`    | Frame orchestration: one-shot linear frames for the CLI and tests, and the progressive path — [`render::Renderer`] accumulates samples into a [`render::Film`] and resolves the linear average. [`render::Session`] runs that loop on its own thread, publishes frames for a consumer to peek, and carries the edit channel: queued change-sets land at wave boundaries as stop → apply → minimal re-prep → restart. [`render::Tonemap`] is the consumer's downstream view transform (exposure + ACES), which the viewer owns and the CLI skips |
 //! | `output`    | Linear EXR write + read (read exists for the golden-image tests and the demo environment) |
@@ -50,6 +51,7 @@ pub mod output;
 pub mod render;
 pub mod scene;
 pub mod shaders;
+mod tables;
 pub mod wavefront;
 
 pub use error::{Error, Result};

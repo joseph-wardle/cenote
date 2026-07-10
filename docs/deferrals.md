@@ -68,6 +68,13 @@ shadergen degrades SSS to diffuse. (D-059)
   which the normal-map path only derives per-hit)*.
 - **Transmission scatter (`transmission_scatter`)** *(revisit: M8 — it is interior
   media by another name)*.
+- **Transport-mode-aware refraction** *(revisit: bidirectional/light transport,
+  if ever)* — Today: the BTDF uses the camera-path adjoint convention (no
+  solid-angle-compression factor), which is what makes a VNDF sample's weight
+  exactly (1−F)·G1 — the quantity the baked glass tables integrate — and closes
+  the glass furnace by construction. Production shape: pbrt's `TransportMode`
+  split, with η² compression on radiance-carrying paths. Unidirectional path
+  tracing never sees the difference. (D-077)
 
 ## Texturing
 

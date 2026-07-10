@@ -59,6 +59,11 @@ pub struct TlasInstance<'a> {
     /// every ray; the scene clears bits for per-ray-type visibility
     /// (today, camera-invisible instances).
     pub mask: u8,
+    /// Whether traversal commits this instance's hits on its own. The
+    /// scene clears it for fractional-opacity materials, whose crossings
+    /// surface as candidates for the kernels' stochastic pass-through and
+    /// shadow attenuation.
+    pub opaque: bool,
 }
 
 impl Context {
@@ -275,9 +280,11 @@ impl Context {
 }
 
 fn raw_instance(instance: &TlasInstance<'_>) -> vk::AccelerationStructureInstanceKHR {
+    // Strictly below the all-ones value: the kernels' packed path state
+    // reserves 0xffffff as its "no medium" sentinel.
     assert!(
-        instance.custom_index < (1 << 24),
-        "instance custom_index must fit in 24 bits"
+        instance.custom_index < (1 << 24) - 1,
+        "instance custom_index must fit below the 24-bit sentinel"
     );
     // Vulkan wants row-major 3×4 (rotation | translation): transpose the
     // column-major glam matrix and keep the first three rows.
@@ -287,11 +294,16 @@ fn raw_instance(instance: &TlasInstance<'_>) -> vk::AccelerationStructureInstanc
         transform: vk::TransformMatrixKHR { matrix },
         instance_custom_index_and_mask: vk::Packed24_8::new(instance.custom_index, instance.mask),
         // No culling: the kernel flips geometric normals toward the ray, so
-        // both faces of everything are hittable.
-        instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(
-            0,
-            vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8,
-        ),
+        // both faces of everything are hittable. Non-opaque overrides the
+        // BLAS's baked opaque flag, surfacing this instance's hits as
+        // candidates.
+        instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(0, {
+            let mut flags = vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE;
+            if !instance.opaque {
+                flags |= vk::GeometryInstanceFlagsKHR::FORCE_NO_OPAQUE;
+            }
+            flags.as_raw() as u8
+        }),
         acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
             device_handle: instance.blas.address,
         },

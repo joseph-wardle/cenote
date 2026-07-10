@@ -64,12 +64,18 @@
             transform: Some(Trs(scale: (8.0, 1.0, 8.0))),
         )),
 
-        // A standing terracotta panel, facing the camera.
+        // A standing terracotta panel, facing the camera — glazed: the
+        // clear coat adds its own sharp reflection and physically darkens
+        // the clay under it (the wet look). Try `coat_weight: Some(0.0)`
+        // live to see the difference; transmission, fuzz, thin-walled
+        // surfaces, and fractional opacity are material fields too.
         Material((
             name: "terracotta",
             base_color: Some(Constant((0.7, 0.22, 0.08))),
             base_diffuse_roughness: Some(0.4),
             specular_roughness: Some(Constant(0.5)),
+            coat_weight: Some(1.0),
+            coat_roughness: Some(0.1),
         )),
         Instance((
             name: "panel_back",

@@ -844,14 +844,18 @@ mod tests {
         }
     }
 
-    /// The step-9 checkpoint's teeth: the white-furnace matrix over the
-    /// `OpenPBR` M1 lobe set. A white material of any construction must
-    /// return exactly the sky's radiance — single-scatter GGX *fails this
-    /// by design* (it loses up to half its energy at roughness 1), so this
-    /// pins the Turquin compensation, the regenerated albedo fits, and the
-    /// albedo-scaling layering all at once. The tolerance is the fits'
-    /// measured residual (CPU-validated at ≤ 0.6% over these very
-    /// configurations) plus sampling noise.
+    /// The white-furnace matrix over the full `OpenPBR` closure (the M1
+    /// matrix, extended lobe by lobe as the step-5 checkpoint demands). A
+    /// white material of any construction must return exactly the sky's
+    /// radiance — single-scatter GGX *fails this by design* (it loses up
+    /// to half its energy at roughness 1), so each row pins its own
+    /// energy machinery: the multiple-scattering compensation and its
+    /// baked `E`/`E_avg` tables, the analytic average Fresnel that makes IOR
+    /// a free axis, the tabulated layering albedos (dielectric, coat —
+    /// where the darkening factor must vanish against a white base — and
+    /// the LTC fuzz), the thin-walled interference series, and the
+    /// stochastic-opacity split in the intersect stage. The tolerance is
+    /// the tables' bake residual plus sampling noise.
     #[test]
     fn openpbr_furnace_matrix() {
         let Some(gpu) = crate::gpu::test_context() else {
@@ -873,6 +877,39 @@ mod tests {
                 "half metal",
                 Material::glossy(white, 0.0, 0.5).with_metalness(0.5),
             ),
+            (
+                "glossy ior=2.5",
+                Material::glossy(white, 0.0, 0.5).with_ior(2.5),
+            ),
+            (
+                "glossy ior=1.1",
+                Material::glossy(white, 0.0, 0.8).with_ior(1.1),
+            ),
+            (
+                "coat over diffuse",
+                Material::glossy(white, 0.0, 0.5).with_coat(1.0, 0.3),
+            ),
+            (
+                "coat over metal",
+                Material::metal(white, 0.5).with_coat(1.0, 0.1),
+            ),
+            (
+                "fuzz over diffuse",
+                Material::matte(white, 0.0).with_fuzz(1.0, 0.5),
+            ),
+            (
+                "the full stack",
+                Material::glossy(white, 0.3, 0.4)
+                    .with_metalness(0.3)
+                    .with_coat(0.7, 0.2)
+                    .with_fuzz(0.5, 0.7),
+            ),
+            ("glass plane r=0.4", Material::glass(0.4, 1.5)),
+            ("thin glass r=0.4", Material::glass(0.4, 1.5).thin_walled()),
+            (
+                "half opacity",
+                Material::matte(white, 0.0).with_opacity(0.5),
+            ),
         ];
         let (sky, samples) = (0.5, 64);
         for (label, material) in configs {
@@ -885,6 +922,165 @@ mod tests {
                 "{label}: furnace leaked, mean {mean} vs {sky}"
             );
         }
+    }
+
+    /// The solid-glass furnace: a closed rough-glass sphere under the
+    /// uniform sky, where every path really enters an interior —
+    /// refraction in, possibly total internal reflection, refraction out
+    /// at the inverted IOR — so the whole frame must still average
+    /// exactly the sky. This is the 3D glass energy tables' test (both
+    /// branches: the η < 1 one is every exit), the interior-medium path
+    /// state, and the epsilon-free below-surface spawn points, at a
+    /// deeper bounce cap so truncation noise stays under the bound.
+    #[test]
+    fn the_glass_furnace_closes() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let renderer = Renderer::with_max_bounces(&gpu, 16).expect("renderer");
+        let objects = [Object {
+            mesh: crate::scene::icosphere(3),
+            transform: Mat4::from_translation(Vec3::Y * 2.0),
+            material: Material::glass(0.2, 1.5),
+        }];
+        let camera = Camera {
+            position: Vec3::new(0.0, 2.0, 4.0),
+            look_at: Vec3::new(0.0, 2.0, 0.0),
+            up: Vec3::Y,
+            vfov_degrees: 40.0,
+            lens: None,
+        };
+        let sky = 0.5;
+        let scene = Scene::new(
+            &gpu,
+            &objects,
+            camera,
+            &Environment::constant(Vec3::splat(sky)),
+        )
+        .expect("scene");
+        let samples = 128;
+        let sum = accumulate_sum(&gpu, &renderer, &scene, 32, samples);
+        let mean =
+            sum.chunks_exact(4).map(|chunk| chunk[0]).sum::<f32>() / (32.0 * 32.0 * samples as f32);
+        assert!(
+            (mean - sky).abs() / sky < 0.015,
+            "glass furnace leaked: mean {mean} vs {sky}"
+        );
+    }
+
+    /// Beer–Lambert absorption, pinned per channel: a glass sphere whose
+    /// interior reaches (0.4, 1, 1) after one radius of travel absorbs
+    /// red only — the green channel must still close its furnace exactly
+    /// (absorption-free glass), while red must land well below it but
+    /// clearly above zero. A sign slip, a wrong distance, or absorption
+    /// applied to the wrong segment moves one channel and not the other.
+    #[test]
+    fn interior_absorption_is_spectral() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let renderer = Renderer::with_max_bounces(&gpu, 16).expect("renderer");
+        let mut material = Material::glass(0.2, 1.5);
+        material.transmission_color = Vec3::new(0.4, 1.0, 1.0);
+        material.transmission_depth = 1.0; // the sphere's radius
+        let objects = [Object {
+            mesh: crate::scene::icosphere(3),
+            transform: Mat4::from_translation(Vec3::Y * 2.0),
+            material,
+        }];
+        let camera = Camera {
+            position: Vec3::new(0.0, 2.0, 4.0),
+            look_at: Vec3::new(0.0, 2.0, 0.0),
+            up: Vec3::Y,
+            vfov_degrees: 40.0,
+            lens: None,
+        };
+        let sky = 0.5;
+        let scene = Scene::new(
+            &gpu,
+            &objects,
+            camera,
+            &Environment::constant(Vec3::splat(sky)),
+        )
+        .expect("scene");
+        let samples = 128;
+        let sum = accumulate_sum(&gpu, &renderer, &scene, 32, samples);
+        let mean = |channel: usize| {
+            sum.chunks_exact(4).map(|chunk| chunk[channel]).sum::<f32>()
+                / (32.0 * 32.0 * samples as f32)
+        };
+        let (red, green) = (mean(0), mean(1));
+        assert!(
+            (green - sky).abs() / sky < 0.015,
+            "the absorption-free channel leaked: {green} vs {sky}"
+        );
+        assert!(
+            red < 0.9 * sky && red > 0.2 * sky,
+            "red should be absorbed along interior chords: {red} vs sky {sky}"
+        );
+    }
+
+    /// Stochastic opacity, per-sample exact: a half-opacity white Lambert
+    /// plane in the furnace. A camera ray either passes through (the
+    /// intersect stage's Bernoulli trial) and reads the sky directly, or
+    /// lands and bounces off albedo 1 — both worth exactly the sky, so
+    /// *every sample of every pixel* must equal it. Any weighting slipped
+    /// into the pass-through (or a miscounted alpha) fails loudly.
+    #[test]
+    fn stochastic_opacity_is_per_sample_exact() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let scene = furnace_scene(
+            &gpu,
+            Material::matte(Vec3::ONE, 0.0).with_opacity(0.5),
+            Vec3::ZERO,
+            1.0,
+            None,
+        );
+        let sum = bsdf_only_sum(&gpu, &scene, 32, 4);
+        for chunk in sum.chunks_exact(4) {
+            for channel in &chunk[..3] {
+                let value = channel / 4.0;
+                assert!(
+                    (value - 0.5).abs() < 1e-3,
+                    "opacity carried weight: {value} vs 0.5"
+                );
+            }
+        }
+    }
+
+    /// The coat's physical darkening: a coat over a *gray* base traps
+    /// part of the base's exitance under internal reflection — the "wet
+    /// look", and it is strong: at coat IOR 1.6 the spec's internal
+    /// diffuse reflection coefficient is K ≈ 0.65, so a 0.5-albedo
+    /// Lambertian base darkens by Δ = (1−K)/(1−0.5·K) ≈ 0.52. Turning
+    /// `coat_darkening` from 0 to 1 must land the render in that
+    /// neighborhood (the coat's own reflection cushions the ratio above
+    /// Δ itself). The furnace matrix pins the white-base case, where
+    /// darkening must vanish; this pins that the factor engages with the
+    /// spec's magnitude.
+    #[test]
+    fn coat_darkening_darkens_a_gray_base() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let renderer = Renderer::new(&gpu).expect("renderer");
+        let mean_with = |darkening: f32| {
+            let mut material = Material::matte(Vec3::splat(0.5), 0.0).with_coat(1.0, 0.1);
+            material.coat_darkening = darkening;
+            let scene = furnace_scene(&gpu, material, Vec3::ZERO, 1.0, None);
+            let samples = 32;
+            let sum = accumulate_sum(&gpu, &renderer, &scene, 16, samples);
+            sum.chunks_exact(4).map(|chunk| chunk[0]).sum::<f32>() / (16.0 * 16.0 * samples as f32)
+        };
+        let (off, on) = (mean_with(0.0), mean_with(1.0));
+        let ratio = on / off;
+        assert!(
+            (0.45..0.75).contains(&ratio),
+            "darkening should land near the spec's Δ ≈ 0.52 for this base: \
+             {on} vs {off} (ratio {ratio})"
+        );
     }
 
     /// First global illumination, made mechanical: sky light bounces off

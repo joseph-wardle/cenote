@@ -70,6 +70,7 @@ struct PathsAddrs {
     pixel: vk::DeviceAddress,
     hit: vk::DeviceAddress,
     throughput: vk::DeviceAddress,
+    state: vk::DeviceAddress,
 }
 
 /// A queue as kernels see it — `struct Queue<T>` in
@@ -84,33 +85,44 @@ struct QueueAddrs {
 /// Push constants for the raygen kernel; mirrors `struct Params` in
 /// `shaders/raygen.slang`. As in every kernel, the scalars after each
 /// `Vec3` sit in what std430 would otherwise spend on padding — field
-/// order is layout.
+/// order is layout. Raygen names the four path fields it writes rather
+/// than embedding [`PathsAddrs`]: camera rays own the defaults for the
+/// rest, and the trimmed block stays inside Vulkan's guaranteed 128
+/// push-constant bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct RaygenParams {
-    paths: PathsAddrs,
+    origin: vk::DeviceAddress,
+    direction: vk::DeviceAddress,
+    pixel: vk::DeviceAddress,
+    throughput: vk::DeviceAddress,
     rays: QueueAddrs,
     /// Which sample of every pixel's sequence this wave traces.
     sample_index: u32,
-    /// Thin-lens radius, meters; 0 takes the pinhole path (also keeping
-    /// the camera block 16-byte aligned, which `Pod` demands explicitly).
-    /// When open, the basis below arrives pre-scaled to the focal plane.
+    /// Thin-lens radius, meters; 0 takes the pinhole path. When open,
+    /// the basis below arrives pre-scaled to the focal plane.
     aperture_radius: f32,
-    camera_position: Vec3,
+    /// With the two scalars above, these square the block off to 16
+    /// bytes, so the `Vec3`s land on their required alignment.
     width: u32,
-    camera_right: Vec3,
     height: u32,
-    camera_up: Vec3,
+    camera_position: Vec3,
     /// First pixel of this range.
     base: u32,
-    camera_forward: Vec3,
+    camera_right: Vec3,
     /// Paths in this range.
     count: u32,
+    camera_up: Vec3,
+    _pad0: u32,
+    camera_forward: Vec3,
+    _pad1: u32,
 }
 
 /// Push constants for the intersect kernel (`shaders/intersect.slang`).
-/// Two instances per wave: camera rays (bounce 0) trace with the camera
-/// visibility bit, every later bounce with all bits.
+/// One instance per bounce: camera rays (bounce 0) trace with the camera
+/// visibility bit, every later bounce with all bits — and the stochastic
+/// transparency stream is keyed by the bounce, so a path's crossings stay
+/// independent from round to round.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct IntersectParams {
@@ -118,8 +130,14 @@ struct IntersectParams {
     rays: QueueAddrs,
     hits: QueueAddrs,
     misses: QueueAddrs,
+    /// Device address of the scene table — opacity lives in the materials.
+    scene: vk::DeviceAddress,
     /// Which instances these rays see — a [`ray_mask`] value.
     ray_mask: u32,
+    /// Which sample of every pixel's sequence this wave traces.
+    sample_index: u32,
+    /// Which bounce these rays leave from.
+    bounce: u32,
     _pad0: u32,
 }
 
@@ -150,7 +168,8 @@ struct ShadeSurfaceParams {
     rays: QueueAddrs,
     /// Next-event connections, consumed by this round's `trace_shadow`.
     shadows: QueueAddrs,
-    /// Device address of the scene table (geometry, materials, lights).
+    /// Device address of the scene table (geometry, materials, lights,
+    /// the closure's lookup tables).
     scene: vk::DeviceAddress,
     radiance: vk::DeviceAddress,
     /// Which sample of every pixel's sequence this wave traces.
@@ -169,6 +188,8 @@ struct ShadeSurfaceParams {
 struct TraceShadowParams {
     shadows: QueueAddrs,
     radiance: vk::DeviceAddress,
+    /// Device address of the scene table — opacity attenuates connections.
+    scene: vk::DeviceAddress,
 }
 
 /// The `SoA` path state: one GPU buffer per logical field, `capacity` slots
@@ -189,6 +210,12 @@ struct PathPool {
     /// scatter that produced this ray (0 on camera rays), kept for the next
     /// vertex's MIS weight; 16 B/path.
     throughput: Buffer,
+    /// The scatter's packed state (`packPathState` in
+    /// `shaders/pathstate.slang`): the sampled-lobe tag — the record the
+    /// AOV specular pass-through ramp and M3's GRIS replay consume — and
+    /// the interior medium's instance, which refraction sets and the next
+    /// vertex's Beer–Lambert absorption reads; 4 B/path.
+    state: Buffer,
 }
 
 impl PathPool {
@@ -227,6 +254,12 @@ impl PathPool {
                 storage,
                 MemoryLocation::GpuOnly,
             )?,
+            state: gpu.create_buffer(
+                "wavefront.state",
+                paths * 4,
+                storage,
+                MemoryLocation::GpuOnly,
+            )?,
         })
     }
 
@@ -237,6 +270,7 @@ impl PathPool {
             pixel: self.pixel.device_address(),
             hit: self.hit.device_address(),
             throughput: self.throughput.device_address(),
+            state: self.state.device_address(),
         }
     }
 }
@@ -524,32 +558,43 @@ impl Wavefront {
         let ranges = (0..pixels)
             .step_by(self.capacity as usize)
             .map(|base| RaygenParams {
-                paths: self.paths.addresses(),
+                origin: self.paths.origin.device_address(),
+                direction: self.paths.direction.device_address(),
+                pixel: self.paths.pixel.device_address(),
+                throughput: self.paths.throughput.device_address(),
                 rays: self.queues.addresses(queue::RAY, &self.queues.ray),
                 sample_index: sample,
                 aperture_radius,
-                camera_position: scene.camera().position,
                 width,
-                camera_right: basis.right,
                 height,
-                camera_up: basis.up,
+                camera_position: scene.camera().position,
                 base: base as u32,
-                camera_forward: basis.forward,
+                camera_right: basis.right,
                 count: (pixels - base).min(u64::from(self.capacity)) as u32,
+                camera_up: basis.up,
+                _pad0: 0,
+                camera_forward: basis.forward,
+                _pad1: 0,
             })
             .collect();
-        let intersect = |mask: u32| IntersectParams {
+        let intersect = |bounce: u32| IntersectParams {
             paths: self.paths.addresses(),
             rays: self.queues.addresses(queue::RAY, &self.queues.ray),
             hits: self.queues.addresses(queue::HIT, &self.queues.hit),
             misses: self.queues.addresses(queue::MISS, &self.queues.miss),
-            ray_mask: mask,
+            scene: scene.table().device_address(),
+            ray_mask: if bounce == 0 {
+                ray_mask::CAMERA
+            } else {
+                ray_mask::ALL
+            },
+            sample_index: sample,
+            bounce,
             _pad0: 0,
         };
         WaveParams {
             ranges,
-            intersect_camera: intersect(ray_mask::CAMERA),
-            intersect_bounce: intersect(ray_mask::ALL),
+            intersect: (0..self.max_bounces).map(intersect).collect(),
             shade_miss: ShadeMissParams {
                 paths: self.paths.addresses(),
                 misses: self.queues.addresses(queue::MISS, &self.queues.miss),
@@ -575,6 +620,7 @@ impl Wavefront {
             trace_shadow: TraceShadowParams {
                 shadows: self.queues.addresses(queue::SHADOW, &self.queues.shadow),
                 radiance: radiance.device_address(),
+                scene: scene.table().device_address(),
             },
         }
     }
@@ -639,11 +685,7 @@ impl Wavefront {
                 passes.push(fill(queue::SHADOW));
                 passes.push(indirect(
                     &self.intersect,
-                    bytemuck::bytes_of(if bounce == 0 {
-                        &params.intersect_camera
-                    } else {
-                        &params.intersect_bounce
-                    }),
+                    bytemuck::bytes_of(&params.intersect[bounce as usize]),
                     queue::RAY,
                 ));
                 // The ray queue was just consumed; empty it for this
@@ -677,10 +719,10 @@ impl Wavefront {
 struct WaveParams {
     /// One raygen instance per pool-sized pixel range.
     ranges: Vec<RaygenParams>,
-    /// Bounce 0: camera rays, tracing with the camera visibility bit.
-    intersect_camera: IntersectParams,
-    /// Every later bounce: all visibility bits set.
-    intersect_bounce: IntersectParams,
+    /// One instance per bounce: bounce 0 traces with the camera visibility
+    /// bit, later bounces with all bits, and each keys its own
+    /// transparency stream.
+    intersect: Vec<IntersectParams>,
     shade_miss: ShadeMissParams,
     /// One instance per bounce.
     shade_surface: Vec<ShadeSurfaceParams>,
@@ -1083,7 +1125,11 @@ mod tests {
     /// and — the sharp edge — next-event samples on its far side, which
     /// must count as occluded by its own near side. An identity test that
     /// stops at the instance (instead of the exact triangle) double-counts
-    /// those and biases NEE-only high, right here.
+    /// those and biases NEE-only high, right here. The glass ball beside
+    /// the sphere extends the agreement through refraction: its exit-face
+    /// vertices connect to the emitter *through* the interface, and the
+    /// transmission pdf competes in every weight — a wrong refraction
+    /// Jacobian splits the strategies here.
     #[test]
     fn light_sampling_strategies_agree() {
         let Some(gpu) = crate::gpu::test_context() else {
@@ -1101,6 +1147,12 @@ mod tests {
                 mesh: ground_plane(4.0),
                 transform: Mat4::IDENTITY,
                 material: Material::glossy(Vec3::splat(0.7), 0.0, 0.2),
+            },
+            Object {
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::new(1.6, 0.6, 1.2))
+                    * Mat4::from_scale(Vec3::splat(0.6)),
+                material: Material::glass(0.4, 1.5),
             },
             Object {
                 // An emissive ball right above the sphere: big enough that

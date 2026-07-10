@@ -115,6 +115,11 @@ struct SceneTable {
     geometry: vk::DeviceAddress,
     materials: vk::DeviceAddress,
     lights: vk::DeviceAddress,
+    /// The closure's baked lookup tables ([`crate::tables`]) — static
+    /// data, but reached through the scene table like everything else the
+    /// kernels share, which keeps their push constants inside Vulkan's
+    /// guaranteed 128 bytes.
+    bsdf_tables: vk::DeviceAddress,
     env_marginal: vk::DeviceAddress,
     env_conditional: vk::DeviceAddress,
     env_pdfs: vk::DeviceAddress,
@@ -162,6 +167,9 @@ struct ResidentBuffers {
     geometry: Buffer,
     materials: Buffer,
     lights: Buffer,
+    /// The closure's lookup tables — uploaded once at build and never
+    /// dirtied (the data is embedded in the binary).
+    bsdf_tables: Buffer,
     env_marginal: Buffer,
     env_conditional: Buffer,
     env_pdfs: Buffer,
@@ -229,6 +237,7 @@ impl Scene {
             geometry,
             materials,
             lights,
+            bsdf_tables: crate::tables::upload(gpu)?,
             env_marginal: env.marginal,
             env_conditional: env.conditional,
             env_pdfs: env.pdfs,
@@ -396,6 +405,7 @@ fn build_scene_tlas(gpu: &Context, placements: &[Placement]) -> Result<Accelerat
             } else {
                 ray_mask::ALL & !ray_mask::CAMERA
             } as u8,
+            opaque: placement.material.opacity >= 1.0,
         })
         .collect();
     gpu.build_tlas("scene.tlas", &instances)
@@ -477,6 +487,7 @@ fn upload_scene_table(
         geometry: resident.geometry.device_address(),
         materials: resident.materials.device_address(),
         lights: resident.lights.device_address(),
+        bsdf_tables: resident.bsdf_tables.device_address(),
         env_marginal: resident.env_marginal.device_address(),
         env_conditional: resident.env_conditional.device_address(),
         env_pdfs: resident.env_pdfs.device_address(),

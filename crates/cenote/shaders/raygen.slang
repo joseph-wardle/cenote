@@ -17,15 +17,24 @@ static const float PI = 3.14159265358979323846;
 // distance, which turns that same sum into the pixel's focal *point*
 // offset from the camera — the point every ray of the pixel converges on,
 // wherever on the lens disk it starts.
+// The path-state fields raygen writes, spelled out instead of embedding
+// `Paths`: camera rays own their defaults for the rest (bounce 0 implies
+// vacuum and no sampled lobe), and the four pointers keep this block
+// inside Vulkan's guaranteed 128 push-constant bytes.
 struct Params {
-    Paths paths;
+    float4* origin;
+    float4* direction;
+    uint* pixel;
+    float4* throughput;
     Queue<uint> rays;
     uint sampleIndex; // which sample of every pixel's sequence this wave is
     float apertureRadius; // lens radius, meters; 0 is the pinhole path
-    float3 cameraPosition; uint width;  // scalars pack into the float3s'
-    float3 cameraRight;    uint height; // std430 padding lanes
-    float3 cameraUp;       uint base;   // first pixel of this range
-    float3 cameraForward;  uint count;  // paths in this range
+    uint width;  // the four scalars square the block off to 16 bytes, so
+    uint height; // the float3s land on their required alignment
+    float3 cameraPosition; uint base;  // first pixel of this range —
+    float3 cameraRight;    uint count; // paths in it. The remaining
+    float3 cameraUp;       uint pad0;  // scalars pack into the float3s'
+    float3 cameraForward;  uint pad1;  // std430 padding lanes.
 };
 
 [vk::push_constant]
@@ -86,11 +95,11 @@ void raygen(uint3 tid: SV_DispatchThreadID) {
         direction = normalize(target - offset);
     }
 
-    params.paths.origin[tid.x] = float4(origin, 0.0);
-    params.paths.direction[tid.x] = float4(direction, 0.0);
-    params.paths.pixel[tid.x] = pixel;
+    params.origin[tid.x] = float4(origin, 0.0);
+    params.direction[tid.x] = float4(direction, 0.0);
+    params.pixel[tid.x] = pixel;
     // w = 0: a camera ray has no scatter pdf, which tells the first
     // surface's emission that no light-sampling strategy competed for it.
-    params.paths.throughput[tid.x] = float4(1.0, 1.0, 1.0, 0.0);
+    params.throughput[tid.x] = float4(1.0, 1.0, 1.0, 0.0);
     params.rays.push(tid.x);
 }

@@ -24,12 +24,13 @@ public struct GeometryRecord {
 };
 
 // Everything the scene shares with the kernels: buffer addresses (indexed
-// by TLAS instance custom index, except the light list) plus the embedded
-// environment light.
+// by TLAS instance custom index, except the light list), the closure's
+// baked lookup tables, plus the embedded environment light.
 public struct SceneTable {
     public GeometryRecord* geometry;
     public Material* materials;
     public LightRecord* lights;
+    public float* bsdfTables; // layout in `tables.rs` ↔ openpbr.slang TABLE_*
     public Environment env;
     public uint lightCount;
     uint pad;

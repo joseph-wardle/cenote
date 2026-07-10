@@ -118,6 +118,11 @@ public LightConnection sampleLights(LightRecord* lights, uint count, float u,
             // The area pdf lifted to solid angle at the shading point —
             // the measure BSDF sampling competes in.
             c.pdf = light.pdf * r2 / cosLight;
+            // Reach the target with slack for its reconstruction error,
+            // but no farther: the identity test stays epsilon-free, while
+            // whatever sits *beyond* the light can neither occlude nor —
+            // if fractionally opaque — attenuate the connection.
+            c.tmax = sqrt(r2) * 1.001;
         }
         break;
     }
