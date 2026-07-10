@@ -8,11 +8,19 @@
 //! layer at a variable IOR, blended toward a conductor by `metalness` and
 //! toward rough glass by `transmission_weight`, under an optional clear
 //! coat and a fuzz (sheen) layer, plus emission, fractional opacity, and
-//! thin-walled surfaces — each a named `OpenPBR` attribute, so M2's
-//! texture step swaps constants for maps instead of rewriting the set.
+//! thin-walled surfaces — each a named `OpenPBR` attribute. The texturable
+//! subset (base color, roughness, metalness, emission, opacity, plus a
+//! tangent-space normal map) carries a bindless-table index next to its
+//! constant; [`TEXTURE_NONE`] means constant-everywhere, and prep resolves
+//! scene-file texture references into live indices.
 
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
+
+/// "No texture" in a material's texture-index slots — the parameter is
+/// its constant everywhere. Matches `TEXTURE_NONE` in
+/// `shaders/textures.slang`.
+pub const TEXTURE_NONE: u32 = u32::MAX;
 
 /// One instance's surface, as the shading kernel reads it.
 #[repr(C)]
@@ -79,9 +87,24 @@ pub struct Material {
     /// interior — transmission passes straight through without refraction
     /// or Beer–Lambert.
     pub thin_walled: u32,
-    /// Explicit std430 padding (`Pod` forbids implicit padding bytes);
-    /// private, so the constructors below are the ways to build one.
-    pad: [f32; 2],
+    /// Bindless-table index of the `base_color` map, or [`TEXTURE_NONE`]:
+    /// a textured parameter keeps its constant as written and the kernel
+    /// replaces it per hit (constants multiply only where a slot's
+    /// semantics say so — emission). Same convention for every `*_texture`
+    /// slot below.
+    pub base_color_texture: u32,
+    /// `specular_roughness` map (scalar, red channel), or [`TEXTURE_NONE`].
+    pub specular_roughness_texture: u32,
+    /// `base_metalness` map (scalar), or [`TEXTURE_NONE`].
+    pub metalness_texture: u32,
+    /// `emission_color` map — multiplied onto `emission`, the
+    /// LDR-map × luminance-scale convention — or [`TEXTURE_NONE`].
+    pub emission_texture: u32,
+    /// `geometry_opacity` map (scalar), multiplied onto `opacity` at each
+    /// traversal crossing, or [`TEXTURE_NONE`].
+    pub opacity_texture: u32,
+    /// Tangent-space normal map (BC5 x/y), or [`TEXTURE_NONE`].
+    pub normal_texture: u32,
 }
 
 impl Material {
@@ -110,7 +133,12 @@ impl Material {
             fuzz_roughness: 0.5,
             opacity: 1.0,
             thin_walled: 0,
-            pad: [0.0; 2],
+            base_color_texture: TEXTURE_NONE,
+            specular_roughness_texture: TEXTURE_NONE,
+            metalness_texture: TEXTURE_NONE,
+            emission_texture: TEXTURE_NONE,
+            opacity_texture: TEXTURE_NONE,
+            normal_texture: TEXTURE_NONE,
         }
     }
 

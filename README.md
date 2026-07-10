@@ -14,7 +14,10 @@ VRAM. Wavefront compute + ray queries, one integrator, everything resident.
 (indirect dispatch, zero mid-frame readbacks), Sobol-Burley sampling, the
 full `OpenPBR` closure — coat, fuzz, rough glass with interior absorption,
 thin-walled surfaces, variable IOR, fractional opacity — energy-compensated
-against baked tables so a white furnace closes through every lobe,
+against baked tables so a white furnace closes through every lobe, textured
+materials through a bindless table (BC-compressed at prep with a DDS cache
+beside each source, sRGB decoded in hardware, converted to the working
+space in-shader) including tangent-space normal maps and per-texel opacity,
 MIS-weighted next-event estimation of emissive meshes, delta lights, and an
 importance-sampled HDRI, thin-lens depth of field, live-editable scene
 files, a progressive viewer, and a batch CLI that writes exactly the image

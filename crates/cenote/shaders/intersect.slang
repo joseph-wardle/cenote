@@ -65,7 +65,9 @@ void intersect(uint3 tid: SV_DispatchThreadID) {
     query.TraceRayInline(sceneTlas, RAY_FLAG_NONE, params.rayMask, ray);
     uint crossings = 0;
     while (query.Proceed()) {
-        let opacity = params.scene.materials[query.CandidateInstanceID()].opacity;
+        let opacity = opacityAt(params.scene, query.CandidateInstanceID(),
+                                query.CandidatePrimitiveIndex(),
+                                query.CandidateTriangleBarycentrics());
         if (crossings >= TRANSPARENT_CAP
             || hashUniform(pixel, params.sampleIndex, params.bounce, crossings) < opacity) {
             query.CommitNonOpaqueTriangleHit();

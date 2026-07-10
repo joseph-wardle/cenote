@@ -55,7 +55,9 @@ void trace_shadow(uint3 tid: SV_DispatchThreadID) {
             && query.CandidatePrimitiveIndex() == shadow.primitive) {
             query.CommitNonOpaqueTriangleHit();
         } else {
-            attenuation *= 1.0 - params.scene.materials[query.CandidateInstanceID()].opacity;
+            attenuation *= 1.0 - opacityAt(params.scene, query.CandidateInstanceID(),
+                                           query.CandidatePrimitiveIndex(),
+                                           query.CandidateTriangleBarycentrics());
             if (attenuation < 1e-4) {
                 return; // solidly occluded, to any precision that matters
             }

@@ -33,7 +33,7 @@ pub use accel::{AccelerationStructure, TlasInstance};
 pub use buffer::{Buffer, MemoryLocation};
 pub use image::SampledImage;
 pub use overlay::GuiFrame;
-pub use pipeline::{Bindings, ComputePipeline, SceneBindings};
+pub use pipeline::{Bindings, ComputePipeline, MAX_SCENE_TEXTURES, SceneBindings};
 pub use present::Presenter;
 pub use submit::Pass;
 

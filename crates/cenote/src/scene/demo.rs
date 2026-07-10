@@ -56,12 +56,19 @@ impl Scene {
     }
 }
 
-/// A host mesh flattened into an inline geometry payload.
+/// A host mesh flattened into an inline geometry payload. An all-zero UV
+/// stream (a mesh nothing textured ever parameterized) stays out of the
+/// payload — `None` and zeros prep identically, and the demo's icosphere
+/// RON is bulky enough already.
 pub(super) fn inline(mesh: &Mesh) -> MeshSource {
     MeshSource::Inline {
         positions: mesh.positions.iter().map(glam::Vec3::to_array).collect(),
         normals: Some(mesh.normals.iter().map(glam::Vec3::to_array).collect()),
-        uvs: None,
+        uvs: mesh
+            .uvs
+            .iter()
+            .any(|uv| *uv != glam::Vec2::ZERO)
+            .then(|| mesh.uvs.iter().map(glam::Vec2::to_array).collect()),
         triangles: mesh.triangles.clone(),
     }
 }

@@ -635,11 +635,12 @@ impl Wavefront {
         params: &'a WaveParams,
     ) -> Vec<Pass<'a>> {
         // Every post-raygen stage touches a scene resource — the TLAS, the
-        // environment texture, or both — and they share one descriptor
-        // layout, so each binds the same pair.
+        // sampled images, or both — and they share one descriptor layout,
+        // so each binds the same set.
         let bindings = SceneBindings {
             tlas: scene.tlas(),
             environment: scene.environment(),
+            textures: scene.texture_descriptors(),
         };
         // An indirect stage: workgroup counts read from its queue's header,
         // which the producing stage maintained.
@@ -1220,6 +1221,169 @@ mod tests {
         let sky = Environment::equirect(width, height, texels);
         let scene = Scene::new(&gpu, &objects, camera, &sky).expect("scene");
         assert_strategies_agree(&gpu, &scene);
+    }
+
+    /// The step-6 estimator-consistency test: agreement must survive
+    /// textures in both places they touch the light transport. The
+    /// emitter's radiance is a *map* — next-event estimation evaluates it
+    /// at its own sampled point (through the connection's barycentrics)
+    /// while BSDF paths evaluate it where they land, and the two only
+    /// converge together if both read the same function pointwise (a
+    /// map's *scale* in the light record with the texel applied twice, or
+    /// not at all, splits them). And a fractionally-transparent *textured*
+    /// card hangs between the emitter and the floor: path rays resolve
+    /// its per-texel coverage stochastically in traversal while shadow
+    /// rays attenuate deterministically — same map, two policies, and any
+    /// disagreement between them biases the NEE modes away from
+    /// BSDF-only. Black sky, so the textured emitter is the only light.
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one flat change-set literal is the whole scene — splitting it \
+                  would hide its shape"
+    )]
+    fn light_sampling_strategies_agree_on_textured_lights_and_opacity() {
+        use crate::scene::changeset::{
+            CameraPatch, ChangeSet, InstancePatch, MaterialPatch, MeshPatch, Op, SettingsPatch,
+        };
+        use crate::scene::description::{
+            MeshSource, SceneDescription, Texturable, TextureRef, Transform,
+        };
+
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("cenote-mis-textured-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        // The emitter's map: three brightness levels and a hard zero.
+        let glow = dir.join("glow.png");
+        #[rustfmt::skip]
+        crate::texture::write_png(&glow, 2, 2, &[
+            255, 255, 255, 255,   100, 100, 100, 255,
+            180, 180, 180, 255,   0, 0, 0, 255,
+        ]);
+        // The card's coverage: opaque, half, quarter, and open quadrants.
+        let holes = dir.join("holes.png");
+        let coverage: Vec<u8> = (0..64)
+            .flat_map(|index| {
+                let (x, y) = (index % 8, index / 8);
+                let value = match (x < 4, y < 4) {
+                    (true, true) => 255u8,
+                    (false, true) => 128,
+                    (true, false) => 64,
+                    (false, false) => 0,
+                };
+                [value, 0, 0, 255]
+            })
+            .collect();
+        crate::texture::write_png(&holes, 8, 8, &coverage);
+
+        let sphere = icosphere(2);
+        let plane = |scale: [f32; 3], translate: [f32; 3]| Transform::Trs {
+            translate,
+            rotate_degrees: [0.0; 3],
+            scale,
+        };
+        let mut description = SceneDescription::new();
+        description
+            .apply(&ChangeSet {
+                ops: vec![
+                    Op::Settings(SettingsPatch::new("main")),
+                    Op::Camera(CameraPatch {
+                        position: Some([0.0, 2.5, 6.0]),
+                        look_at: Some([0.0, 1.0, 0.0]),
+                        vfov_degrees: Some(45.0),
+                        ..CameraPatch::new("main")
+                    }),
+                    Op::Mesh(MeshPatch {
+                        source: Some(MeshSource::Inline {
+                            positions: vec![
+                                [-1.0, 0.0, -1.0],
+                                [-1.0, 0.0, 1.0],
+                                [1.0, 0.0, 1.0],
+                                [1.0, 0.0, -1.0],
+                            ],
+                            normals: Some(vec![[0.0, 1.0, 0.0]; 4]),
+                            uvs: Some(vec![[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]),
+                            triangles: vec![[0, 1, 2], [0, 2, 3]],
+                        }),
+                        ..MeshPatch::new("plane")
+                    }),
+                    Op::Mesh(MeshPatch {
+                        source: Some(MeshSource::Inline {
+                            positions: sphere.positions.iter().map(glam::Vec3::to_array).collect(),
+                            normals: Some(
+                                sphere.normals.iter().map(glam::Vec3::to_array).collect(),
+                            ),
+                            uvs: None,
+                            triangles: sphere.triangles.clone(),
+                        }),
+                        ..MeshPatch::new("sphere")
+                    }),
+                    // Glossy floor and a half-metal sphere: sharp lobes are
+                    // where wrong-but-plausible weights live.
+                    Op::Material(Box::new(MaterialPatch {
+                        base_color: Some(Texturable::Constant([0.7; 3])),
+                        specular_roughness: Some(Texturable::Constant(0.2)),
+                        ..MaterialPatch::new("floor")
+                    })),
+                    Op::Instance(InstancePatch {
+                        mesh: Some("plane".into()),
+                        material: Some("floor".into()),
+                        transform: Some(plane([4.0, 1.0, 4.0], [0.0; 3])),
+                        ..InstancePatch::new("floor")
+                    }),
+                    Op::Material(Box::new(MaterialPatch {
+                        base_color: Some(Texturable::Constant([0.6; 3])),
+                        specular_roughness: Some(Texturable::Constant(0.3)),
+                        base_metalness: Some(Texturable::Constant(0.5)),
+                        ..MaterialPatch::new("shell")
+                    })),
+                    Op::Instance(InstancePatch {
+                        mesh: Some("sphere".into()),
+                        material: Some("shell".into()),
+                        transform: Some(plane([1.0; 3], [0.0, 1.0, 0.0])),
+                        ..InstancePatch::new("shell")
+                    }),
+                    // The textured emitter overhead...
+                    Op::Material(Box::new(MaterialPatch {
+                        base_color: Some(Texturable::Constant([0.0; 3])),
+                        specular_weight: Some(0.0),
+                        emission_luminance: Some(4.0),
+                        emission_color: Some(Texturable::Texture(TextureRef {
+                            path: glow,
+                            color_space: None,
+                        })),
+                        ..MaterialPatch::new("lamp")
+                    })),
+                    Op::Instance(InstancePatch {
+                        mesh: Some("plane".into()),
+                        material: Some("lamp".into()),
+                        transform: Some(plane([0.7; 3], [0.0, 3.0, 0.0])),
+                        ..InstancePatch::new("lamp")
+                    }),
+                    // ...and the perforated card between it and the floor.
+                    Op::Material(Box::new(MaterialPatch {
+                        base_color: Some(Texturable::Constant([0.5; 3])),
+                        specular_weight: Some(0.0),
+                        geometry_opacity: Some(Texturable::Texture(TextureRef {
+                            path: holes,
+                            color_space: None,
+                        })),
+                        ..MaterialPatch::new("card")
+                    })),
+                    Op::Instance(InstancePatch {
+                        mesh: Some("plane".into()),
+                        material: Some("card".into()),
+                        transform: Some(plane([1.2, 1.0, 1.2], [0.0, 2.0, 0.0])),
+                        ..InstancePatch::new("card")
+                    }),
+                ],
+            })
+            .expect("valid scene");
+        let scene = crate::scene::Scene::prep(&gpu, &mut description).expect("prep");
+        assert_strategies_agree(&gpu, &scene);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Render `scene` under all three light-sampling modes and require the

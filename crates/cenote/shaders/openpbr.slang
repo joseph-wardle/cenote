@@ -67,8 +67,14 @@ public struct Material {
     public float fuzzRoughness; // sheen fiber roughness
     public float opacity;      // resolved in the intersect and shadow stages
     public uint thinWalled;    // bool: no interior — transmission passes straight
-    float pad0;
-    float pad1;
+    // Bindless-table indices, TEXTURE_NONE (textures.slang) = constant
+    // everywhere. resolveMaterial there replaces the constants per hit.
+    public uint baseColorTexture;
+    public uint specularRoughnessTexture;
+    public uint metalnessTexture;
+    public uint emissionTexture; // multiplies onto `emission`
+    public uint opacityTexture;  // multiplies onto `opacity`, in traversal
+    public uint normalTexture;   // tangent-space, BC5 x/y
 };
 
 // -- Lookup tables ---------------------------------------------------------

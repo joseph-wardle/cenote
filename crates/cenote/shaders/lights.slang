@@ -70,7 +70,10 @@ public struct LightConnection {
     public float3 direction; // unit, from the shading point toward the light
     public float tmax;       // shadow-ray extent: bounded for point lights
                              //   (nothing sits at the light itself), open otherwise
-    public float3 radiance;  // what arrives if unoccluded (point falloff folded in)
+    public float3 radiance;  // what arrives if unoccluded (point falloff folded
+                             //   in) — before any emission map, which the caller
+                             //   evaluates at `bary` so both strategies see the
+                             //   same textured radiance
     public float pdf;        // pdf of this draw within the table: per solid
                              //   angle (triangle) or the discrete selection
                              //   probability (delta) — callers fold in the
@@ -78,6 +81,8 @@ public struct LightConnection {
     public bool delta;       // no BSDF strategy competes: MIS weight is 1
     public uint instance;    // shadow-ray identity target, or LIGHT_NONE
     public uint primitive;
+    public float2 bary;      // triangle only: the sampled point's barycentrics,
+                             //   weights on the record's edge1/edge2 corners
 };
 
 // Draw one light ∝ power and connect `from` to it. The alias-table
@@ -101,13 +106,15 @@ public LightConnection sampleLights(LightRecord* lights, uint count, float u,
     c.delta = light.kind != LIGHT_KIND_TRIANGLE;
     c.instance = light.instance;
     c.primitive = light.primitive;
+    c.bary = float2(0.0);
 
     switch (light.kind) {
     case LIGHT_KIND_TRIANGLE: {
         // A uniform point on the triangle: √u1 picks the slice so area is
         // preserved, u2 the position along it.
         let su = sqrt(uPoint.x);
-        let position = light.a + (1.0 - su) * light.edge1 + (uPoint.y * su) * light.edge2;
+        c.bary = float2(1.0 - su, uPoint.y * su);
+        let position = light.a + c.bary.x * light.edge1 + c.bary.y * light.edge2;
         let delta = position - from;
         let r2 = dot(delta, delta);
         let normal = normalize(cross(light.edge1, light.edge2));

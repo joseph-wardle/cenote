@@ -1,8 +1,11 @@
-//! Sampled images — the environment map's home. Buffers travel as device
-//! addresses in push constants, but filtered texture reads need real
-//! `VkImage`s behind descriptors, so this is the one image the binding
-//! model carries (set 0, binding 1, next to the TLAS) until M2's bindless
-//! texture table.
+//! Sampled images. Buffers travel as device addresses in push constants,
+//! but filtered texture reads need real `VkImage`s behind descriptors, so
+//! images are what the binding model carries: the environment map (set 0,
+//! binding 1, next to the TLAS) and the material textures in the bindless
+//! table (binding 2). Two upload paths, one per producer:
+//! [`Context::upload_sampled_image`] for the environment's RGBA `f32`
+//! radiance, [`Context::upload_texture`] for the BC blocks `texture.rs`
+//! prepares.
 
 use std::mem::ManuallyDrop;
 use std::slice;
@@ -15,11 +18,11 @@ use crate::error::{Error, Result};
 use crate::gpu::buffer::free_allocation;
 use crate::gpu::{Context, MemoryLocation};
 
-/// A 2D RGBA `f32` image with a view and its sampler, ready to bind for
-/// filtered shader reads; freed on drop (before the [`Context`], like every
-/// `gpu` resource). The sampler is equirect-shaped: bilinear, wrapping
-/// horizontally (azimuth is periodic) and clamping vertically (the poles
-/// are edges, not seams).
+/// A 2D image with a view and its sampler, ready to bind for filtered
+/// shader reads; freed on drop (before the [`Context`], like every `gpu`
+/// resource). Always bilinear; the address modes are the upload path's —
+/// equirect-shaped for the environment (wrapping azimuth, clamped poles),
+/// wrapping both ways for material textures.
 pub struct SampledImage {
     image: vk::Image,
     view: vk::ImageView,
@@ -85,25 +88,94 @@ impl Context {
             u64::from(width) * u64::from(height) * 4,
             "texel count doesn't match image dimensions"
         );
+        self.upload_image(
+            name,
+            (width, height),
+            FORMAT,
+            // Equirect addressing: azimuth is periodic, the poles are
+            // edges, not seams.
+            (
+                vk::SamplerAddressMode::REPEAT,
+                vk::SamplerAddressMode::CLAMP_TO_EDGE,
+            ),
+            bytemuck::cast_slice(texels),
+            (width, height),
+        )
+    }
+
+    /// Create a [`SampledImage`] holding one level of a prepped material
+    /// texture: BC blocks over block-padded rows (`padded` names the
+    /// texel extent the rows actually span), wrapping bilinear sampler —
+    /// texture coordinates tile.
+    ///
+    /// # Errors
+    ///
+    /// As [`Context::upload_sampled_image`].
+    ///
+    /// # Panics
+    ///
+    /// On zero dimensions or data that doesn't match them — programmer
+    /// bugs (prep validated the cache before handing it over).
+    pub fn upload_texture(
+        &self,
+        name: &str,
+        width: u32,
+        height: u32,
+        format: vk::Format,
+        data: &[u8],
+    ) -> Result<SampledImage> {
+        let padded = (width.next_multiple_of(4), height.next_multiple_of(4));
+        assert_eq!(
+            data.len() as u64,
+            u64::from(padded.0 / 4) * u64::from(padded.1 / 4) * crate::texture::block_size(format),
+            "block data doesn't match the texture's padded dimensions"
+        );
+        self.upload_image(
+            name,
+            (width, height),
+            format,
+            (
+                vk::SamplerAddressMode::REPEAT,
+                vk::SamplerAddressMode::REPEAT,
+            ),
+            data,
+            padded,
+        )
+    }
+
+    /// The shared upload: create the image, check the device can filter
+    /// its format, allocate, build view and sampler, stage the bytes.
+    /// `row_extent` is the texel span of the source rows — the image's own
+    /// size for tightly packed data, the block-padded size for BC data.
+    fn upload_image(
+        &self,
+        name: &str,
+        (width, height): (u32, u32),
+        format: vk::Format,
+        address_modes: (vk::SamplerAddressMode, vk::SamplerAddressMode),
+        data: &[u8],
+        row_extent: (u32, u32),
+    ) -> Result<SampledImage> {
+        assert!(width > 0 && height > 0, "zero-sized image");
         let device = self.device();
 
         let features = unsafe {
             self.instance
-                .get_physical_device_format_properties(self.physical_device(), FORMAT)
+                .get_physical_device_format_properties(self.physical_device(), format)
         }
         .optimal_tiling_features;
         if !features.contains(
             vk::FormatFeatureFlags::SAMPLED_IMAGE
                 | vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR,
         ) {
-            return Err(Error::NoCapableGpu(
-                "  selected device: cannot linearly filter RGBA32F sampled images\n".into(),
-            ));
+            return Err(Error::NoCapableGpu(format!(
+                "  selected device: cannot linearly filter {format:?} sampled images\n"
+            )));
         }
 
         let info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
-            .format(FORMAT)
+            .format(format)
             .extent(vk::Extent3D {
                 width,
                 height,
@@ -119,7 +191,15 @@ impl Context {
 
         // Everything after image creation funnels failures through one
         // cleanup that unwinds exactly what was built.
-        match self.finish_sampled_image(name, image, width, height, texels) {
+        match self.finish_sampled_image(
+            name,
+            image,
+            (width, height),
+            format,
+            address_modes,
+            data,
+            row_extent,
+        ) {
             Ok(sampled) => Ok(sampled),
             Err(err) => {
                 unsafe { device.destroy_image(image, None) };
@@ -128,13 +208,19 @@ impl Context {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the private back half of upload_image, split only for its cleanup seam"
+    )]
     fn finish_sampled_image(
         &self,
         name: &str,
         image: vk::Image,
-        width: u32,
-        height: u32,
-        texels: &[f32],
+        (width, height): (u32, u32),
+        format: vk::Format,
+        address_modes: (vk::SamplerAddressMode, vk::SamplerAddressMode),
+        data: &[u8],
+        row_extent: (u32, u32),
     ) -> Result<SampledImage> {
         let device = self.device();
         let requirements = unsafe { device.get_image_memory_requirements(image) };
@@ -164,7 +250,7 @@ impl Context {
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
             .view_type(vk::ImageViewType::TYPE_2D)
-            .format(FORMAT)
+            .format(format)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
                 base_mip_level: 0,
@@ -178,25 +264,27 @@ impl Context {
             .mag_filter(vk::Filter::LINEAR)
             .min_filter(vk::Filter::LINEAR)
             .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
-            .address_mode_u(vk::SamplerAddressMode::REPEAT)
-            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_u(address_modes.0)
+            .address_mode_v(address_modes.1)
             .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
         sampled.sampler = unsafe { device.create_sampler(&sampler_info, None)? };
 
-        self.upload_texels(&sampled, width, height, texels)?;
+        self.upload_texels(&sampled, (width, height), data, row_extent)?;
         Ok(sampled)
     }
 
-    /// Stage `texels` into the image: transition to transfer target, copy,
-    /// transition to its permanent shader-read layout.
+    /// Stage `data` into the image: transition to transfer target, copy,
+    /// transition to its permanent shader-read layout. `row_extent` is the
+    /// texel span of the staged rows; when it exceeds the image (BC data's
+    /// block padding), the copy skips the padding on its way in.
     fn upload_texels(
         &self,
         sampled: &SampledImage,
-        width: u32,
-        height: u32,
-        texels: &[f32],
+        (width, height): (u32, u32),
+        data: &[u8],
+        row_extent: (u32, u32),
     ) -> Result<()> {
-        let staging = self.staging_buffer("image.staging", bytemuck::cast_slice(texels))?;
+        let staging = self.staging_buffer("image.staging", data)?;
         self.submit_once(|device, cmd| {
             image_barrier(
                 device,
@@ -213,6 +301,16 @@ impl Context {
                 ),
             );
             let region = vk::BufferImageCopy::default()
+                .buffer_row_length(if row_extent.0 == width {
+                    0
+                } else {
+                    row_extent.0
+                })
+                .buffer_image_height(if row_extent.1 == height {
+                    0
+                } else {
+                    row_extent.1
+                })
                 .image_subresource(vk::ImageSubresourceLayers {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
                     mip_level: 0,

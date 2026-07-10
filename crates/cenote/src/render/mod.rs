@@ -1083,6 +1083,401 @@ mod tests {
         );
     }
 
+    /// A scratch directory for a texture test's generated fixtures.
+    fn fixture_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("cenote-render-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        dir
+    }
+
+    /// The furnace, prepped from a description — the only route to
+    /// texture references. Same geometry and framing as [`furnace_scene`]
+    /// (one big plane, the camera just above looking obliquely down)
+    /// with the plane carrying a unit UV parameterization (u toward +x,
+    /// v toward +z), under a constant sky written as a 2×2 EXR into
+    /// `dir`. `material` is the plane's patch, named "surface";
+    /// `extra_ops` appends lights or overrides.
+    fn textured_furnace_scene(
+        gpu: &Context,
+        dir: &std::path::Path,
+        material: crate::scene::changeset::MaterialPatch,
+        sky: f32,
+        extra_ops: Vec<crate::scene::changeset::Op>,
+    ) -> Scene {
+        use crate::scene::changeset::{
+            CameraPatch, ChangeSet, EnvironmentPatch, InstancePatch, MeshPatch, Op, SettingsPatch,
+        };
+        use crate::scene::description::{MeshSource, SceneDescription};
+
+        // Named by value: the test-only environment cache keys by path,
+        // so one path must never hold two different skies.
+        let sky_path = dir.join(format!("sky-{sky}.exr"));
+        crate::output::write_exr(&sky_path, 2, 2, &[sky; 16]).expect("sky EXR");
+        let mut ops = vec![
+            Op::Settings(SettingsPatch::new("main")),
+            Op::Camera(CameraPatch {
+                position: Some([0.0, 1.0, 0.0]),
+                look_at: Some([0.0, 0.0, -1.0]),
+                vfov_degrees: Some(40.0),
+                ..CameraPatch::new("main")
+            }),
+            Op::Environment(EnvironmentPatch {
+                path: Some(sky_path),
+                ..EnvironmentPatch::new("sky")
+            }),
+            Op::Mesh(MeshPatch {
+                source: Some(MeshSource::Inline {
+                    positions: vec![
+                        [-5.0, 0.0, -5.0],
+                        [-5.0, 0.0, 5.0],
+                        [5.0, 0.0, 5.0],
+                        [5.0, 0.0, -5.0],
+                    ],
+                    normals: Some(vec![[0.0, 1.0, 0.0]; 4]),
+                    uvs: Some(vec![[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]),
+                    triangles: vec![[0, 1, 2], [0, 2, 3]],
+                }),
+                ..MeshPatch::new("plane")
+            }),
+            Op::Material(Box::new(material)),
+            Op::Instance(InstancePatch {
+                mesh: Some("plane".into()),
+                material: Some("surface".into()),
+                ..InstancePatch::new("surface")
+            }),
+        ];
+        ops.extend(extra_ops);
+        let mut description = SceneDescription::new();
+        description.apply(&ChangeSet { ops }).expect("valid scene");
+        Scene::prep(gpu, &mut description).expect("prep")
+    }
+
+    /// The furnace through the whole texture pipeline. A white
+    /// `base_color` *map* on a Lambert base must keep every sample at
+    /// exactly the sky: BC7 encodes flat white losslessly, the sampler's
+    /// sRGB decode maps 255 to exactly 1, and the in-shader IDT maps
+    /// white to white — so sampling, decode, and working-space conversion
+    /// collectively neither gain nor lose energy. The glossy variant
+    /// reads `specular_roughness` from a mid-gray BC4 map over a white
+    /// base and pins the mean: the energy-compensation machinery must
+    /// hold under sampled parameters exactly as under constants.
+    #[test]
+    fn the_textured_furnace_closes() {
+        use crate::scene::changeset::MaterialPatch;
+        use crate::scene::description::{Texturable, TextureRef};
+
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let dir = fixture_dir("furnace");
+        let white = dir.join("white.png");
+        crate::texture::write_png(&white, 8, 8, &[255u8; 8 * 8 * 4]);
+        let scene = textured_furnace_scene(
+            &gpu,
+            &dir,
+            MaterialPatch {
+                base_color: Some(Texturable::Texture(TextureRef {
+                    path: white,
+                    color_space: None,
+                })),
+                specular_weight: Some(0.0),
+                ..MaterialPatch::new("surface")
+            },
+            0.5,
+            vec![],
+        );
+        let sum = bsdf_only_sum(&gpu, &scene, 32, 4);
+        for chunk in sum.chunks_exact(4) {
+            for channel in &chunk[..3] {
+                let value = channel / 4.0;
+                assert!(
+                    (value - 0.5).abs() < 2e-3,
+                    "textured albedo leaked energy: {value} vs 0.5"
+                );
+            }
+        }
+
+        let gray = dir.join("gray.png");
+        let texel = [128u8, 128, 128, 255];
+        crate::texture::write_png(&gray, 8, 8, &texel.repeat(8 * 8));
+        let scene = textured_furnace_scene(
+            &gpu,
+            &dir,
+            MaterialPatch {
+                base_color: Some(Texturable::Constant([1.0; 3])),
+                specular_roughness: Some(Texturable::Texture(TextureRef {
+                    path: gray,
+                    color_space: None,
+                })),
+                ..MaterialPatch::new("surface")
+            },
+            0.5,
+            vec![],
+        );
+        let renderer = Renderer::new(&gpu).expect("renderer");
+        let samples = 64;
+        let sum = accumulate_sum(&gpu, &renderer, &scene, 32, samples);
+        let mean =
+            sum.chunks_exact(4).map(|chunk| chunk[0]).sum::<f32>() / (32.0 * 32.0 * samples as f32);
+        assert!(
+            (mean - 0.5).abs() / 0.5 < 0.015,
+            "mapped-roughness furnace leaked: mean {mean} vs 0.5"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// One emissive probe pins four properties at once: UV orientation (u
+    /// right, v down the image), texel addressing, the sampler's hardware
+    /// sRGB decode, and the in-shader IDT. A quad exactly filling the
+    /// frame (its half-extent over its distance matches the half-fov)
+    /// wears a 2×2 emission map — red green / blue white — so each
+    /// quadrant center lands on a texel center, and a camera hit on an
+    /// emitter reports its radiance exactly: every probe is an equality
+    /// against `acescg(srgb⁻¹(texel))`, within the sliver of bilinear mix
+    /// the camera jitter can reach.
+    #[test]
+    fn an_emission_map_pins_uv_orientation_and_the_idt() {
+        use crate::scene::changeset::{
+            CameraPatch, ChangeSet, InstancePatch, MaterialPatch, MeshPatch, Op, SettingsPatch,
+        };
+        use crate::scene::description::{MeshSource, SceneDescription, Texturable, TextureRef};
+
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let dir = fixture_dir("probe");
+        let map = dir.join("quadrants.png");
+        #[rustfmt::skip]
+        crate::texture::write_png(&map, 2, 2, &[
+            255, 0, 0, 255,    0, 255, 0, 255,
+            0, 0, 255, 255,    255, 255, 255, 255,
+        ]);
+
+        let mut description = SceneDescription::new();
+        description
+            .apply(&ChangeSet {
+                ops: vec![
+                    Op::Settings(SettingsPatch::new("main")),
+                    Op::Camera(CameraPatch {
+                        position: Some([0.0, 0.0, 2.0]),
+                        look_at: Some([0.0; 3]),
+                        // 2·atan(1/2): the ±1 quad at distance 2 exactly
+                        // fills the frame.
+                        vfov_degrees: Some(53.130_1),
+                        ..CameraPatch::new("main")
+                    }),
+                    // No environment: black sky, so the map is the image.
+                    Op::Mesh(MeshPatch {
+                        source: Some(MeshSource::Inline {
+                            positions: vec![
+                                [-1.0, -1.0, 0.0],
+                                [1.0, -1.0, 0.0],
+                                [1.0, 1.0, 0.0],
+                                [-1.0, 1.0, 0.0],
+                            ],
+                            normals: Some(vec![[0.0, 0.0, 1.0]; 4]),
+                            // v runs down the image: (0,0) at the
+                            // upper-left corner the camera sees.
+                            uvs: Some(vec![[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]),
+                            triangles: vec![[0, 1, 2], [0, 2, 3]],
+                        }),
+                        ..MeshPatch::new("quad")
+                    }),
+                    Op::Material(Box::new(MaterialPatch {
+                        base_color: Some(Texturable::Constant([0.0; 3])),
+                        specular_weight: Some(0.0),
+                        emission_luminance: Some(1.0),
+                        emission_color: Some(Texturable::Texture(TextureRef {
+                            path: map,
+                            color_space: None,
+                        })),
+                        ..MaterialPatch::new("emit")
+                    })),
+                    Op::Instance(InstancePatch {
+                        mesh: Some("quad".into()),
+                        material: Some("emit".into()),
+                        ..InstancePatch::new("emit")
+                    }),
+                ],
+            })
+            .expect("valid scene");
+        let scene = Scene::prep(&gpu, &mut description).expect("prep");
+        let renderer = Renderer::new(&gpu).expect("renderer");
+        let size = 64;
+        let pixels = renderer.render(&gpu, &scene, size, size).expect("render");
+
+        let expected = |srgb: Vec3| crate::color::acescg_from_rec709(srgb);
+        for (x, y, texel, label) in [
+            (16, 16, Vec3::new(1.0, 0.0, 0.0), "top-left red"),
+            (48, 16, Vec3::new(0.0, 1.0, 0.0), "top-right green"),
+            (16, 48, Vec3::new(0.0, 0.0, 1.0), "bottom-left blue"),
+            (48, 48, Vec3::ONE, "bottom-right white"),
+        ] {
+            let probe = pixel(&pixels, size, x, y);
+            let want = expected(texel);
+            for (channel, (got, expect)) in probe[..3].iter().zip(want.to_array()).enumerate() {
+                assert!(
+                    (got - expect).abs() < 0.06,
+                    "{label}, channel {channel}: {got} vs {expect}"
+                );
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Normal maps, both halves. Energy: a flat map (128, 128, 255) may
+    /// tilt shading by at most BC5's half-quantum, so the white Lambert
+    /// furnace's mean must stay at the sky. Direction: under a distant
+    /// light at 45°, a map tilted *toward* the light must render clearly
+    /// brighter than the same map tilted away — once along +u against a
+    /// light from +x (pinning the tangent's sign) and once along +v
+    /// against a light from +z (pinning the bitangent's).
+    #[test]
+    fn normal_maps_tilt_shading_and_keep_energy() {
+        use crate::scene::changeset::{LightPatch, MaterialPatch, Op};
+        use crate::scene::description::{Light, Texturable, TextureRef};
+
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let dir = fixture_dir("normals");
+        let flat = dir.join("flat.png");
+        crate::texture::write_png(&flat, 8, 8, &[128u8, 128, 255, 255].repeat(8 * 8));
+        let scene = textured_furnace_scene(
+            &gpu,
+            &dir,
+            MaterialPatch {
+                base_color: Some(Texturable::Constant([1.0; 3])),
+                specular_weight: Some(0.0),
+                geometry_normal: Some(Some(TextureRef {
+                    path: flat,
+                    color_space: None,
+                })),
+                ..MaterialPatch::new("surface")
+            },
+            0.5,
+            vec![],
+        );
+        let sum = bsdf_only_sum(&gpu, &scene, 32, 4);
+        let mean = sum.chunks_exact(4).map(|chunk| chunk[0]).sum::<f32>() / (32.0 * 32.0 * 4.0);
+        assert!(
+            (mean - 0.5).abs() < 1e-3,
+            "a flat normal map moved the furnace: mean {mean} vs 0.5"
+        );
+
+        // ~30° tilts along ±u and ±v (192 ↔ +0.5, 64 ↔ −0.5), each pair
+        // under a light from the axis the tilt faces.
+        let tilted = |name: &str, texel: [u8; 4]| {
+            let path = dir.join(name);
+            crate::texture::write_png(&path, 8, 8, &texel.repeat(8 * 8));
+            path
+        };
+        let mean_under = |map: std::path::PathBuf, travel: [f32; 3]| {
+            let scene = textured_furnace_scene(
+                &gpu,
+                &dir,
+                MaterialPatch {
+                    base_color: Some(Texturable::Constant([0.5; 3])),
+                    specular_weight: Some(0.0),
+                    geometry_normal: Some(Some(TextureRef {
+                        path: map,
+                        color_space: None,
+                    })),
+                    ..MaterialPatch::new("surface")
+                },
+                0.0, // black sky: the delta light is the only source
+                vec![Op::Light(LightPatch {
+                    light: Some(Light::Distant {
+                        direction: travel,
+                        irradiance: [3.0; 3],
+                    }),
+                    ..LightPatch::new("sun")
+                })],
+            );
+            let renderer = Renderer::new(&gpu).expect("renderer");
+            let samples = 16;
+            let sum = accumulate_sum(&gpu, &renderer, &scene, 16, samples);
+            sum.chunks_exact(4).map(|chunk| chunk[0]).sum::<f32>() / (16.0 * 16.0 * samples as f32)
+        };
+        for (axis, toward, away, travel) in [
+            (
+                "u",
+                [192u8, 128, 220, 255],
+                [64u8, 128, 220, 255],
+                [-1.0f32, -1.0, 0.0],
+            ),
+            (
+                "v",
+                [128u8, 192, 220, 255],
+                [128u8, 64, 220, 255],
+                [0.0f32, -1.0, -1.0],
+            ),
+        ] {
+            let bright = mean_under(tilted(&format!("toward-{axis}.png"), toward), travel);
+            let dark = mean_under(tilted(&format!("away-{axis}.png"), away), travel);
+            assert!(
+                bright > 2.0 * dark && dark > 0.0,
+                "±{axis} tilt should swing the shading strongly: {bright} vs {dark}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Textured opacity, per-sample exact: a white Lambert plane whose
+    /// coverage is a 0/255 checker map in the furnace. Every camera ray
+    /// either passes through a hole (and reads the sky) or lands on
+    /// albedo 1 (and bounces to the sky) — both worth exactly the sky
+    /// whatever the map says, so *every sample of every pixel* must equal
+    /// it. This pins the per-crossing map lookup in the intersect stage's
+    /// Bernoulli trial: any weighting slipped into a textured
+    /// pass-through fails loudly.
+    #[test]
+    fn textured_opacity_is_per_sample_exact() {
+        use crate::scene::changeset::MaterialPatch;
+        use crate::scene::description::{Texturable, TextureRef};
+
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let dir = fixture_dir("opacity");
+        let checker = dir.join("holes.png");
+        // 8×8, 4×4 quadrants: two opaque, two fully transparent.
+        let rgba: Vec<u8> = (0..64)
+            .flat_map(|index| {
+                let (x, y) = (index % 8, index / 8);
+                let solid = (x < 4) == (y < 4);
+                [if solid { 255u8 } else { 0 }, 0, 0, 255]
+            })
+            .collect();
+        crate::texture::write_png(&checker, 8, 8, &rgba);
+        let scene = textured_furnace_scene(
+            &gpu,
+            &dir,
+            MaterialPatch {
+                base_color: Some(Texturable::Constant([1.0; 3])),
+                specular_weight: Some(0.0),
+                geometry_opacity: Some(Texturable::Texture(TextureRef {
+                    path: checker,
+                    color_space: None,
+                })),
+                ..MaterialPatch::new("surface")
+            },
+            0.5,
+            vec![],
+        );
+        let sum = bsdf_only_sum(&gpu, &scene, 32, 4);
+        for chunk in sum.chunks_exact(4) {
+            for channel in &chunk[..3] {
+                let value = channel / 4.0;
+                assert!(
+                    (value - 0.5).abs() < 1e-3,
+                    "textured opacity carried weight: {value} vs 0.5"
+                );
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// First global illumination, made mechanical: sky light bounces off
     /// a terracotta sphere onto a gray floor, so floor pixels beside the
     /// sphere pick up a red cast that the far floor corner doesn't. Both

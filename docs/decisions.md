@@ -1348,3 +1348,80 @@ the tables ride the scene table (one pointer for everything kernels
 share), the lobe tag and medium pack into one path-state word (24-bit
 medium, hence instance indexes below the 0xffffff sentinel), and raygen
 names only the four fields it writes — bounce 0 owns the defaults.
+
+## 2026-07-10 — M2 step 6: textures
+
+### D-078: Leaf decisions made while building the texture pipeline
+Textures now flow end to end: UVs through the geometry path, a prep
+pipeline with a DDS cache, the bindless table the descriptor-indexing
+baseline was reserved for, constant-or-texture material parameters, the
+in-shader IDT, tangent-space normal maps, and per-texel emission and
+opacity — with the demo goldens bit-identical, so the machinery provably
+costs untextured scenes nothing. The calls the code forced: (1) *The prep
+pipeline is decode → linear-light mip-cap → BC encode, cached as DDS
+beside the source* (D-060's shape): `image` (PNG/JPEG, those features
+only) and the existing EXR reader decode; anything past 4096 box-halves
+in linear light (normals decode, average, renormalize); `intel_tex_2`'s
+ISPC kernels encode BC7 for 8-bit color, BC6H for float color, BC4 for
+scalars (red channel), BC5 for normals, over surfaces edge-padded to
+whole 4×4 blocks (the upload skips the padding via its row length). The
+planned `ddsfile` dependency died on inspection — it keeps the header's
+reserved words private, which is exactly where the cache validity hash
+belongs — so the cache is ~90 hand-rolled lines of DX10 DDS (D-011's
+under-100-lines rule), with an FNV-1a hash of source bytes + prep
+parameters + pipeline version in `reserved1`: invalidation is by content,
+immune to the mtime churn of git checkouts, and any parse or hash
+mismatch is simply a miss to re-encode over. (2) *The bindless table is
+one partially-bound, fixed-capacity (1024) sampled-image array* on the
+existing scene descriptor set (binding 2, beside the TLAS and
+environment), written per submission like its neighbors — blocking
+submits mean no set is in flight when written, so update-after-bind stays
+unused. Slots are keyed by (path, usage, color-space override): two
+materials sharing an image share a slot, a color and a mask use of one
+file are two. Indices are the key set's sort order, deterministic per
+prep; scene residency keeps each image's content hash, so an edit
+re-preps only textures its dirty materials reference and re-uploads only
+those whose source bytes actually changed — a repainted image reloads on
+the next material touch, a coat-weight drag re-uploads nothing.
+(3) *Constant-or-texture is constant + index*: each texturable slot
+(base color, roughness, metalness, emission, opacity, normal) carries a
+u32 table index, TEXTURE_NONE meaning constant-everywhere;
+`resolveMaterial` replaces or multiplies per hit and everything
+downstream reads one plain material. Textured slots lower their constants
+to stand-ins — schema defaults where the kernel replaces, the identity
+where it multiplies (emission, opacity). (4) *The color pipeline is
+storage-stays-source-space*: BC7 with an sRGB view for 8-bit color
+(hardware decode), the 3×3 Rec.709 → ACEScg matrix applied in-shader
+after sampling — the same matrix prep applies to constants — float
+sources linear BC6H (an sRGB override there is meaningless and ignored),
+scalars linear by default with an explicit sRGB override honored by
+linearizing at prep (BC4 has no sRGB view), normal maps always linear (a
+stray override warns and is ignored rather than forking the cache).
+(5) *Textured emission stays estimator-consistent by construction*: the
+material record and light table carry the map's scale
+(luminance × coat tint), and both strategies evaluate the map itself at
+their own point — BSDF hits through the per-hit resolve, next-event
+connections through the sampled point's barycentrics, which
+`LightConnection` now carries (the light sampler's triangle
+parameterization and ray-query barycentrics share a convention, weights
+on the second and third corner). The MIS-agreement matrix gained a
+textured emitter to hold it. Light *selection* still weighs the constant
+scale — map variation steers noise, never the estimate. (6) *Textured
+opacity resolves per crossing in traversal*: one `opacityAt` (constant ×
+map at the candidate's UV) feeds both halves of D-073's split —
+stochastic in intersect, multiplicative in trace_shadow — and an opacity
+map forces the instance's non-opaque TLAS flag whatever its constant.
+The agreement scene's perforated card holds the two policies to one
+function. (7) *Normal-map tangents derive per hit from UVs* (D-061: no
+authored tangents until anisotropy): dPdu orthonormalized against the
+interpolated shading normal, the bitangent's sign from dPdv so mirrored
+UV islands map correctly, z rebuilt from BC5's unit length, degenerate
+parameterizations (including the all-zero stream of an unauthored mesh)
+falling back to the unmapped normal, and the geometric-side flip
+preserved. (8) *A UV-less mesh under a textured material warns and reads
+texel (0, 0)* — constant, never out of bounds, never silent. A texture
+that fails to read or decode is a scene error (the live session keeps its
+last good residency); a cache that fails to write only warns. (9) *The
+geometry record grew a fourth pointer* (per-vertex UVs, zeros when
+unauthored) — which lands its transform rows on 16-byte alignment and
+retires M1's PhysicalStorageBuffer validation nag as a side effect.

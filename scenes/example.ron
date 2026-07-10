@@ -32,7 +32,8 @@
 
         // One unit plane, shared by every instance below at its own
         // scale and orientation — meshes carry geometry, instances place
-        // it. Surfaces are two-sided throughout.
+        // it. Surfaces are two-sided throughout. The UVs run 0–4, so a
+        // texture tiles four times across (samplers wrap).
         Mesh((
             name: "plane",
             source: Some(Inline(
@@ -48,13 +49,19 @@
                     (0.0, 1.0, 0.0),
                     (0.0, 1.0, 0.0),
                 ]),
+                uvs: Some([(0.0, 0.0), (0.0, 4.0), (4.0, 4.0), (4.0, 0.0)]),
                 triangles: [(0, 1, 2), (0, 2, 3)],
             )),
         )),
 
+        // Any color or scalar parameter can be a texture instead of a
+        // constant: the reference resolves against this file's directory,
+        // 8-bit color reads as sRGB (add `color_space: Some(Linear)` to
+        // override), and prep caches the GPU-compressed result in a .dds
+        // beside the image. Swap the checker for any PNG/JPEG/EXR — live.
         Material((
             name: "floor",
-            base_color: Some(Constant((0.6, 0.6, 0.6))),
+            base_color: Some(Texture((path: "checker.png"))),
             specular_roughness: Some(Constant(0.2)),
         )),
         Instance((

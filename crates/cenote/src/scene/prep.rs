@@ -8,12 +8,12 @@
 //! would — the determinism invariant extends through editing.
 //!
 //! Prep is where the description meets what the renderer can currently
-//! express, under two rules. Anything not wired up yet is *warned by
-//! name* and rendered without — today that means texture references,
-//! until the texture pipeline lands — so a skipped feature is never
-//! silent. Anything with no honest render at all is an error: PLY
-//! geometry (no reader yet), or a description without its one camera and
-//! settings.
+//! express, under two rules. Anything not wired up yet — and anything
+//! legal but almost certainly a scene bug (a textured material over a
+//! UV-less mesh) — is *warned by name* and rendered anyway, so a skipped
+//! feature is never silent. Anything with no honest render at all is an
+//! error: PLY geometry (no reader yet), a texture that doesn't read or
+//! decode, or a description without its one camera and settings.
 //! [`Error::Scene`] from here means *the description is fine but this
 //! build can't render it* — residency is untouched, so a live session
 //! keeps its last good scene and reports the edit instead of dying.
@@ -27,21 +27,22 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec2, Vec3};
 
 use super::changeset::{Dirty, Kind};
-use super::description::{self, MeshSource, SceneDescription, Texturable};
+use super::description::{self, ColorSpace, MeshSource, SceneDescription, Texturable, TextureRef};
 use super::{
-    Camera, GpuMesh, Lens, Mesh, Placement, ResidentBuffers, Scene, build_scene_tlas,
-    emissive_triangles, select_probability, upload_environment, upload_instance_tables,
-    upload_mesh, upload_scene_table,
+    Camera, GpuMesh, Lens, Mesh, Placement, ResidentBuffers, ResidentTexture, Scene,
+    build_scene_tlas, emissive_triangles, select_probability, upload_environment,
+    upload_instance_tables, upload_mesh, upload_scene_table,
 };
 use crate::color::{acescg_from_rec709, luminance};
 use crate::environment::Environment;
 use crate::error::{Error, Result};
 use crate::gpu::Context;
 use crate::lights::{DeltaLight, TriangleLight};
-use crate::material::Material;
+use crate::material::{Material, TEXTURE_NONE};
+use crate::texture;
 
 impl Scene {
     /// Build `description` into a fresh, traceable scene, consuming its
@@ -60,7 +61,7 @@ impl Scene {
                   its environment and camera — not reachable panics"
     )]
     pub fn prep(gpu: &Context, description: &mut SceneDescription) -> Result<Self> {
-        let host = host_phase(description, &all_dirty(description), true)?;
+        let host = host_phase(description, &all_dirty(description), true, &BTreeMap::new())?;
         let mut meshes = BTreeMap::new();
         for (name, mesh) in &host.meshes {
             meshes.insert(
@@ -68,6 +69,11 @@ impl Scene {
                 upload_mesh(gpu, &format!("scene.mesh.{name}"), mesh)?,
             );
         }
+        let textures = upload_textures(gpu, BTreeMap::new(), &host)?;
+        let descriptors = textures
+            .values()
+            .map(|texture| texture.image.descriptor())
+            .collect();
         let environment = host
             .environment
             .as_ref()
@@ -102,6 +108,8 @@ impl Scene {
             table,
             resident,
             meshes,
+            textures,
+            descriptors,
             camera: host.camera.expect("a fresh build always adopts its camera"),
             env_size,
             env_power: env.power,
@@ -124,7 +132,12 @@ impl Scene {
         description: &SceneDescription,
         dirty: &Dirty,
     ) -> Result<()> {
-        let host = host_phase(description, dirty, false)?;
+        let resident_hashes = self
+            .textures
+            .iter()
+            .map(|(key, texture)| (key.clone(), texture.hash))
+            .collect();
+        let host = host_phase(description, dirty, false, &resident_hashes)?;
         // Only device faults from here on — the untouched-on-Scene-error
         // contract holds because everything fallible already ran.
         for name in &host.removed_meshes {
@@ -136,6 +149,8 @@ impl Scene {
                 upload_mesh(gpu, &format!("scene.mesh.{name}"), mesh)?,
             );
         }
+        self.textures = upload_textures(gpu, std::mem::take(&mut self.textures), &host)?;
+        self.rebuild_texture_descriptors();
         if let Some(environment) = &host.environment {
             let env = upload_environment(gpu, environment)?;
             self.environment = env.image;
@@ -185,6 +200,11 @@ struct HostScene {
     triangle_lights: Vec<TriangleLight>,
     /// The delta lights, lowered from the description's light objects.
     delta_lights: Vec<DeltaLight>,
+    /// Every texture the description references, in bindless-index order
+    /// (`BTreeMap` iteration *is* the index assignment). Values are the
+    /// prepped data to (re)upload — `None` keeps the resident image, whose
+    /// content hash matched.
+    textures: BTreeMap<texture::Key, Option<texture::Prepared>>,
     /// Loaded when the environment changed (always, on a fresh build);
     /// `None` keeps the resident image and tables.
     environment: Option<Arc<Environment>>,
@@ -221,7 +241,15 @@ struct InstanceSpec {
 /// repeat itself about parameters it already reported. `fresh` marks a
 /// full build, which loads its environment even when no dirt names one —
 /// a description without an environment object leaves nothing to mark.
-fn host_phase(description: &SceneDescription, dirty: &Dirty, fresh: bool) -> Result<HostScene> {
+/// `resident_textures` maps already-uploaded textures to their content
+/// hashes, so an edit re-preps only textures a dirty material references —
+/// and re-uploads only those whose source content actually changed.
+fn host_phase(
+    description: &SceneDescription,
+    dirty: &Dirty,
+    fresh: bool,
+    resident_textures: &BTreeMap<texture::Key, u64>,
+) -> Result<HostScene> {
     let (_, camera_source) = singleton(description.cameras(), "camera")?;
     singleton(description.settings(), "settings")?;
     if description.environments().len() > 1 {
@@ -247,13 +275,57 @@ fn host_phase(description: &SceneDescription, dirty: &Dirty, fresh: bool) -> Res
         .collect();
 
     let changed_materials = names(&dirty.changed, Kind::Material);
+
+    // Texture references, collected description-wide first so shared
+    // images prep once and index assignment (key order) is deterministic.
+    // A key preps when it isn't resident yet or a dirty material names it
+    // — the latter re-hashes the source so a repainted image reloads on
+    // the next material touch — and uploads only when the content hash
+    // says the resident image is actually stale.
+    let mut referenced: BTreeMap<texture::Key, bool> = BTreeMap::new();
+    for (name, material) in description.materials() {
+        let noisy = changed_materials.contains(name.as_str());
+        for key in texture_keys(material) {
+            *referenced.entry(key).or_insert(false) |= noisy;
+        }
+    }
+    if referenced.len() > crate::gpu::MAX_SCENE_TEXTURES as usize {
+        return Err(scene_error(format!(
+            "the scene references {} textures; the bindless table holds {}",
+            referenced.len(),
+            crate::gpu::MAX_SCENE_TEXTURES
+        )));
+    }
+    let mut textures: BTreeMap<texture::Key, Option<texture::Prepared>> = BTreeMap::new();
+    for (key, touched) in referenced {
+        let resident = resident_textures.get(&key).copied();
+        let prepared = if resident.is_none() || touched {
+            let prepared = texture::prepare(&key.0, key.1, key.2)?;
+            (resident != Some(prepared.hash)).then_some(prepared)
+        } else {
+            None
+        };
+        textures.insert(key, prepared);
+    }
+    let texture_indices: BTreeMap<&texture::Key, u32> = textures
+        .keys()
+        .enumerate()
+        .map(|(index, key)| (key, index as u32))
+        .collect();
+
     let mut materials: BTreeMap<&str, Material> = BTreeMap::new();
     for (name, source) in description.materials() {
         materials.insert(
             name,
-            lower_material(name, source, changed_materials.contains(name.as_str())),
+            lower_material(
+                name,
+                source,
+                changed_materials.contains(name.as_str()),
+                &texture_indices,
+            ),
         );
     }
+    warn_textured_without_uvs(description, dirty);
 
     let delta_lights = lower_delta_lights(description);
     let (instances, triangle_lights) = lower_instances(description, &materials)?;
@@ -283,6 +355,7 @@ fn host_phase(description: &SceneDescription, dirty: &Dirty, fresh: bool) -> Res
         instances,
         triangle_lights,
         delta_lights,
+        textures,
         environment,
         camera,
         // Material dirt rebuilds the TLAS too: fractional opacity is baked
@@ -387,42 +460,41 @@ fn lower_instances(
 
 /// Lower an authoring-side material onto the GPU record, converting color
 /// constants from the format's linear `Rec.709` into `ACEScg` — prep owns
-/// that conversion, the same way it owns texture color spaces later — and
-/// clamping weights into the ranges the kernel's lerps assume. The coat's
-/// tint on emission folds in here: it is a view-independent constant in
-/// this closure, and folding it keeps the light table and the shading
-/// kernel reading the same emitted radiance. Parameters the kernels can't
-/// express yet (texture references) are collected and, when `warn` (the
-/// material changed this round), reported once by name.
-fn lower_material(name: &str, source: &description::Material, warn: bool) -> Material {
-    let mut skipped: Vec<String> = Vec::new();
-    let base_color = color_constant(&mut skipped, "base_color", &source.base_color, [0.8; 3]);
-    let metalness = scalar_constant(&mut skipped, "base_metalness", &source.base_metalness, 0.0);
-    let specular_roughness = scalar_constant(
-        &mut skipped,
-        "specular_roughness",
-        &source.specular_roughness,
-        0.3,
-    );
-    let emission_color = color_constant(
-        &mut skipped,
-        "emission_color",
-        &source.emission_color,
-        [1.0; 3],
-    );
-    let opacity = scalar_constant(
-        &mut skipped,
-        "geometry_opacity",
-        &source.geometry_opacity,
-        1.0,
-    );
-    if source.geometry_normal.is_some() {
-        skipped.push("geometry_normal".into());
-    }
-    if warn && !skipped.is_empty() {
+/// that conversion (textures make the same trip in-shader, after the
+/// hardware's sRGB decode) — and clamping weights into the ranges the
+/// kernel's lerps assume. The coat's tint on emission folds in here: it
+/// is a view-independent constant in this closure, and folding it keeps
+/// the light table and the shading kernel reading the same emitted
+/// radiance. Textured slots resolve to bindless indices through
+/// `indices`; their constants lower to stand-ins — replaced slots get the
+/// schema default, multiplied slots (emission, opacity) the identity.
+fn lower_material(
+    name: &str,
+    source: &description::Material,
+    warn: bool,
+    indices: &BTreeMap<&texture::Key, u32>,
+) -> Material {
+    // The collection pass walked every reference through the same
+    // `texture_key`, so these lookups cannot miss.
+    let slot = |reference: Option<&TextureRef>, usage: texture::Usage| -> u32 {
+        reference.map_or(TEXTURE_NONE, |reference| {
+            indices[&texture_key(reference, usage)]
+        })
+    };
+    let base_color = constant_or(&source.base_color, [0.8; 3]);
+    let metalness = constant_or(&source.base_metalness, 0.0);
+    let specular_roughness = constant_or(&source.specular_roughness, 0.3);
+    let emission_color = constant_or(&source.emission_color, [1.0; 3]);
+    let opacity = constant_or(&source.geometry_opacity, 1.0);
+    if warn
+        && source
+            .geometry_normal
+            .as_ref()
+            .is_some_and(|reference| reference.color_space == Some(ColorSpace::Srgb))
+    {
         log::warn!(
-            "material \"{name}\": {} not wired to the renderer yet; rendering without",
-            skipped.join(", ")
+            "material \"{name}\": geometry_normal ignores its sRGB color-space \
+             override — normal maps are always linear"
         );
     }
 
@@ -454,43 +526,123 @@ fn lower_material(name: &str, source: &description::Material, warn: bool) -> Mat
     material.thin_walled = u32::from(source.geometry_thin_walled);
     // Emission leaves through the coat: L_e = lerp(1, coat_color, C)·E,
     // OpenPBR's reduction with its view-independent coat transmittance.
+    // With an emission map, this is the map's scale (the light table
+    // weighs selection by it too — the map's spatial variation only
+    // steers noise, never the estimate).
     material.emission = acescg_from_rec709(Vec3::from(emission_color))
         * source.emission_luminance
         * Vec3::ONE.lerp(coat_color, coat_weight);
+    material.base_color_texture = slot(source.base_color.texture(), texture::Usage::Color);
+    material.specular_roughness_texture =
+        slot(source.specular_roughness.texture(), texture::Usage::Scalar);
+    material.metalness_texture = slot(source.base_metalness.texture(), texture::Usage::Scalar);
+    material.emission_texture = slot(source.emission_color.texture(), texture::Usage::Color);
+    material.opacity_texture = slot(source.geometry_opacity.texture(), texture::Usage::Scalar);
+    material.normal_texture = slot(source.geometry_normal.as_ref(), texture::Usage::Normal);
     material
 }
 
-/// A color slot's constant — or, until textures land, its schema default
-/// with the reference recorded as skipped.
-fn color_constant(
-    skipped: &mut Vec<String>,
-    slot: &str,
-    value: &Texturable<[f32; 3]>,
-    default: [f32; 3],
-) -> [f32; 3] {
+/// A texturable slot's constant, or `stand_in` when it is textured — the
+/// schema default for slots the kernel replaces per hit, the identity for
+/// slots it multiplies (emission, opacity).
+fn constant_or<T: Copy>(value: &Texturable<T>, stand_in: T) -> T {
     match value {
-        Texturable::Constant(color) => *color,
-        Texturable::Texture(_) => {
-            skipped.push(format!("{slot} (textured)"));
-            default
+        Texturable::Constant(constant) => *constant,
+        Texturable::Texture(_) => stand_in,
+    }
+}
+
+/// The prep request a texture reference makes when feeding `usage` — the
+/// identity textures are collected, prepped, and indexed under.
+fn texture_key(reference: &TextureRef, usage: texture::Usage) -> texture::Key {
+    let srgb = match usage {
+        // Normal maps are always linear; a stray override must not fork
+        // the cache (its lowering warns instead).
+        texture::Usage::Normal => None,
+        texture::Usage::Color | texture::Usage::Scalar => {
+            reference.color_space.map(|space| space == ColorSpace::Srgb)
+        }
+    };
+    (reference.path.clone(), usage, srgb)
+}
+
+/// Every prep request a material makes, one per textured slot.
+fn texture_keys(material: &description::Material) -> impl Iterator<Item = texture::Key> {
+    [
+        (material.base_color.texture(), texture::Usage::Color),
+        (material.base_metalness.texture(), texture::Usage::Scalar),
+        (
+            material.specular_roughness.texture(),
+            texture::Usage::Scalar,
+        ),
+        (material.emission_color.texture(), texture::Usage::Color),
+        (material.geometry_opacity.texture(), texture::Usage::Scalar),
+        (material.geometry_normal.as_ref(), texture::Usage::Normal),
+    ]
+    .into_iter()
+    .filter_map(|(reference, usage)| reference.map(|reference| texture_key(reference, usage)))
+}
+
+/// A textured material over a mesh with no authored UVs samples texel
+/// (0, 0) everywhere — legal, but almost certainly a scene bug, so it
+/// warns once per touched (instance, material, mesh) combination.
+fn warn_textured_without_uvs(description: &SceneDescription, dirty: &Dirty) {
+    for (name, instance) in description.instances() {
+        let material = &description.materials()[&instance.material];
+        if material.textures().next().is_none() {
+            continue;
+        }
+        let has_uvs = match &description.meshes()[&instance.mesh].source {
+            MeshSource::Inline { uvs, .. } => uvs.is_some(),
+            // PLY meshes answer this when the reader lands.
+            MeshSource::Ply { .. } => true,
+        };
+        let touched = |kind: Kind, target: &str| dirty.changed.contains(&(kind, target.to_owned()));
+        if !has_uvs
+            && (touched(Kind::Instance, name)
+                || touched(Kind::Material, &instance.material)
+                || touched(Kind::Mesh, &instance.mesh))
+        {
+            log::warn!(
+                "instance \"{name}\": material \"{}\" is textured but mesh \"{}\" has \
+                 no UVs — every lookup reads texel (0, 0)",
+                instance.material,
+                instance.mesh
+            );
         }
     }
 }
 
-/// See [`color_constant`].
-fn scalar_constant(
-    skipped: &mut Vec<String>,
-    slot: &str,
-    value: &Texturable<f32>,
-    default: f32,
-) -> f32 {
-    match value {
-        Texturable::Constant(scalar) => *scalar,
-        Texturable::Texture(_) => {
-            skipped.push(format!("{slot} (textured)"));
-            default
-        }
+/// The GPU half of texture residency: keep the resident images the host
+/// phase kept, upload the ones it prepped (new or content-changed), and
+/// drop whatever nothing references anymore. Returns the new resident
+/// map — iteration order is the bindless index order the lowered
+/// materials already encode.
+fn upload_textures(
+    gpu: &Context,
+    mut resident: BTreeMap<texture::Key, ResidentTexture>,
+    host: &HostScene,
+) -> Result<BTreeMap<texture::Key, ResidentTexture>> {
+    let mut textures = BTreeMap::new();
+    for (key, prepared) in &host.textures {
+        let texture = match prepared {
+            Some(prepared) => ResidentTexture {
+                image: gpu.upload_texture(
+                    &format!("scene.texture.{}", key.0.display()),
+                    prepared.width,
+                    prepared.height,
+                    prepared.format,
+                    &prepared.data,
+                )?,
+                hash: prepared.hash,
+            },
+            None => resident
+                .remove(key)
+                .expect("the host phase keeps only resident textures"),
+        };
+        textures.insert(key.clone(), texture);
     }
+    Ok(textures)
 }
 
 /// Resolve a mesh's geometry payload onto the host, deriving normals
@@ -500,9 +652,7 @@ fn resolve_mesh(name: &str, mesh: &description::Mesh) -> Result<Mesh> {
         MeshSource::Inline {
             positions,
             normals,
-            // Textured lookups land with the texture pipeline; the stream
-            // is data, so carrying it silently is honest.
-            uvs: _,
+            uvs,
             triangles,
         } => {
             let positions: Vec<Vec3> = positions.iter().copied().map(Vec3::from).collect();
@@ -510,9 +660,16 @@ fn resolve_mesh(name: &str, mesh: &description::Mesh) -> Result<Mesh> {
                 Some(normals) => normals.iter().copied().map(Vec3::from).collect(),
                 None => smooth_normals(&positions, triangles),
             };
+            // An unauthored stream carries zeros: textured lookups on it
+            // read texel (0, 0) — constant, never out of bounds.
+            let uvs = match uvs {
+                Some(uvs) => uvs.iter().copied().map(Vec2::from).collect(),
+                None => vec![Vec2::ZERO; positions.len()],
+            };
             Ok(Mesh {
                 positions,
                 normals,
+                uvs,
                 triangles: triangles.clone(),
             })
         }
@@ -722,7 +879,7 @@ mod tests {
     }
 
     fn host(description: &SceneDescription) -> Result<HostScene> {
-        host_phase(description, &all_dirty(description), true)
+        host_phase(description, &all_dirty(description), true, &BTreeMap::new())
     }
 
     /// `unwrap_err` without demanding `Debug` of the GPU-adjacent
@@ -806,6 +963,30 @@ mod tests {
         assert!(crate::color::luminance(host.triangle_lights[0].emission) > 0.0);
     }
 
+    /// A texture that exists but doesn't decode is caught in the host
+    /// phase — [`Error::Scene`], so a live session keeps its previous
+    /// residency rather than dying on a bad image. (A *missing* file is
+    /// already an apply-time error, like every dangling path.)
+    #[test]
+    fn an_undecodable_texture_is_rejected_at_prep() {
+        let mut description = triangle_description();
+        description
+            .apply(&ChangeSet {
+                ops: vec![Op::Material(Box::new(MaterialPatch {
+                    base_color: Some(Texturable::Texture(TextureRef {
+                        // Exists (so apply accepts it) but is no image.
+                        path: concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml").into(),
+                        color_space: None,
+                    })),
+                    ..MaterialPatch::new("gray")
+                }))],
+            })
+            .expect("valid data");
+        let error = host_error(&description);
+        assert!(error.to_string().contains("texture"), "{error}");
+        assert!(error.to_string().contains("decode"), "{error}");
+    }
+
     #[test]
     fn an_unreadable_environment_is_rejected_at_prep() {
         let mut description = triangle_description();
@@ -887,10 +1068,16 @@ mod tests {
         clippy::float_cmp,
         reason = "lowering passes authored closure constants through untouched"
     )]
-    fn textured_slots_lower_to_defaults_and_closure_params_carry() {
+    fn textured_slots_lower_to_indices_and_closure_params_carry() {
+        use crate::material::TEXTURE_NONE;
+
         let source = description::Material {
             base_color: Texturable::Texture(TextureRef {
                 path: "/wood.png".into(),
+                color_space: None,
+            }),
+            geometry_normal: Some(TextureRef {
+                path: "/weave.png".into(),
                 color_space: None,
             }),
             coat_weight: 0.5,
@@ -900,10 +1087,22 @@ mod tests {
             geometry_opacity: Texturable::Constant(0.5),
             ..description::Material::default()
         };
-        let lowered = lower_material("m", &source, false);
-        // The textured slot falls back to OpenPBR's default constant until
-        // the texture pipeline lands; every closure parameter reaches the
-        // GPU record as authored.
+        // The index map the collection pass would build for this material.
+        let keys: Vec<texture::Key> = texture_keys(&source).collect();
+        assert_eq!(keys.len(), 2);
+        let indices: BTreeMap<&texture::Key, u32> = keys
+            .iter()
+            .enumerate()
+            .map(|(index, key)| (key, index as u32))
+            .collect();
+        let lowered = lower_material("m", &source, false, &indices);
+        // Textured slots resolve to their table index; the base-color
+        // stand-in is the schema default (dead — the kernel replaces it);
+        // every closure parameter reaches the GPU record as authored.
+        assert_eq!(lowered.base_color_texture, indices[&keys[0]]);
+        assert_eq!(lowered.normal_texture, indices[&keys[1]]);
+        assert_eq!(lowered.emission_texture, TEXTURE_NONE);
+        assert_eq!(lowered.opacity_texture, TEXTURE_NONE);
         assert_eq!(lowered.base_color, acescg_from_rec709(Vec3::splat(0.8)));
         assert_eq!(lowered.coat_weight, 0.5);
         assert_eq!(lowered.transmission_weight, 0.25);
@@ -923,7 +1122,7 @@ mod tests {
             coat_color: [0.5, 1.0, 1.0],
             ..description::Material::default()
         };
-        let lowered = lower_material("m", &source, false);
+        let lowered = lower_material("m", &source, false, &BTreeMap::new());
         let expected =
             acescg_from_rec709(Vec3::ONE) * 10.0 * acescg_from_rec709(Vec3::new(0.5, 1.0, 1.0));
         assert!((lowered.emission - expected).length() < 1e-5);
@@ -974,14 +1173,15 @@ mod tests {
     /// (buffer upload), emission (light tables), transform (TLAS),
     /// topology (BLAS), removal (retired residency), environment swap, a
     /// camera move, a delta light, a camera-visibility flip (TLAS masks),
-    /// and a closure edit with fractional opacity (materials plus the
-    /// TLAS opacity flags).
+    /// a closure edit with fractional opacity (materials plus the TLAS
+    /// opacity flags), a texture reference (the bindless table gains a
+    /// slot mid-session), and its removal (the slot retires).
     #[expect(
         clippy::too_many_lines,
         reason = "a flat list of labeled edits, one per re-prep path — splitting it \
                   would hide the walk's shape"
     )]
-    fn edit_walk(sky: &std::path::Path) -> Vec<(&'static str, ChangeSet)> {
+    fn edit_walk(sky: &std::path::Path, wood: &std::path::Path) -> Vec<(&'static str, ChangeSet)> {
         vec![
             (
                 "material",
@@ -1085,6 +1285,27 @@ mod tests {
                     }))],
                 },
             ),
+            (
+                "texture",
+                ChangeSet {
+                    ops: vec![Op::Material(Box::new(MaterialPatch {
+                        base_color: Some(Texturable::Texture(TextureRef {
+                            path: wood.to_owned(),
+                            color_space: None,
+                        })),
+                        ..MaterialPatch::new("floor")
+                    }))],
+                },
+            ),
+            (
+                "texture removal",
+                ChangeSet {
+                    ops: vec![Op::Material(Box::new(MaterialPatch {
+                        base_color: Some(Texturable::Constant([0.4, 0.35, 0.3])),
+                        ..MaterialPatch::new("floor")
+                    }))],
+                },
+            ),
         ]
     }
 
@@ -1096,14 +1317,32 @@ mod tests {
         let Some(gpu) = crate::gpu::test_context() else {
             return;
         };
-        let sky = std::env::temp_dir().join(format!("cenote-prep-sky-{}.exr", std::process::id()));
+        // A fixture directory of their own: the walk's texture edit
+        // writes a DDS cache next to its source, so cleanup is the
+        // directory, not a file list.
+        let dir = std::env::temp_dir().join(format!("cenote-prep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let sky = dir.join("sky.exr");
         crate::output::write_exr(&sky, 2, 2, &[0.3_f32; 16]).expect("test sky");
+        let wood = dir.join("wood.png");
+        // A visible two-tone map: the renders diverge if the incremental
+        // path misindexes or fails to upload it.
+        let texels: Vec<u8> = (0..64)
+            .flat_map(|index| {
+                if index % 2 == 0 {
+                    [200u8, 120, 60, 255]
+                } else {
+                    [40u8, 90, 130, 255]
+                }
+            })
+            .collect();
+        crate::texture::write_png(&wood, 8, 8, &texels);
 
         let mut history = vec![ChangeSet::demo()];
         let mut description = replay(&history);
         let mut scene = Scene::prep(&gpu, &mut description).expect("prep");
 
-        for (label, set) in edit_walk(&sky) {
+        for (label, set) in edit_walk(&sky, &wood) {
             description.apply(&set).expect(label);
             let dirty = description.take_dirty();
             scene
@@ -1117,7 +1356,7 @@ mod tests {
                 "{label}: the incremental update diverged from a fresh build"
             );
         }
-        std::fs::remove_file(&sky).ok();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The classic invisible-emitter trick, wired through the TLAS camera

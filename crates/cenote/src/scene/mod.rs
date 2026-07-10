@@ -25,13 +25,14 @@ use std::collections::{BTreeMap, HashMap};
 
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec2, Vec3};
 
 use crate::environment::Environment;
 use crate::error::Result;
 use crate::gpu::{AccelerationStructure, Buffer, Context, SampledImage, TlasInstance};
 use crate::lights::{DeltaLight, LIGHT_NONE, TriangleLight};
-use crate::material::Material;
+use crate::material::{Material, TEXTURE_NONE};
+use crate::texture;
 
 /// Ray-visibility mask bits, matched by the mask each TLAS instance
 /// carries. Camera rays trace with [`ray_mask::CAMERA`]; every other ray
@@ -54,6 +55,10 @@ pub struct Mesh {
     /// coarse sphere render smooth; geometry that *should* look flat
     /// (planes, quads) carries its face normal at every vertex.
     pub normals: Vec<Vec3>,
+    /// Texture coordinates, one per position. A mesh authored without any
+    /// carries zeros — textured lookups then read texel (0, 0), constant
+    /// but never out of bounds.
+    pub uvs: Vec<Vec2>,
     /// Counter-clockwise-outward index triples into `positions`.
     pub triangles: Vec<[u32; 3]>,
 }
@@ -77,6 +82,7 @@ struct GpuMesh {
     blas: AccelerationStructure,
     vertices: Buffer,
     normals: Buffer,
+    uvs: Buffer,
     indices: Buffer,
 }
 
@@ -89,6 +95,7 @@ struct GpuMesh {
 struct GeometryRecord {
     positions: vk::DeviceAddress,
     normals: vk::DeviceAddress,
+    uvs: vk::DeviceAddress,
     indices: vk::DeviceAddress,
     /// Rows of the instance's 3×4 object-to-world transform — the same
     /// shape the TLAS instance itself carries.
@@ -150,6 +157,15 @@ pub struct Scene {
     /// dirtied. The procedural [`Scene::new`] path keys them by object
     /// index and never updates.
     meshes: BTreeMap<String, GpuMesh>,
+    /// Material-texture residency by prep request, with the content hash
+    /// each image was built from — how an update tells a real image edit
+    /// from a mere re-reference. Bindless indices are this map's iteration
+    /// order, the order `descriptors` holds and material records index.
+    /// The procedural [`Scene::new`] path has no textures.
+    textures: BTreeMap<texture::Key, ResidentTexture>,
+    /// The bindless table's write list, rebuilt whenever `textures`
+    /// changes; every wave binds it next to the TLAS.
+    descriptors: Vec<vk::DescriptorImageInfo>,
     camera: Camera,
     /// The environment's dimensions and emitted power, retained so a
     /// light edit can rebuild the scene table (its selection probability
@@ -157,6 +173,13 @@ pub struct Scene {
     /// the image.
     env_size: (u32, u32),
     env_power: f64,
+}
+
+/// One material texture resident on the GPU, with the content hash of the
+/// source it was prepped from.
+struct ResidentTexture {
+    image: SampledImage,
+    hash: u64,
 }
 
 /// Every buffer the [`SceneTable`] points into: geometry records,
@@ -262,6 +285,8 @@ impl Scene {
                 .enumerate()
                 .map(|(index, mesh)| (index.to_string(), mesh))
                 .collect(),
+            textures: BTreeMap::new(),
+            descriptors: Vec::new(),
             camera,
             env_size,
             env_power: env.power,
@@ -286,6 +311,23 @@ impl Scene {
     #[must_use]
     pub fn environment(&self) -> &SampledImage {
         &self.environment
+    }
+
+    /// The bindless texture table's write list, in the index order
+    /// material records use — what every wave binds at binding 2.
+    pub fn texture_descriptors(&self) -> &[vk::DescriptorImageInfo] {
+        &self.descriptors
+    }
+
+    /// Rebuild the bindless write list from the resident map — called
+    /// after any prep that changed it. Iteration order is key order, the
+    /// same order prep assigned the material records' indices in.
+    fn rebuild_texture_descriptors(&mut self) {
+        self.descriptors = self
+            .textures
+            .values()
+            .map(|texture| texture.image.descriptor())
+            .collect();
     }
 
     /// The scene's camera.
@@ -405,7 +447,10 @@ fn build_scene_tlas(gpu: &Context, placements: &[Placement]) -> Result<Accelerat
             } else {
                 ray_mask::ALL & !ray_mask::CAMERA
             } as u8,
-            opaque: placement.material.opacity >= 1.0,
+            // An opacity *map* forces the non-opaque path no matter the
+            // constant: the traversal loop must get its per-texel look.
+            opaque: placement.material.opacity >= 1.0
+                && placement.material.opacity_texture == TEXTURE_NONE,
         })
         .collect();
     gpu.build_tlas("scene.tlas", &instances)
@@ -442,6 +487,7 @@ fn upload_instance_tables(
             GeometryRecord {
                 positions: placement.mesh.vertices.device_address(),
                 normals: placement.mesh.normals.device_address(),
+                uvs: placement.mesh.uvs.device_address(),
                 indices: placement.mesh.indices.device_address(),
                 object_to_world: transform_rows(placement.transform),
                 world_to_object: transform_rows(inverse),
@@ -599,6 +645,11 @@ fn upload_mesh(gpu: &Context, name: &str, mesh: &Mesh) -> Result<GpuMesh> {
         mesh.positions.len(),
         "a mesh needs one shading normal per vertex"
     );
+    assert_eq!(
+        mesh.uvs.len(),
+        mesh.positions.len(),
+        "a mesh needs one uv per vertex (zeros when unauthored)"
+    );
     // BUILD_INPUT for the BLAS build; STORAGE + device address so the
     // shading kernel can fetch triangle corners afterwards.
     let usage = vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
@@ -612,6 +663,11 @@ fn upload_mesh(gpu: &Context, name: &str, mesh: &Mesh) -> Result<GpuMesh> {
     let normals = gpu.upload_buffer(
         &format!("{name}.normals"),
         bytemuck::cast_slice(&mesh.normals),
+        usage,
+    )?;
+    let uvs = gpu.upload_buffer(
+        &format!("{name}.uvs"),
+        bytemuck::cast_slice(&mesh.uvs),
         usage,
     )?;
     let indices = gpu.upload_buffer(
@@ -630,6 +686,7 @@ fn upload_mesh(gpu: &Context, name: &str, mesh: &Mesh) -> Result<GpuMesh> {
         blas,
         vertices,
         normals,
+        uvs,
         indices,
     })
 }
@@ -658,6 +715,9 @@ pub fn icosphere(subdivisions: u32) -> Mesh {
     // Every vertex lies on the unit sphere, where the exact normal at a
     // point is the point itself.
     mesh.normals = mesh.positions.clone();
+    // No parameterization — a seamless sphere unwrap isn't worth inventing
+    // for a test solid; textured lookups on it read texel (0, 0).
+    mesh.uvs = vec![Vec2::ZERO; mesh.positions.len()];
     mesh
 }
 
@@ -697,6 +757,7 @@ fn icosahedron() -> Mesh {
     .map(|p| Vec3::from(p).normalize())
     .collect::<Vec<Vec3>>();
     let normals = positions.clone();
+    let uvs = vec![Vec2::ZERO; positions.len()];
     let triangles = vec![
         [0, 11, 5],
         [0, 5, 1],
@@ -722,12 +783,15 @@ fn icosahedron() -> Mesh {
     Mesh {
         positions,
         normals,
+        uvs,
         triangles,
     }
 }
 
 /// A square ground plane in the XZ plane at y = 0, spanning ±`half_extent`
-/// meters, normal +Y.
+/// meters, normal +Y, unit UVs with v growing toward +z (image row 0 maps
+/// to the far edge, matching the top-of-image = far convention a camera
+/// looking down −z sees).
 #[must_use]
 pub fn ground_plane(half_extent: f32) -> Mesh {
     let e = half_extent;
@@ -739,6 +803,12 @@ pub fn ground_plane(half_extent: f32) -> Mesh {
             Vec3::new(e, 0.0, -e),
         ],
         normals: vec![Vec3::Y; 4],
+        uvs: vec![
+            Vec2::new(0.0, 0.0),
+            Vec2::new(0.0, 1.0),
+            Vec2::new(1.0, 1.0),
+            Vec2::new(1.0, 0.0),
+        ],
         triangles: vec![[0, 1, 2], [0, 2, 3]],
     }
 }

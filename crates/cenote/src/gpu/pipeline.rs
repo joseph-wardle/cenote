@@ -1,15 +1,16 @@
 //! Compute pipelines and their descriptor sets.
 //!
 //! A [`ComputePipeline`] is one kernel compiled from SPIR-V plus its layout
-//! and — for kernels that read the scene's TLAS or environment texture —
-//! the one descriptor set that carries them. Kernels reach every buffer
-//! through device addresses in a single push-constant struct; the only
-//! resources that cannot be addresses are the scene TLAS and the
-//! environment texture (filtered reads need a real sampled image), so a
-//! kernel that touches either declares [`Bindings::Scene`] and carries set
-//! 0 — binding 0 the TLAS, binding 1 the environment — written at
-//! submission time. Kernels that only chew buffers ([`Bindings::None`])
-//! have no descriptors at all.
+//! and — for kernels that read the scene's TLAS or its textures — the one
+//! descriptor set that carries them. Kernels reach every buffer through
+//! device addresses in a single push-constant struct; the only resources
+//! that cannot be addresses are the scene TLAS and the sampled images
+//! (filtered reads need real descriptors), so a kernel that touches any
+//! declares [`Bindings::Scene`] and carries set 0 — binding 0 the TLAS,
+//! binding 1 the environment, binding 2 the bindless material-texture
+//! array (partially bound: a scene binds only as many as it holds) —
+//! written at submission time. Kernels that only chew buffers
+//! ([`Bindings::None`]) have no descriptors at all.
 //!
 //! Running a pipeline lives next door in `submit.rs`: [`Context::dispatch`]
 //! for one, [`Context::submit_passes`] for a wave's stage chain.
@@ -33,9 +34,17 @@ pub enum Bindings {
     /// Push constants only — no descriptor set.
     None,
     /// Set 0 — binding 0: the scene TLAS; binding 1: the environment
-    /// texture. Both written at dispatch time.
+    /// texture; binding 2: the bindless material-texture array. All
+    /// written at dispatch time.
     Scene,
 }
+
+/// Capacity of the bindless texture array (binding 2). A fixed layout-time
+/// bound — scenes bind only what they hold, the rest stays unwritten
+/// under `PARTIALLY_BOUND` — sized far above any corpus scene while
+/// staying well inside every ray-tracing GPU's per-stage sampled-image
+/// limit.
+pub const MAX_SCENE_TEXTURES: u32 = 1024;
 
 /// The scene resources a [`Bindings::Scene`] dispatch binds.
 #[derive(Clone, Copy)]
@@ -44,6 +53,9 @@ pub struct SceneBindings<'a> {
     pub tlas: &'a AccelerationStructure,
     /// The environment texture (binding 1).
     pub environment: &'a SampledImage,
+    /// The material textures (binding 2), in bindless-index order — the
+    /// order material records index. At most [`MAX_SCENE_TEXTURES`].
+    pub textures: &'a [vk::DescriptorImageInfo],
 }
 
 /// A compute pipeline plus its layout and (for scene-resource kernels) its
@@ -164,8 +176,10 @@ impl Context {
     }
 
     /// Create the binding model's single descriptor set: binding 0 = the
-    /// scene TLAS, binding 1 = the environment texture. Contents are
-    /// written at dispatch time.
+    /// scene TLAS, binding 1 = the environment texture, binding 2 = the
+    /// bindless texture array. Contents are written at dispatch time; the
+    /// array is partially bound — a scene writes only the slots it holds,
+    /// and kernels index nothing past them.
     fn create_scene_descriptors(&self) -> Result<SceneDescriptors> {
         let device = self.device();
         let bindings = [
@@ -179,8 +193,22 @@ impl Context {
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(MAX_SCENE_TEXTURES)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
         ];
-        let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+        let binding_flags = [
+            vk::DescriptorBindingFlags::empty(),
+            vk::DescriptorBindingFlags::empty(),
+            vk::DescriptorBindingFlags::PARTIALLY_BOUND,
+        ];
+        let mut flags_info =
+            vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&binding_flags);
+        let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
+            .bindings(&bindings)
+            .push_next(&mut flags_info);
         let set_layout = unsafe { device.create_descriptor_set_layout(&layout_info, None)? };
 
         let pool_sizes = [
@@ -189,7 +217,7 @@ impl Context {
                 .descriptor_count(1),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .descriptor_count(1),
+                .descriptor_count(1 + MAX_SCENE_TEXTURES),
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(1)

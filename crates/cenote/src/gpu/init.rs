@@ -245,6 +245,10 @@ fn missing_requirements(
 
     // One entry per feature `create_device` enables — keep in lockstep.
     let feature_checks = [
+        (
+            features.features.texture_compression_bc,
+            "textureCompressionBC",
+        ),
         (accel.acceleration_structure, "accelerationStructure"),
         (ray_query.ray_query, "rayQuery"),
         (vk12.buffer_device_address, "bufferDeviceAddress"),
@@ -333,6 +337,9 @@ pub(super) fn create_device(
         vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default().acceleration_structure(true);
     let mut ray_query = vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
     let mut features = vk::PhysicalDeviceFeatures2::default()
+        // The one core-1.0 feature in the baseline: BC sampling, which
+        // every texture in the bindless table stores.
+        .features(vk::PhysicalDeviceFeatures::default().texture_compression_bc(true))
         .push_next(&mut vk12)
         .push_next(&mut vk13)
         .push_next(&mut accel)

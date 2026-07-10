@@ -20,6 +20,7 @@ import openpbr;
 import pathstate;
 import rng;
 import scene;
+import textures;
 
 struct Params {
     Paths paths;
@@ -156,6 +157,56 @@ SpawnPoint spawnPoint(GeometryRecord mesh, Hit hit, float3 rayDirection) {
     return spawn;
 }
 
+// The shading normal under a tangent-space normal map. The tangent frame
+// derives per hit from the triangle's positions and UVs (no authored
+// tangents until anisotropy demands them): solve the triangle's 2×2 UV
+// system for the world direction of +u, orthonormalize it against the
+// interpolated shading normal, and take the bitangent's sign from the
+// +v solution so mirrored UV islands map correctly. A degenerate
+// parameterization (zero UV area — including the all-zero stream of an
+// unauthored mesh) keeps the unmapped normal. Like the interpolated
+// normal it replaces, the result is flipped to the geometric side.
+float3 mappedShadingNormal(GeometryRecord mesh, Hit hit, float2 uv, uint map,
+                           SpawnPoint spawn) {
+    uint base = 3 * hit.primitive;
+    let i0 = mesh.indices[base];
+    let i1 = mesh.indices[base + 1];
+    let i2 = mesh.indices[base + 2];
+    let duv1 = mesh.uvs[i1] - mesh.uvs[i0];
+    let duv2 = mesh.uvs[i2] - mesh.uvs[i0];
+    let det = duv1.x * duv2.y - duv1.y * duv2.x;
+    if (abs(det) < 1e-12) {
+        return spawn.shading;
+    }
+    let e1 = fetch3(mesh.positions, i1) - fetch3(mesh.positions, i0);
+    let e2 = fetch3(mesh.positions, i2) - fetch3(mesh.positions, i0);
+    let o2w = mesh.objectToWorld;
+    // World-space edges — the transform's linear part only.
+    let we1 = float3(dot(o2w[0].xyz, e1), dot(o2w[1].xyz, e1), dot(o2w[2].xyz, e1));
+    let we2 = float3(dot(o2w[0].xyz, e2), dot(o2w[1].xyz, e2), dot(o2w[2].xyz, e2));
+    let dpdu = (duv2.y * we1 - duv1.y * we2) / det;
+    let dpdv = (duv1.x * we2 - duv2.x * we1) / det;
+    var tangent = dpdu - spawn.shading * dot(spawn.shading, dpdu);
+    let lenSqr = dot(tangent, tangent);
+    if (!(lenSqr > 1e-20)) {
+        return spawn.shading;
+    }
+    tangent *= rsqrt(lenSqr);
+    var bitangent = cross(spawn.shading, tangent);
+    if (dot(bitangent, dpdv) < 0.0) {
+        bitangent = -bitangent;
+    }
+    let texel = sampleNormal(map, uv);
+    var mapped = normalize(texel.x * tangent + texel.y * bitangent
+                         + texel.z * spawn.shading);
+    // Shading must agree with the face the ray actually struck, exactly
+    // as the interpolated normal it perturbs.
+    if (dot(mapped, spawn.normal) < 0.0) {
+        mapped = -mapped;
+    }
+    return mapped;
+}
+
 [shader("compute")]
 [numthreads(WORKGROUP_SIZE, 1, 1)]
 void shade_surface(uint3 tid: SV_DispatchThreadID) {
@@ -168,7 +219,10 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     let direction = params.paths.direction[path].xyz;
     let origin = params.paths.origin[path].xyz;
     GeometryRecord mesh = params.scene.geometry[hit.instance];
-    Material material = params.scene.materials[hit.instance];
+    // Textured parameters resolve at the hit's UV once; everything below
+    // reads one plain material, whatever mix of maps and constants fed it.
+    let uv = interpolateUv(mesh, hit.primitive, hit.barycentrics);
+    let material = resolveMaterial(params.scene.materials[hit.instance], uv);
     let spawn = spawnPoint(mesh, hit, direction);
     // xyz = the path's weight; w = the previous scatter's pdf (0: camera ray).
     var throughput = params.paths.throughput[path];
@@ -225,16 +279,21 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
         return;
     }
 
-    // The BSDF lives in the shading frame, resolved once per vertex
-    // against the view direction. A hit on the far wall of the interior
-    // the path is inside sees the bare glass interface at the inverted
-    // IOR. Directions that are valid in the shading frame but pass
-    // through the real triangle (the wrong side of the geometric horizon)
-    // are rejected at each use below — the standard shading-normal trade:
-    // a sliver of energy lost near silhouettes, never light through
-    // walls, and the same treatment for every strategy so MIS stays
-    // consistent.
-    let frame = Frame(spawn.shading);
+    // The BSDF lives in the shading frame — the interpolated normal,
+    // perturbed by the normal map where the material carries one —
+    // resolved once per vertex against the view direction. A hit on the
+    // far wall of the interior the path is inside sees the bare glass
+    // interface at the inverted IOR. Directions that are valid in the
+    // shading frame but pass through the real triangle (the wrong side of
+    // the geometric horizon) are rejected at each use below — the
+    // standard shading-normal trade: a sliver of energy lost near
+    // silhouettes, never light through walls, and the same treatment for
+    // every strategy so MIS stays consistent.
+    var shading = spawn.shading;
+    if (material.normalTexture != TEXTURE_NONE) {
+        shading = mappedShadingNormal(mesh, hit, uv, material.normalTexture, spawn);
+    }
+    let frame = Frame(shading);
     let wo = frame.toLocal(-direction);
     let closure = resolveClosure(params.scene.bsdfTables, material, wo,
                                  medium == hit.instance);
@@ -288,8 +347,21 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
             // when the list is powerless, so this branch always has
             // something to walk.
             let uList = (uLight - envProb) / (1.0 - envProb);
-            let candidate = sampleLights(params.scene.lights, params.scene.lightCount,
+            var candidate = sampleLights(params.scene.lights, params.scene.lightCount,
                                          uList, uPoint, spawn.position);
+            // A textured emitter's record carries the map's scale; the
+            // map itself evaluates at the sampled point, so this strategy
+            // sees exactly the radiance a BSDF path hitting that point
+            // would (the estimators must agree pointwise, not on average).
+            if (!candidate.delta) {
+                let emitter = params.scene.materials[candidate.instance];
+                if (emitter.emissionTexture != TEXTURE_NONE) {
+                    candidate.radiance *= sampleColor(
+                        emitter.emissionTexture,
+                        interpolateUv(params.scene.geometry[candidate.instance],
+                                      candidate.primitive, candidate.bary));
+                }
+            }
             let wiLight = frame.toLocal(candidate.direction);
             let throughSurface = dot(candidate.direction, spawn.normal) < 0.0;
             if (candidate.pdf > 0.0 && wiLight.z != 0.0

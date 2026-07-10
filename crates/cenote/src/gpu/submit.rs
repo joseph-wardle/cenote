@@ -337,6 +337,12 @@ impl Context {
             return;
         };
         assert!(
+            scene.textures.len() <= crate::gpu::MAX_SCENE_TEXTURES as usize,
+            "scene binds {} textures, the bindless table holds {}",
+            scene.textures.len(),
+            crate::gpu::MAX_SCENE_TEXTURES
+        );
+        assert!(
             passes
                 .iter()
                 .filter_map(|other| match *other {
@@ -355,16 +361,25 @@ impl Context {
                 .all(|other| {
                     other.tlas.handle() == scene.tlas.handle()
                         && std::ptr::eq(other.environment, scene.environment)
+                        && std::ptr::eq(other.textures, scene.textures)
                 }),
             "one pipeline, two scenes — its single descriptor set can hold only one"
         );
+        self.write_scene_descriptors(pipeline, scene);
+    }
 
+    /// Write one validated [`SceneBindings`] into a pipeline's descriptor
+    /// set: the TLAS at binding 0, the environment at binding 1, and the
+    /// bindless texture table at binding 2 — only as far as the scene
+    /// fills it, since the binding is partially bound and kernels never
+    /// index past what the material records name.
+    fn write_scene_descriptors(&self, pipeline: &ComputePipeline, scene: SceneBindings) {
         let descriptors = pipeline.scene.as_ref().expect("checked against bindings");
         let handles = [scene.tlas.handle()];
         let mut tlas_write = vk::WriteDescriptorSetAccelerationStructureKHR::default()
             .acceleration_structures(&handles);
         let image_info = scene.environment.descriptor();
-        let writes = [
+        let mut writes = vec![
             vk::WriteDescriptorSet::default()
                 .dst_set(descriptors.set)
                 .dst_binding(0)
@@ -379,6 +394,15 @@ impl Context {
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .image_info(slice::from_ref(&image_info)),
         ];
+        if !scene.textures.is_empty() {
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(descriptors.set)
+                    .dst_binding(2)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(scene.textures),
+            );
+        }
         unsafe {
             self.device().update_descriptor_sets(&writes, &[]);
         }

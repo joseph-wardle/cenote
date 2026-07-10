@@ -1,3 +1,6 @@
 /target
 
 /*.exr
+
+# Texture-prep caches, written beside their source images
+*.dds
