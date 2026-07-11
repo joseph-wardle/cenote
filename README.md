@@ -61,24 +61,26 @@ pbrt — pours as clear glass. pbrt reconstructs with a triangle filter where
 cenote uses a box, so at matched samples its per-pixel noise sits slightly
 lower.*
 
-![The same three scenes, each given about two seconds of wall clock: cenote resolves cleaner where pbrt-v4 still carries visible noise](docs/pbrt-equal-time.png)
+![The same three scenes, each given about half a second of rendering: cenote resolves cleaner where pbrt-v4 still carries visible noise](docs/pbrt-equal-time.png)
 
-*Equal time — about two seconds of wall clock each, both on one RTX 4070 Ti
-SUPER. In that budget cenote draws three to four times the samples — 280,
-588, and 186 spp against pbrt's 68, 186, and 59 — and carries visibly less
-grain. The gap is the estimator's throughput, not the hardware: same GPU,
-same scene, same seconds.*
+*Equal time — about half a second of rendering each, both on one RTX 4070 Ti
+SUPER, with the ~0.5 s of one-time startup (Vulkan or OptiX init and the
+acceleration-structure build) set aside so the budget is the estimator, not
+the launch. In that half second cenote draws three to four times the
+samples — 92, 193, and 62 spp against pbrt's 23, 66, and 22 — and carries
+visibly less grain. The gap is throughput, not hardware: same GPU, same
+scene, same seconds.*
 
 | Scene | Resolution | pbrt-v4 | cenote | per sample |
 |---|---|---|---|---|
-| `cornell-box` | 1024² | 21.6 ms/spp | 4.9 ms/spp | 4.4× |
-| `veach-mis` | 1280×720 | 8.1 ms/spp | 2.6 ms/spp | 3.1× |
-| `teapot-full` | 1280×720 | 23.5 ms/spp | 8.0 ms/spp | 3.0× |
+| `cornell-box` | 1024² | 21.7 ms/spp | 5.5 ms/spp | 3.9× |
+| `veach-mis` | 1280×720 | 7.6 ms/spp | 2.6 ms/spp | 2.9× |
+| `teapot-full` | 1280×720 | 23.0 ms/spp | 8.0 ms/spp | 2.9× |
 
 *Steady-state cost per sample, both engines on one NVIDIA RTX 4070 Ti SUPER
-(pbrt-v4 through its OptiX wavefront back end). Each render also carries
-~0.5–0.8 s of fixed startup — Vulkan or OptiX init and the
-acceleration-structure build — which the two-second budget above includes.*
+(pbrt-v4 through its OptiX wavefront back end). Startup — the ~0.5 s above —
+is measured separately and excluded; this is the per-sample rate the
+equal-time figure divides that half second by.*
 
 pbrt renders spectrally and writes linear `Rec.709`; cenote renders RGB in
 `ACEScg`. The comparison is perceptual — the same scene under the same
