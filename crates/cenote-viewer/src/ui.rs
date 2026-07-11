@@ -29,6 +29,9 @@ pub struct Gui {
     state: egui_winit::State,
     /// Exposure in stops, applied by the tonemap kernel.
     exposure: f32,
+    /// Show the OIDN-denoised view instead of the raw average.
+    #[cfg(feature = "denoise")]
+    denoise: bool,
 }
 
 impl Gui {
@@ -45,12 +48,20 @@ impl Gui {
         Self {
             state,
             exposure: 0.0,
+            #[cfg(feature = "denoise")]
+            denoise: false,
         }
     }
 
     /// Exposure in stops, for [`cenote::render::Tonemap::apply`].
     pub fn exposure(&self) -> f32 {
         self.exposure
+    }
+
+    /// Whether the panel's denoise toggle is on.
+    #[cfg(feature = "denoise")]
+    pub fn denoise(&self) -> bool {
+        self.denoise
     }
 
     /// Feed a window event to egui. `consumed` in the response means the UI
@@ -102,6 +113,8 @@ impl Gui {
 
                 ui.separator();
                 ui.add(egui::Slider::new(&mut self.exposure, -4.0..=4.0).text("exposure"));
+                #[cfg(feature = "denoise")]
+                ui.checkbox(&mut self.denoise, "denoise");
             });
     }
 }

@@ -22,6 +22,7 @@
 //! | `wavefront` | The engine core: `SoA` path state, GPU stage queues, indirect dispatch — one [`wavefront::Wavefront::trace`] is one sample per pixel, written pixel-owned so renders are bitwise deterministic |
 //! | `render`    | Frame orchestration: one-shot linear frames for the CLI and tests, and the progressive path — [`render::Renderer`] accumulates samples into a [`render::Film`] and resolves the linear average. [`render::Session`] runs that loop on its own thread, publishes frames for a consumer to peek, and carries the edit channel: queued change-sets land at wave boundaries as stop → apply → minimal re-prep → restart. [`render::Tonemap`] is the consumer's downstream view transform (exposure + ACES), which the viewer owns and the CLI skips |
 //! | `output`    | Linear EXR write + read (read exists for the golden-image tests and the demo environment) |
+//! | `denoise`   | OIDN denoising of the film's averages by host copy, guided by the albedo/normal AOVs — behind the `denoise` cargo feature |
 //! | `error`     | The crate-wide [`enum@Error`] |
 //!
 //! The GPU kernels themselves live in `shaders/` (Slang, compiled to SPIR-V
@@ -43,6 +44,8 @@
 //! corruption.
 
 pub mod color;
+#[cfg(feature = "denoise")]
+pub mod denoise;
 pub mod environment;
 pub mod error;
 pub mod format;

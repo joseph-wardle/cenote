@@ -352,6 +352,7 @@ dependencies = [
  "log",
  "notify",
  "nv-flip",
+ "oidn",
  "raw-window-handle",
  "ron",
  "serde",
@@ -1860,6 +1861,16 @@ dependencies = [
  "objc2 0.5.2",
  "objc2-core-location",
  "objc2-foundation 0.2.2",
+]
+
+[[package]]
+name = "oidn"
+version = "2.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cba0fa3e9ed252c987d6e4cd17bb6fd45bf1223087ef346e0327308ac49913f2"
+dependencies = [
+ "num_enum",
+ "pkg-config",
 ]
 
 [[package]]

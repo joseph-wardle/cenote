@@ -1541,3 +1541,64 @@ bare f32 `Z`, `albedo.RGB`/`normal.XYZ` in f16, zip scanlines, ACEScg
 chromaticities in the header; the published `Frame` gained
 albedo/normal/depth accessors resolved from the same publish slot as the
 beauty, `TRANSFER_SRC` already in place for step 9's host-copy denoise.
+
+## 2026-07-10 — M2 step 9: OIDN
+
+### D-081: Leaf decisions made while wiring the denoiser
+
+Status: accepted. D-063's shape held — the safe `oidn` crate, DEFAULT
+device, host copies, a `denoise` cargo feature — and the estimator is
+untouched by construction: denoising is a *view* (a second labeled EXR
+from the CLI, a swapped tonemap input in the viewer), never a write back
+into the film. Six leaf decisions from the flagged spike:
+
+(1) *Library discovery is `OIDN_DIR`, documented, not automated.* The
+crate's `bundled` feature is broken on crates.io (its pinned-hash files
+didn't ship in the package — verified), and Fedora packages neither a
+dev symlink nor a pkg-config file, so pkg-config can never fire there.
+The honest path: `OIDN_DIR` in the *user-level* cargo config pointing at
+a directory whose `lib/` holds a `libOpenImageDenoise.so` (a symlink to
+the distro's versioned library suffices); runtime resolution then rides
+the ordinary loader. The README carries the recipe; the feature stays
+off by default so `cargo run` needs nothing new.
+
+(2) *Guides go in as noisy aux — no `cleanAux`, no prefilter.* The
+plan's caveat proved worse than feared: the crate cannot express OIDN's
+prescribed guide prefilter (it unconditionally binds an input as the
+color image), and its `clean_aux` setter misspells the parameter name
+(`clean_aux` for `cleanAux`), which OIDN silently ignores — verified
+empirically, output bit-identical either way. The pre-authorized
+fallback stands: default noisy-aux weights, which only *under-trust*
+our near-clean pass-through guides.
+
+(3) *DEFAULT device honored; the filter is rebuilt per call.* On a
+CPU-only OIDN install the DEFAULT device is the CPU (~200 ms at 720p;
+measured: the CPU device treats `Balanced` and `High` identically, so
+the quality knob matters only where GPU device runtimes exist — both
+still passed as designed, viewer `Balanced`, CLI `High`). A fresh
+filter per call costs ~10% of one 720p run and keeps `Denoiser` free of
+self-borrowing; one device lives across frames.
+
+(4) *The viewer's toggle is a cadence, not a mode:* one job in flight at
+a time, at most one per second, downloaded from the published frame on
+the redraw thread (all submits are queue-locked and fence-waited, so the
+render thread is undisturbed), filtered on a worker thread, re-uploaded
+through `Tonemap::upload_average`, and size-gated against the current
+frame so a resize falls back to raw instead of stretching. The denoised
+image trails the orbit by up to a second — the usual shape of an
+interactive denoise preview (Cycles' viewport split, D-063).
+
+(5) *libstdc++ gets named twice in the build script.* Linking
+libOpenImageDenoise (C++) makes ld extract ISPC texture-compression
+archive members it otherwise skips, whose C++-runtime symbols were only
+ever satisfied transitively. Placement decides survival under
+`--as-needed`: the propagated `rustc-link-lib` lands after the archives
+for downstream binaries, while the crate's own test binaries put
+root-crate libs first — discarded — so a trailing `rustc-link-arg`
+covers them.
+
+(6) *CI builds and runs the feature it can't render:* OIDN's CPU device
+needs no GPU, so the runner installs the distro library, lints every
+crate with the feature on, and runs the unit test that pushes a real
+image through the real filter — the one step-9 seam CI can actually
+exercise.

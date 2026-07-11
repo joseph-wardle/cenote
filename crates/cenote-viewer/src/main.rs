@@ -18,11 +18,15 @@
 //! is a thin consumer: it feeds the session camera and size changes, *peeks*
 //! at the latest published linear frame, tonemaps it (live exposure), and
 //! presents. Each redraw requests the next, so vsync paces the *display*
-//! while the renderer runs free behind it. Camera motion, resizes, and
+//! while the renderer runs free behind it. In builds with the `denoise`
+//! feature, a panel toggle swaps the tonemap's input for an OIDN-denoised
+//! view refreshed about once a second (see the `denoise` module). Camera motion, resizes, and
 //! scene edits are just inputs the session picks up; it restarts or
 //! rebuilds accordingly.
 
 mod camera;
+#[cfg(feature = "denoise")]
+mod denoise;
 mod ui;
 
 use std::path::{Path, PathBuf};
@@ -143,6 +147,10 @@ struct Viewer {
     /// Its `Arc` also keeps that publish buffer out of the render thread's
     /// reuse pool while we display it.
     frame: Option<cenote::render::Frame>,
+    /// The denoised view of the published frame — a worker thread at its
+    /// own cadence, consulted by the redraw when the panel's toggle is on.
+    #[cfg(feature = "denoise")]
+    denoise: denoise::DenoiseView,
     gpu: Arc<cenote::gpu::Context>,
     gui: Gui,
     window: Window,
@@ -216,6 +224,8 @@ impl Viewer {
             presenter,
             tonemap,
             frame: None,
+            #[cfg(feature = "denoise")]
+            denoise: denoise::DenoiseView::new(),
             gpu,
             gui,
             window,
@@ -343,10 +353,30 @@ impl Viewer {
             .gui
             .run(&self.window, self.gpu.device_summary(), &self.stats);
 
+        // The toggle swaps which buffer the tonemap reads — raw average or
+        // the denoised view — and nothing upstream notices. Until the first
+        // filtered result lands (or right after a resize), the raw frame
+        // stands in.
+        #[cfg(feature = "denoise")]
+        if self.gui.denoise() {
+            self.denoise
+                .update(&self.gpu, frame)
+                .context("updating the denoised view")?;
+        }
+        #[cfg(feature = "denoise")]
+        let average = self
+            .gui
+            .denoise()
+            .then(|| self.denoise.display(frame))
+            .flatten()
+            .unwrap_or_else(|| frame.image());
+        #[cfg(not(feature = "denoise"))]
+        let average = frame.image();
+
         self.tonemap
             .apply(
                 &self.gpu,
-                frame.image(),
+                average,
                 frame.width(),
                 frame.height(),
                 self.gui.exposure(),

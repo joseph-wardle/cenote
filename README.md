@@ -24,8 +24,9 @@ files, a pbrt-v4 importer (`cenote-cli import`, or open a `.pbrt` in the
 viewer directly) with a CC0 regression corpus rendered and FLIP-compared in
 CI, AOVs (denoiser albedo/normal guides with Cycles-style specular
 pass-through, first-hit depth) accumulated beside the beauty and written as
-one multi-layer EXR, a progressive viewer, and a batch CLI that writes
-exactly the image the viewer converges to.
+one multi-layer EXR, OIDN denoising over those guides (a CLI flag and a
+viewer toggle, in builds with the `denoise` feature), a progressive viewer,
+and a batch CLI that writes exactly the image the viewer converges to.
 
 ![A 5×5 grid of terracotta spheres resting on a glossy gray floor — roughness increasing left to right, metalness back to front — under a blue sky](docs/demo.png)
 
@@ -66,6 +67,36 @@ guides, and first-hit depth as `Z`; with `--watch` it re-renders on
 every shader edit, recompiling from the source checkout in under a second.
 `import` converts pbrt-v4 scenes, printing every fidelity warning —
 anything the importer drops or degrades is named, never silent.
+
+### Denoising
+
+Builds with the `denoise` feature add [Open Image
+Denoise](https://www.openimagedenoise.org/), fed by the film's albedo and
+normal AOV guides:
+
+```sh
+cargo run --release -p cenote-cli --features denoise -- render --spp 64 --denoise --out shot.exr
+cargo run --release -p cenote-viewer --features denoise    # panel gains a denoise toggle
+```
+
+`--denoise` writes a second EXR (`shot.denoised.exr`) beside the raw one —
+the estimator's output is never replaced. The viewer's toggle re-denoises
+the accumulating frame about once a second.
+
+The feature links the system OpenImageDenoise library. If your install has
+a pkg-config file the build finds it alone; otherwise point `OIDN_DIR` at a
+directory whose `lib/` contains `libOpenImageDenoise.so` — an extracted
+[official release](https://github.com/RenderKit/oidn/releases), or a
+symlink to your distro's versioned library (Fedora's `oidn-libs` ships only
+`libOpenImageDenoise.so.2`, so: `mkdir -p ~/.local/opt/oidn/lib && ln -s
+/usr/lib64/libOpenImageDenoise.so.2
+~/.local/opt/oidn/lib/libOpenImageDenoise.so`). Setting it once in
+`~/.cargo/config.toml` covers every build:
+
+```toml
+[env]
+OIDN_DIR = "/home/you/.local/opt/oidn"
+```
 
 ## Tests and goldens
 

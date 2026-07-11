@@ -199,6 +199,12 @@ shadergen degrades SSS to diffuse. (D-059)
   ACES fit's look becomes the limitation)* — the tonemap kernel is a swappable
   stage by design (D-029); ACES 2.0 has no shader-friendly form, so the upgrade is
   a baked 3D LUT through that same slot.
+- **Prefiltered denoiser guides (`cleanAux`)** *(revisit: with zero-copy interop,
+  which replaces the crate's filter plumbing anyway)* — Today: guides go in as
+  noisy aux with the default weights, because the `oidn` crate can't express a
+  guide-only prefilter and its `clean_aux` setter misspells the OIDN parameter.
+  Production shape: each guide denoised through its own RT filter, then `cleanAux`
+  on the beauty filter — OIDN's prescribed highest-quality path. (D-081)
 - **Temporally-aware / in-flight denoising** *(revisit: M3+, with real-time
   interactivity)* — Today: OIDN on the accumulated film at a throttled cadence,
   Cycles' viewport pattern. Production shape only matters when frames stop being

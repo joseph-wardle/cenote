@@ -12,6 +12,20 @@ include!("slangc.rs");
 fn main() {
     println!("cargo::rerun-if-changed=shaders");
     println!("cargo::rerun-if-changed=slangc.rs");
+    // Linking libOpenImageDenoise (C++) makes ld extract ISPC archive
+    // members it otherwise skips, and those need the C++ runtime the
+    // shared library carries only transitively — name it explicitly.
+    // Twice, because placement decides survival under --as-needed: the
+    // link-lib propagates to downstream binaries (where this crate's
+    // native libs land after the archives that need them), while this
+    // crate's own test binaries put root-crate libs first — discarded —
+    // so they also get it appended as a trailing linker arg.
+    if env::var_os("CARGO_FEATURE_DENOISE").is_some()
+        && env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux")
+    {
+        println!("cargo::rustc-link-lib=stdc++");
+        println!("cargo::rustc-link-arg=-lstdc++");
+    }
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
     for kernel in KERNELS {
         let src = format!("shaders/{kernel}.slang");

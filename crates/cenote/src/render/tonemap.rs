@@ -121,6 +121,22 @@ impl Tonemap {
         self.display.as_ref().expect("apply has not run yet")
     }
 
+    /// Upload a host frame of linear RGBA averages as a buffer
+    /// [`Tonemap::apply`] can read — the road back onto the GPU for a
+    /// frame that left it to be processed on the host, like the viewer's
+    /// denoised beauty.
+    ///
+    /// # Errors
+    ///
+    /// Any [`crate::Error`] from buffer creation or the staging copy.
+    pub fn upload_average(gpu: &Context, name: &str, texels: &[f32]) -> Result<Buffer> {
+        gpu.upload_buffer(
+            name,
+            bytemuck::cast_slice(texels),
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+        )
+    }
+
     /// The display buffer sized for `width`×`height`, allocating or growing
     /// it when the frame outgrows it. The pipeline is size-independent, so
     /// this lazy buffer is all that tracks the window.
@@ -165,13 +181,8 @@ mod tests {
             -0.5, 0.2, 0.2, 1.0, // negative clamps to zero, not garbage
             1.0, 0.1, 0.05, 1.0, // saturated red
         ];
-        let average = gpu
-            .upload_buffer(
-                "tonemap.average.synthetic",
-                bytemuck::bytes_of(&averages),
-                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-            )
-            .expect("upload");
+        let average =
+            Tonemap::upload_average(&gpu, "tonemap.average.synthetic", &averages).expect("upload");
         let exposure = 0.5;
         tonemap
             .apply(&gpu, &average, 6, 1, exposure)
