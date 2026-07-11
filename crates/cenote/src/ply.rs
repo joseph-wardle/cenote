@@ -329,9 +329,14 @@ fn read_vertices(element: &Element, data: &mut Data<'_>, mesh: &mut Ply) -> Resu
         .iter()
         .find_map(|names| Some([index_of(names[0])?, index_of(names[1])?]));
 
-    mesh.positions.reserve(element.count);
-    let mut normals = normal.map(|_| Vec::with_capacity(element.count));
-    let mut uvs = uv.map(|_| Vec::with_capacity(element.count));
+    // The header count is untrusted: cap the pre-reservation so a corrupt
+    // "element vertex 999999999999" can't demand a terabyte before a single
+    // byte is read. The read loop is already bounded — it hits EOF and
+    // errors out — so an honest mesh larger than the cap just grows.
+    let reserve = element.count.min(1 << 20);
+    mesh.positions.reserve(reserve);
+    let mut normals = normal.map(|_| Vec::with_capacity(reserve));
+    let mut uvs = uv.map(|_| Vec::with_capacity(reserve));
     let mut row = vec![0.0f64; element.properties.len()];
     for _ in 0..element.count {
         for (slot, property) in row.iter_mut().zip(&element.properties) {
@@ -552,5 +557,23 @@ end_header
     fn a_missing_file_names_its_path() {
         let error = read(Path::new("/no/such/mesh.ply")).unwrap_err();
         assert!(error.to_string().contains("/no/such/mesh.ply"), "{error}");
+    }
+
+    /// A wildly overstated vertex count must fail on the missing data, not
+    /// try to pre-allocate a terabyte from the untrusted header.
+    #[test]
+    fn an_absurd_vertex_count_errors_before_it_allocates() {
+        let text = "\
+ply
+format ascii 1.0
+element vertex 999999999999
+property float x
+property float y
+property float z
+end_header
+0 0 0
+";
+        let error = parse(text.as_bytes()).unwrap_err();
+        assert!(matches!(error, Error::Scene(_)), "{error}");
     }
 }
