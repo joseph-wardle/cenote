@@ -1,7 +1,7 @@
 //! Change-sets: ordered, typed edits to a [`SceneDescription`] — the scene
 //! model's one verb. A scene file *is* a change-set against the empty
 //! description, the pbrt importer emits one, the lookdev panel emits tiny
-//! ones, and the M4 wire protocol will carry serialized ones — file, wire,
+//! ones, and a network client could carry serialized ones — file, wire,
 //! and edit are the same value by construction.
 //!
 //! The apply contract:
@@ -90,8 +90,8 @@ pub enum Op {
     Settings(SettingsPatch),
     /// Delete an object outright. Errors if the target does not exist or
     /// if removing it would strand a reference. Deletion is real —
-    /// residency retires with the object — because the M4 Hydra delegate
-    /// requires it (renames arrive as remove + re-insert).
+    /// residency retires with the object — because a scene-graph delegate
+    /// (Hydra-style) requires it (renames arrive as remove + re-insert).
     Remove(Kind, String),
 }
 

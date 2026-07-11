@@ -769,8 +769,8 @@ mod tests {
         }
     }
 
-    /// The diffuse white furnace (the step-7 checkpoint): an albedo-1 EON
-    /// plane under a uniform sky must reflect exactly the sky radiance —
+    /// The diffuse white furnace: an albedo-1 EON plane under a uniform
+    /// sky must reflect exactly the sky radiance —
     /// energy lost or gained anywhere in the estimator (a dropped
     /// multiple-scattering lobe, a wrong pdf, a biased roulette) shifts the
     /// result. At roughness 0 the lobe is Lambert and, BSDF-only, *every
@@ -1003,9 +1003,9 @@ mod tests {
         }
     }
 
-    /// The white-furnace matrix over the full `OpenPBR` closure (the M1
-    /// matrix, extended lobe by lobe as the step-5 checkpoint demands). A
-    /// white material of any construction must return exactly the sky's
+    /// The white-furnace matrix over the full `OpenPBR` closure, extended
+    /// lobe by lobe. A white material of any construction must return
+    /// exactly the sky's
     /// radiance — single-scatter GGX *fails this by design* (it loses up
     /// to half its energy at roughness 1), so each row pins its own
     /// energy machinery: the multiple-scattering compensation and its

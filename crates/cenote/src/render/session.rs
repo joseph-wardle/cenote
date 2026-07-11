@@ -1,7 +1,7 @@
 //! The render loop as an actor: a dedicated thread that accumulates as fast
 //! as the GPU allows, so a consumer's display refresh never paces the
-//! renderer. The viewer is the first consumer; the M2 Hydra delegate will be
-//! a second — the concurrency lives here, once, not in each of them. This is
+//! renderer. The viewer is the first consumer; a scene-graph delegate could
+//! be a second — the concurrency lives here, once, not in each of them. This is
 //! the shape Cycles, `MoonRay`, and Karma all use: the path tracer runs on its
 //! own thread and the UI *peeks* at its output.
 //!

@@ -167,7 +167,7 @@ pub struct Mesh {
 
 /// A mesh's geometry payload. Small meshes stay inline — self-contained
 /// and diffable in the scene file; big geometry lives in PLY, the format
-/// everyone already has (D-056's bulk-data line).
+/// everyone already has.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum MeshSource {
     /// Geometry spelled out in the scene file.
@@ -446,9 +446,8 @@ pub struct Settings {
     /// Maximum path length in bounces.
     pub max_bounces: u32,
     /// Sampler seed, decorrelating repeat renders. Carried by the format
-    /// but not yet wired into the sampler — a deferral with its ledger
-    /// entry, since honest decorrelation needs a seed input in the RNG,
-    /// not a sample-index offset.
+    /// but not yet wired into the sampler — honest decorrelation needs a
+    /// seed input in the RNG, not a sample-index offset.
     pub seed: u32,
 }
 

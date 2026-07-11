@@ -941,8 +941,8 @@ mod tests {
         assert_eq!(render(64), render(4096));
     }
 
-    /// The step-6 checkpoint, kept honest since — progressive refinement
-    /// is real. A camera ray that misses adds the environment radiance to
+    /// Progressive refinement is real. A camera ray that misses adds the
+    /// environment radiance to
     /// a zero-filled pixel exactly (throughput is still 1, and a constant
     /// environment reads back its one texel exactly), and no surface path
     /// plausibly lands on that exact value, so "this sample saw the sky"
@@ -1225,8 +1225,8 @@ mod tests {
         );
     }
 
-    /// The step-8 checkpoint, and the test that catches wrong-but-plausible
-    /// MIS: next-event-only, BSDF-only, and MIS renders of one scene must
+    /// The test that catches wrong-but-plausible MIS: next-event-only,
+    /// BSDF-only, and MIS renders of one scene must
     /// converge to the same mean. A pdf mismatch or a weight pair that
     /// doesn't sum to 1 biases the strategies apart (double-counting shows
     /// up as 2×); goldens can't see this — they'd normalize the bias into
@@ -1290,8 +1290,8 @@ mod tests {
         assert_strategies_agree(&gpu, &scene);
     }
 
-    /// The same agreement, with the *environment* as the only light — the
-    /// step-10 counterpart. The synthetic sky is the CDF tables' worst
+    /// The same agreement, with the *environment* as the only light. The
+    /// synthetic sky is the CDF tables' worst
     /// case: one bright texel flanked by hard zeros over a dim base, so
     /// next-event sampling must importance-sample the sun through the
     /// marginal/conditional tables *and* reach the zero texels its
@@ -1335,8 +1335,8 @@ mod tests {
         assert_strategies_agree(&gpu, &scene);
     }
 
-    /// The step-6 estimator-consistency test: agreement must survive
-    /// textures in both places they touch the light transport. The
+    /// Estimator consistency must survive textures in both places they
+    /// touch the light transport. The
     /// emitter's radiance is a *map* — next-event estimation evaluates it
     /// at its own sampled point (through the connection's barycentrics)
     /// while BSDF paths evaluate it where they land, and the two only

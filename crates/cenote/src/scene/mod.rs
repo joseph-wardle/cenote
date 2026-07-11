@@ -38,8 +38,8 @@ use crate::texture;
 /// carries. Camera rays trace with [`ray_mask::CAMERA`]; every other ray
 /// (bounce, shadow) traces with [`ray_mask::ALL`], so a camera-invisible
 /// instance still bounces light, casts shadows, and — when emissive —
-/// illuminates. The full per-ray-type set (diffuse/glossy/shadow) is a
-/// ledger deferral; today only the camera bit is real.
+/// illuminates. The full per-ray-type set (diffuse/glossy/shadow) is not
+/// yet wired up; today only the camera bit is real.
 pub(crate) mod ray_mask {
     pub const CAMERA: u32 = 0x01;
     pub const ALL: u32 = 0xFF;
