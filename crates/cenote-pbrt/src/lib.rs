@@ -66,3 +66,28 @@ pub fn import(scene: &Path, generated: &Path) -> Result<Import> {
     let (set, warnings) = map::Mapper::new(parser, generated, stem).run()?;
     Ok(Import { set, warnings })
 }
+
+/// Load any scene file as an [`Import`]: a `.pbrt` through [`import`]
+/// (derived assets to a temp directory), anything else as a cenote `.ron`
+/// via [`cenote::format`], which carries no warnings. The one front door
+/// both binaries turn a scene path into a change-set through, so the choice
+/// of importer-vs-native lives in one place rather than drifting between
+/// them.
+///
+/// # Errors
+///
+/// Whatever [`import`] or [`cenote::format::load`] raise for the path.
+pub fn load(scene: &Path) -> Result<Import> {
+    if scene
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pbrt"))
+    {
+        let generated = std::env::temp_dir().join("cenote-pbrt-generated");
+        import(scene, &generated)
+    } else {
+        Ok(Import {
+            set: cenote::format::load(scene)?,
+            warnings: Vec::new(),
+        })
+    }
+}

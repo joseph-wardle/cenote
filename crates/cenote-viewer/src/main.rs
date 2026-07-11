@@ -61,25 +61,16 @@ fn main() -> anyhow::Result<()> {
     app.error.map_or(Ok(()), Err)
 }
 
-/// Load a scene file as a change-set: `.pbrt` imports through
-/// cenote-pbrt (fidelity warnings logged, derived assets in a temp
-/// directory), anything else parses as `.ron`. Reloads-on-save take the
-/// same path, so editing a watched `.pbrt` re-imports it live.
+/// Load a scene file as a change-set, logging any import fidelity warnings.
+/// Reloads-on-save take this same path, so editing a watched `.pbrt`
+/// re-imports it live.
 fn load_scene(path: &Path) -> anyhow::Result<cenote::scene::changeset::ChangeSet> {
-    if path
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("pbrt"))
-    {
-        let generated = std::env::temp_dir().join("cenote-pbrt-generated");
-        let imported = cenote_pbrt::import(path, &generated)
-            .with_context(|| format!("importing {}", path.display()))?;
-        for warning in &imported.warnings {
-            log::warn!("{warning}");
-        }
-        Ok(imported.set)
-    } else {
-        cenote::format::load(path).with_context(|| format!("loading scene {}", path.display()))
+    let imported =
+        cenote_pbrt::load(path).with_context(|| format!("loading scene {}", path.display()))?;
+    for warning in &imported.warnings {
+        log::warn!("{warning}");
     }
+    Ok(imported.set)
 }
 
 /// The winit application shell: the [`Viewer`] is absent until `resumed`

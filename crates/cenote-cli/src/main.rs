@@ -83,24 +83,14 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-/// Load a scene file as a change-set: `.pbrt` through the importer
-/// (derived assets go to a temp directory that lives as long as this
-/// process cares), anything else as `.ron`.
+/// Load a scene file as a change-set, logging any import fidelity warnings.
 fn load_scene(path: &Path) -> anyhow::Result<cenote::scene::changeset::ChangeSet> {
-    if path
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("pbrt"))
-    {
-        let generated = std::env::temp_dir().join("cenote-pbrt-generated");
-        let imported = cenote_pbrt::import(path, &generated)
-            .with_context(|| format!("importing {}", path.display()))?;
-        for warning in &imported.warnings {
-            log::warn!("{warning}");
-        }
-        Ok(imported.set)
-    } else {
-        cenote::format::load(path).with_context(|| format!("loading scene {}", path.display()))
+    let imported =
+        cenote_pbrt::load(path).with_context(|| format!("loading scene {}", path.display()))?;
+    for warning in &imported.warnings {
+        log::warn!("{warning}");
     }
+    Ok(imported.set)
 }
 
 fn render(args: &RenderArgs) -> anyhow::Result<()> {
