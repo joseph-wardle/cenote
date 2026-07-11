@@ -1665,3 +1665,80 @@ needs the light table rebuilt, not just the material buffer re-uploaded —
 verified against `Scene::update`, which re-derives triangle lights over
 the whole description and rebuilds the light table on every material wave
 (D-075(5)), so the new emitter is sampled from the next frame.
+
+## 2026-07-10 — M2 step 11: polish and the post-M2 refinement pass
+
+### D-083: Leaf decisions made polishing M2
+
+Status: accepted. Step 11 folded the plan's polish items (module headers
+current, decisions current, goldens verified) together with a post-M2
+code-review pass — six reviewers over the scene, prep, render, session,
+importer, and support clusters, measured against the Cycles X / MoonRay
+bar. What the review turned up split into refactors worth doing now and
+seams worth naming for later. The refactors are all bit-identical: the
+incremental-vs-fresh determinism test and the furnace matrix carry through
+every one, so the goldens never moved and none needed regenerating.
+
+Done:
+
+(1) *Host lowering split out of prep.* `prep.rs` fused the fallible
+host-side lowering (file reads, decodes, capability checks — everything
+rejected on user data) with the GPU orchestration that consumes it, joined
+at `HostScene`. The lowering moved to `scene/lower.rs`; `prep.rs` is now the
+two orchestrators plus the two residency helpers. The boundary the module
+doc described is now the boundary the code has, and the untouched-on-error
+contract reads where it lives.
+
+(2) *Film split out of render.* `Film`/`Accumulation`/`FilmAverages` moved
+to `render/film.rs` — the split `Tonemap` already had — with fields
+`pub(super)` so the renderer-side param builders read them without new
+accessors, and the ~1500-line test suite moved to `render/tests.rs`.
+`render/mod.rs` is the renderer and the film kernels, skimmable again.
+
+(3) *One list for the textured slots.* The collection pass (`texture_keys`)
+and the lowering pass (`lower_material`) each carried the slot-to-usage
+pairing; a disagreement would panic the bindless-index lookup. Both now
+read one `textured_slots` list, and `lower_material` destructures it through
+an array pattern so the slot count is compiler-pinned — a new textured
+parameter will not compile until it is assigned a field.
+
+(4) *The PLY reader caps its pre-allocation.* A header-declared vertex count
+was trusted straight into `reserve`, so a corrupt `element vertex
+999999999999` could ask the allocator for terabytes before a byte was read.
+The read loop was already EOF-bounded; the reserve now is too.
+
+(5) *The docs sweep.* `Kind`'s unused `Hash` derive dropped (every use is a
+`BTreeSet` keyed on `Ord`), `render_to_buffer` (one caller, a hypothetical
+justification) inlined, four stale or dangling doc comments corrected, and
+the importer's triply-explained reflective-camera rule trimmed to a single
+owner (`FLIP_Z`).
+
+Named, not fixed — the per-edit cost model is a watch item, not rot:
+
+(6) *`validate()` re-stats every referenced file on every apply.* A lookdev
+slider's one-field patch stats every texture and PLY in the scene. Scoping
+the file-existence checks to dirtied paths is correct — paths are
+per-object, and prep reads the file as the real guard — but it threads the
+dirty set into the validate-then-apply contract for a cheap-`stat` latency
+win. Left pristine; prep is the backstop, and interactive edits touch no
+paths.
+
+(7) *`lights::build` and `total_power` recompute the record list.* Scene
+prep, update, and demo each call both, and each rebuilds `raw_records`. A
+clean dedup threads `build`'s already-computed total through
+`upload_instance_tables` to three call sites and reworks two unit tests —
+cross-file churn for a prep-time linear pass over a handful of emissive
+triangles. Deferred.
+
+(8) *The viewer's replica can diverge from what renders.* D-082(6) claimed
+the `ui_desc` replica never diverges from the rendered scene. It can: a
+reload the render thread rejects at *residency* — a present-but-corrupt
+asset, which apply's existence check cannot catch — leaves the replica
+holding the new scene while the renderer keeps the old, until the next good
+reload resyncs both. The lookdev edit path is safe (a material patch cannot
+fail residency), so this is the reload seam only, and it is logged, not
+silent. The proper fix is a confirmation channel so the replica advances
+only on the render thread's acceptance; it belongs with the M4 rework that
+makes the scene graph the single authority (deferral ledger, Viewer &
+lookdev). The whole replica device is a temporary M2 stand-in for a
+read-back the delegate supplies for free.

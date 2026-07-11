@@ -149,6 +149,10 @@ the lookdev panel (both charter-consistent, neither in the original line item), 
 
 Each step ends green: compiles, clippy-clean, tests pass, committed.
 
+**All eleven steps complete as of 2026-07-10.** Step 11 also folded in a
+post-M2 code-review pass; the refactors, the conscious skips, and the one
+seam left for M4 are recorded in [decisions.md](decisions.md) D-083.
+
 1. **Plan docs** (this file, deferrals.md, decisions.md entries, README rows).
 2. **Change-set schema + RON round-trip** — pure CPU: the value types (Remove ops
    included), apply semantics (get-or-create, validate-then-apply atomicity,

@@ -216,3 +216,14 @@ shadergen degrades SSS to diffuse. (D-059)
   through the Hydra delegate supplies this wholesale)* — Today: material panel only.
   Building authoring UI ourselves duplicates what the M4 milestone gets for free.
   (D-064)
+- **Viewer scene replica → single source of truth** *(revisit: M4, with the Hydra
+  delegate)* — Today: the viewer keeps its own `SceneDescription` replica (`ui_desc`),
+  hand-mirrored to the render thread's copy on every edit, because the rendered
+  description moved onto the render thread and is unreadable. There is no confirmation
+  channel back, so a reload the render thread rejects at *residency* leaves the replica
+  ahead of what actually renders until the next good reload (D-083(8)). Production
+  shape: the scene graph is the single authority and the session reads a snapshot from
+  it — the Hydra delegate's model, where the render index owns the scene and the
+  delegate syncs deltas. The manual mirror is a temporary M2 device the M4 delegate
+  replaces wholesale; the fix is a scene-version the published frame carries, so the
+  replica advances only on acceptance. (D-064, D-082, D-083)

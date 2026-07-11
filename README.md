@@ -10,7 +10,7 @@ Where CPU production renderers optimize for memory capacity on unbounded scenes,
 Cenote makes the inverse bet: extreme single-GPU performance on scenes that fit in
 VRAM. Wavefront compute + ray queries, one integrator, everything resident.
 
-**Status: M1 complete, M2 underway** — the six-kernel wavefront engine
+**Status: M2 complete** — the six-kernel wavefront engine
 (indirect dispatch, zero mid-frame readbacks), Sobol-Burley sampling, the
 full `OpenPBR` closure — coat, fuzz, rough glass with interior absorption,
 thin-walled surfaces, variable IOR, fractional opacity — energy-compensated
