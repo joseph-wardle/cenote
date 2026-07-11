@@ -1,11 +1,14 @@
 //! Prep: the one path from a [`SceneDescription`] to GPU residency.
 //! [`Scene::prep`] builds a description fresh; [`Scene::update`] follows
-//! its accumulated [`Dirty`] state and rebuilds only what edits touched —
-//! a material re-uploads the material array, a moved instance rebuilds
-//! the TLAS, new geometry rebuilds its own BLAS, an environment swap
-//! reloads the image and its tables. Iteration order everywhere is name
-//! order, so an incremental update lands the exact scene a fresh build
-//! would — the determinism invariant extends through editing.
+//! its accumulated [`Dirty`] state. Meshes, textures, the environment, and
+//! the TLAS each rebuild only when an edit touched them — a changed mesh
+//! re-uploads its own BLAS, an environment swap reloads the image and its
+//! tables, an untouched one is left resident. The instance tables
+//! (geometry, materials, lights) and the scene table rebuild wholesale on
+//! any edit instead: cheap over a scene's handful of instances, and the
+//! first thing to make granular when that stops holding. Iteration order
+//! everywhere is name order, so an incremental update lands the exact scene
+//! a fresh build would — the determinism invariant extends through editing.
 //!
 //! Prep is where the description meets what the renderer can currently
 //! express, under two rules. Anything not wired up yet — and anything
@@ -32,9 +35,9 @@ use glam::{Mat4, Vec2, Vec3};
 use super::changeset::{Dirty, Kind};
 use super::description::{self, ColorSpace, MeshSource, SceneDescription, Texturable, TextureRef};
 use super::{
-    Camera, GpuMesh, Lens, Mesh, Placement, ResidentBuffers, ResidentTexture, Scene,
-    build_scene_tlas, emissive_triangles, scene_error, select_probability, upload_environment,
-    upload_instance_tables, upload_mesh, upload_scene_table,
+    Camera, GpuEnvironment, GpuMesh, Lens, Mesh, Placement, ResidentBuffers, ResidentTexture,
+    Scene, build_scene_tlas, emissive_triangles, scene_error, select_probability,
+    upload_environment, upload_instance_tables, upload_mesh, upload_scene_table,
 };
 use crate::color::{acescg_from_rec709, luminance};
 use crate::environment::Environment;
@@ -78,33 +81,39 @@ impl Scene {
             .environment
             .as_ref()
             .expect("a fresh build always carries its environment");
-        let env = upload_environment(gpu, environment)?;
+        let GpuEnvironment {
+            image,
+            marginal,
+            conditional,
+            pdfs,
+            power,
+        } = upload_environment(gpu, environment)?;
         let placements = placements(&meshes, &host.instances);
         let tlas = build_scene_tlas(gpu, &placements)?;
         let (geometry, materials, lights) =
             upload_instance_tables(gpu, &placements, &host.triangle_lights, &host.delta_lights)?;
         drop(placements);
-        let resident = ResidentBuffers {
+        let resident = ResidentBuffers::assemble(
+            gpu,
             geometry,
             materials,
             lights,
-            bsdf_tables: crate::tables::upload(gpu)?,
-            env_marginal: env.marginal,
-            env_conditional: env.conditional,
-            env_pdfs: env.pdfs,
-        };
+            marginal,
+            conditional,
+            pdfs,
+        )?;
         let env_size = (environment.width(), environment.height());
         let table = upload_scene_table(
             gpu,
             &resident,
             env_size,
-            select_probability(env.power, host.light_power()),
+            select_probability(power, host.light_power()),
             host.light_count(),
         )?;
         description.take_dirty();
         Ok(Self {
             tlas,
-            environment: env.image,
+            environment: image,
             table,
             resident,
             meshes,
@@ -112,7 +121,7 @@ impl Scene {
             descriptors,
             camera: host.camera.expect("a fresh build always adopts its camera"),
             env_size,
-            env_power: env.power,
+            env_power: power,
         })
     }
 
@@ -161,7 +170,7 @@ impl Scene {
             self.env_power = env.power;
         }
         let placements = placements(&self.meshes, &host.instances);
-        if host.geometry_dirty {
+        if host.tlas_dirty {
             self.tlas = build_scene_tlas(gpu, &placements)?;
         }
         let (geometry, materials, lights) =
@@ -211,8 +220,10 @@ struct HostScene {
     /// The camera, when it changed — a material edit must not snap the
     /// view back to the authored pose.
     camera: Option<Camera>,
-    /// A BLAS or the instance set changed, so the TLAS must rebuild.
-    geometry_dirty: bool,
+    /// The TLAS must rebuild. Set by a mesh, instance, *or* material edit —
+    /// material because fractional opacity bakes into each instance's
+    /// non-opaque flag (see where it's assigned).
+    tlas_dirty: bool,
 }
 
 impl HostScene {
@@ -361,7 +372,7 @@ fn host_phase(
         // Material dirt rebuilds the TLAS too: fractional opacity is baked
         // into each instance's non-opaque flag, and the TLAS over a scene's
         // handful of instances is the cheap structure (every BLAS stays).
-        geometry_dirty: touched(Kind::Mesh) || touched(Kind::Instance) || touched(Kind::Material),
+        tlas_dirty: touched(Kind::Mesh) || touched(Kind::Instance) || touched(Kind::Material),
     })
 }
 
