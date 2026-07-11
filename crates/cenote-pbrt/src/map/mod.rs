@@ -38,6 +38,9 @@
 //! importer drops is named in the warning list, so silence always means
 //! "handled".
 
+mod color;
+mod shape;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -50,6 +53,9 @@ use cenote::scene::description::{
 };
 use cenote::{Error, Result};
 use glam::{Mat3, Mat4, Vec3};
+
+use color::{blackbody_rec709, conductor_f0, named_metal_f0};
+use shape::{disk_mesh, sphere_mesh, trianglemesh};
 
 use crate::parse::{Directive, Parser};
 
@@ -561,34 +567,6 @@ fn swaps_handedness(matrix: Mat4) -> bool {
     Mat3::from_mat4(matrix).determinant() < 0.0
 }
 
-/// Normal-incidence reflectance from a conductor's complex IOR — how
-/// pbrt's `eta`/`k` spectra land in `base_color`'s F0 convention.
-fn conductor_f0(eta: [f32; 3], k: [f32; 3]) -> [f32; 3] {
-    let mut f0 = [0.0; 3];
-    for channel in 0..3 {
-        let (n, k) = (eta[channel], k[channel]);
-        f0[channel] = ((n - 1.0).powi(2) + k * k) / ((n + 1.0).powi(2) + k * k);
-    }
-    f0
-}
-
-/// Linear `Rec.709` F0 for the named conductor spectra the corpus uses
-/// (pbrt's `metal-*-eta`/`-k` measurements, reduced to normal-incidence
-/// RGB — the standard lookdev values).
-fn named_metal_f0(spectrum: &str) -> Option<[f32; 3]> {
-    let metal = spectrum
-        .strip_prefix("metal-")?
-        .strip_suffix("-eta")
-        .or_else(|| spectrum.strip_prefix("metal-")?.strip_suffix("-k"))?;
-    Some(match metal {
-        "Cu" => [0.955, 0.638, 0.538],
-        "Au" => [1.000, 0.782, 0.344],
-        "Ag" => [0.972, 0.960, 0.915],
-        "Al" => [0.913, 0.921, 0.925],
-        _ => return None,
-    })
-}
-
 impl Mapper {
     fn shape_directive(&mut self, directive: &Directive) -> Result<()> {
         self.verify_block(directive, true)?;
@@ -787,33 +765,9 @@ impl Mapper {
             return Ok([1.0; 3]);
         };
         Ok(match param.ty.as_str() {
-            "rgb" | "color" => match param.as_floats()? {
-                [r, g, b] => [*r as f32, *g as f32, *b as f32],
-                _ => {
-                    return Err(Error::SceneFormat(format!(
-                        "{}: parameter \"{name}\" needs three values",
-                        param.location
-                    )));
-                }
-            },
-            "blackbody" => match param.as_floats()? {
-                [kelvin] => blackbody_rec709(*kelvin as f32),
-                _ => {
-                    return Err(Error::SceneFormat(format!(
-                        "{}: blackbody \"{name}\" needs one temperature",
-                        param.location
-                    )));
-                }
-            },
-            "float" => match param.as_floats()? {
-                [value] => [*value as f32; 3],
-                _ => {
-                    return Err(Error::SceneFormat(format!(
-                        "{}: parameter \"{name}\" needs one value",
-                        param.location
-                    )));
-                }
-            },
+            "rgb" | "color" => param.as_rgb()?,
+            "blackbody" => blackbody_rec709(param.as_scalar()?),
+            "float" => [param.as_scalar()?; 3],
             _ => {
                 self.warn(format!(
                     "{}: spectral light data is not supported — \"{name}\" imports as \
@@ -1166,10 +1120,7 @@ impl Mapper {
             if !matches!(param.ty.as_str(), "rgb" | "color") {
                 return None;
             }
-            match param.as_floats().ok()? {
-                [r, g, b] => Some([*r as f32, *g as f32, *b as f32]),
-                _ => None,
-            }
+            param.as_rgb().ok()
         };
         if let (Some(eta), Some(k)) = (rgb_of(eta), rgb_of(k)) {
             return Ok(Texturable::Constant(conductor_f0(eta, k)));
@@ -1282,24 +1233,8 @@ impl Mapper {
             return Ok(None);
         };
         Ok(Some(match param.ty.as_str() {
-            "rgb" | "color" => match param.as_floats()? {
-                [r, g, b] => Texturable::Constant([*r as f32, *g as f32, *b as f32]),
-                _ => {
-                    return Err(Error::SceneFormat(format!(
-                        "{}: parameter \"{name}\" needs three values",
-                        param.location
-                    )));
-                }
-            },
-            "float" => match param.as_floats()? {
-                [value] => Texturable::Constant([*value as f32; 3]),
-                _ => {
-                    return Err(Error::SceneFormat(format!(
-                        "{}: parameter \"{name}\" needs one value",
-                        param.location
-                    )));
-                }
-            },
+            "rgb" | "color" => Texturable::Constant(param.as_rgb()?),
+            "float" => Texturable::Constant([param.as_scalar()?; 3]),
             "texture" => match self.texture_lookup(param.as_string()?, &param.location)? {
                 TextureDef::Constant(value) => Texturable::Constant(value),
                 TextureDef::Image {
@@ -1338,15 +1273,7 @@ impl Mapper {
             return Ok(None);
         };
         Ok(Some(match param.ty.as_str() {
-            "float" => match param.as_floats()? {
-                [value] => Texturable::Constant(*value as f32),
-                _ => {
-                    return Err(Error::SceneFormat(format!(
-                        "{}: parameter \"{name}\" needs one value",
-                        param.location
-                    )));
-                }
-            },
+            "float" => Texturable::Constant(param.as_scalar()?),
             _ => match self.texture_lookup(param.as_string()?, &param.location)? {
                 TextureDef::Constant(value) => Texturable::Constant(value[0]),
                 TextureDef::Image {
@@ -1399,18 +1326,24 @@ impl Mapper {
                 directive.location
             ));
         }
-        let differs = |name: &str, identity: f32| {
-            params
-                .float(name)
-                .ok()
-                .flatten()
+        // A mistyped uscale/udelta errors like every other slot — and all
+        // four are read (not short-circuited) so a wrong type is caught and
+        // none is left to spuriously warn as unused.
+        let mut uv_transformed = false;
+        for (param, identity) in [
+            ("uscale", 1.0),
+            ("vscale", 1.0),
+            ("udelta", 0.0),
+            ("vdelta", 0.0),
+        ] {
+            if params
+                .float(param)?
                 .is_some_and(|value| (value - identity).abs() > f32::EPSILON)
-        };
-        if differs("uscale", 1.0)
-            || differs("vscale", 1.0)
-            || differs("udelta", 0.0)
-            || differs("vdelta", 0.0)
-        {
+            {
+                uv_transformed = true;
+            }
+        }
+        if uv_transformed {
             self.warn(format!(
                 "{}: UV transforms are not supported — \"{name}\" samples \
                  authored UVs directly",
@@ -1439,16 +1372,7 @@ impl Mapper {
             "imagemap" => self.imagemap_texture(directive, &name)?,
             "constant" => {
                 let value = match params.take("value", &["float", "rgb", "color"])? {
-                    Some(param) => match param.as_floats()? {
-                        [value] => [*value as f32; 3],
-                        [r, g, b] => [*r as f32, *g as f32, *b as f32],
-                        _ => {
-                            return Err(Error::SceneFormat(format!(
-                                "{}: constant texture \"{name}\" needs one or three values",
-                                param.location
-                            )));
-                        }
-                    },
+                    Some(param) => param.as_rgb_broadcast()?,
                     None => [1.0; 3],
                 };
                 TextureDef::Constant(value)
@@ -1458,16 +1382,7 @@ impl Mapper {
                     Some(param) if param.ty == "texture" => {
                         self.texture_lookup(param.as_string()?, &param.location)?
                     }
-                    Some(param) => match param.as_floats()? {
-                        [value] => TextureDef::Constant([*value as f32; 3]),
-                        [r, g, b] => TextureDef::Constant([*r as f32, *g as f32, *b as f32]),
-                        _ => {
-                            return Err(Error::SceneFormat(format!(
-                                "{}: scale texture \"{name}\" has a malformed \"tex\"",
-                                param.location
-                            )));
-                        }
-                    },
+                    Some(param) => TextureDef::Constant(param.as_rgb_broadcast()?),
                     None => TextureDef::Constant([1.0; 3]),
                 };
                 let factor = match params.take("scale", &["float", "texture"])? {
@@ -1512,208 +1427,6 @@ impl Mapper {
         self.named_textures.insert(name, def);
         Ok(())
     }
-}
-
-/// A `trianglemesh` shape's streams, verbatim in object space. `flip`
-/// (trap 4's XOR) negates authored normals and reverses winding —
-/// winding also drives derived normals, so orientation survives either
-/// way.
-fn trianglemesh(directive: &Directive, flip: bool) -> Result<MeshSource> {
-    let params = &directive.params;
-    let triples = |name: &str, types: &[&str]| -> Result<Option<Vec<[f32; 3]>>> {
-        let Some(param) = params.take(name, types)? else {
-            return Ok(None);
-        };
-        let floats = param.as_floats()?;
-        if floats.len() % 3 != 0 {
-            return Err(Error::SceneFormat(format!(
-                "{}: \"{name}\" needs whole (x, y, z) triples",
-                param.location
-            )));
-        }
-        Ok(Some(
-            floats
-                .chunks_exact(3)
-                .map(|triple| [triple[0] as f32, triple[1] as f32, triple[2] as f32])
-                .collect(),
-        ))
-    };
-    let positions = triples("P", &["point3", "point"])?.ok_or_else(|| {
-        Error::SceneFormat(format!(
-            "{}: trianglemesh has no \"point3 P\"",
-            directive.location
-        ))
-    })?;
-    let mut normals = triples("N", &["normal", "normal3"])?;
-    if flip && let Some(normals) = &mut normals {
-        for normal in normals {
-            *normal = normal.map(|component| -component);
-        }
-    }
-    let uvs = match params.take("uv", &["point2", "float", "vector2"])? {
-        Some(param) => {
-            let floats = param.as_floats()?;
-            if floats.len() % 2 != 0 {
-                return Err(Error::SceneFormat(format!(
-                    "{}: \"uv\" needs whole (u, v) pairs",
-                    param.location
-                )));
-            }
-            Some(
-                floats
-                    .chunks_exact(2)
-                    .map(|pair| [pair[0] as f32, pair[1] as f32])
-                    .collect(),
-            )
-        }
-        None => None,
-    };
-    let triangles = match params.take("indices", &["integer"])? {
-        Some(param) => {
-            let values = param.as_floats()?;
-            if values.len() % 3 != 0 {
-                return Err(Error::SceneFormat(format!(
-                    "{}: \"indices\" needs whole triangles",
-                    param.location
-                )));
-            }
-            let mut triangles = Vec::with_capacity(values.len() / 3);
-            for triple in values.chunks_exact(3) {
-                let mut triangle = [0u32; 3];
-                for (corner, value) in triangle.iter_mut().zip(triple) {
-                    if *value < 0.0 || *value > f64::from(u32::MAX) {
-                        return Err(Error::SceneFormat(format!(
-                            "{}: index {value} is out of range",
-                            param.location
-                        )));
-                    }
-                    *corner = *value as u32;
-                }
-                triangles.push(triangle);
-            }
-            triangles
-        }
-        // pbrt allows exactly one implicit triangle.
-        None if positions.len() == 3 => vec![[0, 1, 2]],
-        None => {
-            return Err(Error::SceneFormat(format!(
-                "{}: trianglemesh has no \"integer indices\"",
-                directive.location
-            )));
-        }
-    };
-    let triangles = if flip {
-        triangles.into_iter().map(|[a, b, c]| [a, c, b]).collect()
-    } else {
-        triangles
-    };
-    Ok(MeshSource::Inline {
-        positions,
-        normals,
-        uvs,
-        triangles,
-    })
-}
-
-/// A pbrt sphere, tessellated: poles on the object-space z axis,
-/// analytic normals, pbrt's parameterization for UVs (`u` around z,
-/// `v = 0` at the +z pole). 32 rings × 64 segments keeps silhouettes
-/// clean at corpus scales.
-fn sphere_mesh(radius: f32) -> MeshSource {
-    const RINGS: u32 = 32;
-    const SEGMENTS: u32 = 64;
-    let mut positions = Vec::new();
-    let mut normals = Vec::new();
-    let mut uvs = Vec::new();
-    for ring in 0..=RINGS {
-        let v = ring as f32 / RINGS as f32;
-        let theta = v * std::f32::consts::PI;
-        let (sin_theta, cos_theta) = theta.sin_cos();
-        for segment in 0..=SEGMENTS {
-            let u = segment as f32 / SEGMENTS as f32;
-            let phi = u * std::f32::consts::TAU;
-            let normal = Vec3::new(sin_theta * phi.cos(), sin_theta * phi.sin(), cos_theta);
-            positions.push((normal * radius).into());
-            normals.push(normal.into());
-            uvs.push([u, v]);
-        }
-    }
-    let mut triangles = Vec::new();
-    let row = SEGMENTS + 1;
-    for ring in 0..RINGS {
-        for segment in 0..SEGMENTS {
-            let a = ring * row + segment;
-            let b = a + row;
-            // The two pole rows collapse to points; their degenerate
-            // half of each quad is skipped.
-            if ring != 0 {
-                triangles.push([a, b, a + 1]);
-            }
-            if ring != RINGS - 1 {
-                triangles.push([a + 1, b, b + 1]);
-            }
-        }
-    }
-    MeshSource::Inline {
-        positions,
-        normals: Some(normals),
-        uvs: Some(uvs),
-        triangles,
-    }
-}
-
-/// A pbrt disk: radius `radius` in the plane `z = height`, facing +z,
-/// pbrt's radial parameterization (`v = 1` at the center).
-fn disk_mesh(radius: f32, height: f32) -> MeshSource {
-    const SEGMENTS: u32 = 64;
-    let mut positions = vec![[0.0, 0.0, height]];
-    let mut uvs = vec![[0.0, 1.0]];
-    for segment in 0..=SEGMENTS {
-        let u = segment as f32 / SEGMENTS as f32;
-        let phi = u * std::f32::consts::TAU;
-        positions.push([radius * phi.cos(), radius * phi.sin(), height]);
-        uvs.push([u, 0.0]);
-    }
-    let triangles = (0..SEGMENTS)
-        .map(|segment| [0, segment + 1, segment + 2])
-        .collect();
-    MeshSource::Inline {
-        positions,
-        normals: Some(vec![[0.0, 0.0, 1.0]; SEGMENTS as usize + 2]),
-        uvs: Some(uvs),
-        triangles,
-    }
-}
-
-/// A blackbody's chromaticity as linear `Rec.709`, normalized to
-/// luminance 1 — matching pbrt, which normalizes blackbody emitters to
-/// 1 nit before its photometric scale (trap 1's blackbody half).
-/// Krystek's Planckian-locus approximation in CIE 1960 UCS, accurate to
-/// ~1e-3 in chromaticity over 1000–15000 K.
-#[expect(
-    clippy::many_single_char_names,
-    reason = "the CIE variables are named what colorimetry names them"
-)]
-fn blackbody_rec709(kelvin: f32) -> [f32; 3] {
-    let t = f64::from(kelvin).clamp(1000.0, 15000.0);
-    let u = (0.860_117_757 + 1.541_182_54e-4 * t + 1.286_412_12e-7 * t * t)
-        / (1.0 + 8.424_202_35e-4 * t + 7.081_451_63e-7 * t * t);
-    let v = (0.317_398_726 + 4.228_062_45e-5 * t + 4.204_816_91e-8 * t * t)
-        / (1.0 - 2.897_418_16e-5 * t + 1.614_560_53e-7 * t * t);
-    // CIE 1960 uv → xy → XYZ at Y = 1 → linear Rec.709.
-    let x = 3.0 * u / (2.0 * u - 8.0 * v + 4.0);
-    let y = 2.0 * v / (2.0 * u - 8.0 * v + 4.0);
-    let xyz = [x / y, 1.0, (1.0 - x - y) / y];
-    let rgb = [
-        3.240_454_2 * xyz[0] - 1.537_138_5 * xyz[1] - 0.498_531_4 * xyz[2],
-        -0.969_266_0 * xyz[0] + 1.876_010_8 * xyz[1] + 0.041_556_0 * xyz[2],
-        0.055_643_4 * xyz[0] - 0.204_025_9 * xyz[1] + 1.057_225_2 * xyz[2],
-    ];
-    // Warm temperatures fall outside the Rec.709 gamut: clamp, then
-    // restore unit luminance.
-    let rgb = rgb.map(|channel| channel.max(0.0) as f32);
-    let luminance = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
-    rgb.map(|channel| channel / luminance)
 }
 
 #[cfg(test)]

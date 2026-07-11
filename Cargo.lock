@@ -378,7 +378,6 @@ dependencies = [
  "cenote",
  "env_logger",
  "glam",
- "log",
  "nv-flip",
 ]
 

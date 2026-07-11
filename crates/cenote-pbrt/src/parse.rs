@@ -74,6 +74,57 @@ impl Param {
         }
     }
 
+    /// The single scalar value.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::SceneFormat`] when the values aren't numeric or aren't
+    /// exactly one.
+    pub fn as_scalar(&self) -> Result<f32> {
+        match self.as_floats()? {
+            [value] => Ok(*value as f32),
+            _ => Err(self.arity_error("one value")),
+        }
+    }
+
+    /// Exactly three values as an RGB triple — pbrt's `rgb`/`color` always
+    /// carry three; a lone value is a `float` slot's job, broadcast by the
+    /// caller (or [`Param::as_rgb_broadcast`]).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::SceneFormat`] when the values aren't numeric or aren't
+    /// exactly three.
+    pub fn as_rgb(&self) -> Result<[f32; 3]> {
+        match self.as_floats()? {
+            [r, g, b] => Ok([*r as f32, *g as f32, *b as f32]),
+            _ => Err(self.arity_error("three values")),
+        }
+    }
+
+    /// One or three values as RGB, a single value broadcasting to all three
+    /// — the leniency pbrt grants where a `constant` or `scale` texture
+    /// takes a color but a float was written.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::SceneFormat`] when the values aren't numeric or number
+    /// neither one nor three.
+    pub fn as_rgb_broadcast(&self) -> Result<[f32; 3]> {
+        match self.as_floats()? {
+            [value] => Ok([*value as f32; 3]),
+            [r, g, b] => Ok([*r as f32, *g as f32, *b as f32]),
+            _ => Err(self.arity_error("one or three values")),
+        }
+    }
+
+    fn arity_error(&self, wants: &str) -> Error {
+        Error::SceneFormat(format!(
+            "{}: parameter \"{}\" needs {wants}",
+            self.location, self.name
+        ))
+    }
+
     /// The single string value.
     ///
     /// # Errors
