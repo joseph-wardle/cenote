@@ -61,14 +61,14 @@ pbrt — pours as clear glass. pbrt reconstructs with a triangle filter where
 cenote uses a box, so at matched samples its per-pixel noise sits slightly
 lower.*
 
-![The same three scenes, each given about half a second of rendering: cenote resolves cleaner where pbrt-v4 still carries visible noise](docs/pbrt-equal-time.png)
+![The same three scenes, each given about a quarter second of rendering: cenote resolves cleaner where pbrt-v4 still carries visible noise](docs/pbrt-equal-time.png)
 
-*Equal time — about half a second of rendering each, both on one RTX 4070 Ti
-SUPER, with the ~0.5 s of one-time startup (Vulkan or OptiX init and the
+*Equal time — about a quarter second of rendering each, both on one RTX 4070
+Ti SUPER, with the ~0.5 s of one-time startup (Vulkan or OptiX init and the
 acceleration-structure build) set aside so the budget is the estimator, not
-the launch. In that half second cenote draws three to four times the
-samples — 92, 193, and 62 spp against pbrt's 23, 66, and 22 — and carries
-visibly less grain. The gap is throughput, not hardware: same GPU, same
+the launch. In that quarter second cenote draws three to four times the
+samples — 46, 96, and 31 spp against pbrt's 12, 33, and 11 — and its grain is
+plainly the finer. The gap is throughput, not hardware: same GPU, same
 scene, same seconds.*
 
 | Scene | Resolution | pbrt-v4 | cenote | per sample |
@@ -78,9 +78,9 @@ scene, same seconds.*
 | `teapot-full` | 1280×720 | 23.0 ms/spp | 8.0 ms/spp | 2.9× |
 
 *Steady-state cost per sample, both engines on one NVIDIA RTX 4070 Ti SUPER
-(pbrt-v4 through its OptiX wavefront back end). Startup — the ~0.5 s above —
-is measured separately and excluded; this is the per-sample rate the
-equal-time figure divides that half second by.*
+(pbrt-v4 through its OptiX wavefront back end). Startup — ~0.5 s each — is
+measured separately and excluded; this is the per-sample rate the equal-time
+figure divides that quarter second by.*
 
 pbrt renders spectrally and writes linear `Rec.709`; cenote renders RGB in
 `ACEScg`. The comparison is perceptual — the same scene under the same
