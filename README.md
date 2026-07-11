@@ -41,6 +41,54 @@ shading-normal or energy bug would show first.*
 *The thesis in one strip: 1, 8, 64, and 512 spp are the same estimator —
 noise is the only difference between preview and final.*
 
+## Next to pbrt-v4
+
+The importer's real test is a side-by-side. Below are the three
+regression-corpus scenes (Benedikt Bitterli's, CC0) imported and rendered
+by cenote, beside [pbrt-v4](https://github.com/mmp/pbrt-v4) rendering the
+same source files — two GPU renderers, one scene description, judged two
+ways. Both images take the same sRGB display transform, so what parts them
+is the renderers, not the tonemap.
+
+![Cornell box, Veach MIS plates, and a glass teapot, each rendered by cenote and by pbrt-v4 at 64 samples per pixel](docs/pbrt-equal-samples.png)
+
+*Equal work — 64 samples per pixel. The images agree on everything that
+carries the scene: layout, materials, the light. Where they part is honest
+and expected. Cenote's `OpenPBR` conductor is not pbrt's spectral one, so
+the Veach plates catch the light a little differently. And cenote has no
+volumetric medium yet, so the teapot's tea — an absorbing medium under
+pbrt — pours as clear glass. pbrt reconstructs with a triangle filter where
+cenote uses a box, so at matched samples its per-pixel noise sits slightly
+lower.*
+
+![The same three scenes, each given about two seconds of wall clock: cenote resolves cleaner where pbrt-v4 still carries visible noise](docs/pbrt-equal-time.png)
+
+*Equal time — about two seconds of wall clock each, both on one RTX 4070 Ti
+SUPER. In that budget cenote draws three to four times the samples — 280,
+588, and 186 spp against pbrt's 68, 186, and 59 — and carries visibly less
+grain. The gap is the estimator's throughput, not the hardware: same GPU,
+same scene, same seconds.*
+
+| Scene | Resolution | pbrt-v4 | cenote | per sample |
+|---|---|---|---|---|
+| `cornell-box` | 1024² | 21.6 ms/spp | 4.9 ms/spp | 4.4× |
+| `veach-mis` | 1280×720 | 8.1 ms/spp | 2.6 ms/spp | 3.1× |
+| `teapot-full` | 1280×720 | 23.5 ms/spp | 8.0 ms/spp | 3.0× |
+
+*Steady-state cost per sample, both engines on one NVIDIA RTX 4070 Ti SUPER
+(pbrt-v4 through its OptiX wavefront back end). Each render also carries
+~0.5–0.8 s of fixed startup — Vulkan or OptiX init and the
+acceleration-structure build — which the two-second budget above includes.*
+
+pbrt renders spectrally and writes linear `Rec.709`; cenote renders RGB in
+`ACEScg`. The comparison is perceptual — the same scene under the same
+light, not the same pixels. The reference is pbrt-v4 at
+[`5f7a606`](https://github.com/mmp/pbrt-v4/commit/5f7a606806a4ac7b939131ded9d7a30ebd02416e),
+the commit this importer's semantics were verified against; strict pbrt-v4
+wants a few spellings our lenient importer accepts without (`point3` for
+`point`, unquoted booleans, no retired `WorldEnd`), translated for the
+reference render only. These figures regenerate from a local pbrt build.
+
 ## Quickstart
 
 Requires: stable Rust, [`slangc`](https://github.com/shader-slang/slang) on PATH
