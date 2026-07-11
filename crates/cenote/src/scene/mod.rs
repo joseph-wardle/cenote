@@ -19,6 +19,7 @@
 pub mod changeset;
 mod demo;
 pub mod description;
+mod lower;
 mod prep;
 mod shapes;
 
