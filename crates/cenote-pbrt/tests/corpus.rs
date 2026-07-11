@@ -69,7 +69,7 @@ fn every_corpus_scene_imports_and_applies() {
         assert_eq!(description.cameras().len(), 1, "{name} camera");
         for warning in &warnings {
             assert!(
-                warning.contains("one-sided")
+                warning.contains("two-sided")
                     || warning.contains("anisotropic")
                     || warning.contains("MakeNamedMedium")
                     || warning.contains("MediumInterface"),

@@ -1742,3 +1742,40 @@ only on the render thread's acceptance; it belongs with the M4 rework that
 makes the scene graph the single authority (deferral ledger, Viewer &
 lookdev). The whole replica device is a temporary M2 stand-in for a
 read-back the delegate supplies for free.
+
+## 2026-07-11 — One-sided emission
+
+### D-084: Emitters emit from the winding-front face only (picks up D-079)
+
+Status: accepted. Reverses the two-sided-emission default the forward
+emissive-hit path assumed (D-034), and picks up the deferred "one-sided
+emission" (D-079). An emissive triangle now radiates from its winding-front
+face only — the side `cross(edge1, edge2)` points to — matching pbrt's area
+light, whose `twosided` defaults false.
+
+*Why now:* the pbrt-v4 comparison demo made the gap visible and measurable.
+A ceiling panel emitting from both faces leaks light up past itself, which
+both looks wrong and inflates the frame: the vendored cornell box measured
+19% brighter than pbrt in mean linear luminance (0.160 vs 0.135) purely from
+back-face spill. One-sided brings it to 0.135 — agreement to under a
+percent, with no scene edits. It is also the physically ordinary default; a
+two-sided emitter is the special case.
+
+*Mechanism, and why MIS stays consistent:* two gates, both keyed on the same
+winding normal so the strategies agree on which face emits. Next-event
+sampling (`lights.slang`) swaps the absolute light-side cosine for a signed
+one — a receiver behind the emitter gets pdf zero. The BSDF-hit path
+(`shade_surface.slang`) records `frontFace` from the raw geometric normal
+*before* it is flushed to face the ray, and adds emission only on a
+front-face hit. The MIS weight needed no change: its next-event pdf already
+used the cosine *magnitude*, which is exactly right for a front-face hit (the
+only case that now emits) and irrelevant for a back-face hit (which emits
+nothing). BSDF surfaces stay two-sided — it is emission, not shading, that
+picks a side.
+
+*Scope, and the new deferral:* this is a global switch, not the per-light
+flag D-079's production shape imagined. cenote is now one-sided everywhere;
+a pbrt light with `twosided true` loses its back-face emission and imports
+with a counted warning (the importer's sidedness warning flips polarity to
+match). Honoring `twosided true` — an opt-in two-sided emitter — is the
+residual, re-lodged in the ledger as "Two-sided emission" against this entry.

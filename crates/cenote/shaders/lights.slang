@@ -7,9 +7,10 @@
 // strategy and their MIS weight is 1. The records are built at prep by
 // `lights.rs`, which mirrors them struct for struct.
 //
-// Emissive surfaces are two-sided, matching the renderer's two-sided
-// surfaces: both faces emit, and every light-side cosine is an absolute
-// value.
+// Emissive surfaces are one-sided, like pbrt's default area light: only the
+// winding-front face emits, so every light-side cosine is signed and a
+// receiver behind the emitter is dark. (BSDF surfaces stay two-sided — it is
+// emission, not shading, that picks a side.)
 
 // `GeometryRecord.light` for instances that are not lights — and, on a
 // queued shadow ray, the target "instance" of a connection with nothing
@@ -119,7 +120,9 @@ public LightConnection sampleLights(LightRecord* lights, uint count, float u,
         let r2 = dot(delta, delta);
         let normal = normalize(cross(light.edge1, light.edge2));
         let direction = delta * rsqrt(r2);
-        let cosLight = abs(dot(normal, direction)); // both faces emit
+        // One-sided: the winding-front normal must face the receiver, so the
+        // cosine is signed. A receiver behind the emitter gets nothing.
+        let cosLight = -dot(normal, direction);
         if (r2 > 0.0 && cosLight > 0.0 && light.pdf > 0.0) {
             c.direction = direction;
             // The area pdf lifted to solid angle at the shading point —

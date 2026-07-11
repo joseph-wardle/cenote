@@ -129,8 +129,11 @@
             name: "lamp",
             mesh: Some("plane"),
             material: Some("lamp"),
+            // Rolled 180° so its one emitting face looks down: emitters are
+            // one-sided, and the plane mesh winds normal-up.
             transform: Some(Trs(
                 translate: (1.5, 3.5, 1.0),
+                rotate_degrees: (180.0, 0.0, 0.0),
                 scale: (0.5, 1.0, 0.5),
             )),
         )),

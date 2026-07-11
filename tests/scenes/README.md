@@ -33,11 +33,12 @@ list of changes:
   512², half float. The Tungsten reference renders (`TungstenRender.*`
   in Bitterli's zips) are not vendored — see his site for them.
 
-Expected import warnings, all by design: one-sided area lights (cenote
-emitters are two-sided), `veach-mis`'s equal-axis `uroughness`/
-`vroughness` (imported as their average — exact here), and
+Expected import warnings, all by design: `veach-mis`'s equal-axis
+`uroughness`/`vroughness` (imported as their average — exact here), and
 `teapot-full`'s tea medium (`MakeNamedMedium`/`MediumInterface` are not
-supported yet, so the tea renders as colorless glass).
+supported yet, so the tea renders as colorless glass). The corpus area
+lights are one-sided in pbrt, which cenote emitters now match, so they
+import clean; a `twosided` light would warn that its back faces stay dark.
 
 ## The comparison caveat
 

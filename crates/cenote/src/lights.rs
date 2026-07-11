@@ -13,7 +13,7 @@
 //!
 //! Selection weighs each light by [`power`], a luminance-scaled flux.
 //! The measures are frankly approximate across kinds — a triangle counts
-//! one face of its two-sided exitance, a point light its whole sphere of
+//! its one-sided (front-face) exitance, a point light its whole sphere of
 //! flux with no receiver in sight — but selection probabilities only
 //! steer noise: the estimator divides by whatever probability was used,
 //! so the image converges to the same answer under any positive weights.
@@ -34,14 +34,14 @@ const KIND_DISTANT: u32 = 1;
 const KIND_POINT: u32 = 2;
 
 /// One emissive triangle as the scene describes it: world-space corners,
-/// radiating `emission` from both faces (surfaces are two-sided throughout
-/// the renderer).
+/// radiating `emission` from its winding-front face only (emitters are
+/// one-sided, like pbrt's default area light).
 pub struct TriangleLight {
     /// The corners, world space. A degenerate (zero-area) triangle is
     /// legal — it keeps its record slot so `light + primitive` indexing
     /// holds, but its selection probability is zero.
     pub corners: [Vec3; 3],
-    /// Radiance, `ACEScg`, from both faces.
+    /// Radiance, `ACEScg`, from the winding-front face.
     pub emission: Vec3,
     /// TLAS custom index of the light's mesh instance — shadow rays test
     /// visibility by identity.

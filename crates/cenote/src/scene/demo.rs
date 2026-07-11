@@ -119,6 +119,8 @@ impl ChangeSet {
             }),
             // The key light: a pure emitter (black base, no specular
             // layer), up and off to the left, opposite the HDRI's sun.
+            // Rolled 180° so its one emitting face looks down at the chart —
+            // emitters are one-sided, and the plane winds normal-up.
             Op::Material(Box::new(MaterialPatch {
                 base_color: Some(Texturable::Constant([0.0; 3])),
                 specular_weight: Some(0.0),
@@ -131,7 +133,7 @@ impl ChangeSet {
                 material: Some("key".into()),
                 transform: Some(Transform::Trs {
                     translate: [-3.5, 5.4, 1.0],
-                    rotate_degrees: [0.0; 3],
+                    rotate_degrees: [180.0, 0.0, 0.0],
                     scale: [0.75; 3],
                 }),
                 ..InstancePatch::new("key")

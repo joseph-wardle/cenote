@@ -1471,7 +1471,13 @@ mod tests {
                     Op::Instance(InstancePatch {
                         mesh: Some("plane".into()),
                         material: Some("lamp".into()),
-                        transform: Some(plane([0.7; 3], [0.0, 3.0, 0.0])),
+                        // Rolled 180° so its one face looks down at the floor:
+                        // the plane winds normal-up, and emission is one-sided.
+                        transform: Some(Transform::Trs {
+                            translate: [0.0, 3.0, 0.0],
+                            rotate_degrees: [180.0, 0.0, 0.0],
+                            scale: [0.7; 3],
+                        }),
                         ..InstancePatch::new("lamp")
                     }),
                     // ...and the perforated card between it and the floor.

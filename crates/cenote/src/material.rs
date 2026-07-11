@@ -32,8 +32,9 @@ pub struct Material {
     pub base_color: Vec3,
     /// Diffuse (Oren-Nayar) roughness in [0, 1]; 0 is Lambert.
     pub base_roughness: f32,
-    /// Emitted radiance in `ACEScg`, from both faces (surfaces are
-    /// two-sided throughout). Nonzero marks the instance as a light.
+    /// Emitted radiance in `ACEScg`, from the winding-front face only
+    /// (emitters are one-sided, like pbrt). Nonzero marks the instance as a
+    /// light.
     pub emission: Vec3,
     /// Conductor blend in [0, 1]: 0 is the dielectric base, 1 pure metal.
     pub metalness: f32,

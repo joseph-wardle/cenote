@@ -57,12 +57,12 @@ makes it honest to support. (D-057)
   copper). Production shape: spectral upsampling projected to RGB at import —
   meaningful only alongside the closure's own spectral ambitions (dispersion).
   (D-057)
-- **One-sided emission** *(revisit: a corpus scene where back-face emission visibly
-  wrongs the light transport)* — Today: cenote emitters are two-sided by design
-  (D-023); one-sided pbrt area lights import with a counted warning, and flush
-  ceiling panels leak a little light above themselves. Production shape: an
-  emission-sidedness flag on the material, honored by both light-sampling
-  strategies. (D-079)
+- **Two-sided emission** *(revisit: a corpus or showcase scene with a `twosided
+  true` area light that visibly needs back-face emission)* — Today: cenote emitters
+  are one-sided (winding-front face only, matching pbrt's default); a pbrt light with
+  `twosided true` loses its back faces and imports with a counted warning. Production
+  shape: an emission-sidedness flag on the material, honored by both light-sampling
+  strategies. (D-084)
 - **Gzipped PLY (`.ply.gz`)** *(revisit: first showcase scene that ships one —
   lte-orb does)* — Today: the PLY reader reads plain files only. Production shape:
   a gzip wrapper over the same reader via the `miniz_oxide` already in the tree.

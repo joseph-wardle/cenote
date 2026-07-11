@@ -210,7 +210,7 @@ pub(crate) struct Mapper {
     /// (see [`FLIP_Z`]'s doc). Chosen at `WorldBegin`.
     conjugation: Mat4,
     environment_emitted: bool,
-    one_sided_lights: u32,
+    two_sided_lights: u32,
     default_material_emitted: bool,
 }
 
@@ -239,7 +239,7 @@ impl Mapper {
             counters: BTreeMap::new(),
             conjugation: FLIP_Z,
             environment_emitted: false,
-            one_sided_lights: 0,
+            two_sided_lights: 0,
             default_material_emitted: false,
         }
     }
@@ -254,11 +254,11 @@ impl Mapper {
                 "the scene never reaches WorldBegin — not a pbrt scene?".into(),
             ));
         }
-        if self.one_sided_lights > 0 {
+        if self.two_sided_lights > 0 {
             self.warnings.push(format!(
-                "{} area light(s) are one-sided in pbrt; cenote emitters are two-sided, so \
-                 they also emit from their back faces",
-                self.one_sided_lights
+                "{} area light(s) are two-sided in pbrt; cenote emitters are one-sided, so \
+                 their back faces stay dark",
+                self.two_sided_lights
             ));
         }
         Ok((ChangeSet { ops: self.ops }, self.warnings.list))
@@ -696,8 +696,8 @@ impl Mapper {
         patch.emission_color = Some(area.color.clone());
         patch.emission_luminance = Some(area.luminance);
         self.ops.push(Op::Material(Box::new(patch)));
-        if !area.two_sided {
-            self.one_sided_lights += 1;
+        if area.two_sided {
+            self.two_sided_lights += 1;
         }
         area.forks.insert(base_name, fork.clone());
         self.state.area_light = Some(area);
@@ -1913,7 +1913,7 @@ Translate 1 0 0
             Material \"coateddiffuse\" \"rgb reflectance\" [0.7 0.2 0.1] \
             \"float roughness\" 0.1\n\
             Shape \"sphere\" \"float radius\" 1\n\
-            AreaLightSource \"diffuse\" \"rgb L\" [8 7 6]\n\
+            AreaLightSource \"diffuse\" \"rgb L\" [8 7 6] \"bool twosided\" true\n\
             Translate 0 0 5\n\
             Shape \"trianglemesh\" \"point3 P\" [0 0 0  1 0 0  0 1 0] \
             \"integer indices\" [0 1 2]\n";
@@ -1930,9 +1930,9 @@ Translate 1 0 0
             let camera = &description.cameras()["main"];
             assert_eq!(camera.aperture_radius, 0.05);
             assert_eq!(camera.focus_distance, Some(4.0));
-            // One warning expected: the one-sided area light summary.
+            // One warning expected: the two-sided area light summary.
             assert!(
-                warnings.iter().any(|warning| warning.contains("one-sided")),
+                warnings.iter().any(|warning| warning.contains("two-sided")),
                 "{warnings:?}"
             );
         });

@@ -81,6 +81,7 @@ struct SpawnPoint {
     float3 below;    // nudged past the surface — transmissions
     float3 normal;  // geometric, facing the arriving ray
     float3 shading; // interpolated, flipped to the geometric side
+    bool frontFace; // did the ray strike the winding-front side? (emission is one-sided)
 };
 
 // Reconstruct the world-space hit point and geometric normal, both facing
@@ -146,8 +147,11 @@ SpawnPoint spawnPoint(GeometryRecord mesh, Hit hit, float3 rayDirection) {
     let objOffset = dot(objErr, abs(objNormal));
     wldOffset = fma(wldScale, objOffset, wldOffset);
 
-    // Two-sided: face the arriving ray (instances disable facing cull), so
-    // the offset pushes off the side the scattered ray leaves from.
+    // Emission is one-sided: record which side the ray struck by the raw
+    // winding normal, before it is flushed to face the ray below.
+    let frontFace = dot(wldNormal, rayDirection) < 0.0;
+    // Face the arriving ray (instances disable facing cull), so the offset
+    // pushes off the side the scattered ray leaves from.
     if (dot(wldNormal, rayDirection) > 0.0) {
         wldNormal = -wldNormal;
     }
@@ -172,6 +176,7 @@ SpawnPoint spawnPoint(GeometryRecord mesh, Hit hit, float3 rayDirection) {
     spawn.below = fma(float3(-wldOffset), wldNormal, wldPosition);
     spawn.normal = wldNormal;
     spawn.shading = shading;
+    spawn.frontFace = frontFace;
     return spawn;
 }
 
@@ -269,8 +274,11 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     // so it is weighted against the probability that next-event sampling
     // at the previous vertex would have picked the same point — except on
     // camera rays, where no other strategy competed and the weight is 1.
+    // Emitters are one-sided (winding front), so a back-face hit adds
+    // nothing — and NEE could not have sampled it either, keeping the two
+    // strategies consistent for MIS.
     var contribution = float3(0.0);
-    if (mesh.light != LIGHT_NONE) {
+    if (mesh.light != LIGHT_NONE && spawn.frontFace) {
         var weight = 1.0;
         if (throughput.w > 0.0) {
             if (lightSampling == LIGHT_SAMPLING_NEE) {
