@@ -18,11 +18,11 @@
 //! is a thin consumer: it feeds the session camera and size changes, *peeks*
 //! at the latest published linear frame, tonemaps it (live exposure), and
 //! presents. Each redraw requests the next, so vsync paces the *display*
-//! while the renderer runs free behind it. In builds with the `denoise`
-//! feature, a panel toggle swaps the tonemap's input for an OIDN-denoised
-//! view refreshed about once a second (see the `denoise` module). Camera motion, resizes, and
+//! while the renderer runs free behind it. Camera motion, resizes, and
 //! scene edits are just inputs the session picks up; it restarts or
-//! rebuilds accordingly.
+//! rebuilds accordingly. In builds with the `denoise` feature, a panel
+//! toggle swaps the tonemap's input for an OIDN-denoised view refreshed
+//! about once a second (see the `denoise` module).
 
 mod camera;
 #[cfg(feature = "denoise")]
@@ -349,18 +349,18 @@ impl Viewer {
         // filtered result lands (or right after a resize), the raw frame
         // stands in.
         #[cfg(feature = "denoise")]
-        if self.gui.denoise() {
-            self.denoise
-                .update(&self.gpu, frame)
-                .context("updating the denoised view")?;
-        }
-        #[cfg(feature = "denoise")]
-        let average = self
-            .gui
-            .denoise()
-            .then(|| self.denoise.display(frame))
-            .flatten()
-            .unwrap_or_else(|| frame.beauty());
+        let average = {
+            let denoising = self.gui.denoise();
+            if denoising {
+                self.denoise
+                    .update(&self.gpu, frame)
+                    .context("updating the denoised view")?;
+            }
+            denoising
+                .then(|| self.denoise.display(frame))
+                .flatten()
+                .unwrap_or_else(|| frame.beauty())
+        };
         #[cfg(not(feature = "denoise"))]
         let average = frame.beauty();
 

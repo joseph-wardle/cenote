@@ -133,7 +133,24 @@ fn render(args: &RenderArgs) -> anyhow::Result<()> {
 
     let mut renderer = cenote::render::Renderer::with_max_bounces(&gpu, depth)?;
     let mut film = cenote::render::Film::new(&gpu, width, height)?;
-    render_frame(&gpu, &scene, &renderer, &mut film, spp, args)?;
+    // One OIDN device for the process — built here, reused every reload,
+    // rather than opened and dropped inside each frame.
+    #[cfg(feature = "denoise")]
+    let mut denoiser = if args.denoise {
+        Some(cenote::denoise::Denoiser::new()?)
+    } else {
+        None
+    };
+    render_frame(
+        &gpu,
+        &scene,
+        &renderer,
+        &mut film,
+        spp,
+        args,
+        #[cfg(feature = "denoise")]
+        denoiser.as_mut(),
+    )?;
     if !args.watch {
         return Ok(());
     }
@@ -155,7 +172,16 @@ fn render(args: &RenderArgs) -> anyhow::Result<()> {
         // A reset replays the same sample sequence, so an unchanged kernel
         // reproduces the previous image bit for bit.
         film.reset();
-        render_frame(&gpu, &scene, &renderer, &mut film, spp, args)?;
+        render_frame(
+            &gpu,
+            &scene,
+            &renderer,
+            &mut film,
+            spp,
+            args,
+            #[cfg(feature = "denoise")]
+            denoiser.as_mut(),
+        )?;
         println!("reloaded in {} ms", start.elapsed().as_millis());
     }
 }
@@ -173,6 +199,7 @@ fn render_frame(
     film: &mut cenote::render::Film,
     spp: u32,
     args: &RenderArgs,
+    #[cfg(feature = "denoise")] denoiser: Option<&mut cenote::denoise::Denoiser>,
 ) -> anyhow::Result<()> {
     for _ in 0..spp {
         renderer.accumulate(gpu, scene, film)?;
@@ -195,9 +222,9 @@ fn render_frame(
         spp
     );
     #[cfg(feature = "denoise")]
-    if args.denoise {
+    if let Some(denoiser) = denoiser {
         let started = Instant::now();
-        let denoised = cenote::denoise::Denoiser::new()?.denoise(
+        let filtered = denoiser.denoise(
             film.width(),
             film.height(),
             cenote::denoise::Quality::High,
@@ -206,7 +233,7 @@ fn render_frame(
             &averages.normal,
         )?;
         let out = args.out.with_extension("denoised.exr");
-        cenote::output::write_exr(&out, film.width(), film.height(), &denoised)?;
+        cenote::output::write_exr(&out, film.width(), film.height(), &filtered)?;
         println!(
             "wrote {} (OIDN high quality, {} ms)",
             out.display(),

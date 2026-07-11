@@ -38,7 +38,7 @@ struct Filtered {
 }
 
 /// The filtered beauty, resident again, and the size it belongs to.
-struct Display {
+struct Resident {
     buffer: cenote::gpu::Buffer,
     width: u32,
     height: u32,
@@ -50,7 +50,7 @@ struct Display {
 pub struct DenoiseView {
     jobs: mpsc::Sender<Job>,
     results: mpsc::Receiver<cenote::Result<Filtered>>,
-    display: Option<Display>,
+    display: Option<Resident>,
     /// A job is with the worker; the cadence tick skips until it answers.
     busy: bool,
     /// When the in-flight or last job was submitted.
@@ -102,7 +102,7 @@ impl DenoiseView {
                     let buffer =
                         cenote::render::Tonemap::upload_average(gpu, "denoised", &filtered.beauty)
                             .context("uploading the denoised frame")?;
-                    self.display = Some(Display {
+                    self.display = Some(Resident {
                         buffer,
                         width: filtered.width,
                         height: filtered.height,
@@ -120,9 +120,9 @@ impl DenoiseView {
             let job = Job {
                 width: frame.width(),
                 height: frame.height(),
-                beauty: texels(&gpu.download_buffer(frame.beauty())?),
-                albedo: texels(&gpu.download_buffer(frame.albedo())?),
-                normal: texels(&gpu.download_buffer(frame.normal())?),
+                beauty: as_f32(&gpu.download_buffer(frame.beauty())?),
+                albedo: as_f32(&gpu.download_buffer(frame.albedo())?),
+                normal: as_f32(&gpu.download_buffer(frame.normal())?),
             };
             // The worker owns its end until we drop ours; send can't fail.
             let _ = self.jobs.send(job);
@@ -166,7 +166,7 @@ fn filter(denoiser: &mut Option<cenote::denoise::Denoiser>, job: &Job) -> cenote
 }
 
 /// Reinterpret downloaded bytes as the f32 texels they are.
-fn texels(bytes: &[u8]) -> Vec<f32> {
+fn as_f32(bytes: &[u8]) -> Vec<f32> {
     bytes
         .chunks_exact(4)
         .map(|lanes| f32::from_ne_bytes([lanes[0], lanes[1], lanes[2], lanes[3]]))

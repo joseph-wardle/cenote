@@ -21,7 +21,7 @@ use crate::{Error, Result};
 
 /// Filter quality, mirroring OIDN's knob. The CPU device treats both
 /// alike; GPU devices trade quality for speed at `Balanced`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub enum Quality {
     /// Interactive — the viewer's preview cadence.
     Balanced,

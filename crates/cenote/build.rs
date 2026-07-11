@@ -19,7 +19,8 @@ fn main() {
     // link-lib propagates to downstream binaries (where this crate's
     // native libs land after the archives that need them), while this
     // crate's own test binaries put root-crate libs first — discarded —
-    // so they also get it appended as a trailing linker arg.
+    // so they also get it appended as a trailing linker arg. Linux only;
+    // elsewhere the toolchain's default C++ runtime already links.
     if env::var_os("CARGO_FEATURE_DENOISE").is_some()
         && env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux")
     {
