@@ -253,7 +253,7 @@ fn encode_color(source: Source, srgb: Option<bool>) -> Prepared {
             height,
         } => {
             let srgb = srgb.unwrap_or(true);
-            let (rgba, width, height) = mip_cap_bytes(rgba, width, height, 4, srgb, false);
+            let (rgba, width, height) = mip_cap_bytes(rgba, width, height, srgb, false);
             let (padded, pw, ph) = pad_to_blocks(&rgba, width, height, 4);
             let surface = intel_tex_2::RgbaSurface {
                 data: &padded,
@@ -315,7 +315,7 @@ fn encode_scalar(source: Source, srgb: Option<bool>) -> Prepared {
             width,
             height,
         } => {
-            let (rgba, width, height) = mip_cap_bytes(rgba, width, height, 4, srgb, false);
+            let (rgba, width, height) = mip_cap_bytes(rgba, width, height, srgb, false);
             (
                 rgba.chunks_exact(4).map(|texel| texel[0]).collect(),
                 width,
@@ -366,7 +366,7 @@ fn encode_normal(source: Source) -> Prepared {
             rgba,
             width,
             height,
-        } => mip_cap_bytes(rgba, width, height, 4, false, true),
+        } => mip_cap_bytes(rgba, width, height, false, true),
         Source::Float {
             rgba,
             width,
@@ -410,7 +410,6 @@ fn mip_cap_bytes(
     rgba: Vec<u8>,
     width: u32,
     height: u32,
-    channels: usize,
     srgb: bool,
     normals: bool,
 ) -> (Vec<u8>, u32, u32) {
@@ -424,7 +423,6 @@ fn mip_cap_bytes(
             if srgb { srgb_to_linear(value) } else { value }
         })
         .collect();
-    let _ = channels;
     let (floats, width, height) = mip_cap_floats(floats, width, height, normals);
     let bytes = floats
         .iter()

@@ -75,19 +75,19 @@ pub enum DeltaLight {
 /// One light as the kernels read it. Mirrors `LightRecord` in
 /// `shaders/lights.slang` field for field; the geometric fields are
 /// per-kind (triangle: corner and edges; distant: travel direction in
-/// `a`; point: position in `a`), as is `pdf`.
+/// `anchor`; point: position in `anchor`), as is `pdf`.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub(crate) struct LightRecord {
-    /// Triangle: one corner. Distant: unit travel direction. Point:
-    /// position.
-    a: Vec3,
+    /// The light's geometric anchor. Triangle: one corner. Distant: unit
+    /// travel direction. Point: position.
+    anchor: Vec3,
     /// Triangle: p(the alias table selects this light) / its area — the
     /// area pdf of next-event estimation's uniform point. Delta lights:
     /// the selection probability itself (there is no area).
     pdf: f32,
-    /// Triangle only: the sides meeting at `a` — the triangle spans
-    /// `a + b1·edge1 + b2·edge2`, `b1 + b2 ≤ 1`.
+    /// Triangle only: the sides meeting at `anchor` — the triangle spans
+    /// `anchor + b1·edge1 + b2·edge2`, `b1 + b2 ≤ 1`.
     edge1: Vec3,
     alias_threshold: f32,
     edge2: Vec3,
@@ -108,6 +108,12 @@ pub(crate) struct LightRecord {
     _pad0: [u32; 2],
 }
 
+// std430 alignment: the trailing pad rounds the record up to a 16-byte
+// multiple so an array of them strides correctly on the GPU. Pinning the
+// total makes a field reorder that changes the padding a compile error, not
+// a silent GPU misread.
+const _: () = assert!(size_of::<LightRecord>() == 80);
+
 /// A light's selection weight: luminance-scaled flux, per kind. A
 /// triangle weighs one face's exitance flux (π · luminance · area); a
 /// distant light the flux it lands on a conventional ~1 m² facing
@@ -117,27 +123,31 @@ pub(crate) struct LightRecord {
 fn power(record: &LightRecord) -> f64 {
     let luma = f64::from(luminance(record.emission));
     match record.kind {
-        KIND_TRIANGLE => {
-            let area = f64::from(record.edge1.cross(record.edge2).length()) / 2.0;
-            std::f64::consts::PI * luma * area
-        }
+        KIND_TRIANGLE => std::f64::consts::PI * luma * triangle_area(record),
         KIND_DISTANT => luma,
         _ => 4.0 * std::f64::consts::PI * luma,
     }
+}
+
+/// A triangle record's world-space area, from the two edges meeting at its
+/// anchor — the quantity both its selection weight and its area pdf divide
+/// through.
+fn triangle_area(record: &LightRecord) -> f64 {
+    f64::from(record.edge1.cross(record.edge2).length()) / 2.0
 }
 
 /// A raw record before the alias pass: geometry and identity filled in,
 /// sampling fields at their never-alias defaults.
 fn record(
     kind: u32,
-    a: Vec3,
+    anchor: Vec3,
     edge1: Vec3,
     edge2: Vec3,
     emission: Vec3,
     ids: (u32, u32),
 ) -> LightRecord {
     LightRecord {
-        a,
+        anchor,
         pdf: 0.0,
         edge1,
         alias_threshold: 1.0,
@@ -175,7 +185,7 @@ pub(crate) fn build(triangles: &[TriangleLight], deltas: &[DeltaLight]) -> Vec<L
         let selection = light_power / total;
         record.pdf = match record.kind {
             KIND_TRIANGLE => {
-                let area = f64::from(record.edge1.cross(record.edge2).length()) / 2.0;
+                let area = triangle_area(record);
                 // A degenerate triangle has selection 0 too: keep the pdf
                 // 0 rather than 0/0.
                 if area > 0.0 {

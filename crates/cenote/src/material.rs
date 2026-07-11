@@ -107,6 +107,13 @@ pub struct Material {
     pub normal_texture: u32,
 }
 
+// The GPU reads this as a std430 record, where every `float3` aligns to 16
+// bytes. The fields are hand-ordered so each `Vec3` lands on a 16-byte
+// offset with no host padding; this pins the total, so a reorder that
+// reintroduces a gap fails to compile instead of silently misreading on the
+// GPU.
+const _: () = assert!(size_of::<Material>() == 144);
+
 impl Material {
     /// A pure diffuse surface — no specular layer. The exact-energy base
     /// case the furnace tests lean on.

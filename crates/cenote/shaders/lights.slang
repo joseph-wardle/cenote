@@ -46,7 +46,7 @@ public float powerHeuristic(float p, float q) {
 // light — so each record carries its own slot (`aliasThreshold`,
 // `aliasIndex`). The geometric fields are per-kind, as documented.
 public struct LightRecord {
-    public float3 a;             // triangle: one corner, world space;
+    public float3 anchor;        // triangle: one corner, world space;
                                  //   distant: unit travel direction; point: position
     public float pdf;            // triangle: p(selecting this light) / its area;
                                  //   delta: the selection probability itself. 0 = never drawn
@@ -114,7 +114,7 @@ public LightConnection sampleLights(LightRecord* lights, uint count, float u,
         // preserved, u2 the position along it.
         let su = sqrt(uPoint.x);
         c.bary = float2(1.0 - su, uPoint.y * su);
-        let position = light.a + c.bary.x * light.edge1 + c.bary.y * light.edge2;
+        let position = light.anchor + c.bary.x * light.edge1 + c.bary.y * light.edge2;
         let delta = position - from;
         let r2 = dot(delta, delta);
         let normal = normalize(cross(light.edge1, light.edge2));
@@ -134,11 +134,11 @@ public LightConnection sampleLights(LightRecord* lights, uint count, float u,
         break;
     }
     case LIGHT_KIND_DISTANT:
-        c.direction = -light.a; // stored as the light's travel direction
+        c.direction = -light.anchor; // stored as the light's travel direction
         c.pdf = light.pdf;
         break;
     default: { // LIGHT_KIND_POINT
-        let delta = light.a - from;
+        let delta = light.anchor - from;
         let r2 = dot(delta, delta);
         if (r2 > 0.0 && light.pdf > 0.0) {
             let r = sqrt(r2);

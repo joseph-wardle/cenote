@@ -254,11 +254,31 @@ mod bake {
     /// with samples that land on the wrong side of the surface counting
     /// zero — exactly the energy the kernel loses and divides back.
     pub fn glass_energy(rough: f32, mu: f32, eta: f32) -> f32 {
+        glass_energy_n(rough, mu, eta, SAMPLES)
+    }
+
+    /// Its cosine-weighted hemisphere average — a sixteenth of the samples
+    /// per view angle, since integrating over 256 of them averages the
+    /// per-angle noise back out.
+    pub fn glass_energy_average(rough: f32, eta: f32) -> f32 {
+        const CHUNK: u32 = 256;
+        let mut sum = 0.0_f64;
+        for k in 0..CHUNK {
+            let mu = (f64::from(k) + 0.5) / f64::from(CHUNK);
+            let mu = (mu.sqrt()) as f32; // pdf 2µ via inverse CDF
+            sum += f64::from(glass_energy_n(rough, mu, eta, SAMPLES / 16));
+        }
+        (sum / f64::from(CHUNK)) as f32
+    }
+
+    /// [`glass_energy`] at an explicit sample budget — the directional value
+    /// spends the full count, its average spends a fraction per angle.
+    fn glass_energy_n(rough: f32, mu: f32, eta: f32, samples: u32) -> f32 {
         let alpha = rough * rough;
         let wo = view(mu);
         let mut sum = 0.0_f64;
-        for i in 0..SAMPLES {
-            let u = quasi_random(i, SAMPLES);
+        for i in 0..samples {
+            let u = quasi_random(i, samples);
             let h = sample_vndf(wo, alpha, [u[0], u[1]]);
             let f = fresnel_dielectric(eta, wo.dot(h));
             let wi = if u[2] < f {
@@ -276,45 +296,7 @@ mod bake {
                 sum += f64::from(smith_g1(alpha, wi.z));
             }
         }
-        (sum / f64::from(SAMPLES)) as f32
-    }
-
-    /// Its cosine-weighted hemisphere average.
-    pub fn glass_energy_average(rough: f32, eta: f32) -> f32 {
-        const CHUNK: u32 = 256;
-        let mut sum = 0.0_f64;
-        for k in 0..CHUNK {
-            let mu = (f64::from(k) + 0.5) / f64::from(CHUNK);
-            let mu = (mu.sqrt()) as f32; // pdf 2µ via inverse CDF
-            sum += f64::from(glass_energy_cheap(rough, mu, eta));
-        }
-        (sum / f64::from(CHUNK)) as f32
-    }
-
-    /// [`glass_energy`] at reduced sample count — the average above
-    /// integrates over 256 view angles, so per-angle noise averages out.
-    fn glass_energy_cheap(rough: f32, mu: f32, eta: f32) -> f32 {
-        let alpha = rough * rough;
-        let wo = view(mu);
-        let n = SAMPLES / 16;
-        let mut sum = 0.0_f64;
-        for i in 0..n {
-            let u = quasi_random(i, n);
-            let h = sample_vndf(wo, alpha, [u[0], u[1]]);
-            let f = fresnel_dielectric(eta, wo.dot(h));
-            let (wi, reflected) = if u[2] < f {
-                (2.0 * wo.dot(h) * h - wo, true)
-            } else {
-                match refract(wo, h, eta) {
-                    Some(wt) => (wt, false),
-                    None => continue,
-                }
-            };
-            if (reflected && wi.z > 0.0) || (!reflected && wi.z < 0.0) {
-                sum += f64::from(smith_g1(alpha, wi.z));
-            }
-        }
-        (sum / f64::from(n)) as f32
+        (sum / f64::from(samples)) as f32
     }
 
     /// Directional albedo of the *compensated* dielectric reflection

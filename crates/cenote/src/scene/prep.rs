@@ -33,7 +33,7 @@ use super::changeset::{Dirty, Kind};
 use super::description::{self, ColorSpace, MeshSource, SceneDescription, Texturable, TextureRef};
 use super::{
     Camera, GpuMesh, Lens, Mesh, Placement, ResidentBuffers, ResidentTexture, Scene,
-    build_scene_tlas, emissive_triangles, select_probability, upload_environment,
+    build_scene_tlas, emissive_triangles, scene_error, select_probability, upload_environment,
     upload_instance_tables, upload_mesh, upload_scene_table,
 };
 use crate::color::{acescg_from_rec709, luminance};
@@ -847,10 +847,6 @@ fn all_dirty(description: &SceneDescription) -> Dirty {
     mark(&mut dirty, Kind::Environment, description.environments());
     mark(&mut dirty, Kind::Settings, description.settings());
     dirty
-}
-
-fn scene_error(message: String) -> Error {
-    Error::Scene(message)
 }
 
 #[cfg(test)]

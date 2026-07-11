@@ -33,7 +33,8 @@ use super::description::{
     Camera, Instance, Light, Mesh, MeshSource, Objects, SceneDescription, Settings, Texturable,
     TextureRef, Transform,
 };
-use crate::error::{Error, Result};
+use super::scene_error;
+use crate::error::Result;
 
 /// The seven object kinds a description holds — the closed schema.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -415,11 +416,11 @@ impl SceneDescription {
 fn apply_op(objects: &mut Objects, dirty: &mut Dirty, op: &Op) -> Result<()> {
     let (kind, name) = op.target();
     if name.is_empty() {
-        return Err(Error::Scene(format!("a {kind} op has an empty name")));
+        return Err(scene_error(format!("a {kind} op has an empty name")));
     }
     if let Op::Remove(kind, name) = op {
         if !objects.remove(*kind, name) {
-            return Err(Error::Scene(format!(
+            return Err(scene_error(format!(
                 "Remove targets a {kind} named \"{name}\" that does not exist"
             )));
         }
@@ -539,10 +540,6 @@ fn validate(objects: &Objects) -> Result<()> {
         validate_settings(name, settings)?;
     }
     Ok(())
-}
-
-fn scene_error(message: String) -> Error {
-    Error::Scene(message)
 }
 
 fn validate_mesh(name: &str, mesh: &Mesh) -> Result<()> {

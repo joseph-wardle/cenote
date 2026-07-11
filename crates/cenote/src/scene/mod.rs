@@ -28,11 +28,18 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec2, Vec3};
 
 use crate::environment::Environment;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::gpu::{AccelerationStructure, Buffer, Context, SampledImage, TlasInstance};
 use crate::lights::{DeltaLight, LIGHT_NONE, TriangleLight};
 use crate::material::{Material, TEXTURE_NONE};
 use crate::texture;
+
+/// A rejected edit or malformed scene input, as an [`Error::Scene`] — the
+/// one failure the change-set apply and prep paths raise, shared so its
+/// spelling stays uniform across both.
+pub(super) fn scene_error(message: String) -> Error {
+    Error::Scene(message)
+}
 
 /// Ray-visibility mask bits, matched by the mask each TLAS instance
 /// carries. Camera rays trace with [`ray_mask::CAMERA`]; every other ray

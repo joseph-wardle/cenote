@@ -55,7 +55,7 @@ pub(crate) fn read(path: &Path) -> Result<Ply> {
 
 /// The scalar types PLY properties are declared with (both spelling
 /// generations: `float` and `float32` mean the same thing).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 enum Scalar {
     I8,
     U8,
