@@ -163,6 +163,7 @@ cargo test --workspace   # on the GPU machine — includes the goldens
 | `docs/m0-plan.md` | The M0 implementation plan |
 | `docs/m1-plan.md` | The M1 implementation plan |
 | `docs/m2-plan.md` | The M2 implementation plan |
+| `docs/m3-plan.md` | The M3 implementation plan |
 | `docs/deferrals.md` | Living ledger of consciously deferred production features and their revival triggers |
 
 ## License

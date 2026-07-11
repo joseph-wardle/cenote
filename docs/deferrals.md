@@ -169,13 +169,53 @@ shadergen degrades SSS to diffuse. (D-059)
   each hand-wired through the film. Production shape: LPE-selected containers
   (MoonRay/Arnold) or Cycles' pass matrix — a registry the wavefront writes
   through, not four more hand-built buffer pairs. (D-080)
-- **Sample cap / convergence idle** *(carried from D-051; revisit: M3 interactivity
-  work)* — a long-converged viewer still pins the GPU at 100%; `max_samples`,
-  publish-interval growth, and a navigation resolution divider belong where the
-  frame loop is the subject.
-- **Blue-noise sample-index ordering** *(revisit: M3, with the interactivity pass)*
-  — the Sobol-Burley sampler was chosen with this as the known drop-in (D-021);
-  it improves *perceived* early convergence, which matters most alongside ReSTIR.
+- **Per-pixel adaptive sample steering** *(revisit: when the variance estimate's
+  reliability on ReSTIR residual is measured — post-M3)* — Today: M3 lands the
+  per-pixel variance substrate and a *global* noise-threshold auto-stop (D-089), but
+  not per-pixel/per-tile steering. Production shape: gate steering to the converged
+  independent-frame phase (where the residual decorrelates and the white-noise variance
+  estimate becomes reliable), make termination *tile*-based so no half-stopped pixel
+  starves its neighbours' spatial reuse, keep the estimate and threshold deterministic.
+  MoonRay's adaptive sampling is the reference; the ReSTIR-residual correlation is the
+  reason it can't be a naive per-pixel copy. (D-089)
+
+## ReSTIR & light reuse
+
+The screen-space primary-hit DI reuse of M3 (D-085…D-090) is the first tenant of the
+index-agnostic reservoir primitive (D-086). Everything below is a reuse axis it was
+built to extend but that M3 consciously does not build.
+
+- **ReGIR world-space reservoirs** *(revisit: many local lights illuminating
+  secondary/volume/SSS vertices — M7/M8 era or a dedicated many-lights pass)* — Today:
+  reuse is screen-space, primary-hit only; secondary bounces use M2 NEE+MIS. Production
+  shape: world-space reservoirs in a hash grid (Boksansky/Wyman, RT Gems II 2021),
+  *orthogonal* to screen-space ReSTIR — the accelerator for the vertices a screen-space
+  reservoir can't see. It instantiates the same reservoir primitive; that is why the
+  primitive is index-agnostic. (D-086)
+- **Reservoir path reuse — reconnection/hybrid shift, splatting, CRIS** *(revisit: M6,
+  ReSTIR-PT)* — Today: reuse is direct-illumination only, an identity shift with a
+  Jacobian of 1. Production shape: full path reuse via reconnection and hybrid shift
+  maps (non-trivial Jacobians), reservoir splatting, and continuous RIS — M6's whole
+  subject. It reuses the D-086 primitive and the `Hit`-shaped reconnection vertex M1
+  chose; the DI shift built in M3 is the dormant-but-correct base case. (D-086, D-087)
+- **Presampled light tiles** *(revisit: measured per-candidate global-gather bottleneck
+  at large light counts)* — Today: candidates are drawn directly from the
+  power-proportional alias table. Production shape: Wyman–Panteleev (2021) RIS over
+  presampled tiles — a memory-coherence win for millions of lights that injects
+  intra-tile correlation, so it is a cost, not a free upgrade, and waits for the
+  measurement that justifies it. (D-088)
+- **Stochastic pairwise MIS** *(revisit: when neighbour counts grow enough that O(M)
+  pairwise MIS is itself the cost — M6 path reuse, or ReGIR)* — Today: defensive
+  pairwise MIS, O(M), evaluated in full. Production shape: the stochastic pairwise
+  estimator (subsample the pairwise terms) when M is large. A drop-in refinement of the
+  same combine function. (D-087)
+- **Compatibility-guided neighbours + MCMC decorrelation** *(revisit: if the correlation
+  floor bites — the converged-still contract proves insufficient in practice)* — Today:
+  the converged still image decorrelates by construction (spatial-only, fresh per-frame
+  RNG — D-085). Production shape, if correlated reuse still leaves a structured residual:
+  compatibility-guided neighbour selection (bias reuse toward similar surfaces) and
+  MCMC-style decorrelation of the reused stream. The named next move for the step-4/5
+  correlation risk, so it is a plan and not a scramble. (D-085, D-089)
 
 ## Performance & sync (one measured pre-M3 pass, per D-043)
 

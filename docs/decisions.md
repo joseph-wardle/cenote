@@ -1779,3 +1779,250 @@ a pbrt light with `twosided true` loses its back-face emission and imports
 with a counted warning (the importer's sidedness warning flips polarity to
 match). Honoring `twosided true` — an opt-in two-sided emitter — is the
 residual, re-lodged in the ledger as "Two-sided emission" against this entry.
+
+## M3 — GRIS-DI
+
+*Locked 2026-07-11 via structured interview + a sourced research pass over ReSTIR-DI,
+GRIS ("Foundations of ReSTIR"), defensive pairwise MIS, presampled tiles, and ReGIR,
+read against Cycles X / MoonRay / pbrt-v4 engine hygiene, then reviewed against those
+same renderers for module boundaries, naming, and observability (D-091, D-092). The
+working plan is [m3-plan.md](m3-plan.md); these entries carry the rationale.*
+
+### D-085: M3 is GRIS-DI; the unbiased convergence contract and the reservoir substrate
+Status: accepted. M3 builds screen-space ReSTIR direct illumination on the GRIS
+foundation, and settles the question a decisions interview must settle first: *what is
+the same-estimator thesis under reuse?* The answer rests on separating two axes the
+literature conflates in casual reading. **Bias:** GRIS (Lin 2022) proves reservoir reuse
+— temporal included — is unbiased given the generalized unbiased contribution weight
+`W_Y = (1/p̂(Y))·Σⱼ wⱼ` (the combined form, *not* the split `1/M`, which biases when the
+resampled inputs differ) and ray-traced bias correction. **Correlation:** unbiased
+frames that share reservoirs are *correlated*, and correlated frames do not average at
+1/N — the effective sample count drops by the integrated autocorrelation time (~the
+M-cap), leaving a spatially-structured, blotchy residual rather than white grain.
+
+The contract that falls out: **temporal reuse warm-starts the preview after camera moves
+*and* after light/material edits** — the film always resets to zero on an edit, but the
+reservoirs carry over, are re-targeted under the new scene, and have stale confidence
+decayed — while **the converged still image is spatial-only with fresh per-frame RNG**,
+so it is a mean of *independent* unbiased frames and converges cleanly at 1/N to the
+exact path-traced ground truth cenote produces today. Every mode is unbiased; temporal
+is annealed for *efficiency*, never suppressed for *correctness*. This is the direct
+answer to the interview's first challenge — yes, temporal can be included without bias,
+and the reason to anneal it is decorrelation, not correctness.
+
+*Why carry state across an edit, when production renderers restart from scratch:* the
+restart-on-dirty reflex is a *delegate convention*, self-imposed via Hydra's
+`IsConverged()` (which defaults true), not a Hydra requirement — nothing forbids a
+delegate from carrying reservoirs across a dirty the way it already carries the BVH. For
+an interactive lookdev renderer, carrying reservoirs across a material tweak is the
+charter-native delta philosophy: re-prep exactly what changed, re-converge from a warm
+start, film honestly reset. Correctness stays airtight because the film resets and every
+mode is unbiased.
+
+*Build the substrate now, not in M4:* the contract needs (a) **per-view reservoir/film
+ownership** keyed by a stable view identity (render-buffer `SdfPath`-ready), because one
+Hydra delegate drives multiple viewports and reservoirs are per-view; (b) **stable light
+identity + an identity↔dense-slot remap**, because the current GPU light index is
+order-derived *and* power-filtered in `lower.rs` — volatile across the very edits
+temporal reuse must survive; and (c) a **cold-start / no-carry render setting** for batch
+determinism (the CLI already cold-starts). Per-view ownership and stable identity are
+high-retrofit-cost — retrofitting them into a shipped M3 would be a rewrite — so they
+land now. This also retires the D-064/D-083 viewer-replica seam early: per-view state
+owned by identity is the shape the Hydra delegate wanted anyway.
+
+*Thesis honesty (the coherence note):* under this contract, temporal-on-motion and
+spatial-on-hold are *different estimators frame-to-frame* — both unbiased, both
+converging to the same image. The README's "the preview and the final are the same
+estimator" gains a footnote saying so: the claim holds at the level that matters (same
+converged result, no biased preview mode, no final-gather switch) but no longer asserts
+frame-level identity once temporal is annealed. The promise stays true; it stops
+overstating.
+
+### D-086: Screen-space primary-hit DI reuse; the reservoir is an index-agnostic primitive
+Status: accepted. Reuse scope is **screen-space, primary-hit direct illumination only**:
+initial RIS → temporal → spatial → resolve, all at the first visible surface. Secondary
+bounces keep the M2 NEE + BSDF-hit MIS path untouched. This is the industry baseline for
+a converging renderer — ReSTIR is a primary-visibility *accelerant*, not a replacement
+for path integration, and the charter's one-integrator commitment means the reuse layer
+sits *in front of* the existing integrator, not around it.
+
+The reservoir + weighted reservoir sampling + RIS + unbiased-weight + pairwise-MIS is
+built as an **index-agnostic primitive** — a `Reservoir<Sample>` type and a handful of
+pure functions with no hardcoded notion of "pixel" — so that M6 path reuse (ReSTIR-PT is
+*also* screen-space, via reconnection/hybrid shift maps) and a future ReGIR world-space
+hash grid both *instantiate* it rather than reimplementing it. The named risk, written
+into the plan so it is resisted rather than rediscovered: this primitive is a data type
+and three-or-four functions, **not** a framework. Designing a speculative abstraction
+for M6/ReGIR requirements we cannot yet fully specify would produce a worse M3; the
+primitive stays small precisely because a reservoir over a light-surface-point sample
+genuinely *is* the same structure regardless of what indexes it.
+
+*ReGIR deferred, and why it is not "the M6 thing":* the reframe that settled the
+interview — ReGIR (world-space reservoirs in a hash grid) is *orthogonal* to screen-space
+ReSTIR and *later*, not the content of M6. M6 is screen-space path reuse. ReGIR's trigger
+is many local lights illuminating *non-primary* vertices — secondary bounces, volume
+scatter points, SSS exit points — where a screen-space reservoir has nothing to reuse. It
+lands in the M7/M8 era or a dedicated many-lights pass (deferrals.md).
+
+### D-087: Estimator internals — surface-point domain, pairwise MIS, ray-traced correction
+Status: accepted. Four internals, three of them derived-locked from D-085's
+unbiasedness requirement plus the research:
+
+**Reservoir domain = the light-surface point.** The reservoir stores a stable light-id +
+primitive index + barycentrics — exactly the `Hit` shape M1 chose for its re-evaluable,
+reconnection-ready form. This makes the DI reuse shift the *identity* map, so its
+**Jacobian is 1**. This is the single most important estimator invariant and it is not
+optional: the Jacobian is 1 *iff* the reservoir stores the surface *point*, not a
+solid-angle *direction* — store the direction and every reuse across surfaces of
+different distance/orientation needs a Jacobian that, dropped, biases silently. Reusing
+`Hit` gives the correct domain for free, and leaves the shift dormant-but-correct for
+M6, where the reconnection shift becomes non-trivial.
+
+**Target p̂ = unshadowed luminance of f·L·cosθ** over the full OpenPBR closure (the
+D-070 one-sample-MIS lobe machinery supplies the combined BSDF value). Luminance rather
+than the RGB vector keeps the reservoir scalar-weighted; the true colour is recovered at
+resolve, where f·L·cosθ is evaluated for real with the visibility ray. Unshadowed,
+because folding visibility into the target would demand a shadow ray per candidate — the
+whole point of RIS is one shadow ray on the *survivor*.
+
+**Reuse MIS = defensive pairwise** (Bitterli 2022 thesis). It buys balance-heuristic-
+quality variance at O(M) cost and ~zero storage, where the generalized balance heuristic
+is O(M²) and the `1/Z` unbiased weight is correct but noisy. Pairwise is the right point
+on the cost/variance curve for the neighbour counts M3 uses.
+
+**Bias correction = unbiased ray-traced.** Each reused neighbour's p̂ is re-evaluated
+*under its own visibility* — a shadow ray from the receiving pixel to the neighbour's
+stored light point. This is what keeps reuse unbiased when neighbours see different
+occlusion (the common case at a shadow boundary); the cheaper "assume visible" correction
+is the classic ReSTIR bias source, and the charter's no-biased-modes thesis rules it out.
+
+### D-088: The reservoir owns all non-delta primary DI; delta lights stay on exact NEE
+Status: accepted. Resolves how ReSTIR and the existing MIS estimator share the primary
+hit without double-counting. **The reservoir owns 100% of non-delta primary-hit direct
+lighting.** Its candidates are M light samples drawn from the existing power-proportional
+alias table (`lights.slang`'s `sampleLights()` — area emitters + the importance-sampled
+HDRI, reused with no new light data structure) *plus one internalized BSDF-sampled
+candidate*, so light-vs-BSDF importance is handled *inside* RIS rather than as a separate
+MIS combination outside it. The BSDF **continuation** ray — the one that carries the path
+to its next bounce — is therefore **indirect only, and suppresses emission at its first
+hit**, because any emitter it strikes was already a reservoir candidate; letting it add
+emission would double-count the light the reservoir just sampled.
+
+**Delta lights stay outside the reservoir**, on exact regular NEE with MIS weight 1,
+added separately. A delta light cannot be hit by a BSDF sample (zero solid angle), so it
+carries no MIS partner and no Monte Carlo noise — a reservoir over it would only inject
+resampling variance into a term that is already exact. This refines D-087's ownership to
+"the reservoir owns all *non-delta* primary direct lighting."
+
+*Candidate counts* start at M ≈ 16 local + a few environment + 1 BSDF, tuned in the
+validation harness. *Presampled light tiles* (Wyman–Panteleev 2021) are deferred: they
+are a memory-coherence optimization for millions of lights that injects intra-tile
+correlation, and cenote's light counts do not need them — the trigger is a measured
+per-candidate global-gather bottleneck (deferrals.md).
+
+### D-089: Convergence policy v1, and the interactivity + variance bundle
+Status: accepted. Convergence policy v1 is deliberately small: **M-cap ≈ 20** (tunable);
+temporal reuse active during camera motion and the first post-edit frame, then a **short
+confidence decay** over a few frames handing off to spatial-only fresh-RNG accumulation,
+so the motion→hold transition has no visible pop. The spatial-only converge mode *is* the
+D-085 camera-hold switch — one mechanism, described from two sides.
+
+Three deferrals are **picked up** here and moved out of the ledger. **Blue-noise
+sample-index ordering** (D-021 earmarked the Sobol-Burley sampler for exactly this
+drop-in; it improves *perceived* early convergence, which matters most beside ReSTIR).
+**Interactive niceties** (D-051's carried deferral): `max_samples` and a convergence-idle
+so a settled viewer stops pinning the GPU, publish-interval growth as convergence slows,
+a navigation-resolution divider during motion. And a **per-pixel variance substrate +
+global noise-threshold auto-stop**: a running mean + second moment of luminance,
+pixel-owned like every film buffer, driving a global stop *and* — the synergy that
+justified landing it now — supplying the exact quantity the D-090 validation convergence
+curves need. One buffer, two consumers.
+
+*Per-tile adaptive steering is deferred*, and the reason is specific to ReSTIR: a
+per-pixel variance estimate assumes *white* noise, but ReSTIR residual is spatially
+correlated (blotchy), so (1) the estimate is unreliable — a correlated blotch reads as
+converged — and (2) stopping a converged-looking pixel starves its neighbours' spatial
+reuse. The clean resolution, when it is built: gate steering to the converged
+independent-frame phase (where the residual *is* decorrelated and the estimate becomes
+reliable), make termination *tile*-based (no half-stopped reuse neighbourhoods), keep the
+estimate and threshold deterministic. Deferred until the estimate's reliability on real
+ReSTIR residual is *measured*, not assumed (deferrals.md).
+
+*Determinism is preserved for free:* spatial reuse reads a committed prior-pass buffer
+(ping-pong, a barrier between passes), neighbour selection comes from a reserved
+deterministic RNG dimension, and no stage accumulates a reservoir with atomics — so the
+pixel-owned bitwise-determinism invariant survives. Async submits would break this, which
+is exactly why the timeline-semaphore/wave-tail perf pass stays deferred (D-043): it is
+an own, measured pass *after* ReSTIR is correct, not folded into M3.
+
+### D-090: Validation harness and the dual flagship demo
+Status: accepted. The ground-truth oracle is **cenote's own brute-force NEE+MIS
+accumulation at high spp**, not an external renderer — because the thesis under test is
+that ReSTIR and brute force are the *same estimator*, so the reference must *be* that
+estimator; measuring against Falcor or pbrt would measure primaries/tonemap/closure
+differences instead of the one thing that matters. Falcor is a behaviour *spot-check*
+only. Metrics: **FLIP + numerical mean-error-vs-reference convergence curves** (read
+straight off the D-089 variance substrate). The **unbiasedness gate** is generalized-MIS
+agreement stated operationally: **ReSTIR-on and ReSTIR-off must converge to the same
+image** — it runs from step 3 (the first estimator) onward, not only at the end, so bias
+is caught the frame it appears.
+
+*The golden strategy (the coherence note):* at converged spp ReSTIR ≡ brute force by
+construction, so the **existing demo and corpus FLIP goldens become a free regression
+gate** — ReSTIR must match them too, at converged spp. Low-spp ReSTIR *noise* is
+deliberately **not** golded: it differs from brute-force noise (that is the whole point)
+and would make the golden a noise-pattern test, not a correctness test.
+
+*The demo is both.* A **procedural many-light scene** (dozens-to-hundreds of small
+emitters with real occlusion, built via the `demo.rs` pattern) is the primary,
+CI-golden, validated demo — ReSTIR vs brute-force equal-time plus convergence curves.
+*Plus* one **imported many-light showcase** as an un-gated README beauty shot — the
+flagship stretch, outside CI so a heavy asset never gates the build. "Flagship begins"
+(charter §4) is this entry.
+
+### D-091: The M3 kernel layout, module boundaries, and naming convention
+Status: accepted. From the design review against Moonray/Cycles/RTXDI — the axes a
+decisions interview under-weights. The estimator decisions (D-085…D-090) say *what* to
+compute; this entry says how it lands *as code*, because for a silently-bug-prone feature
+that is what separates a research-correct plan from a discoverable one.
+
+*Kernels.* The primary-hit reuse chain is **four discrete, single-purpose stages**,
+matching Cycles X's one-purpose-per-kernel shape and cenote's existing queue-driven
+wavefront — never a mega-kernel fused into `shade_surface`: `restir_candidates` (initial
+RIS) → `restir_temporal` → `restir_spatial` → `restir_resolve`. Visibility and
+bias-correction rays reuse the existing `trace_shadow` kernel. The reasoning is
+observability: the wavefront stage sequence in `wavefront.rs` *is* the map of the
+renderer — a new reader traces it to understand a frame — and four named stages in that
+sequence keep the map honest where a fused kernel would bury the estimator. Discrete
+kernels also make the D-092 per-stage toggles fall out for free.
+
+*Modules.* The index-agnostic primitive lives in a new `shaders/reservoir.slang`; each
+stage is its own `shaders/restir_*.slang`; reservoir-buffer lifecycle, per-view
+ownership, and the light-identity remap live in a new `src/restir.rs`; `wavefront.rs`
+wires the four pipelines beside its existing five. This mirrors how the code already
+separates the stage chain (wavefront.rs) from the resources it drives.
+
+*Naming.* **Readable identifiers**, with a **Rosetta-stone doc block** at the head of
+`reservoir.slang` mapping each to its paper term — the house style `rng.slang` already
+sets. `Reservoir { sample, weightSum, confidence, unbiasedWeight }`; `reservoirUpdate`
+(the WRS stream insert), `reservoirMerge` (the pairwise-MIS combine), `targetFunction`
+(p̂), `unbiasedContributionWeight` (the GRIS W_Y). The paper vocabulary — RIS, WRS, UCW,
+GRIS, Jacobian — appears in comments, never as bare identifiers, because that jargon is a
+wall for a new reader and a Rosetta stone lets the code still be checked against the
+papers.
+
+### D-092: A first-class ReSTIR debug/observability surface
+Status: accepted. From the same design review. ReSTIR bias does not crash or NaN — it
+shifts the converged mean a few percent and looks plausible — so the D-090 converge-to-
+reference gate, an *end* check, is not enough: steps 4–5 are undebuggable without
+*intermediate* visibility, and RTXDI ships exactly this surface for exactly this reason.
+
+The debug surface is its **own workstream, landing with step 3** (the first estimator),
+not folded into final validation: false-colour **selected-light-id**, **confidence (M)**
+and **unbiased-weight (W)** heatmaps, **per-stage on/off toggles** (initial-only,
++temporal, +spatial — the same switches the D-090 unbiasedness gate drives), and a
+**reuse-gain** view off the variance substrate. It is gated behind a viewer debug mode /
+render setting and written by `restir_resolve` through a single enum-selected debug
+buffer — lean, deliberately *not* the full D-080 AOV registry, in keeping with the
+charter's lightweight bias. It doubles as discoverability: the debug views *are*
+documentation of what each stage does.
