@@ -27,6 +27,7 @@
 mod camera;
 #[cfg(feature = "denoise")]
 mod denoise;
+mod lookdev;
 mod ui;
 
 use std::path::{Path, PathBuf};
@@ -34,6 +35,8 @@ use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 use anyhow::Context as _;
+use cenote::scene::changeset::{ChangeSet, Op};
+use cenote::scene::description::SceneDescription;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -64,7 +67,7 @@ fn main() -> anyhow::Result<()> {
 /// Load a scene file as a change-set, logging any import fidelity warnings.
 /// Reloads-on-save take this same path, so editing a watched `.pbrt`
 /// re-imports it live.
-fn load_scene(path: &Path) -> anyhow::Result<cenote::scene::changeset::ChangeSet> {
+fn load_scene(path: &Path) -> anyhow::Result<ChangeSet> {
     let imported =
         cenote_pbrt::load(path).with_context(|| format!("loading scene {}", path.display()))?;
     for warning in &imported.warnings {
@@ -144,6 +147,12 @@ struct Viewer {
     denoise: denoise::DenoiseView,
     gpu: Arc<cenote::gpu::Context>,
     gui: Gui,
+    /// The viewer's own copy of the scene as data — the lookdev panel's
+    /// model. The description the [`Session`] renders from lives on the
+    /// render thread and isn't readable here, so the panel reads and edits
+    /// this replica; every edit is applied to both, keeping them identical.
+    /// A scene-file reload rebuilds it from the new scene.
+    ui_desc: SceneDescription,
     window: Window,
     camera: OrbitCamera,
     stats: FrameStats,
@@ -171,10 +180,15 @@ impl Viewer {
         // change-set applied to an empty description, then prepped.
         let (set, scene_watch) = match scene_path {
             Some(path) => (load_scene(path)?, Some(SceneWatch::new(path)?)),
-            None => (cenote::scene::changeset::ChangeSet::demo(), None),
+            None => (ChangeSet::demo(), None),
         };
-        let mut description = cenote::scene::description::SceneDescription::new();
+        let mut description = SceneDescription::new();
         description.apply(&set).context("scene rejected")?;
+        // The lookdev panel's model: the same scene as data, kept beside the
+        // one prep consumes (the description moves into the Session, out of
+        // reach). Both start from `set`, so they begin identical.
+        let mut ui_desc = SceneDescription::new();
+        ui_desc.apply(&set).context("scene rejected")?;
         let scene =
             cenote::scene::Scene::prep(&gpu, &mut description).context("preparing the scene")?;
         let camera = OrbitCamera::framing(scene.camera());
@@ -219,6 +233,7 @@ impl Viewer {
             denoise: denoise::DenoiseView::new(),
             gpu,
             gui,
+            ui_desc,
             window,
             camera,
             stats: FrameStats::default(),
@@ -306,9 +321,19 @@ impl Viewer {
         if let Some(watch) = &self.scene_watch
             && watch.events.try_iter().count() > 0
         {
-            match load_scene(&watch.path) {
-                Ok(set) => {
+            // Build the replacement replica first: it validates the reload
+            // exactly as the render thread will, so the panel's model and the
+            // rendered scene stay identical. A file that doesn't parse — or
+            // parses but doesn't apply — keeps both the previous scene.
+            let reloaded = load_scene(&watch.path).and_then(|set| {
+                let mut fresh = SceneDescription::new();
+                fresh.apply(&set)?;
+                Ok((fresh, set))
+            });
+            match reloaded {
+                Ok((fresh, set)) => {
                     log::info!("scene file changed; reloading {}", watch.path.display());
+                    self.ui_desc = fresh;
                     self.session.replace(set);
                 }
                 Err(err) => {
@@ -340,9 +365,25 @@ impl Viewer {
         // The UI runs first so its exposure is current for this frame's
         // tonemap and an exposure drag lands this very frame. The stats it
         // shows are the previous frame's — one frame stale, imperceptible.
-        let gui_frame = self
-            .gui
-            .run(&self.window, self.gpu.device_summary(), &self.stats);
+        let (gui_frame, edit) = self.gui.run(
+            &self.window,
+            self.gpu.device_summary(),
+            &self.stats,
+            &self.ui_desc,
+        );
+        // A lookdev widget moved: apply the patch to the replica first — it
+        // must accept a value change to a material it already holds — then
+        // hand the same set to the render session (stop, apply, restart), so
+        // model and rendered scene stay in step.
+        if let Some((name, patch)) = edit {
+            let set = ChangeSet {
+                ops: vec![Op::Material(Box::new(patch))],
+            };
+            match self.ui_desc.apply(&set) {
+                Ok(()) => self.session.apply(set),
+                Err(err) => log::error!("lookdev edit to \"{name}\" rejected: {err}"),
+            }
+        }
 
         // The toggle swaps which buffer the tonemap reads — raw average or
         // the denoised view — and nothing upstream notices. Until the first

@@ -1602,3 +1602,66 @@ needs no GPU, so the runner installs the distro library, lints every
 crate with the feature on, and runs the unit test that pushes a real
 image through the real filter — the one step-9 seam CI can actually
 exercise.
+
+## 2026-07-10 — M2 step 10: the lookdev panel
+
+### D-082: Leaf decisions made while building the lookdev panel
+
+Status: accepted. The panel is a temporary closure-testing tool that goes
+away when the M4 Hydra delegate moves lookdev into Solaris/Karma, so the
+guiding bar was thin over complete. Its whole backend already existed —
+the edit channel, `MaterialPatch`, `Op::Material`, and the stop → apply →
+restart wave (D-064, D-075), proven by the session's edit tests — so step
+10 was a pure viewer-UI task that added **zero** core API. Seven leaf
+decisions:
+
+(1) *The viewer holds its own `SceneDescription` replica as the panel's
+model.* The description the renderer edits moves onto the render thread at
+`Session::new` and is unreadable from the viewer, so the panel can't read
+current material values from it. Rather than add a read-back channel, the
+viewer keeps a second description applied from the same change-set: both
+start identical, every panel edit is applied to *both* (the replica via
+its public `apply`, the session via the edit channel), and a reload
+rebuilds the replica from the new scene. The description's own `apply` is
+the only mutation path, so the two can't drift.
+
+(2) *Materials by name, not D-064's looser "object list".* The list is the
+scene's materials (`description.materials()`); editing one affects every
+instance wearing it — the right granularity for closure lookdev, and the
+only kind the panel touches. Lights, camera, and environment stay out:
+the camera is orbit-driven, and lights/environment ride the watched scene
+file (D-064's "no authoring UI").
+
+(3) *The full constant parameter set, grouped as OpenPBR groups it* (Base,
+Specular, Transmission, Coat, Fuzz, Emission, Geometry) under collapsing
+headers, one widget per field. Weights/roughness/metalness/darkening are
+[0,1] sliders, IOR a 1–3 slider, luminance and transmission depth are
+unbounded non-negative drag boxes, colors are linear-RGB squares (the
+values are linear Rec.709, which is what egui's rgb picker edits).
+
+(4) *A textured slot renders read-only.* The five `Texturable` fields and
+the normal map, when bound to an image, show a muted "(textured)" label
+rather than a widget — the panel edits constants, never overrides a map
+with a constant. Constants-only keeps the temporary tool honest about what
+it can and can't touch.
+
+(5) *An edit sends the whole material, not a minimal diff.* On any widget
+change the panel emits a `MaterialPatch` with every field `Some`. Apply's
+equality gate (D-075(3)) makes this exact: only the field the widget
+actually moved differs from what both replicas already hold, so only it
+dirties and forces a re-prep — the panel needs no per-field change
+tracking, and the wire behavior is identical to a minimal patch.
+
+(6) *Reload wins over unsaved panel edits.* A watched-file save rebuilds
+the replica and whole-scene-replaces the render scene; any in-flight
+slider tweaks are ephemeral scratch, discarded. The reload is validated
+against a fresh description locally *before* it's sent, so a file that
+parses but doesn't apply keeps the previous scene on both sides and the
+replica never diverges from what the renderer holds.
+
+(7) *Lighting an object from the panel works, not just recoloring it.*
+Dragging `emission_luminance` off zero makes the material an emitter, which
+needs the light table rebuilt, not just the material buffer re-uploaded —
+verified against `Scene::update`, which re-derives triangle lights over
+the whole description and rebuilds the light table on every material wave
+(D-075(5)), so the new emitter is sampled from the next frame.

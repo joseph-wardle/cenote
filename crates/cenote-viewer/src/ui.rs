@@ -1,4 +1,5 @@
-//! The overlay UI: device and frame stats, plus the live exposure control.
+//! The overlay UI: device and frame stats, the live exposure control, and
+//! the lookdev material panel (in [`crate::lookdev`]).
 //!
 //! This is the egui half of the overlay — input translation, layout,
 //! tessellation. The Vulkan half lives behind the core's `gpu` quarantine
@@ -7,8 +8,12 @@
 use std::time::Duration;
 
 use cenote::gpu::GuiFrame;
+use cenote::scene::changeset::MaterialPatch;
+use cenote::scene::description::SceneDescription;
 use winit::event::WindowEvent;
 use winit::window::Window;
+
+use crate::lookdev::Lookdev;
 
 /// Numbers the panel displays, measured by the redraw loop.
 #[derive(Default)]
@@ -32,6 +37,9 @@ pub struct Gui {
     /// Show the OIDN-denoised view instead of the raw average.
     #[cfg(feature = "denoise")]
     denoise: bool,
+    /// The material inspector — its own window, driven each frame off the
+    /// scene replica the viewer passes to [`Gui::run`].
+    lookdev: Lookdev,
 }
 
 impl Gui {
@@ -50,6 +58,7 @@ impl Gui {
             exposure: 0.0,
             #[cfg(feature = "denoise")]
             denoise: false,
+            lookdev: Lookdev::default(),
         }
     }
 
@@ -75,24 +84,38 @@ impl Gui {
         self.state.on_window_event(window, event)
     }
 
-    /// Run one UI frame and tessellate it for the presenter. No repaint
-    /// signal comes back: the viewer accumulates continuously, so every
-    /// frame is followed by another.
-    pub fn run(&mut self, window: &Window, device: &str, stats: &FrameStats) -> GuiFrame {
+    /// Run one UI frame and tessellate it for the presenter. Returns the
+    /// frame plus any material edit the lookdev panel produced — the target
+    /// material's name and a patch of its values, for the caller to apply to
+    /// both the scene replica and the render session. No repaint signal
+    /// comes back: the viewer accumulates continuously, so every frame is
+    /// followed by another.
+    pub fn run(
+        &mut self,
+        window: &Window,
+        device: &str,
+        stats: &FrameStats,
+        description: &SceneDescription,
+    ) -> (GuiFrame, Option<(String, MaterialPatch)>) {
         let input = self.state.take_egui_input(window);
         // Clone the (cheap, shared-reference) context so the closure can
         // borrow `self`'s widget state while `self.state` stays untouched.
         let context = self.state.egui_ctx().clone();
-        let output = context.run(input, |context| self.panel(context, device, stats));
+        let mut edit = None;
+        let output = context.run(input, |context| {
+            self.panel(context, device, stats);
+            edit = self.lookdev.show(context, description);
+        });
         self.state
             .handle_platform_output(window, output.platform_output);
 
         let primitives = context.tessellate(output.shapes, output.pixels_per_point);
-        GuiFrame {
+        let frame = GuiFrame {
             pixels_per_point: output.pixels_per_point,
             primitives,
             textures_delta: output.textures_delta,
-        }
+        };
+        (frame, edit)
     }
 
     fn panel(&mut self, context: &egui::Context, device: &str, stats: &FrameStats) {
