@@ -305,16 +305,14 @@ fn lower_instances(
     Ok((instances, triangle_lights))
 }
 
-/// Lower an authoring-side material onto the GPU record, converting color
-/// constants from the format's linear `Rec.709` into `ACEScg` — prep owns
-/// that conversion (textures make the same trip in-shader, after the
-/// hardware's sRGB decode) — and clamping weights into the ranges the
-/// kernel's lerps assume. The coat's tint on emission folds in here: it
-/// is a view-independent constant in this closure, and folding it keeps
-/// the light table and the shading kernel reading the same emitted
-/// radiance. Textured slots resolve to bindless indices through
-/// `indices`; their constants lower to stand-ins — replaced slots get the
-/// schema default, multiplied slots (emission, opacity) the identity.
+/// Lower an authoring-side material onto the GPU record: color constants
+/// convert from the format's linear `Rec.709` into `ACEScg` — prep owns
+/// that conversion, and textures make the same trip in-shader after the
+/// hardware's sRGB decode — and weights clamp into the ranges the kernel's
+/// lerps assume. Textured slots resolve to bindless indices through
+/// `indices`; their constants lower to stand-ins (the schema default for
+/// slots the kernel replaces per hit, the identity for those it
+/// multiplies). The point-of-use comments below carry the per-field why.
 fn lower_material(
     name: &str,
     source: &description::Material,

@@ -504,9 +504,9 @@ impl Mapper {
         }));
 
         let camera = &self.options.camera;
-        // Trap 4's per-scene half: a reflective camera transform already
-        // encodes a handedness conversion, so the world conjugation is
-        // the identity under one; a proper camera rotation gets FLIP_Z.
+        // Trap 4's per-scene half (see FLIP_Z for the why): a proper camera
+        // rotation gets the conjugation, a reflective one — already
+        // handedness-fixed — gets the identity.
         self.conjugation = if swaps_handedness(camera.world_from_camera) {
             Mat4::IDENTITY
         } else {

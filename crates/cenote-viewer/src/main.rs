@@ -321,10 +321,14 @@ impl Viewer {
         if let Some(watch) = &self.scene_watch
             && watch.events.try_iter().count() > 0
         {
-            // Build the replacement replica first: it validates the reload
-            // exactly as the render thread will, so the panel's model and the
-            // rendered scene stay identical. A file that doesn't parse — or
-            // parses but doesn't apply — keeps both the previous scene.
+            // Build the replacement replica first, validated by the same
+            // apply the render thread runs: a file that doesn't parse — or
+            // parses but doesn't apply — keeps the previous scene on both
+            // sides. One gap remains: the render thread's residency step can
+            // still reject a scene apply accepted (a present-but-corrupt
+            // asset), leaving the replica ahead of what actually renders
+            // until the next good reload. It is logged below, not yet
+            // reconciled — the deferral ledger tracks the fix.
             let reloaded = load_scene(&watch.path).and_then(|set| {
                 let mut fresh = SceneDescription::new();
                 fresh.apply(&set)?;

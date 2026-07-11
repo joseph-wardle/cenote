@@ -56,7 +56,8 @@ pub(crate) enum Usage {
 }
 
 impl Usage {
-    /// The cache-file tag — and the human-readable name warnings use.
+    /// The usage class as it appears in the DDS cache path and content
+    /// hash, so a color and a data use of one image cache separately.
     fn tag(self) -> &'static str {
         match self {
             Self::Color => "color",

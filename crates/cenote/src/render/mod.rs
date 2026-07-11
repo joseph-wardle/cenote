@@ -213,31 +213,6 @@ impl Renderer {
         width: u32,
         height: u32,
     ) -> Result<Vec<f32>> {
-        let pixels = self.render_to_buffer(gpu, scene, width, height)?;
-        // pod_collect_to_vec rather than cast_slice: the downloaded bytes
-        // carry no alignment guarantee.
-        Ok(bytemuck::pod_collect_to_vec(&gpu.download_buffer(&pixels)?))
-    }
-
-    /// [`Renderer::render`], minus the readback: the frame stays in the
-    /// returned GPU buffer. Backs [`Renderer::render`]; kept separate so a
-    /// future consumer can trace one-shot into a buffer without the download.
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from buffer creation or submission.
-    ///
-    /// # Panics
-    ///
-    /// On a zero-sized target — callers validate their inputs, so this is a
-    /// programmer bug.
-    pub(crate) fn render_to_buffer(
-        &self,
-        gpu: &Context,
-        scene: &Scene,
-        width: u32,
-        height: u32,
-    ) -> Result<Buffer> {
         assert!(width > 0 && height > 0, "zero-sized render target");
         let size = u64::from(width) * u64::from(height) * 4 * size_of::<f32>() as u64;
         let pixels = gpu.create_buffer(
@@ -251,7 +226,9 @@ impl Renderer {
         )?;
         self.wavefront
             .trace(gpu, scene, &pixels, width, height, 0)?;
-        Ok(pixels)
+        // pod_collect_to_vec rather than cast_slice: the downloaded bytes
+        // carry no alignment guarantee.
+        Ok(bytemuck::pod_collect_to_vec(&gpu.download_buffer(&pixels)?))
     }
 
     /// Trace the film's next sample of `scene` and add it to its sums (the

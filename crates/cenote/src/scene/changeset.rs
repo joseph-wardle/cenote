@@ -37,7 +37,7 @@ use super::scene_error;
 use crate::error::Result;
 
 /// The seven object kinds a description holds — the closed schema.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Kind {
     /// Triangle geometry ([`Mesh`]).
     Mesh,
@@ -394,8 +394,8 @@ impl SceneDescription {
     ///
     /// # Errors
     ///
-    /// [`Error::Scene`] when the set is invalid: a removal that targets
-    /// nothing or strands a reference, an instance left without a
+    /// [`Error::Scene`](crate::Error) when the set is invalid: a removal
+    /// that targets nothing or strands a reference, an instance left without a
     /// resolvable mesh or material, inconsistent inline geometry, a
     /// degenerate camera or transform, zero-valued settings, or a
     /// referenced file that is relative or missing on disk.

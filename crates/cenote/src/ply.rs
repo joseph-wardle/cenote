@@ -1,9 +1,9 @@
 //! Hand-rolled PLY reader — the bulk-geometry half of the mesh schema.
 //! Small meshes live inline in scene files; heavy geometry stays in PLY,
 //! the format the pbrt corpus (and everyone else) already ships. The
-//! format is small enough that a reader is ~200 lines: a self-describing
-//! header names elements and their typed properties, then the data
-//! follows in declared order, ASCII or binary.
+//! format is small enough to read by hand: a self-describing header names
+//! elements and their typed properties, then the data follows in declared
+//! order, ASCII or binary.
 //!
 //! Read here: `vertex` positions (required), normals and UVs when
 //! present, and `face` index lists, fan-triangulated so quad-dominant

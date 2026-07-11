@@ -303,8 +303,7 @@ mod bake {
     /// lobe: the Fresnel-weighted single-scatter albedo `E[F·G1]`, times
     /// the same multiple-scattering scale the kernel applies
     /// (`1 + Fms·(1−E)/E`, Fresnel-free `E`/`E_avg` with the analytic
-    /// average Fresnel). This is the layering weight's ground truth — bake
-    /// it
+    /// average Fresnel). This is the layering weight's ground truth, baked
     /// from the finished lobe so `1 − E_spec` closes the furnace.
     pub fn dielectric_albedo(rough: f32, mu: f32, eta: f32) -> f32 {
         let alpha = rough * rough;
