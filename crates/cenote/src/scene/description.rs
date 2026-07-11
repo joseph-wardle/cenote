@@ -342,7 +342,9 @@ impl Default for Material {
 
 impl Material {
     /// Every texture reference this material holds — validation walks
-    /// these, and prep will collect them for upload.
+    /// these, and prep collects them for upload. The same six slots, paired
+    /// with their texture usage, drive prep's collection and lowering; a new
+    /// textured parameter joins here, there, and `MaterialPatch`.
     pub(crate) fn textures(&self) -> impl Iterator<Item = &TextureRef> {
         [
             self.base_color.texture(),

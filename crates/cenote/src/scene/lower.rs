@@ -321,13 +321,6 @@ fn lower_material(
     warn: bool,
     indices: &BTreeMap<&texture::Key, u32>,
 ) -> Material {
-    // The collection pass walked every reference through the same
-    // `texture_key`, so these lookups cannot miss.
-    let slot = |reference: Option<&TextureRef>, usage: texture::Usage| -> u32 {
-        reference.map_or(TEXTURE_NONE, |reference| {
-            indices[&texture_key(reference, usage)]
-        })
-    };
     let base_color = constant_or(&source.base_color, [0.8; 3]);
     let metalness = constant_or(&source.base_metalness, 0.0);
     let specular_roughness = constant_or(&source.specular_roughness, 0.3);
@@ -379,13 +372,31 @@ fn lower_material(
     material.emission = acescg_from_rec709(Vec3::from(emission_color))
         * source.emission_luminance
         * Vec3::ONE.lerp(coat_color, coat_weight);
-    material.base_color_texture = slot(source.base_color.texture(), texture::Usage::Color);
-    material.specular_roughness_texture =
-        slot(source.specular_roughness.texture(), texture::Usage::Scalar);
-    material.metalness_texture = slot(source.base_metalness.texture(), texture::Usage::Scalar);
-    material.emission_texture = slot(source.emission_color.texture(), texture::Usage::Color);
-    material.opacity_texture = slot(source.geometry_opacity.texture(), texture::Usage::Scalar);
-    material.normal_texture = slot(source.geometry_normal.as_ref(), texture::Usage::Normal);
+    // Every textured slot resolves to its bindless index through the shared
+    // `textured_slots` list — the same list, in the same order, the
+    // collection pass keyed on, so a slot can't be collected under one
+    // usage and looked up under another (the lookup would panic). The
+    // collection pass walked every reference already, so these can't miss.
+    // The array pattern pins the count: a new slot won't compile until it
+    // is assigned a field here.
+    let [
+        base_color_texture,
+        metalness_texture,
+        specular_roughness_texture,
+        emission_texture,
+        opacity_texture,
+        normal_texture,
+    ] = textured_slots(source).map(|(reference, usage)| {
+        reference.map_or(TEXTURE_NONE, |reference| {
+            indices[&texture_key(reference, usage)]
+        })
+    });
+    material.base_color_texture = base_color_texture;
+    material.metalness_texture = metalness_texture;
+    material.specular_roughness_texture = specular_roughness_texture;
+    material.emission_texture = emission_texture;
+    material.opacity_texture = opacity_texture;
+    material.normal_texture = normal_texture;
     material
 }
 
@@ -413,8 +424,12 @@ fn texture_key(reference: &TextureRef, usage: texture::Usage) -> texture::Key {
     (reference.path.clone(), usage, srgb)
 }
 
-/// Every prep request a material makes, one per textured slot.
-fn texture_keys(material: &description::Material) -> impl Iterator<Item = texture::Key> {
+/// A material's textured slots paired with the texture usage each feeds,
+/// in a fixed order — the one list [`texture_keys`] (collection) and
+/// [`lower_material`] (lowering) share, so a slot can never be collected
+/// under one usage and lowered under another. `description`'s own
+/// `Material::textures` walks the same six slots for validation.
+fn textured_slots(material: &description::Material) -> [(Option<&TextureRef>, texture::Usage); 6] {
     [
         (material.base_color.texture(), texture::Usage::Color),
         (material.base_metalness.texture(), texture::Usage::Scalar),
@@ -426,8 +441,13 @@ fn texture_keys(material: &description::Material) -> impl Iterator<Item = textur
         (material.geometry_opacity.texture(), texture::Usage::Scalar),
         (material.geometry_normal.as_ref(), texture::Usage::Normal),
     ]
-    .into_iter()
-    .filter_map(|(reference, usage)| reference.map(|reference| texture_key(reference, usage)))
+}
+
+/// Every prep request a material makes, one per textured slot.
+fn texture_keys(material: &description::Material) -> impl Iterator<Item = texture::Key> {
+    textured_slots(material)
+        .into_iter()
+        .filter_map(|(reference, usage)| reference.map(|reference| texture_key(reference, usage)))
 }
 
 /// A textured material over a mesh with no authored UVs samples texel
