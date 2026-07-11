@@ -68,7 +68,7 @@ fn accumulated_demo_matches_golden() {
             .accumulate(&gpu, &scene, &mut film)
             .expect("accumulate");
     }
-    let actual = film.average(&gpu).expect("average");
+    let actual = film.beauty_average(&gpu).expect("average");
     compare_with_golden("demo-64spp", &actual);
 }
 

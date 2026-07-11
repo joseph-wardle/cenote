@@ -13,7 +13,7 @@
 //!   sample into the [`Film`]'s running sums. [`Renderer::resolve`] then
 //!   divides those sums by the sample count into a caller-owned linear
 //!   average — the estimator's current best image. The CLI resolves on the
-//!   host with [`Film::average`] and writes the batch EXR; the [`Session`]
+//!   host with [`Film::beauty_average`] and writes the batch EXR; the [`Session`]
 //!   resolves on the GPU into a published frame and hands it to a consumer's
 //!   [`Tonemap`] view transform. Batch output and the viewer's converged
 //!   image are the same estimator by construction — they share the film.
@@ -38,8 +38,8 @@
 //! contact darkening.
 //!
 //! [`Session`] wraps this progressive path in a render thread, so the viewer
-//! and the future Hydra delegate consume published frames without pacing the
-//! renderer to their own refresh — the actor that decouples the render loop.
+//! and a future scene-graph delegate consume published frames without pacing
+//! the renderer to their own refresh — the actor that decouples the render loop.
 
 mod session;
 mod tonemap;
@@ -255,7 +255,7 @@ impl Film {
     ///
     /// If the film has no samples — there is no average yet, so calling
     /// order is a programmer bug.
-    pub fn average(&self, gpu: &Context) -> Result<Vec<f32>> {
+    pub fn beauty_average(&self, gpu: &Context) -> Result<Vec<f32>> {
         assert!(self.samples > 0, "averaging an empty film");
         self.averaged(gpu, &self.beauty)
     }
@@ -424,7 +424,8 @@ impl Renderer {
     }
 
     /// [`Renderer::render`], minus the readback: the frame stays in the
-    /// returned GPU buffer.
+    /// returned GPU buffer. Backs [`Renderer::render`]; kept separate so a
+    /// future consumer can trace one-shot into a buffer without the download.
     ///
     /// # Errors
     ///
@@ -434,7 +435,7 @@ impl Renderer {
     ///
     /// On a zero-sized target — callers validate their inputs, so this is a
     /// programmer bug.
-    pub fn render_to_buffer(
+    pub(crate) fn render_to_buffer(
         &self,
         gpu: &Context,
         scene: &Scene,
@@ -1963,7 +1964,7 @@ mod tests {
         // The batch readback is those sums divided by the count — the same
         // f32 division on both sides, so agreement is again bitwise.
         let average: Vec<f32> = expected.iter().map(|sum| sum / 3.0).collect();
-        assert_eq!(film.average(&gpu).expect("average"), average);
+        assert_eq!(film.beauty_average(&gpu).expect("average"), average);
     }
 
     /// After a reset, the next sample overwrites the stale sums — that *is*

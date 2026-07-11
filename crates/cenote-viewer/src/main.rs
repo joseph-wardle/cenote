@@ -369,9 +369,9 @@ impl Viewer {
             .denoise()
             .then(|| self.denoise.display(frame))
             .flatten()
-            .unwrap_or_else(|| frame.image());
+            .unwrap_or_else(|| frame.beauty());
         #[cfg(not(feature = "denoise"))]
-        let average = frame.image();
+        let average = frame.beauty();
 
         self.tonemap
             .apply(

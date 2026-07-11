@@ -120,7 +120,7 @@ impl DenoiseView {
             let job = Job {
                 width: frame.width(),
                 height: frame.height(),
-                beauty: texels(&gpu.download_buffer(frame.image())?),
+                beauty: texels(&gpu.download_buffer(frame.beauty())?),
                 albedo: texels(&gpu.download_buffer(frame.albedo())?),
                 normal: texels(&gpu.download_buffer(frame.normal())?),
             };

@@ -141,9 +141,10 @@ pub struct Frame {
 }
 
 impl Frame {
-    /// The linear `ACEScg` average, ready for a [`super::Tonemap`] to read.
+    /// The linear `ACEScg` beauty average, ready for a [`super::Tonemap`]
+    /// to read.
     #[must_use]
-    pub fn image(&self) -> &Buffer {
+    pub fn beauty(&self) -> &Buffer {
         &self.buffers.beauty
     }
 

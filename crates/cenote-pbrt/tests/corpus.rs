@@ -109,7 +109,7 @@ fn corpus_renders_match_goldens() {
                 .accumulate(&gpu, &scene, &mut film)
                 .expect("accumulate");
         }
-        let actual = film.average(&gpu).expect("average");
+        let actual = film.beauty_average(&gpu).expect("average");
         compare_with_golden(name, width, height, &actual);
     }
 }
