@@ -1,14 +1,13 @@
 # Cenote
 
 A portable, GPU-first, interactive-progressive production path tracer built on Vulkan
-ray tracing, with GRIS/ReSTIR as its theoretical core. The defining thesis: **the
-interactive lookdev preview and the converged final frame are the same estimator** —
-no biased preview modes, no "final gather" switch. What the artist sees at one second
-is an honest prediction of the frame at one hour.
+ray tracing, with GRIS/ReSTIR as its theoretical core. An exploration into how ReSTIR 
+can benefit lookdev for offline rendering. What the artist sees at one second is an 
+honest prediction of the frame at one hour.
 
 Where CPU production renderers optimize for memory capacity on unbounded scenes,
 Cenote makes the inverse bet: extreme single-GPU performance on scenes that fit in
-VRAM. Wavefront compute + ray queries, one integrator, everything resident.
+VRAM.
 
 **Status: M2 complete** — the six-kernel wavefront engine
 (indirect dispatch, zero mid-frame readbacks), Sobol-Burley sampling, the
@@ -38,35 +37,27 @@ shading-normal or energy bug would show first.*
 
 ![Four crops of the same render at 1, 8, 64, and 512 samples per pixel, the noise resolving away left to right](docs/convergence.png)
 
-*The thesis in one strip: 1, 8, 64, and 512 spp are the same estimator —
-noise is the only difference between preview and final.*
+*1, 8, 64, and 512 spp*
 
 ## Next to pbrt-v4
 
 The importer's real test is a side-by-side. Below are the three
 regression-corpus scenes (Benedikt Bitterli's, CC0) imported and rendered
 by cenote, beside [pbrt-v4](https://github.com/mmp/pbrt-v4) rendering the
-same source files — two GPU renderers, one scene description, judged two
-ways. Both images take the same sRGB display transform, so what parts them
-is the renderers, not the tonemap.
+same source files. Both images take the same sRGB display transform.
 
 ![Cornell box, Veach MIS plates, and a glass teapot, each rendered by cenote and by pbrt-v4 at 64 samples per pixel](docs/pbrt-equal-samples.png)
 
-*Equal work — 64 samples per pixel. The images agree on everything that
-carries the scene: layout, materials, the light. Where they part is honest
-and expected. Cenote's `OpenPBR` conductor is not pbrt's spectral one, so
-the Veach plates catch the light a little differently. And cenote has no
-volumetric medium yet, so the teapot's tea — an absorbing medium under
-pbrt — pours as clear glass. pbrt reconstructs with a triangle filter where
-cenote uses a box, so at matched samples its per-pixel noise sits slightly
-lower.*
+*64 samples per pixel.  Cenote's `OpenPBR` conductor is not pbrt's spectral one, so
+the Veach plates catch the light a little differently. And cenote has no volumetric 
+medium yet, so the teapot's tea looks like plain glass. pbrt reconstructs with a 
+triangle filter where cenote uses a box, so at matched samples its per-pixel noise 
+sits slightly lower.*
 
 ![The same three scenes, each given about a quarter second of rendering: cenote resolves cleaner where pbrt-v4 still carries visible noise](docs/pbrt-equal-time.png)
 
 *Equal time — about a quarter second of rendering each, both on one RTX 4070
-Ti SUPER, with the ~0.5 s of one-time startup (Vulkan or OptiX init and the
-acceleration-structure build) set aside so the budget is the estimator, not
-the launch. In that quarter second cenote draws three to four times the
+Ti SUPER. In that quarter second cenote draws three to four times the
 samples — 46, 96, and 31 spp against pbrt's 12, 33, and 11 — and its grain is
 plainly the finer. The gap is throughput, not hardware: same GPU, same
 scene, same seconds.*
@@ -78,18 +69,11 @@ scene, same seconds.*
 | `teapot-full` | 1280×720 | 23.0 ms/spp | 8.0 ms/spp | 2.9× |
 
 *Steady-state cost per sample, both engines on one NVIDIA RTX 4070 Ti SUPER
-(pbrt-v4 through its OptiX wavefront back end). Startup — ~0.5 s each — is
-measured separately and excluded; this is the per-sample rate the equal-time
-figure divides that quarter second by.*
+(pbrt-v4 through its OptiX wavefront back end).*
 
 pbrt renders spectrally and writes linear `Rec.709`; cenote renders RGB in
-`ACEScg`. The comparison is perceptual — the same scene under the same
-light, not the same pixels. The reference is pbrt-v4 at
-[`5f7a606`](https://github.com/mmp/pbrt-v4/commit/5f7a606806a4ac7b939131ded9d7a30ebd02416e),
-the commit this importer's semantics were verified against; strict pbrt-v4
-wants a few spellings our lenient importer accepts without (`point3` for
-`point`, unquoted booleans, no retired `WorldEnd`), translated for the
-reference render only. These figures regenerate from a local pbrt build.
+`ACEScg`.The reference is pbrt-v4 at
+[`5f7a606`](https://github.com/mmp/pbrt-v4/commit/5f7a606806a4ac7b939131ded9d7a30ebd02416e).
 
 ## Quickstart
 
@@ -103,20 +87,6 @@ cargo run --release -p cenote-viewer -- scenes/example.ron   # open a scene file
 cargo run --release -p cenote-cli -- render --spp 256 --out shot.exr
 cargo run --release -p cenote-cli -- import scene.pbrt --out scene.ron   # pbrt-v4 in, cenote scene out
 ```
-
-The viewer accumulates forever and re-converges after every camera move. An
-opened scene file is watched: save an edit — a color, a transform, the
-lamp's brightness — and the viewer re-preps exactly what changed and
-re-converges. A save that doesn't parse (or that this build can't render
-yet) is logged and the previous scene keeps rendering.
-`cenote-cli render` takes a scene file too (`.ron`, or a `.pbrt` imported
-on the fly), accumulates `--spp` samples of the same estimator into the
-same film, and writes one multi-layer EXR — linear `ACEScg` beauty
-(chromaticities declared in the header), the denoiser's albedo and normal
-guides, and first-hit depth as `Z`; with `--watch` it re-renders on
-every shader edit, recompiling from the source checkout in under a second.
-`import` converts pbrt-v4 scenes, printing every fidelity warning —
-anything the importer drops or degrades is named, never silent.
 
 ### Denoising
 
@@ -137,10 +107,7 @@ The feature links the system OpenImageDenoise library. If your install has
 a pkg-config file the build finds it alone; otherwise point `OIDN_DIR` at a
 directory whose `lib/` contains `libOpenImageDenoise.so` — an extracted
 [official release](https://github.com/RenderKit/oidn/releases), or a
-symlink to your distro's versioned library (Fedora's `oidn-libs` ships only
-`libOpenImageDenoise.so.2`, so: `mkdir -p ~/.local/opt/oidn/lib && ln -s
-/usr/lib64/libOpenImageDenoise.so.2
-~/.local/opt/oidn/lib/libOpenImageDenoise.so`). Setting it once in
+symlink to your distro's versioned library (Setting it once in
 `~/.cargo/config.toml` covers every build:
 
 ```toml
