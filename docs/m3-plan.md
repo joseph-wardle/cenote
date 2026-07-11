@@ -68,10 +68,23 @@ than what it computes.
   dimension** (the slot `rng.slang` already reserves for a GRIS shift decision), and no
   stage accumulates a reservoir with atomics. Async submits would break this, which is
   precisely why the timeline-semaphore pass stays deferred (D-089/D-043).
-- **Reservoir memory**: ~16 B per pixel per buffer (sample = light-id + primitive +
-  barycentrics + the scalar reservoir fields), two buffers for temporal ping-pong plus
-  the spatial-pass pair, block-linear. Per-view, so a Hydra delegate driving N viewports
-  owns N sets — the ownership keyed by stable view identity, not delegate-global.
+- **Reservoir memory**: 24 B per pixel per buffer — the sample alone is light-id (4) +
+  primitive (4) + barycentrics (8) = 16 B (the `Hit` shape), and the reservoir adds its
+  two *persistent* scalars, the unbiased contribution weight W (4) and the confidence c
+  (4). (wSum is a pass-local register, never stored — see step-2 notes.) **Three buffers
+  per view** — prev/curr for the temporal ping-pong plus one scratch — laid out
+  **row-major linear**; Morton/tiled ordering is deferred, because it perturbs the
+  pixel↔slot mapping and so interacts with the determinism invariant. At 1080p that is
+  ~150 MB/view. Per-view, so a Hydra delegate driving N viewports owns N sets — the
+  ownership keyed by stable view identity, not delegate-global.
+- **View identity vs. generation**: the per-view ownership key is a stable *viewport*
+  identity — constant for the single viewer today, one per Hydra viewport later — **not**
+  the `RenderInputs.generation` counter. Generation bumps on every camera move, but the
+  view is the same view and its reservoirs must carry across the move (that carry *is* the
+  warm-start). So a camera move resets the film and carries the reservoirs under the same
+  view identity; a **resize** rebuilds the per-view state (pixel correspondence breaks);
+  only a genuinely new viewport mints a new identity. Generation stays the
+  camera-move/edit signal it already is.
 - **Stable light identity**: the current GPU light index is order-derived *and*
   power-filtered in `scene/lower.rs` ("name order", "a powerless light is skipped
   outright"), so it is volatile across edits. M3 adds a stable identity (the source name,

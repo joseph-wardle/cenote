@@ -55,6 +55,7 @@ pub mod material;
 pub mod output;
 mod ply;
 pub mod render;
+mod restir;
 pub mod scene;
 pub mod shaders;
 mod tables;
