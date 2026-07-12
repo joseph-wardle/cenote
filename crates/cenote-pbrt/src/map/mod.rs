@@ -246,8 +246,25 @@ impl Mapper {
 
     /// Walk the whole directive stream and close out the change-set.
     pub fn run(mut self) -> Result<(ChangeSet, Vec<String>)> {
+        // pbrt-v4 creates every named texture and material only once the
+        // world block is fully parsed, so a material may legally name a
+        // texture declared *later* in the file — watercolor does exactly
+        // this. We honor that deferral by buffering the directive stream
+        // and resolving every `Texture` in a first pass, before any
+        // material or shape can look one up. The buffer is bounded by the
+        // scene's source text; the heavy mesh data lives in external PLY
+        // files referenced by path, so holding the directives costs little.
+        let mut directives = Vec::new();
         while let Some(directive) = self.parser.next_directive()? {
-            self.dispatch(&directive)?;
+            directives.push(directive);
+        }
+        for directive in &directives {
+            if directive.keyword == "Texture" {
+                self.define_texture(directive)?;
+            }
+        }
+        for directive in &directives {
+            self.dispatch(directive)?;
         }
         if !self.in_world {
             return Err(Error::SceneFormat(
@@ -391,7 +408,9 @@ impl Mapper {
             "Material" => self.material_directive(directive)?,
             "MakeNamedMaterial" => self.make_named_material(directive)?,
             "NamedMaterial" => self.named_material(directive)?,
-            "Texture" => self.texture_directive(directive)?,
+            // Resolved in the pre-pass (see `run`); here only the block
+            // rule is enforced, in source order with the rest of the scene.
+            "Texture" => self.verify_block(directive, true)?,
             "Shape" => self.shape_directive(directive)?,
             "AreaLightSource" => self.area_light_directive(directive)?,
             "LightSource" => self.light_directive(directive)?,
@@ -1018,14 +1037,21 @@ impl Mapper {
 
     fn named_material(&mut self, directive: &Directive) -> Result<()> {
         self.verify_block(directive, true)?;
-        let name = &directive.names[0];
-        let patch = self.named_materials.get(name).ok_or_else(|| {
-            Error::SceneFormat(format!(
-                "{}: NamedMaterial \"{name}\" was never made",
+        let name = directive.names[0].clone();
+        if let Some(patch) = self.named_materials.get(&name).cloned() {
+            self.state.material = Some((name, patch));
+        } else {
+            // pbrt treats a reference to an undefined named material as a
+            // warning, not a fatal error, and falls back to the default
+            // material — watercolor names "BG", whose `MakeNamedMaterial`
+            // is commented out. Match that leniency: drop to the default
+            // (`state.material = None`) so the shapes in scope still render.
+            self.warn(format!(
+                "{}: NamedMaterial \"{name}\" was never made — the default material is used",
                 directive.location
-            ))
-        })?;
-        self.state.material = Some((name.clone(), patch.clone()));
+            ));
+            self.state.material = None;
+        }
         Ok(())
     }
 
@@ -1050,30 +1076,64 @@ impl Mapper {
                 );
                 patch.specular_weight = Some(0.0);
                 patch.coat_weight = Some(1.0);
-                patch.coat_ior = Some(self.dielectric_eta(directive)?);
-                patch.coat_roughness = Some(match self.roughness_slot(directive)? {
-                    Texturable::Constant(roughness) => roughness,
-                    Texturable::Texture(_) => {
-                        self.warn(format!(
-                            "{}: coat roughness cannot be textured — the coat imports smooth",
-                            directive.location
-                        ));
-                        0.0
-                    }
-                });
+                patch.coat_ior = Some(self.dielectric_eta(directive, "")?);
+                patch.coat_roughness = Some(self.coat_roughness(directive, "")?);
             }
-            "conductor" => {
+            // A dielectric coat over a conductor base — the same clear coat
+            // `coateddiffuse` wears, this time over the metal lobe
+            // (`metalness = 1`). pbrt names the two interfaces apart: the
+            // conductor reads `conductor.*`, the coat `interface.*`. The
+            // coat's scattering medium (`thickness`, `albedo`, `g`) has no
+            // analogue in OpenPBR's clear coat, so it falls to the
+            // unused-parameter backstop.
+            "coatedconductor" => {
                 patch.base_metalness = Some(Texturable::Constant(1.0));
-                patch.base_color = Some(self.conductor_color(directive)?);
-                patch.specular_roughness = Some(self.roughness_slot(directive)?);
+                patch.base_color = Some(self.conductor_color(directive, "conductor.")?);
+                patch.specular_roughness = Some(self.roughness_slot(directive, "conductor.")?);
+                patch.coat_weight = Some(1.0);
+                patch.coat_ior = Some(self.dielectric_eta(directive, "interface.")?);
+                patch.coat_roughness = Some(self.coat_roughness(directive, "interface.")?);
+            }
+            // `metal` is pbrt-v3's name for what v4 calls `conductor`, with
+            // the same `eta`/`k`/`roughness` parameters — import it as one.
+            "conductor" | "metal" => {
+                patch.base_metalness = Some(Texturable::Constant(1.0));
+                patch.base_color = Some(self.conductor_color(directive, "")?);
+                patch.specular_roughness = Some(self.roughness_slot(directive, "")?);
             }
             "dielectric" | "thindielectric" => {
                 patch.transmission_weight = Some(1.0);
-                patch.specular_ior = Some(self.dielectric_eta(directive)?);
+                patch.specular_ior = Some(self.dielectric_eta(directive, "")?);
                 if ty == "thindielectric" {
                     patch.geometry_thin_walled = Some(true);
                 } else {
-                    patch.specular_roughness = Some(self.roughness_slot(directive)?);
+                    patch.specular_roughness = Some(self.roughness_slot(directive, "")?);
+                }
+            }
+            // Lambertian reflection *and* transmission. OpenPBR's only
+            // transmission is specular glass, so import the reflective half
+            // as an ordinary diffuse — the dominant look for the fabric and
+            // paper that use it — and drop the transmitted half with a
+            // warning.
+            "diffusetransmission" => {
+                patch.base_color = Some(
+                    self.color_slot(directive, "reflectance")?
+                        .unwrap_or(Texturable::Constant([0.25; 3])),
+                );
+                patch.specular_weight = Some(0.0);
+                if directive
+                    .params
+                    .take(
+                        "transmittance",
+                        &["rgb", "color", "float", "spectrum", "texture"],
+                    )?
+                    .is_some()
+                {
+                    self.warn(format!(
+                        "{}: diffuse transmission has no OpenPBR lobe — imported as \
+                         opaque diffuse, the transmittance dropped",
+                        directive.location
+                    ));
                 }
             }
             other => {
@@ -1095,15 +1155,23 @@ impl Mapper {
     /// A conductor's F0: `reflectance` verbatim, `eta`/`k` through the
     /// normal-incidence formula (RGB values) or the named-metal table,
     /// copper — pbrt's own default — when nothing usable is given.
-    fn conductor_color(&mut self, directive: &Directive) -> Result<Texturable<[f32; 3]>> {
+    fn conductor_color(
+        &mut self,
+        directive: &Directive,
+        prefix: &str,
+    ) -> Result<Texturable<[f32; 3]>> {
         let params = &directive.params;
+        // pbrt namespaces a coated conductor's `eta`/`k` as `conductor.*`,
+        // but `reflectance` stays bare in both the plain and coated forms.
+        let eta_name = format!("{prefix}eta");
+        let k_name = format!("{prefix}k");
         if let Some(reflectance) = self.color_slot(directive, "reflectance")? {
             // pbrt refuses reflectance and eta/k together.
             if params
-                .take("eta", &["rgb", "color", "spectrum", "float", "texture"])?
+                .take(&eta_name, &["rgb", "color", "spectrum", "float", "texture"])?
                 .is_some()
                 || params
-                    .take("k", &["rgb", "color", "spectrum", "float", "texture"])?
+                    .take(&k_name, &["rgb", "color", "spectrum", "float", "texture"])?
                     .is_some()
             {
                 return Err(Error::SceneFormat(format!(
@@ -1113,8 +1181,8 @@ impl Mapper {
             }
             return Ok(reflectance);
         }
-        let eta = params.take("eta", &["rgb", "color", "spectrum", "float", "texture"])?;
-        let k = params.take("k", &["rgb", "color", "spectrum", "float", "texture"])?;
+        let eta = params.take(&eta_name, &["rgb", "color", "spectrum", "float", "texture"])?;
+        let k = params.take(&k_name, &["rgb", "color", "spectrum", "float", "texture"])?;
         let rgb_of = |param: Option<&crate::parse::Param>| -> Option<[f32; 3]> {
             let param = param?;
             if !matches!(param.ty.as_str(), "rgb" | "color") {
@@ -1150,10 +1218,10 @@ impl Mapper {
 
     /// The dielectric IOR: a float (or float-typed spectrum degenerates
     /// with a warning). pbrt's parameter name is `eta`, default 1.5.
-    fn dielectric_eta(&mut self, directive: &Directive) -> Result<f32> {
+    fn dielectric_eta(&mut self, directive: &Directive, prefix: &str) -> Result<f32> {
         let Some(param) = directive
             .params
-            .take("eta", &["float", "spectrum", "rgb", "color"])?
+            .take(&format!("{prefix}eta"), &["float", "spectrum", "rgb", "color"])?
         else {
             return Ok(1.5);
         };
@@ -1174,14 +1242,15 @@ impl Mapper {
     /// `roughness²`, so the value imports as the fourth root (square
     /// root when remapping is off). The curve can't ride a texture, so
     /// textured roughness imports as-is with a warning.
-    fn roughness_slot(&mut self, directive: &Directive) -> Result<Texturable<f32>> {
+    fn roughness_slot(&mut self, directive: &Directive, prefix: &str) -> Result<Texturable<f32>> {
         let params = &directive.params;
         let remap = params.boolean("remaproughness")?.unwrap_or(true);
-        let mut roughness = self.float_slot(directive, "roughness")?;
-        let anisotropic: Vec<Texturable<f32>> = ["uroughness", "vroughness"]
-            .iter()
-            .filter_map(|name| self.float_slot(directive, name).transpose())
-            .collect::<Result<_>>()?;
+        let mut roughness = self.float_slot(directive, &format!("{prefix}roughness"))?;
+        let anisotropic: Vec<Texturable<f32>> =
+            [format!("{prefix}uroughness"), format!("{prefix}vroughness")]
+                .iter()
+                .filter_map(|name| self.float_slot(directive, name).transpose())
+                .collect::<Result<_>>()?;
         if !anisotropic.is_empty() {
             self.warn(format!(
                 "{}: anisotropic roughness is not supported — the axes are averaged",
@@ -1214,6 +1283,23 @@ impl Mapper {
                     directive.location
                 ));
                 Texturable::Texture(reference)
+            }
+        })
+    }
+
+    /// The coat's GGX roughness as a scalar. `OpenPBR`'s coat lobe can't
+    /// carry a texture, so a textured slot imports smooth with a warning.
+    /// `prefix` picks the parameter namespace: `""` for `coateddiffuse`'s
+    /// bare `roughness`, `"interface."` for `coatedconductor`'s coat.
+    fn coat_roughness(&mut self, directive: &Directive, prefix: &str) -> Result<f32> {
+        Ok(match self.roughness_slot(directive, prefix)? {
+            Texturable::Constant(roughness) => roughness,
+            Texturable::Texture(_) => {
+                self.warn(format!(
+                    "{}: coat roughness cannot be textured — the coat imports smooth",
+                    directive.location
+                ));
+                0.0
             }
         })
     }
@@ -1357,8 +1443,11 @@ impl Mapper {
         })
     }
 
-    fn texture_directive(&mut self, directive: &Directive) -> Result<()> {
-        self.verify_block(directive, true)?;
+    /// Resolve one `Texture` directive into the flat named-texture map.
+    /// Called from the pre-pass in [`run`], where the world block hasn't
+    /// been entered yet — the block rule is enforced separately, when
+    /// `dispatch` reaches the directive in source order.
+    fn define_texture(&mut self, directive: &Directive) -> Result<()> {
         let name = directive.names[0].clone();
         let class = directive.names[2].clone();
         if self.named_textures.contains_key(&name) {
@@ -1842,6 +1931,140 @@ Translate 1 0 0
                 );
             },
         );
+    }
+
+    /// pbrt-v4 defers texture creation to after the world block is parsed,
+    /// so a material may name a texture declared *later* in the file —
+    /// watercolor does. The pre-pass in [`Mapper::run`] resolves every
+    /// texture before any material looks one up, so the forward reference
+    /// lands on the real image rather than failing "was never declared".
+    #[test]
+    fn a_material_may_name_a_texture_declared_later() {
+        let world = format!(
+            "MakeNamedMaterial \"planks\" \"string type\" \"diffuse\" \
+             \"texture reflectance\" \"wood\"\n\
+             NamedMaterial \"planks\"\n{TRIANGLE}\n\
+             Texture \"wood\" \"spectrum\" \"imagemap\" \"string filename\" \"wood.png\"\n"
+        );
+        import_files(
+            "forward-texture",
+            &[
+                ("scene.pbrt", &world_scene(&world)),
+                ("wood.png", "not-a-real-png"),
+            ],
+            |set, _| {
+                let planks = material(set, "planks");
+                match &planks.base_color {
+                    Some(Texturable::Texture(reference)) => {
+                        assert!(reference.path.ends_with("wood.png"), "{reference:?}");
+                    }
+                    other => panic!("expected the later-declared texture, got {other:?}"),
+                }
+            },
+        );
+    }
+
+    /// pbrt treats a reference to an undefined named material as a warning
+    /// and falls back to the default material, not a fatal error —
+    /// watercolor names "BG", whose `MakeNamedMaterial` is commented out.
+    /// The import must survive it, and the shape lands on `pbrt-default`.
+    #[test]
+    fn an_undefined_named_material_falls_back_to_the_default() {
+        let world = format!("NamedMaterial \"ghost\"\n{TRIANGLE}\n");
+        import_world("dangling-material", &world, |set, warnings| {
+            let placed = instances(set);
+            assert_eq!(placed.len(), 1);
+            assert_eq!(placed[0].material.as_deref(), Some("pbrt-default"));
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning.contains("ghost") && warning.contains("never made")),
+                "{warnings:?}"
+            );
+        });
+    }
+
+    /// A `coatedconductor` maps to a metal base (`metalness = 1`, F0 from
+    /// the named-metal table) under `OpenPBR`'s clear coat (`coat_weight =
+    /// 1`) — the same coat `coateddiffuse` wears — rather than falling to
+    /// the gray default. The conductor reads `conductor.*`, the coat
+    /// `interface.*`.
+    #[test]
+    fn coated_conductor_wears_a_clear_coat_over_metal() {
+        let world = format!(
+            "MakeNamedMaterial \"gold\" \"string type\" \"coatedconductor\" \
+             \"spectrum conductor.eta\" \"metal-Au-eta\" \
+             \"spectrum conductor.k\" \"metal-Au-k\" \
+             \"float conductor.roughness\" [ 0.1 ] \
+             \"float interface.roughness\" [ 0.0 ]\n\
+             NamedMaterial \"gold\"\n{TRIANGLE}\n"
+        );
+        import_world("coated-conductor", &world, |set, _| {
+            let gold = material(set, "gold");
+            assert_eq!(gold.base_metalness, Some(Texturable::Constant(1.0)));
+            assert_eq!(gold.coat_weight, Some(1.0));
+            match gold.base_color {
+                Some(Texturable::Constant(f0)) => {
+                    let expected = named_metal_f0("metal-Au-eta").expect("gold in the table");
+                    assert!(
+                        f0.iter().zip(expected).all(|(&a, b)| (a - b).abs() < 1e-6),
+                        "expected the gold F0 {expected:?}, got {f0:?} (not the gray default)"
+                    );
+                }
+                ref other => panic!("expected the gold F0, got {other:?}"),
+            }
+        });
+    }
+
+    /// `OpenPBR` has no diffuse-transmission lobe, so `diffusetransmission`
+    /// imports as an opaque diffuse carrying its `reflectance`; the
+    /// transmitted half is dropped with a warning.
+    #[test]
+    fn diffuse_transmission_imports_as_opaque_diffuse() {
+        let world = format!(
+            "MakeNamedMaterial \"leaf\" \"string type\" \"diffusetransmission\" \
+             \"rgb reflectance\" [ 0.8 0.6 0.2 ] \"rgb transmittance\" [ 0.1 0.1 0.1 ]\n\
+             NamedMaterial \"leaf\"\n{TRIANGLE}\n"
+        );
+        import_world("diffuse-transmission", &world, |set, warnings| {
+            let leaf = material(set, "leaf");
+            assert_eq!(leaf.base_color, Some(Texturable::Constant([0.8, 0.6, 0.2])));
+            assert_eq!(leaf.specular_weight, Some(0.0));
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning.contains("diffuse transmission")
+                        && warning.contains("dropped")),
+                "{warnings:?}"
+            );
+        });
+    }
+
+    /// pbrt-v3's `metal` is v4's `conductor` under an older name; it
+    /// imports as a full metal (`metalness = 1`, F0 from its `eta`/`k`),
+    /// not the gray default.
+    #[test]
+    fn v3_metal_imports_as_a_conductor() {
+        let world = format!(
+            "MakeNamedMaterial \"chrome\" \"string type\" \"metal\" \
+             \"rgb eta\" [ 1.65 0.88 0.52 ] \"rgb k\" [ 9.2 6.26 4.83 ] \
+             \"float roughness\" [ 0.005 ]\n\
+             NamedMaterial \"chrome\"\n{TRIANGLE}\n"
+        );
+        import_world("v3-metal", &world, |set, _| {
+            let chrome = material(set, "chrome");
+            assert_eq!(chrome.base_metalness, Some(Texturable::Constant(1.0)));
+            match chrome.base_color {
+                Some(Texturable::Constant(f0)) => {
+                    let expected = conductor_f0([1.65, 0.88, 0.52], [9.2, 6.26, 4.83]);
+                    assert!(
+                        f0.iter().zip(expected).all(|(&a, b)| (a - b).abs() < 1e-6),
+                        "expected the eta/k conductor F0 {expected:?}, got {f0:?}"
+                    );
+                }
+                ref other => panic!("expected a conductor F0, got {other:?}"),
+            }
+        });
     }
 
     fn world_scene(world: &str) -> String {
