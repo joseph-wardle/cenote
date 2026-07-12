@@ -27,9 +27,10 @@
 //!    *reflective* (Tungsten-converted exports bake their handedness fix
 //!    there) already project right-handed, and get the identity instead —
 //!    see [`FLIP_Z`]. `ReverseOrientation` XOR a handedness-swapping
-//!    `CTM` flips authored normals and winding, per pbrt's rule; emission
-//!    *sidedness* is the one honest divergence (cenote emitters are
-//!    two-sided) and is warned, once, with a count.
+//!    `CTM` flips authored normals and winding, per pbrt's rule. cenote
+//!    emitters are one-sided like pbrt's default, so the honest divergence
+//!    is the other way: a pbrt `twosided` area light is warned, once, with
+//!    a count.
 //! 5. **Octahedral skies** resample to cenote's equirect at import
 //!    ([`crate::env`]), orientation and photometric scale baked in.
 //!
@@ -603,10 +604,14 @@ impl Mapper {
                     ))
                 })?;
                 let path = self.parser.resolve(file);
-                if flip {
+                // Under two-sided shading the flip is invisible for a
+                // reflective mesh, so it only costs anything when the mesh
+                // emits: emission is one-sided (winding-front), and a PLY's
+                // winding can't be reversed at import. Warn only there.
+                if flip && self.state.area_light.is_some() {
                     self.warn(format!(
-                        "{}: ReverseOrientation on a plymesh is ignored (cenote shades \
-                         and emits two-sided)",
+                        "{}: ReverseOrientation on an emissive plymesh is ignored — it \
+                         emits from the winding-front face, which may be the wrong side",
                         directive.location
                     ));
                 }
@@ -1834,6 +1839,31 @@ Translate 1 0 0
             // …and a handedness-swapping transform cancels it.
             assert_eq!(cancelled, 1.0);
             assert_eq!(cancelled_winding, [0, 1, 2]);
+        });
+    }
+
+    /// A PLY's winding can't be reversed at import, so `ReverseOrientation`
+    /// is dropped either way — but under two-sided shading that's invisible
+    /// for a reflective mesh, and only the emitter (one-sided) loses a face.
+    /// Warn there and stay silent on the reflective mesh.
+    #[test]
+    fn reverse_orientation_on_a_plymesh_warns_only_when_it_emits() {
+        let world = "\
+            AttributeBegin\n\
+              ReverseOrientation\n\
+              AreaLightSource \"diffuse\" \"rgb L\" [1 1 1]\n\
+              Shape \"plymesh\" \"string filename\" \"emitter.ply\"\n\
+            AttributeEnd\n\
+            AttributeBegin\n\
+              ReverseOrientation\n\
+              Shape \"plymesh\" \"string filename\" \"plain.ply\"\n\
+            AttributeEnd\n";
+        import_world("plymesh-reverse", world, |_, warnings| {
+            let hits = warnings
+                .iter()
+                .filter(|warning| warning.contains("emissive plymesh is ignored"))
+                .count();
+            assert_eq!(hits, 1, "warnings: {warnings:?}");
         });
     }
 
