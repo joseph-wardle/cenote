@@ -12,7 +12,11 @@ boundaries, naming, and observability, and amended (see §1b). Parent scope is c
 + spatial reuse; convergence policy v1; validation harness." Decisions D-085…D-092 in
 [decisions.md](decisions.md) carry the full rationale; this file is the working plan.
 Everything consciously *not* built lives in [deferrals.md](deferrals.md) with its
-revival trigger.*
+revival trigger. A second, adversarial research pass (2026-07-11) re-derived the step-3
+sizing independently against those same three renderers and the RTXDI/GRIS reference
+line; it confirmed the scope and added two cheap correctness tripwires — a white-furnace
+energy check and an explicit support-coverage guard on the unshadowed target — folded
+into §2/§6/§7 below.*
 
 Two framing notes the research settled, because they govern every choice below:
 
@@ -94,7 +98,13 @@ than what it computes.
 - **Target function**: p̂ = luminance(f·L·cosθ), unshadowed, evaluated over the full
   OpenPBR closure (the D-070 one-sample-MIS lobe machinery already gives a combined
   BSDF value). Luminance (not the RGB vector) keeps the reservoir scalar-weighted; the
-  colour is recovered exactly at resolve where f·L·cosθ is evaluated for real.
+  colour is recovered exactly at resolve where f·L·cosθ is evaluated for real. Because
+  the target is **unshadowed** (visibility deferred to resolve), the RIS estimator is
+  unbiased only if some candidate covers the full support of f — the standard
+  canonical-sample condition. The power-alias table (every emitter) plus the BSDF
+  candidate cover it by construction; step 3 makes that explicit with a **support-coverage
+  assert**, so a later candidate-budget edit cannot silently drop coverage and bias the
+  mean — one of the two subtlest traps the reference course flags to bake in early.
 - **Continuation ray**: after `restir_resolve` shades the primary-hit direct term, the
   path continues as an ordinary BSDF-sampled indirect ray into `intersect` — with
   first-hit emission suppressed on that ray, because the emitter it might hit is already
@@ -165,11 +175,14 @@ pass on the GPU machine, committed.
    and round-trip per view; a light add/delete remaps without touching reservoir
    history. The riskiest step — see §6.*
 3. **Initial RIS + resolve + debug surface** — `restir_candidates` (alias-table
-   candidates + BSDF candidate, WRS, one shadow ray on the survivor) and
-   `restir_resolve` (shade survivor, continuation ray with emission suppression);
-   primary-hit NEE moves out of `shade_surface`; delta lights stay on exact NEE; the
-   §D-092 debug views land here. *Checkpoint: single-frame RIS matches brute-force in
-   expectation — the unbiasedness gate — and you can false-colour the selected light.*
+   candidates + internalized BSDF candidate, count-weighted balance heuristic, WRS,
+   selection on the *unshadowed* target) and `restir_resolve` (the survivor's single
+   visibility shadow ray, shade, then the continuation ray with emission suppression);
+   primary-hit NEE moves out of `shade_surface`; delta lights stay on exact additive
+   NEE; the §D-092 debug views (W heatmap, selected-light-id, ReSTIR on/off) land here.
+   *Checkpoint: single-frame RIS matches brute-force in expectation — the unbiasedness
+   gate — the white-furnace scene stays energy-neutral, and you can false-colour the
+   selected light.*
 4. **Spatial reuse** — `restir_spatial`: k-neighbour gather from the committed
    prior-pass buffer, defensive pairwise MIS, ray-traced visibility bias correction.
    *Checkpoint: spatial-only converges to ground truth; first convergence curves.*
@@ -216,7 +229,13 @@ mid-step: (1) the §D-092 debug surface lands *with* the first estimator (step 3
 after, so every later step is inspectable; (2) the unbiasedness gate — ReSTIR-on vs
 ReSTIR-off to the same image — runs from step 3 onward, not just at the end; (3) the
 Jacobian-1 invariant (D-087) is guarded by construction — the reservoir stores the
-surface point, so no Jacobian term can be silently dropped. The **correlation floor**
+surface point, so no Jacobian term can be silently dropped. A fourth, cheaper defence
+sits in front of all three: a **white-furnace scene** (albedo-1 surface under a uniform
+unit emitter) that must render energy-neutral — it fails fast on a missing π, a
+factor-of-2, or MIS weights that do not sum to 1 (the exact silent-bias class) without
+waiting for a 4096-spp FLIP run, and paired with the unshadowed-target
+**support-coverage assert** (§2) it turns two of the subtlest bias traps into loud
+failures. The **correlation floor**
 is the expected step-4/5 incident: reuse makes frames correlated, so they average slower
 than 1/N and the residual is blotchy, not grainy — the pre-agreed answer is the
 converged-still contract (spatial-only fresh-RNG, D-085), and if it still bites, the
@@ -230,6 +249,9 @@ step 2 commits to it.
 - `cenote-cli render many-lights.ron --spp 4096` and the same scene with ReSTIR
   disabled converge to the same image (FLIP under threshold) — the unbiasedness gate,
   in CI on the GPU machine.
+- The white-furnace scene renders energy-neutral (a cheap, always-on bias tripwire that
+  fails fast before the FLIP gate), and the unshadowed-target support-coverage assert
+  holds — the two additions guarding the silent-bias class §6 names.
 - Viewer: open the many-light scene, orbit — the preview warm-starts through the move
   and re-converges on hold; toggle each reuse stage and the debug views live; the frame
   stops pinning the GPU once settled.

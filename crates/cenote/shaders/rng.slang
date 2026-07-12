@@ -46,6 +46,49 @@ public uint bounceDimension(uint bounce, uint slot) {
     return PATH_BASE + bounce * BOUNCE_SLOTS + slot;
 }
 
+// ReSTIR initial-RIS candidate dimensions. The reservoir streams M light
+// candidates at the primary hit, each needing its own light-selection,
+// point-on-light, and reservoir-acceptance draws. They sit in a dedicated high
+// block, clear of the per-bounce path dimensions above — the bounce-0 scatter
+// shares this same vertex, and the M candidates must not correlate with it.
+// Candidate c's slot s is `restirCandidateDimension(c, s)`.
+public static const uint RESTIR_BASE = 256;
+static const uint RESTIR_SLOTS = 4;   // 3 named + 1 reserved
+public static const uint RESTIR_LIGHT = 0; // environment vs the list, and which light
+public static const uint RESTIR_POINT = 1; // point on the light, or env texel (2D)
+public static const uint RESTIR_ACCEPT = 2; // reservoir stream acceptance
+
+public uint restirCandidateDimension(uint candidate, uint slot) {
+    return RESTIR_BASE + candidate * RESTIR_SLOTS + slot;
+}
+
+// The one internalized BSDF-sampled candidate (D-088). It draws a scattered
+// direction from the closure and reconnects to whatever light that direction
+// reaches, so it needs a lobe pick, a 2D direction, and its own reservoir
+// acceptance — its own dedicated slots, distinct from both the bounce-0
+// continuation scatter (or it would just re-trace the same ray) and every light
+// candidate above. Fixed base, clear of the M-candidate block for M up to 64,
+// so growing M never shifts it.
+public static const uint RESTIR_BSDF_BASE = 512;
+public static const uint RESTIR_BSDF_LOBE = 0;   // which technique scatters
+public static const uint RESTIR_BSDF_DIR = 1;    // scattered direction (2D: slots 1,2)
+public static const uint RESTIR_BSDF_ACCEPT = 3; // reservoir stream acceptance
+
+public uint restirBsdfDimension(uint slot) {
+    return RESTIR_BSDF_BASE + slot;
+}
+
+// The one delta-light next-event draw `restir_resolve` adds outside the
+// reservoir (D-088): a single selection of a delta light ∝ power. A delta light
+// is a point or a direction, so its connection has no positional sampling — one
+// 1D draw picks the light and that is the whole sample. Fixed, immediately past
+// the BSDF block (which owns slots 0..3), so neither shifts the other.
+public static const uint RESTIR_DELTA = RESTIR_BSDF_BASE + 4;
+
+public uint restirDeltaDimension() {
+    return RESTIR_DELTA;
+}
+
 // -- Implementation ----------------------------------------------------
 
 // Generator-matrix columns of the Sobol sequence's second dimension, one

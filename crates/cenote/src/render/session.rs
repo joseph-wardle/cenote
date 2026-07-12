@@ -55,9 +55,9 @@ use std::time::{Duration, Instant};
 
 use ash::vk;
 
-use super::{Film, Renderer, ResolveTargets};
+use super::{DebugView, Film, RenderMode, Renderer, ResolveTargets};
 use crate::error::{Error, Result};
-use crate::gpu::{Buffer, Context, MemoryLocation};
+use crate::gpu::{Buffer, Context, MemoryLocation, Pass};
 use crate::scene::changeset::{ChangeSet, Dirty, Kind};
 use crate::scene::description::SceneDescription;
 use crate::scene::{Camera, Scene};
@@ -87,6 +87,15 @@ struct RenderInputs {
     /// the new camera and restarts accumulation — the threaded equivalent of
     /// the single-threaded viewer's `Film::reset`.
     generation: u64,
+    /// Which estimator owns the primary hit's direct lighting. The viewer's
+    /// `ReSTIR` toggle writes it; the render thread adopts a change and
+    /// restarts accumulation (the two estimators converge to the same image,
+    /// so this keeps an A/B switch crisp rather than mixing them).
+    render_mode: RenderMode,
+    /// The D-092 debug view to false-colour, or [`DebugView::Off`]. Flows
+    /// straight into each sample — the debug surface is single-shot and live,
+    /// so a change needs no accumulation restart.
+    debug_view: DebugView,
     /// Cleared to stop the thread; checked at the top of every iteration.
     running: bool,
 }
@@ -121,6 +130,10 @@ struct FrameBuffers {
     albedo: Buffer,
     normal: Buffer,
     depth: Buffer,
+    /// The D-092 debug false-colour, copied from the film's single-shot debug
+    /// buffer at publish. Untouched (and unread) unless a [`DebugView`] is
+    /// active; the viewer presents it in place of `beauty` when it is.
+    debug: Buffer,
 }
 
 /// A published frame: the estimator's current best image as a **linear**
@@ -166,6 +179,14 @@ impl Frame {
     #[must_use]
     pub fn depth(&self) -> &Buffer {
         &self.buffers.depth
+    }
+
+    /// The `ReSTIR` debug false-colour (RGBA f32) — meaningful only when the
+    /// frame was published with a [`DebugView`] active. Already display-ready:
+    /// present it through the tonemap's passthrough, not the tone curve.
+    #[must_use]
+    pub fn debug(&self) -> &Buffer {
+        &self.buffers.debug
     }
 
     /// Width in pixels.
@@ -228,6 +249,8 @@ impl Session {
                 camera,
                 size: (width, height),
                 generation: 0,
+                render_mode: RenderMode::PathTracer,
+                debug_view: DebugView::Off,
                 running: true,
             }),
             edits: Mutex::new(Vec::new()),
@@ -238,7 +261,7 @@ impl Session {
             let lanes = Arc::clone(&lanes);
             std::thread::Builder::new()
                 .name("cenote-render".into())
-                .spawn(move || render_loop(&gpu, description, scene, &renderer, &lanes))
+                .spawn(move || render_loop(&gpu, description, scene, renderer, &lanes))
                 .expect("spawning the render thread")
         };
         Self {
@@ -259,6 +282,36 @@ impl Session {
         let mut inputs = self.lanes.inputs.lock().expect("inputs mutex poisoned");
         inputs.camera = camera;
         inputs.generation += 1;
+    }
+
+    /// Switch the primary-hit estimator — the viewer's `ReSTIR` toggle. The
+    /// render thread adopts the change at the next wave boundary and restarts
+    /// accumulation, so an A/B flip shows one estimator at a time.
+    ///
+    /// # Panics
+    ///
+    /// If the render thread panicked while holding the input lock.
+    pub fn set_render_mode(&self, mode: RenderMode) {
+        self.lanes
+            .inputs
+            .lock()
+            .expect("inputs mutex poisoned")
+            .render_mode = mode;
+    }
+
+    /// Select the D-092 debug view the render thread false-colours (or
+    /// [`DebugView::Off`]). The debug surface is single-shot, so the change is
+    /// live on the next published frame without restarting accumulation.
+    ///
+    /// # Panics
+    ///
+    /// If the render thread panicked while holding the input lock.
+    pub fn set_debug_view(&self, view: DebugView) {
+        self.lanes
+            .inputs
+            .lock()
+            .expect("inputs mutex poisoned")
+            .debug_view = view;
     }
 
     /// Note a new render-target size; the render thread rebuilds its film to
@@ -417,7 +470,7 @@ fn render_loop(
     gpu: &Context,
     mut description: SceneDescription,
     mut scene: Scene,
-    renderer: &Renderer,
+    mut renderer: Renderer,
     lanes: &Lanes,
 ) -> Result<()> {
     log::debug!("render thread started");
@@ -428,6 +481,9 @@ fn render_loop(
     let mut target: Option<(Film, [Arc<FrameBuffers>; 2])> = None;
     let mut applied_size = (0, 0);
     let mut applied_generation = 0;
+    // Which estimator is in the renderer, so a viewer toggle restarts
+    // accumulation on the switch (matching `Session::new`'s default).
+    let mut applied_render_mode = RenderMode::PathTracer;
     let mut last_publish: Option<Instant> = None;
     // Dirt whose re-prep was rejected (this build can't render the edited
     // description). It survives here so the *next* applied edit retries the
@@ -475,6 +531,17 @@ fn render_loop(
             film.reset();
             applied_generation = input.generation;
         }
+        // The estimator switch restarts accumulation (the two converge to the
+        // same image, so this keeps an A/B flip from mixing them). The debug
+        // view is single-shot and live, so it just flows into the next sample.
+        if input.render_mode != applied_render_mode {
+            log::debug!("render mode adopted; accumulation restarts");
+            renderer.set_render_mode(input.render_mode);
+            applied_render_mode = input.render_mode;
+            film.reset();
+            last_publish = None;
+        }
+        renderer.set_debug_view(input.debug_view);
 
         let started = Instant::now();
         renderer.accumulate(gpu, &scene, film)?;
@@ -496,6 +563,17 @@ fn render_loop(
                     depth: &free.depth,
                 },
             )?;
+            // The debug surface isn't a film accumulation channel — it's a
+            // single-shot buffer the wave just wrote — so it's lifted into the
+            // frame slot by a plain copy rather than a resolve. Only when a view
+            // is active (then `accumulate` allocated the film's debug buffer).
+            if let Some(debug) = renderer.debug_buffer(film) {
+                gpu.submit_passes(&[Pass::CopyBuffer {
+                    src: debug,
+                    dst: &free.debug,
+                    size: u64::from(width) * u64::from(height) * 16,
+                }])?;
+            }
             let frame = Frame {
                 buffers: Arc::clone(free),
                 width,
@@ -589,6 +667,13 @@ fn publish_buffers(gpu: &Context, width: u32, height: u32) -> Result<[Arc<FrameB
             albedo: buffer("session.frame.albedo", texels * 16)?,
             normal: buffer("session.frame.normal", texels * 16)?,
             depth: buffer("session.frame.depth", texels * 4)?,
+            // Also a copy target for the film's debug buffer at publish.
+            debug: gpu.create_buffer(
+                "session.frame.debug",
+                texels * 16,
+                usage | vk::BufferUsageFlags::TRANSFER_DST,
+                MemoryLocation::GpuOnly,
+            )?,
         }))
     };
     Ok([slot()?, slot()?])

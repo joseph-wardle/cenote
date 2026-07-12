@@ -17,7 +17,15 @@
 //! {sample, `unbiasedWeight`, confidence} — `weightSum` is pass-local and never
 //! stored, the one invariant `reservoir.slang` documents at length.
 
+use ash::vk;
 use bytemuck::{Pod, Zeroable};
+
+use crate::error::Result;
+use crate::gpu::{Buffer, Context};
+use crate::lights::LightRecord;
+
+pub(crate) use identity::{EmissiveLight, LightIdentityRegistry};
+use identity::LightRemap;
 
 /// The DI reservoir's concrete sample — the host mirror of `DirectLightSample`
 /// in `shaders/reservoir_di.slang`. A light surface point in the re-evaluable
@@ -57,6 +65,138 @@ pub struct StoredReservoir {
 // field *offsets* agree, which sizes alone cannot.
 const _: () = assert!(size_of::<DirectLightSample>() == 16);
 const _: () = assert!(size_of::<StoredReservoir>() == 24);
+
+/// The GPU mirror of `struct RestirScene` in `shaders/restir_scene.slang`: the
+/// reservoir path's own scene slice — the triangle-only candidate light table,
+/// the environment coin-flip probability, and the stable-identity remap — behind
+/// one address the two initial-RIS stages carry beside the shared `SceneTable`.
+/// Kept off `SceneTable` so the rest of the wavefront, which neither has nor
+/// needs it, keeps its push constants small.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct RestirSceneTable {
+    candidate_lights: vk::DeviceAddress,
+    /// Candidate-table length; the environment is the coin-flip partner, not a
+    /// row (D-088).
+    light_count: u32,
+    /// p(a candidate is the environment) = env / (env + triangle power) — the
+    /// triangle-only companion to `SceneTable.env_select_prob`, undiluted by the
+    /// delta lights the reservoir excludes.
+    env_select_prob: f32,
+    instance_to_id: vk::DeviceAddress,
+    id_to_instance: vk::DeviceAddress,
+    /// The delta-only power-alias table (`lights::delta_table`) — the distant
+    /// and point lights the reservoir excludes (D-088), added on exact NEE by
+    /// `restir_resolve`.
+    delta_lights: vk::DeviceAddress,
+    /// Delta-table length; 0 leaves the padded record below unread, exactly as
+    /// `light_count` guards the candidate table.
+    delta_count: u32,
+    _pad0: u32,
+}
+
+// Two u32 scalars fill the gap between the leading pointer and the next, so the
+// layout is tight — mirrored field for field in restir_scene.slang.
+const _: () = assert!(size_of::<RestirSceneTable>() == 48);
+
+/// The reservoir path's resident scene buffers, held to keep them alive while
+/// the two restir stages reach them through [`RestirResources::table`]'s
+/// addresses. Rebuilt whenever a light edit churns the candidate table or the
+/// identity remap, exactly as the shared scene table is.
+pub(crate) struct RestirResources {
+    // Reached only by GPU address, through `table`; held for residency.
+    #[expect(dead_code, reason = "resident, reached by address via the table")]
+    candidate_lights: Buffer,
+    #[expect(dead_code, reason = "resident, reached by address via the table")]
+    instance_to_id: Buffer,
+    #[expect(dead_code, reason = "resident, reached by address via the table")]
+    id_to_instance: Buffer,
+    #[expect(dead_code, reason = "resident, reached by address via the table")]
+    delta_lights: Buffer,
+    /// The uploaded [`RestirSceneTable`] the two restir stages point at.
+    table: Buffer,
+}
+
+impl RestirResources {
+    /// The `RestirScene` table address, for the restir stages' push constants.
+    pub(crate) fn table(&self) -> &Buffer {
+        &self.table
+    }
+
+    /// Build the reservoir path's resident scene slice: upload the candidate
+    /// table, the delta-only table, the two remap tables, and the
+    /// [`RestirSceneTable`] naming them. `env_select_prob` is the triangle-only
+    /// environment coin-flip probability.
+    ///
+    /// # Errors
+    ///
+    /// Any [`crate::Error`] from buffer creation.
+    pub(crate) fn upload(
+        gpu: &Context,
+        candidate_table: &[LightRecord],
+        delta_table: &[LightRecord],
+        remap: &LightRemap,
+        env_select_prob: f32,
+    ) -> Result<Self> {
+        let usage =
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
+        // Vulkan forbids empty buffers; an environment-only scene has no
+        // triangle candidates, so it uploads one zeroed record the kernels
+        // never read (the table says count 0).
+        let padded = [LightRecord::zeroed()];
+        let candidate_lights = gpu.upload_buffer(
+            "restir.candidates",
+            bytemuck::cast_slice(if candidate_table.is_empty() {
+                &padded
+            } else {
+                candidate_table
+            }),
+            usage,
+        )?;
+        // The delta lights, uploaded the same way: a scene with none uploads the
+        // zeroed placeholder the kernel never reads (the table says count 0).
+        let delta_lights = gpu.upload_buffer(
+            "restir.deltas",
+            bytemuck::cast_slice(if delta_table.is_empty() {
+                &padded
+            } else {
+                delta_table
+            }),
+            usage,
+        )?;
+        // Both remap tables are non-empty for any non-empty scene: `instance_to_id`
+        // sizes to the instance count, `id_to_instance` to the reserved-plus-minted
+        // id block (at least the environment sentinel's slot).
+        let instance_to_id = gpu.upload_buffer(
+            "restir.instance_to_id",
+            bytemuck::cast_slice(&remap.instance_to_id),
+            usage,
+        )?;
+        let id_to_instance = gpu.upload_buffer(
+            "restir.id_to_instance",
+            bytemuck::cast_slice(&remap.id_to_instance),
+            usage,
+        )?;
+        let table = RestirSceneTable {
+            candidate_lights: candidate_lights.device_address(),
+            light_count: candidate_table.len() as u32,
+            env_select_prob,
+            instance_to_id: instance_to_id.device_address(),
+            id_to_instance: id_to_instance.device_address(),
+            delta_lights: delta_lights.device_address(),
+            delta_count: delta_table.len() as u32,
+            _pad0: 0,
+        };
+        let table = gpu.upload_buffer("restir.table", bytemuck::bytes_of(&table), usage)?;
+        Ok(Self {
+            candidate_lights,
+            instance_to_id,
+            id_to_instance,
+            delta_lights,
+            table,
+        })
+    }
+}
 
 // Stable light identity — the registry that keeps a reservoir's stored light
 // reference meaningful across scene edits — lives in its own file, colocated

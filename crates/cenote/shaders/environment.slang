@@ -29,6 +29,9 @@ public struct EnvironmentSample {
     public float3 direction; // unit, world space
     public float3 radiance;  // ACEScg, read from the texture
     public float pdf;        // solid-angle pdf of `direction`; 0 = invalid
+    public float2 uv;        // the image point the direction maps to — the
+                             //   env's reconnection coordinate, the analogue of
+                             //   a triangle's barycentrics (see `connect`)
 };
 
 // One row or column draw from a piecewise-constant CDF: the largest index
@@ -102,7 +105,35 @@ public struct Environment {
         s.pdf = sinTheta > 0.0
               ? pdfs[row.index * width + col.index] / (2.0 * PI * PI * sinTheta)
               : 0.0;
+        s.uv = uv;
         return s;
+    }
+
+    // Reconnect to a stored image point: the direction, radiance, and
+    // solid-angle pdf for a candidate held as `uv` rather than a primary draw.
+    // ReSTIR stores the env candidate's `uv` (a point on the image, the
+    // analogue of a triangle's barycentrics), so two candidate sources share
+    // one reconstruction: a next-event draw (via `sample`, which fills `uv`)
+    // and a BSDF-sampled ray that escaped to the sky (via `locate`, which
+    // inverts its direction to `uv`). `restir_resolve` reconnects the survivor
+    // through here. The texel indices recover from `uv` exactly as `pdf` below.
+    public EnvironmentSample connect(float2 uv) {
+        let sinTheta = sin(PI * uv.y);
+        let col = min(uint(uv.x * float(width)), width - 1);
+        let row = min(uint(uv.y * float(height)), height - 1);
+        EnvironmentSample s;
+        s.direction = directionFromUv(uv);
+        s.radiance = environmentTexture.SampleLevel(uv, 0.0).xyz;
+        s.pdf = sinTheta > 0.0 ? pdfs[row * width + col] / (2.0 * PI * PI * sinTheta) : 0.0;
+        s.uv = uv;
+        return s;
+    }
+
+    // The image point a direction maps to — the inverse of the `directionFromUv`
+    // `sample`/`connect` build directions with, so a BSDF-sampled ray escaping
+    // to the sky can be stored as an env candidate and reconnected exactly.
+    public float2 locate(float3 d) {
+        return uvFromDirection(d);
     }
 
     // The solid-angle pdf `sample` would report for direction `d` — the

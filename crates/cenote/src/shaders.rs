@@ -52,6 +52,12 @@ pub struct Kernels {
     pub shade_surface: Kernel,
     /// Occlusion tests for queued shadow rays.
     pub trace_shadow: Kernel,
+    /// `ReSTIR` initial RIS: stream the primary hit's light candidates through
+    /// a per-pixel reservoir.
+    pub restir_candidates: Kernel,
+    /// `ReSTIR` resolve: shade the surviving light sample and queue its
+    /// visibility ray.
+    pub restir_resolve: Kernel,
     /// Film: add a wave's sample into the running sums (NaN/Inf-guarded).
     pub accumulate: Kernel,
     /// Film: running sums → the resolved linear `ACEScg` average.
@@ -81,6 +87,8 @@ impl Kernels {
             shade_miss: kernel(spirv!("shade_miss"), c"shade_miss"),
             shade_surface: kernel(spirv!("shade_surface"), c"shade_surface"),
             trace_shadow: kernel(spirv!("trace_shadow"), c"trace_shadow"),
+            restir_candidates: kernel(spirv!("restir_candidates"), c"restir_candidates"),
+            restir_resolve: kernel(spirv!("restir_resolve"), c"restir_resolve"),
             accumulate: kernel(spirv!("accumulate"), c"accumulate"),
             resolve: kernel(spirv!("resolve"), c"resolve"),
             tonemap: kernel(spirv!("tonemap"), c"tonemap"),
@@ -109,6 +117,8 @@ impl Kernels {
             shade_miss,
             shade_surface,
             trace_shadow,
+            restir_candidates,
+            restir_resolve,
             accumulate,
             resolve,
             tonemap,
@@ -139,6 +149,14 @@ impl Kernels {
             trace_shadow: Kernel {
                 spirv: trace_shadow?,
                 entry: c"trace_shadow",
+            },
+            restir_candidates: Kernel {
+                spirv: restir_candidates?,
+                entry: c"restir_candidates",
+            },
+            restir_resolve: Kernel {
+                spirv: restir_resolve?,
+                entry: c"restir_resolve",
             },
             accumulate: Kernel {
                 spirv: accumulate?,
@@ -173,8 +191,17 @@ pub(crate) fn compile_fixture(stem: &str) -> Result<Vec<u8>> {
 /// binaries to paths, not stdout, so the output round-trips through a temp
 /// file — the same invocation shape as `build.rs`.
 fn compile(src: &Path) -> Result<Vec<u8>> {
+    // The temp path is unique per invocation, not just per process: two
+    // concurrent recompiles (the hot-reload tests run several at once) would
+    // otherwise both write `cenote-<stem>-<pid>.spv` and race on the shared
+    // file. A process-wide counter keeps each `slangc` output private.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let stem = src.file_stem().unwrap_or_default().to_string_lossy();
-    let dst = std::env::temp_dir().join(format!("cenote-{stem}-{}.spv", std::process::id()));
+    let dst = std::env::temp_dir().join(format!(
+        "cenote-{stem}-{}-{unique}.spv",
+        std::process::id()
+    ));
     slangc::run_slangc(src, &dst).map_err(Error::ShaderCompile)?;
     let spirv = std::fs::read(&dst)?;
     // Best-effort tidy-up; a stale temp file is not worth failing a reload.
@@ -262,13 +289,15 @@ mod tests {
         u32::from_le_bytes(bytes[..4].try_into().unwrap()) == 0x0723_0203
     }
 
-    fn all(kernels: &Kernels) -> [&Kernel; 8] {
+    fn all(kernels: &Kernels) -> [&Kernel; 10] {
         [
             &kernels.raygen,
             &kernels.intersect,
             &kernels.shade_miss,
             &kernels.shade_surface,
             &kernels.trace_shadow,
+            &kernels.restir_candidates,
+            &kernels.restir_resolve,
             &kernels.accumulate,
             &kernels.resolve,
             &kernels.tonemap,

@@ -156,7 +156,11 @@ struct ShadeMissParams {
     aov: vk::DeviceAddress,
     /// Which strategies reach the lights — a [`LightSampling`] as `u32`.
     light_sampling: u32,
-    _pad0: u32,
+    /// `1` for the one bounce whose escaping ray is the `ReSTIR` BSDF strategy's
+    /// reach to the environment (the primary continuation's first hit), so its
+    /// env radiance is suppressed — already a reservoir candidate (D-088). `0`
+    /// on every other bounce and outside [`RenderMode::Restir`].
+    restir_suppress: u32,
 }
 
 /// Push constants for the surface-shading kernel
@@ -188,9 +192,59 @@ struct ShadeSurfaceParams {
 
 /// Pack `ShadeSurfaceParams::packed`, mirrored by the unpack at the top of
 /// `shade_surface.slang`. Both byte-wide fields are asserted in range by
-/// [`Wavefront::new`].
-fn pack_shade_surface(bounce: u32, max_bounces: u32, light_sampling: LightSampling) -> u32 {
-    bounce | max_bounces << 8 | (light_sampling as u32) << 16
+/// [`Wavefront::new`]. `restir` sets bit 24 on *every* bounce in `ReSTIR` mode;
+/// the kernel reads it two ways: at bounce 0 the reservoir owns next-event
+/// estimation (skip this kernel's NEE), and at bounce 1 the reservoir's BSDF
+/// candidate owns the primary continuation's first-hit emission (suppress it).
+fn pack_shade_surface(
+    bounce: u32,
+    max_bounces: u32,
+    light_sampling: LightSampling,
+    restir: bool,
+) -> u32 {
+    bounce | max_bounces << 8 | (light_sampling as u32) << 16 | (u32::from(restir) << 24)
+}
+
+/// Push constants for the `ReSTIR` initial-RIS stage
+/// (`shaders/restir_candidates.slang`). Runs at bounce 0 only; dispatched
+/// indirectly from the hit queue it reads but does not consume.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct RestirCandidatesParams {
+    paths: PathsAddrs,
+    hits: QueueAddrs,
+    scene: vk::DeviceAddress,
+    /// The `RestirScene` slice — candidate table, env coin flip, identity remap.
+    restir: vk::DeviceAddress,
+    /// This wave's per-pixel reservoirs (curr), written here.
+    reservoirs: vk::DeviceAddress,
+    sample_index: u32,
+    /// M — the initial-RIS candidate count.
+    candidates: u32,
+}
+
+/// Push constants for the `ReSTIR` resolve stage
+/// (`shaders/restir_resolve.slang`). Runs at bounce 0 only; reads the reservoir
+/// and queues the survivor's shadow ray.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct RestirResolveParams {
+    paths: PathsAddrs,
+    hits: QueueAddrs,
+    shadows: QueueAddrs,
+    scene: vk::DeviceAddress,
+    restir: vk::DeviceAddress,
+    reservoirs: vk::DeviceAddress,
+    /// The film accumulator: the additive delta-light term adds straight to it
+    /// (a pixel-owned write — one resolve thread per primary hit).
+    radiance: vk::DeviceAddress,
+    /// The D-092 debug false-colour target, or 0 when no [`DebugView`] is
+    /// selected (`debug_view` is then [`DebugView::Off`]).
+    debug: vk::DeviceAddress,
+    /// The [`DebugView`] as `u32` — which view to write into `debug`.
+    debug_view: u32,
+    /// This wave's sample index — the delta term's one next-event draw.
+    sample_index: u32,
 }
 
 /// Push constants for the shadow-ray kernel (`shaders/trace_shadow.slang`).
@@ -438,6 +492,61 @@ pub enum LightSampling {
     NeeOnly = 2,
 }
 
+/// How the primary hit's direct lighting is estimated. Orthogonal to
+/// [`LightSampling`]: it chooses *which estimator* runs the light-sampling
+/// strategy at bounce 0, not which strategies exist.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RenderMode {
+    /// The M2 path tracer: `shade_surface` does per-bounce NEE itself.
+    PathTracer,
+    /// M3 `ReSTIR`-DI: at bounce 0 the reservoir stages
+    /// (`restir_candidates`/`restir_resolve`) own the light-sampling term,
+    /// resolved into a per-view reservoir buffer; `shade_surface`'s bounce-0
+    /// NEE is switched off. Every later bounce is unchanged. At convergence this
+    /// matches [`PathTracer`](Self::PathTracer) exactly — the unbiasedness gate.
+    Restir,
+}
+
+/// The D-092 debug surface's enum-selected view: what `restir_resolve`
+/// false-colours into the debug buffer at the primary hit. [`Off`](Self::Off)
+/// writes nothing (and needs no debug buffer). The `u32` values mirror the
+/// `DEBUG_*` constants in `shaders/restir_resolve.slang`.
+///
+/// A first-class observability workstream (D-092): `ReSTIR` bias shifts a
+/// converged mean a few percent and looks plausible, so the survivor's
+/// selection is made inspectable from the first estimator on, not just at the
+/// end-of-pipeline reference gate.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum DebugView {
+    /// No debug view — the common path; the debug buffer stays untouched.
+    #[default]
+    Off = 0,
+    /// False-colour by stable light id — the checkpoint's "false-colour the
+    /// selected light". The environment reads as a steady near-white.
+    SelectedLight = 1,
+    /// The confidence M as a heatmap (flat at the candidate count until reuse
+    /// compounds it, from step 4 on).
+    Confidence = 2,
+    /// The unbiased contribution weight W as a heatmap — the bias detector.
+    UnbiasedWeight = 3,
+}
+
+/// The bounce-0 `ReSTIR` targets a wave writes into, in [`RenderMode::Restir`]:
+/// the per-pixel reservoir the candidate/resolve stages stream through, and —
+/// only when a [`DebugView`] is selected — the debug buffer `restir_resolve`
+/// false-colours the survivor into. `debug` is `Some` exactly when `debug_view`
+/// is not [`DebugView::Off`]; the wave zero-fills it so unreached pixels read
+/// black.
+pub struct RestirInputs<'a> {
+    /// This wave's per-pixel reservoirs (curr), sized to the target.
+    pub reservoir: &'a Buffer,
+    /// The debug false-colour target (one RGBA f32 per pixel), or `None` when
+    /// no view is selected.
+    pub debug: Option<&'a Buffer>,
+    /// Which view `restir_resolve` writes into `debug`.
+    pub debug_view: DebugView,
+}
+
 /// The engine: five stage pipelines over one path pool and its queues.
 /// Created once and reused across waves — nothing in it depends on the
 /// target size or the scene.
@@ -447,6 +556,11 @@ pub struct Wavefront {
     shade_miss: ComputePipeline,
     shade_surface: ComputePipeline,
     trace_shadow: ComputePipeline,
+    /// M3 initial RIS: streams the primary hit's light candidates into the
+    /// reservoir. Built alongside the rest; used only in [`RenderMode::Restir`].
+    restir_candidates: ComputePipeline,
+    /// M3 resolve: shades the surviving light sample and queues its shadow ray.
+    restir_resolve: ComputePipeline,
     paths: PathPool,
     queues: Queues,
     /// The all-zero [`AovTableData`] a wave binds when the caller brings
@@ -469,6 +583,26 @@ impl Wavefront {
     /// cap — and eight covers the deepest transport the demo makes visible
     /// (mirror spheres reflecting each other's reflections) with margin.
     pub const DEFAULT_MAX_BOUNCES: u32 = 8;
+
+    /// Initial-RIS candidate count M at the primary hit (D-088: ~16 emitter/env
+    /// candidates, plus one internalized BSDF candidate the stage adds). Tuned
+    /// in validation; the estimator is unbiased at any M ≥ 1, so this trades
+    /// variance for cost, never correctness.
+    pub const RESTIR_CANDIDATES: u32 = 16;
+
+    // Support-coverage guard (M3 plan §2, §6): the reservoir's *unshadowed*
+    // target makes RIS unbiased only if some candidate covers the whole support
+    // of f — and the light-sampling technique (the power-alias table over every
+    // emitter, plus the environment) does, on its own, for any M ≥ 1. The
+    // internalized BSDF candidate only sharpens variance; it cannot be the sole
+    // cover. So a future candidate-budget edit that drops M to 0 would silently
+    // bias the mean — this pins it as a build error instead, one of the two
+    // subtlest bias traps the reference course flags to bake in early.
+    const _SUPPORT_COVERAGE: () = assert!(
+        Self::RESTIR_CANDIDATES >= 1,
+        "ReSTIR needs at least one light candidate: it is the only technique \
+         guaranteed to cover the support of the unshadowed target (M3 plan §2)"
+    );
 
     /// Build the five stage pipelines and allocate the pool and queues.
     /// Each wave shades at most `max_bounces` bounces per path and reaches
@@ -526,6 +660,19 @@ impl Wavefront {
                 size_of::<TraceShadowParams>(),
                 Bindings::Scene,
             )?,
+            // The reservoir stages read the environment map and bindless
+            // textures (target evaluation, textured emitters), so they bind the
+            // same scene set the shading kernels do.
+            restir_candidates: pipeline(
+                &kernels.restir_candidates,
+                size_of::<RestirCandidatesParams>(),
+                Bindings::Scene,
+            )?,
+            restir_resolve: pipeline(
+                &kernels.restir_resolve,
+                size_of::<RestirResolveParams>(),
+                Bindings::Scene,
+            )?,
             paths: PathPool::new(gpu, capacity)?,
             queues: Queues::new(gpu, capacity)?,
             aov_disabled: gpu.upload_buffer(
@@ -574,7 +721,7 @@ impl Wavefront {
         height: u32,
         sample: u32,
     ) -> Result<()> {
-        self.trace_then(gpu, scene, radiance, width, height, sample, None, &[])
+        self.trace_then(gpu, scene, radiance, width, height, sample, None, None, &[])
     }
 
     /// [`Wavefront::trace`], then `trailing` — extra passes appended to the
@@ -613,6 +760,7 @@ impl Wavefront {
         height: u32,
         sample: u32,
         aovs: Option<&AovTargets>,
+        restir: Option<&RestirInputs>,
         trailing: &[Pass],
     ) -> Result<()> {
         assert!(width > 0 && height > 0, "zero-sized trace target");
@@ -621,15 +769,37 @@ impl Wavefront {
             radiance.size() >= pixels * 16,
             "radiance buffer smaller than the target"
         );
+        if let Some(restir) = restir {
+            assert!(
+                restir.reservoir.size()
+                    >= pixels * size_of::<crate::restir::StoredReservoir>() as u64,
+                "reservoir buffer smaller than the target"
+            );
+            assert_eq!(
+                restir.debug.is_some(),
+                restir.debug_view != DebugView::Off,
+                "a debug buffer is required exactly when a DebugView is selected"
+            );
+            if let Some(debug) = restir.debug {
+                assert!(
+                    debug.size() >= pixels * 16,
+                    "debug buffer smaller than the target"
+                );
+            }
+        }
         let aov_table = aovs.map_or(&self.aov_disabled, |aov| aov.table);
-        let params = self.wave_params(scene, radiance, aov_table, width, height, sample);
-        let mut passes = self.record_wave(scene, radiance, aovs, pixels, &params);
+        let params = self.wave_params(scene, radiance, aov_table, width, height, sample, restir);
+        let mut passes = self.record_wave(scene, radiance, aovs, restir, pixels, &params);
         passes.extend_from_slice(trailing);
         gpu.submit_passes(&passes)
     }
 
     /// Every stage's push constants for one wave, built up front so the
     /// recorded passes can borrow them.
+    // The wave's target, sizing, sample index, and optional reservoir — one
+    // more than the linter's cutoff, and every one already threaded through
+    // `trace_then`; a struct would only scatter the single call site.
+    #[allow(clippy::too_many_arguments)]
     fn wave_params(
         &self,
         scene: &Scene,
@@ -638,6 +808,7 @@ impl Wavefront {
         width: u32,
         height: u32,
         sample: u32,
+        restir: Option<&RestirInputs>,
     ) -> WaveParams {
         let pixels = u64::from(width) * u64::from(height);
         let mut basis = scene.camera().basis(width as f32 / height as f32);
@@ -691,15 +862,19 @@ impl Wavefront {
         WaveParams {
             ranges,
             intersect: (0..self.max_bounces).map(intersect).collect(),
-            shade_miss: ShadeMissParams {
-                paths: self.paths.addresses(),
-                misses: self.queues.addresses(queue::MISS, &self.queues.miss),
-                scene: scene.table().device_address(),
-                radiance: radiance.device_address(),
-                aov: aov_table.device_address(),
-                light_sampling: self.light_sampling as u32,
-                _pad0: 0,
-            },
+            // One instance per bounce: only ReSTIR's bounce-1 emission
+            // suppression (the primary continuation escaping to the sky) varies.
+            shade_miss: (0..self.max_bounces)
+                .map(|bounce| ShadeMissParams {
+                    paths: self.paths.addresses(),
+                    misses: self.queues.addresses(queue::MISS, &self.queues.miss),
+                    scene: scene.table().device_address(),
+                    radiance: radiance.device_address(),
+                    aov: aov_table.device_address(),
+                    light_sampling: self.light_sampling as u32,
+                    restir_suppress: u32::from(restir.is_some() && bounce == 1),
+                })
+                .collect(),
             shade_surface: (0..self.max_bounces)
                 .map(|bounce| ShadeSurfaceParams {
                     paths: self.paths.addresses(),
@@ -710,13 +885,67 @@ impl Wavefront {
                     radiance: radiance.device_address(),
                     aov: aov_table.device_address(),
                     sample_index: sample,
-                    packed: pack_shade_surface(bounce, self.max_bounces, self.light_sampling),
+                    packed: pack_shade_surface(
+                        bounce,
+                        self.max_bounces,
+                        self.light_sampling,
+                        // ReSTIR mode, flagged on every bounce: the kernel keys
+                        // its bounce-0 NEE skip and bounce-1 emission suppression
+                        // off it.
+                        restir.is_some(),
+                    ),
                 })
                 .collect(),
             trace_shadow: TraceShadowParams {
                 shadows: self.queues.addresses(queue::SHADOW, &self.queues.shadow),
                 radiance: radiance.device_address(),
                 scene: scene.table().device_address(),
+            },
+            // The reservoir stages run at bounce 0 only, when the caller brought
+            // a reservoir target (ReSTIR mode).
+            restir: restir.map(|restir| self.restir_wave_params(scene, restir, radiance, sample)),
+        }
+    }
+
+    /// The two reservoir stages' push constants for one wave — built only in
+    /// [`RenderMode::Restir`], when the caller supplies [`RestirInputs`].
+    /// Both stages address the same hit queue and per-pixel reservoir buffer;
+    /// candidates writes it, resolve reads it. Resolve also carries the debug
+    /// target and view, so it can false-colour the survivor (D-092).
+    fn restir_wave_params(
+        &self,
+        scene: &Scene,
+        restir: &RestirInputs,
+        radiance: &Buffer,
+        sample: u32,
+    ) -> RestirWaveParams {
+        let paths = self.paths.addresses();
+        let hits = self.queues.addresses(queue::HIT, &self.queues.hit);
+        let scene_table = scene.table().device_address();
+        let restir_table = scene.restir_table().device_address();
+        let reservoirs = restir.reservoir.device_address();
+        RestirWaveParams {
+            candidates: RestirCandidatesParams {
+                paths,
+                hits,
+                scene: scene_table,
+                restir: restir_table,
+                reservoirs,
+                sample_index: sample,
+                candidates: Self::RESTIR_CANDIDATES,
+            },
+            resolve: RestirResolveParams {
+                paths,
+                hits,
+                shadows: self.queues.addresses(queue::SHADOW, &self.queues.shadow),
+                scene: scene_table,
+                restir: restir_table,
+                reservoirs,
+                radiance: radiance.device_address(),
+                // 0 when no view is selected; restir_resolve then writes nothing.
+                debug: restir.debug.map_or(0, Buffer::device_address),
+                debug_view: restir.debug_view as u32,
+                sample_index: sample,
             },
         }
     }
@@ -729,6 +958,7 @@ impl Wavefront {
         scene: &'a Scene,
         radiance: &'a Buffer,
         aovs: Option<&AovTargets<'a>>,
+        restir: Option<&RestirInputs<'a>>,
         pixels: u64,
         params: &'a WaveParams,
     ) -> Vec<Pass<'a>> {
@@ -780,6 +1010,18 @@ impl Wavefront {
                 });
             }
         }
+        // The debug surface is single-shot, not accumulated: `restir_resolve`
+        // writes only the pixels whose reservoir selected a light, so the wave
+        // clears it first — unreached and empty-reservoir pixels then read as
+        // black (nothing selected).
+        if let Some(debug) = restir.and_then(|restir| restir.debug) {
+            passes.push(Pass::Fill {
+                buffer: debug,
+                offset: 0,
+                size: pixels * 16,
+                value: 0,
+            });
+        }
         for raygen in &params.ranges {
             passes.push(fill(queue::RAY));
             passes.push(Pass::Dispatch {
@@ -809,9 +1051,27 @@ impl Wavefront {
                 }
                 passes.push(indirect(
                     &self.shade_miss,
-                    bytemuck::bytes_of(&params.shade_miss),
+                    bytemuck::bytes_of(&params.shade_miss[bounce as usize]),
                     queue::MISS,
                 ));
+                // ReSTIR mode, primary hit: stream the reservoir candidates and
+                // resolve the survivor before shade_surface (whose bounce-0 NEE
+                // is off). Both dispatch from the hit queue without consuming it
+                // — candidates writes the reservoir, resolve reads it, the
+                // barrier between passes ordering the two. Later bounces are the
+                // ordinary path.
+                if let Some(restir) = params.restir.as_ref().filter(|_| bounce == 0) {
+                    passes.push(indirect(
+                        &self.restir_candidates,
+                        bytemuck::bytes_of(&restir.candidates),
+                        queue::HIT,
+                    ));
+                    passes.push(indirect(
+                        &self.restir_resolve,
+                        bytemuck::bytes_of(&restir.resolve),
+                        queue::HIT,
+                    ));
+                }
                 passes.push(indirect(
                     &self.shade_surface,
                     bytemuck::bytes_of(&params.shade_surface[bounce as usize]),
@@ -836,10 +1096,21 @@ struct WaveParams {
     /// bit, later bounces with all bits, and each keys its own
     /// transparency stream.
     intersect: Vec<IntersectParams>,
-    shade_miss: ShadeMissParams,
+    /// One instance per bounce, like `shade_surface`: only `ReSTIR`'s bounce-1
+    /// emission suppression varies across them.
+    shade_miss: Vec<ShadeMissParams>,
     /// One instance per bounce.
     shade_surface: Vec<ShadeSurfaceParams>,
     trace_shadow: TraceShadowParams,
+    /// The bounce-0 reservoir stages' push constants, present only in
+    /// [`RenderMode::Restir`].
+    restir: Option<RestirWaveParams>,
+}
+
+/// The two reservoir stages' push constants for one wave — bounce 0 only.
+struct RestirWaveParams {
+    candidates: RestirCandidatesParams,
+    resolve: RestirResolveParams,
 }
 
 #[cfg(test)]
@@ -1554,5 +1825,568 @@ mod tests {
                 "{name} disagrees with MIS: {value} vs {mis} ({deviation:.4} relative)"
             );
         }
+    }
+
+    /// The M3 step-3 unbiasedness gate: the `ReSTIR`-DI estimator (initial RIS
+    /// at the primary hit, one visibility ray at resolve) and the M2 path tracer
+    /// must converge to the same image. They share every secondary bounce; only
+    /// the primary *direct* term differs — the reservoir owns the whole of it (M
+    /// light candidates plus one internalized BSDF candidate, combined under the
+    /// count-weighted balance heuristic), so `ReSTIR` suppresses the primary
+    /// continuation's bounce-1 emission that the path tracer's BSDF strategy
+    /// adds. It is the same integral estimated two ways: a biased reservoir (a
+    /// dropped Jacobian, a wrong count in the balance heuristic, a stale target,
+    /// a missed suppression) would shift the converged mean a few percent —
+    /// exactly what this catches. The scene is a lit environment *and* an area
+    /// emitter, so both light-candidate branches — the env coin flip and the
+    /// triangle table — and the BSDF candidate's reconnection to each are all
+    /// exercised. No delta lights: they stay on exact additive NEE outside the
+    /// reservoir (D-088), a separate term this gate deliberately leaves out.
+    #[test]
+    fn restir_di_matches_the_path_tracer() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let objects = [
+            Object {
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::Y),
+                material: Material::glossy(Vec3::splat(0.6), 0.4, 0.3).with_metalness(0.5),
+            },
+            Object {
+                mesh: ground_plane(4.0),
+                transform: Mat4::IDENTITY,
+                material: Material::glossy(Vec3::splat(0.7), 0.0, 0.2),
+            },
+            Object {
+                // An area emitter above the sphere — the triangle candidates.
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::Y * 3.0)
+                    * Mat4::from_scale(Vec3::splat(0.7)),
+                material: Material::emitter(Vec3::splat(4.0)),
+            },
+        ];
+        let camera = Camera {
+            position: Vec3::new(0.0, 2.5, 6.0),
+            look_at: Vec3::new(0.0, 1.0, 0.0),
+            up: Vec3::Y,
+            vfov_degrees: 45.0,
+            lens: None,
+        };
+        // A lit environment as well, so the env coin flip fires alongside the
+        // triangle table.
+        let scene = Scene::new(&gpu, &objects, camera, &Environment::constant(Vec3::splat(0.3)))
+            .expect("scene");
+
+        let kernels = Kernels::embedded();
+        let (width, height) = (32, 32);
+        // As with the strategy-agreement gate: 256 spp brings the sampler
+        // realization swing under ~1%, so the 3% bound answers to bias, not
+        // noise.
+        let samples: u32 = 256;
+        let reservoir = gpu
+            .create_buffer(
+                "test.reservoir",
+                u64::from(width) * u64::from(height) * size_of::<crate::restir::StoredReservoir>() as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                MemoryLocation::GpuOnly,
+            )
+            .expect("reservoir buffer");
+        let wavefront = Wavefront::new(
+            &gpu,
+            &kernels,
+            4096,
+            Wavefront::DEFAULT_MAX_BOUNCES,
+            LightSampling::Mis,
+        )
+        .expect("wavefront");
+        let inputs = RestirInputs {
+            reservoir: &reservoir,
+            debug: None,
+            debug_view: DebugView::Off,
+        };
+        let mean = |restir: bool| -> f64 {
+            let radiance = radiance_buffer(&gpu, width, height);
+            let mut total = 0.0;
+            for sample in 0..samples {
+                wavefront
+                    .trace_then(
+                        &gpu,
+                        &scene,
+                        &radiance,
+                        width,
+                        height,
+                        sample,
+                        None,
+                        restir.then_some(&inputs),
+                        &[],
+                    )
+                    .expect("trace");
+                let pixels: Vec<f32> = bytemuck::pod_collect_to_vec(
+                    &gpu.download_buffer(&radiance).expect("download"),
+                );
+                total += pixels
+                    .chunks_exact(4)
+                    .map(|pixel| f64::from(pixel[0]) + f64::from(pixel[1]) + f64::from(pixel[2]))
+                    .sum::<f64>();
+            }
+            total / f64::from(samples * width * height)
+        };
+
+        let path = mean(false);
+        let restir = mean(true);
+        assert!(path > 0.01, "the scene should be lit, got mean {path}");
+        let deviation = (restir - path).abs() / path;
+        assert!(
+            deviation < 0.03,
+            "ReSTIR disagrees with the path tracer: {restir} vs {path} ({deviation:.4} relative)"
+        );
+    }
+
+    /// The delta-light half of D-088: delta lights stay *outside* the reservoir,
+    /// added by `restir_resolve` as an exact additive NEE term. A white Lambert
+    /// plane under a black sky, lit by one distant light straight down with
+    /// irradiance π, has the closed form (albedo/π)·π = 1 at every pixel — the
+    /// same ground truth `a_distant_light_is_analytically_exact` pins for the
+    /// path tracer, now driven through `ReSTIR`. Two things must hold at once:
+    /// the primary hit sees the delta (the reservoir owns no delta candidate, and
+    /// `shade_surface` skips its own NEE there), and the delta term lands even
+    /// though the reservoir comes back *empty* — a black sky and no area lights
+    /// leave it nothing to select, so this exercises the path that adds the delta
+    /// before the empty-reservoir return. Drop the delta term, or gate it behind
+    /// that return, and the plane goes black. Built through description → prep,
+    /// the only route delta lights exist on.
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one flat change-set literal is the whole scene — splitting it \
+                  would hide its shape"
+    )]
+    fn restir_adds_the_delta_lights_the_reservoir_excludes() {
+        use crate::scene::changeset::{
+            CameraPatch, ChangeSet, InstancePatch, LightPatch, MaterialPatch, MeshPatch, Op,
+            SettingsPatch,
+        };
+        use crate::scene::description::{Light, MeshSource, SceneDescription, Texturable};
+
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let mut description = SceneDescription::new();
+        description
+            .apply(&ChangeSet {
+                ops: vec![
+                    Op::Settings(SettingsPatch::new("main")),
+                    Op::Camera(CameraPatch {
+                        position: Some([0.0, 1.0, 0.0]),
+                        look_at: Some([0.0, 0.0, -1.0]),
+                        ..CameraPatch::new("main")
+                    }),
+                    Op::Mesh(MeshPatch {
+                        source: Some(MeshSource::Inline {
+                            positions: vec![
+                                [-5.0, 0.0, -5.0],
+                                [-5.0, 0.0, 5.0],
+                                [5.0, 0.0, 5.0],
+                                [5.0, 0.0, -5.0],
+                            ],
+                            normals: Some(vec![[0.0, 1.0, 0.0]; 4]),
+                            uvs: None,
+                            triangles: vec![[0, 1, 2], [0, 2, 3]],
+                        }),
+                        ..MeshPatch::new("plane")
+                    }),
+                    Op::Material(Box::new(MaterialPatch {
+                        base_color: Some(Texturable::Constant([1.0; 3])),
+                        specular_weight: Some(0.0),
+                        ..MaterialPatch::new("lambert")
+                    })),
+                    Op::Instance(InstancePatch {
+                        mesh: Some("plane".into()),
+                        material: Some("lambert".into()),
+                        ..InstancePatch::new("floor")
+                    }),
+                    Op::Light(LightPatch {
+                        light: Some(Light::Distant {
+                            direction: [0.0, -1.0, 0.0],
+                            irradiance: [std::f32::consts::PI; 3],
+                        }),
+                        ..LightPatch::new("sun")
+                    }),
+                ],
+            })
+            .expect("valid scene data");
+        let scene = Scene::prep(&gpu, &mut description).expect("prep");
+
+        let kernels = Kernels::embedded();
+        let (width, height) = (16, 16);
+        // The delta term is variance-free here — one light, cosθ = 1, open sky —
+        // so a handful of samples already sits on the closed form.
+        let samples: u32 = 16;
+        let reservoir = gpu
+            .create_buffer(
+                "test.reservoir",
+                u64::from(width)
+                    * u64::from(height)
+                    * size_of::<crate::restir::StoredReservoir>() as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                MemoryLocation::GpuOnly,
+            )
+            .expect("reservoir buffer");
+        let wavefront = Wavefront::new(
+            &gpu,
+            &kernels,
+            4096,
+            Wavefront::DEFAULT_MAX_BOUNCES,
+            LightSampling::Mis,
+        )
+        .expect("wavefront");
+        let inputs = RestirInputs {
+            reservoir: &reservoir,
+            debug: None,
+            debug_view: DebugView::Off,
+        };
+        let radiance = radiance_buffer(&gpu, width, height);
+        let mut total = 0.0f64;
+        for sample in 0..samples {
+            wavefront
+                .trace_then(
+                    &gpu,
+                    &scene,
+                    &radiance,
+                    width,
+                    height,
+                    sample,
+                    None,
+                    Some(&inputs),
+                    &[],
+                )
+                .expect("trace");
+            let pixels: Vec<f32> = bytemuck::pod_collect_to_vec(
+                &gpu.download_buffer(&radiance).expect("download"),
+            );
+            total += pixels
+                .chunks_exact(4)
+                .map(|pixel| f64::from(pixel[0]) + f64::from(pixel[1]) + f64::from(pixel[2]))
+                .sum::<f64>();
+        }
+        let mean = total / f64::from(samples * width * height * 3);
+        assert!(
+            (mean - 1.0).abs() < 5e-3,
+            "ReSTIR delta light off the closed form: {mean} vs 1"
+        );
+    }
+
+    /// The `ReSTIR` white furnace (M3 plan §6, §7): an albedo-1 Lambert plane
+    /// under a uniform sky must reflect exactly that sky — energy neutral. It is
+    /// the cheap, always-on bias tripwire that fails *fast* on the silent-bias
+    /// class step 3.4 opens up. The internalized BSDF candidate and the M light
+    /// candidates must combine, under the count-weighted balance heuristic, into
+    /// one unbiased estimate of the direct term; and the primary continuation's
+    /// suppressed first-hit emission must cover *precisely* what that BSDF
+    /// candidate already counted. Break either half — an env BSDF candidate
+    /// without the matching suppression, or the reverse — and the furnace leaks
+    /// light or darkens, long before a 4096-spp FLIP run would notice. No area
+    /// or delta lights, so envSelectProb is 1 and every candidate that doesn't
+    /// escape is an env draw: the env BSDF candidate and its suppression are
+    /// squarely on the hot path.
+    #[test]
+    fn restir_white_furnace_stays_energy_neutral() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let sky = 0.5;
+        // One big white Lambert plane, camera just above looking obliquely down
+        // (the basis forbids straight down) — render::tests' furnace framing,
+        // rebuilt here to drive the reservoir directly.
+        let objects = [Object {
+            mesh: ground_plane(5.0),
+            transform: Mat4::IDENTITY,
+            material: Material::matte(Vec3::ONE, 0.0),
+        }];
+        let camera = Camera {
+            position: Vec3::new(0.0, 1.0, 0.0),
+            look_at: Vec3::new(0.0, 0.0, -1.0),
+            up: Vec3::Y,
+            vfov_degrees: 40.0,
+            lens: None,
+        };
+        let scene = Scene::new(&gpu, &objects, camera, &Environment::constant(Vec3::splat(sky)))
+            .expect("scene");
+
+        let kernels = Kernels::embedded();
+        let (width, height) = (32, 32);
+        // The mean over this many samples brings the estimator's swing well
+        // under the 2% bound, so the bound answers to bias.
+        let samples: u32 = 256;
+        let reservoir = gpu
+            .create_buffer(
+                "test.reservoir.furnace",
+                u64::from(width)
+                    * u64::from(height)
+                    * size_of::<crate::restir::StoredReservoir>() as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                MemoryLocation::GpuOnly,
+            )
+            .expect("reservoir buffer");
+        let wavefront = Wavefront::new(
+            &gpu,
+            &kernels,
+            4096,
+            Wavefront::DEFAULT_MAX_BOUNCES,
+            LightSampling::Mis,
+        )
+        .expect("wavefront");
+        let inputs = RestirInputs {
+            reservoir: &reservoir,
+            debug: None,
+            debug_view: DebugView::Off,
+        };
+
+        let radiance = radiance_buffer(&gpu, width, height);
+        let mut total = 0.0_f64;
+        for sample in 0..samples {
+            wavefront
+                .trace_then(
+                    &gpu,
+                    &scene,
+                    &radiance,
+                    width,
+                    height,
+                    sample,
+                    None,
+                    Some(&inputs),
+                    &[],
+                )
+                .expect("trace");
+            let pixels: Vec<f32> =
+                bytemuck::pod_collect_to_vec(&gpu.download_buffer(&radiance).expect("download"));
+            total += pixels
+                .chunks_exact(4)
+                .map(|pixel| f64::from(pixel[0]))
+                .sum::<f64>();
+        }
+        let mean = total / f64::from(samples * width * height);
+        assert!(
+            (mean - f64::from(sky)).abs() / f64::from(sky) < 0.02,
+            "the ReSTIR furnace leaked: mean {mean} vs sky {sky}"
+        );
+    }
+
+    /// The D-092 debug surface: with a [`DebugView`] selected, `restir_resolve`
+    /// false-colours the survivor into the debug buffer. This is the step-3
+    /// checkpoint — "you can false-colour the selected light". A lit surface
+    /// pixel (which resampled a light) comes out non-black and opaque; a sky
+    /// pixel, which the wave zero-fills and the resolve stage never reaches,
+    /// stays black — so the view genuinely marks *where* a light was chosen,
+    /// not a flat wash.
+    #[test]
+    fn restir_debug_surface_paints_the_selected_light() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let objects = [
+            Object {
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::Y),
+                material: Material::glossy(Vec3::splat(0.6), 0.4, 0.3),
+            },
+            Object {
+                mesh: ground_plane(4.0),
+                transform: Mat4::IDENTITY,
+                material: Material::glossy(Vec3::splat(0.7), 0.0, 0.2),
+            },
+            Object {
+                // An area emitter above the sphere — the triangle candidates.
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::Y * 3.0)
+                    * Mat4::from_scale(Vec3::splat(0.7)),
+                material: Material::emitter(Vec3::splat(4.0)),
+            },
+        ];
+        // The camera looks slightly down from above, so the frame's upper rows
+        // clear the ground plane and see the (lit) environment: guaranteed sky.
+        let camera = Camera {
+            position: Vec3::new(0.0, 2.5, 6.0),
+            look_at: Vec3::new(0.0, 1.0, 0.0),
+            up: Vec3::Y,
+            vfov_degrees: 45.0,
+            lens: None,
+        };
+        let scene = Scene::new(&gpu, &objects, camera, &Environment::constant(Vec3::splat(0.3)))
+            .expect("scene");
+
+        let (width, height) = (32, 32);
+        let texels = u64::from(width) * u64::from(height);
+        let storage =
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
+        let reservoir = gpu
+            .create_buffer(
+                "test.debug.reservoir",
+                texels * size_of::<crate::restir::StoredReservoir>() as u64,
+                storage,
+                MemoryLocation::GpuOnly,
+            )
+            .expect("reservoir buffer");
+        let debug = gpu
+            .create_buffer(
+                "test.debug.surface",
+                texels * 16,
+                storage | vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST,
+                MemoryLocation::GpuOnly,
+            )
+            .expect("debug buffer");
+        let radiance = radiance_buffer(&gpu, width, height);
+        let wavefront = Wavefront::new(
+            &gpu,
+            &Kernels::embedded(),
+            4096,
+            Wavefront::DEFAULT_MAX_BOUNCES,
+            LightSampling::Mis,
+        )
+        .expect("wavefront");
+
+        let inputs = RestirInputs {
+            reservoir: &reservoir,
+            debug: Some(&debug),
+            debug_view: DebugView::SelectedLight,
+        };
+        wavefront
+            .trace_then(
+                &gpu, &scene, &radiance, width, height, 0, None, Some(&inputs), &[],
+            )
+            .expect("trace");
+        let pixels: Vec<f32> =
+            bytemuck::pod_collect_to_vec(&gpu.download_buffer(&debug).expect("download"));
+
+        let lit = pixels
+            .chunks_exact(4)
+            .filter(|texel| texel[0] + texel[1] + texel[2] > 0.0)
+            .count();
+        let black = pixels
+            .chunks_exact(4)
+            .filter(|texel| texel[..3].iter().all(|c| *c == 0.0))
+            .count();
+        assert!(lit > 0, "no pixel was false-coloured — the surface is blank");
+        assert!(
+            black > 0,
+            "every pixel was painted — sky pixels should stay at the zero-fill"
+        );
+        // A false-coloured pixel is opaque (alpha 1); the zero-fill leaves
+        // unpainted pixels at alpha 0, so a 0.5 split cleanly tells them apart.
+        assert!(
+            pixels
+                .chunks_exact(4)
+                .filter(|texel| texel[0] + texel[1] + texel[2] > 0.0)
+                .all(|texel| texel[3] > 0.5),
+            "a painted debug pixel is not opaque"
+        );
+    }
+
+    /// The M3 §2/§6 determinism invariant, carried through the reservoir. The
+    /// plain [`rendering_is_bitwise_deterministic`] gate drives `trace`, which
+    /// bypasses `ReSTIR` entirely, so it never touches the writes the reservoir
+    /// path adds: `restir_candidates` streaming the WRS reservoir into its
+    /// pixel-owned slot, `restir_resolve` folding the survivor's shade into the
+    /// film, and the survivor's `trace_shadow` visibility ray. Every one of
+    /// those is pixel-owned, never atomic — the same rule the whole wavefront
+    /// keeps — so the queue push order, which varies run to run, can never
+    /// reach the image. This re-runs the four-stage chain twice, each from a
+    /// fresh reservoir, and demands the accumulated films agree bit for bit: a
+    /// stray shared write or an atomic accumulation slipped into any reservoir
+    /// stage would surface here as flickering low bits, exactly as it does for
+    /// the path tracer. The scene lights through both candidate branches (a lit
+    /// environment *and* an area emitter), so the reservoir is genuinely
+    /// populated by weighted resampling and the survivor's shadow ray fires —
+    /// the stochastic machinery whose determinism the invariant is about.
+    #[test]
+    fn restir_is_bitwise_deterministic() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let objects = [
+            Object {
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::Y),
+                material: Material::glossy(Vec3::splat(0.6), 0.4, 0.3).with_metalness(0.5),
+            },
+            Object {
+                mesh: ground_plane(4.0),
+                transform: Mat4::IDENTITY,
+                material: Material::glossy(Vec3::splat(0.7), 0.0, 0.2),
+            },
+            Object {
+                // An area emitter above the sphere feeds the triangle candidates.
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::Y * 3.0)
+                    * Mat4::from_scale(Vec3::splat(0.7)),
+                material: Material::emitter(Vec3::splat(4.0)),
+            },
+        ];
+        let camera = Camera {
+            position: Vec3::new(0.0, 2.5, 6.0),
+            look_at: Vec3::new(0.0, 1.0, 0.0),
+            up: Vec3::Y,
+            vfov_degrees: 45.0,
+            lens: None,
+        };
+        // A lit environment as well, so the env coin flip fires alongside the
+        // triangle table and every reservoir write is on the hot path.
+        let scene = Scene::new(&gpu, &objects, camera, &Environment::constant(Vec3::splat(0.3)))
+            .expect("scene");
+
+        let kernels = Kernels::embedded();
+        let (width, height) = (32, 32);
+        let wavefront = Wavefront::new(
+            &gpu,
+            &kernels,
+            4096,
+            Wavefront::DEFAULT_MAX_BOUNCES,
+            LightSampling::Mis,
+        )
+        .expect("wavefront");
+
+        // One full run of the ReSTIR chain from a fresh reservoir, concatenating
+        // every sample's raw film bytes — so a difference in any single sample
+        // is caught exactly, not just in the sum where two could cancel.
+        let run = || -> Vec<u8> {
+            let reservoir = gpu
+                .create_buffer(
+                    "test.determinism.reservoir",
+                    u64::from(width)
+                        * u64::from(height)
+                        * size_of::<crate::restir::StoredReservoir>() as u64,
+                    vk::BufferUsageFlags::STORAGE_BUFFER
+                        | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                    MemoryLocation::GpuOnly,
+                )
+                .expect("reservoir buffer");
+            let inputs = RestirInputs {
+                reservoir: &reservoir,
+                debug: None,
+                debug_view: DebugView::Off,
+            };
+            let radiance = radiance_buffer(&gpu, width, height);
+            let mut film = Vec::new();
+            for sample in 0..8 {
+                wavefront
+                    .trace_then(
+                        &gpu,
+                        &scene,
+                        &radiance,
+                        width,
+                        height,
+                        sample,
+                        None,
+                        Some(&inputs),
+                        &[],
+                    )
+                    .expect("trace");
+                film.extend_from_slice(&gpu.download_buffer(&radiance).expect("download"));
+            }
+            film
+        };
+
+        assert_eq!(run(), run(), "the ReSTIR path is not bitwise deterministic");
     }
 }

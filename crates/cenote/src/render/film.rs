@@ -81,6 +81,17 @@ pub struct Film {
     /// The uploaded table the shading kernels reach the four buffers
     /// above through.
     aov_table: Buffer,
+    /// The `ReSTIR` per-pixel reservoir (curr), lazily allocated the first time
+    /// a wave runs in [`RenderMode::Restir`](crate::wavefront::RenderMode). Pure
+    /// per-frame scratch for single-frame RIS: the candidate stage overwrites
+    /// each hit pixel every wave, so it neither accumulates nor needs clearing.
+    /// Absent (and unallocated) in the path-tracer default.
+    reservoir: Option<Buffer>,
+    /// The D-092 debug surface's single-shot false-colour buffer, lazily
+    /// allocated the first time a [`DebugView`](crate::wavefront::DebugView) is
+    /// selected. `restir_resolve` writes it (zero-filled each wave); the render
+    /// thread copies it into the published frame. RGBA f32, one per pixel.
+    debug: Option<Buffer>,
     pub(super) width: u32,
     pub(super) height: u32,
     pub(super) samples: u32,
@@ -120,10 +131,68 @@ impl Film {
             depth,
             guide,
             aov_table,
+            reservoir: None,
+            debug: None,
             width,
             height,
             samples: 0,
         })
+    }
+
+    /// Ensure the `ReSTIR` targets for this frame exist: the per-pixel
+    /// reservoir, and — when `debug` — the debug false-colour buffer. Both are
+    /// lazily allocated so the path-tracer default pays for neither. Idempotent;
+    /// call before a [`RenderMode::Restir`](crate::wavefront::RenderMode) wave.
+    ///
+    /// # Errors
+    ///
+    /// Any [`crate::Error`] from buffer creation.
+    pub(super) fn ensure_restir(&mut self, gpu: &Context, debug: bool) -> Result<()> {
+        let texels = u64::from(self.width) * u64::from(self.height);
+        if self.reservoir.is_none() {
+            let stride = size_of::<crate::restir::StoredReservoir>() as u64;
+            self.reservoir = Some(gpu.create_buffer(
+                "film.restir.reservoir",
+                texels * stride,
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                MemoryLocation::GpuOnly,
+            )?);
+        }
+        if debug && self.debug.is_none() {
+            self.debug = Some(gpu.create_buffer(
+                "film.restir.debug",
+                texels * 16,
+                // Written by restir_resolve (storage), zero-filled each wave
+                // (transfer-dst), copied into the published frame (transfer-src).
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                    | vk::BufferUsageFlags::TRANSFER_SRC
+                    | vk::BufferUsageFlags::TRANSFER_DST,
+                MemoryLocation::GpuOnly,
+            )?);
+        }
+        Ok(())
+    }
+
+    /// The `ReSTIR` reservoir buffer, present after [`Film::ensure_restir`].
+    ///
+    /// # Panics
+    ///
+    /// If called before [`Film::ensure_restir`] allocated it — a caller bug.
+    pub(super) fn reservoir(&self) -> &Buffer {
+        self.reservoir
+            .as_ref()
+            .expect("ensure_restir has not run yet")
+    }
+
+    /// The debug false-colour buffer, present after
+    /// [`Film::ensure_restir`]`(gpu, true)`.
+    ///
+    /// # Panics
+    ///
+    /// If called before a debug view allocated it — a caller bug.
+    pub(super) fn debug(&self) -> &Buffer {
+        self.debug.as_ref().expect("no debug buffer allocated")
     }
 
     /// The wave-facing halves of the AOV buffers, for

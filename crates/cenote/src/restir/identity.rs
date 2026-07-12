@@ -10,13 +10,11 @@
 //! the GPU stages translate through: the stable id at rest in the reservoir,
 //! the current dense index at the moment of reuse.
 //!
-//! This substrate lands before its consumer by deliberate plan sequencing (M3
+//! This substrate landed before its consumer by deliberate plan sequencing (M3
 //! §4 step 2 before step 3): the first caller is `restir_candidates`, which
-//! stamps a fresh reservoir with the stable id and, on reuse, resolves it back.
-//! Until that stage exists the registry is exercised only by its tests, so the
-//! module carries one scoped `dead_code` allowance — removed the moment step 3
-//! wires the registry into `Scene`'s prep path.
-#![allow(dead_code)]
+//! stamps a fresh reservoir with the stable id, and `restir_resolve`, which
+//! resolves it back. Step 3 wired the registry into `Scene`'s build, so the
+//! `dead_code` allowance the substrate carried is gone.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,8 +25,9 @@ use std::collections::{BTreeMap, BTreeSet};
 /// table — both are `u32::MAX`, matching `LIGHT_NONE` in `lights.slang`.
 pub const LIGHT_ID_ENVIRONMENT: u32 = 0;
 pub const LIGHT_ID_NONE: u32 = u32::MAX;
-/// The first id handed to an emissive instance — past the reserved sentinels.
-const FIRST_INSTANCE_ID: u32 = 1;
+/// The first id handed to an emissive instance — one past the reserved
+/// environment sentinel, so no instance can ever collide with it.
+const FIRST_INSTANCE_ID: u32 = LIGHT_ID_ENVIRONMENT + 1;
 
 /// One emissive light present in the current build, as the registry needs to
 /// see it: which instance it is, and the fingerprint of everything a stored

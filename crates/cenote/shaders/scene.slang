@@ -62,3 +62,39 @@ public float opacityAt(SceneTable* scene, uint instance, uint primitive, float2 
     }
     return opacity;
 }
+
+// Trace one next-event connection and return its visibility in [0, 1]: 0 when a
+// solid occluder blocks it, otherwise the product of (1 − opacity) over every
+// fractional-opacity crossing — Cycles' deterministic transparency split, so
+// this stays RNG-free. `light`/`primitive` name the connection's aimed target
+// (or `LIGHT_NONE`, which no instance carries, for the environment and delta
+// lights): the connection is visible iff the nearest solid thing along the ray
+// is that target or nothing. The identity test needs no distance epsilon — the
+// ray's `tmax` is bounded to the target (see `ShadowRay` in pathstate.slang).
+// Shared by `trace_shadow` (the queued next-event rays) and `restir_resolve`
+// (the inline delta-light term the reservoir leaves out, D-088).
+public float shadowVisibility(RaytracingAccelerationStructure tlas, SceneTable* scene,
+                              RayDesc ray, uint light, uint primitive) {
+    RayQuery<RAY_FLAG_NONE> query;
+    query.TraceRayInline(tlas, RAY_FLAG_NONE, 0xFF, ray);
+    var attenuation = 1.0;
+    while (query.Proceed()) {
+        if (query.CandidateInstanceID() == light
+            && query.CandidatePrimitiveIndex() == primitive) {
+            query.CommitNonOpaqueTriangleHit();
+        } else {
+            attenuation *= 1.0 - opacityAt(scene, query.CandidateInstanceID(),
+                                           query.CandidatePrimitiveIndex(),
+                                           query.CandidateTriangleBarycentrics());
+            if (attenuation < 1e-4) {
+                return 0.0; // solidly occluded, to any precision that matters
+            }
+        }
+    }
+    if (query.CommittedStatus() == COMMITTED_NOTHING
+        || (query.CommittedInstanceID() == light
+            && query.CommittedPrimitiveIndex() == primitive)) {
+        return attenuation;
+    }
+    return 0.0;
+}

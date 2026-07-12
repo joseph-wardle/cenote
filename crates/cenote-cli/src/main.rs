@@ -57,6 +57,12 @@ struct RenderArgs {
     #[arg(long)]
     denoise: bool,
 
+    /// Render with ReSTIR-DI at the primary hit instead of the path tracer's
+    /// per-bounce NEE. The two converge to the same image (the unbiasedness
+    /// gate); this is the batch half of that comparison.
+    #[arg(long)]
+    restir: bool,
+
     /// Re-render whenever a shader source is edited (hot reload).
     /// Compiles kernels from the source checkout; a broken edit prints
     /// the compiler's diagnostics and keeps the last good image.
@@ -132,6 +138,11 @@ fn render(args: &RenderArgs) -> anyhow::Result<()> {
     let depth = args.depth.unwrap_or(settings.max_bounces);
 
     let mut renderer = cenote::render::Renderer::with_max_bounces(&gpu, depth)?;
+    renderer.set_render_mode(if args.restir {
+        cenote::render::RenderMode::Restir
+    } else {
+        cenote::render::RenderMode::PathTracer
+    });
     let mut film = cenote::render::Film::new(&gpu, width, height)?;
     // One OIDN device for the process — built here, reused every reload,
     // rather than opened and dropped inside each frame.

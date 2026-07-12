@@ -86,6 +86,47 @@ public struct LightConnection {
                              //   weights on the record's edge1/edge2 corners
 };
 
+// Reconnect to a chosen point on a triangle light: the connection geometry
+// (direction, solid-angle pdf, shadow-ray extent) for a barycentric point
+// already picked. `sampleLights` calls it after drawing the point; M3's
+// `restir_resolve` calls it to re-derive the same connection from a reservoir's
+// *stored* point — sharing this math is what keeps the two on one surface, so a
+// reused sample weighs exactly as the fresh draw did. `bary` weights the
+// record's edge1/edge2 corners. pdf 0 means the receiver is behind the
+// one-sided emitter, or the record is degenerate.
+public LightConnection connectTriangle(LightRecord light, float2 bary, float3 from) {
+    LightConnection c;
+    c.pdf = 0.0;
+    c.direction = float3(0.0);
+    c.tmax = 1e30;
+    c.radiance = light.emission;
+    c.delta = false;
+    c.instance = light.instance;
+    c.primitive = light.primitive;
+    c.bary = bary;
+
+    let position = light.anchor + bary.x * light.edge1 + bary.y * light.edge2;
+    let delta = position - from;
+    let r2 = dot(delta, delta);
+    let normal = normalize(cross(light.edge1, light.edge2));
+    let direction = delta * rsqrt(r2);
+    // One-sided: the winding-front normal must face the receiver, so the
+    // cosine is signed. A receiver behind the emitter gets nothing.
+    let cosLight = -dot(normal, direction);
+    if (r2 > 0.0 && cosLight > 0.0 && light.pdf > 0.0) {
+        c.direction = direction;
+        // The area pdf lifted to solid angle at the shading point — the
+        // measure BSDF sampling competes in.
+        c.pdf = light.pdf * r2 / cosLight;
+        // Reach the target with slack for its reconstruction error, but no
+        // farther: the identity test stays epsilon-free, while whatever sits
+        // *beyond* the light can neither occlude nor — if fractionally opaque
+        // — attenuate the connection.
+        c.tmax = sqrt(r2) * 1.001;
+    }
+    return c;
+}
+
 // Draw one light ∝ power and connect `from` to it. The alias-table
 // lookup: `u` scaled by the light count picks a slot, and the leftover
 // fraction picks between the slot's own light and its alias — every light
@@ -99,43 +140,24 @@ public LightConnection sampleLights(LightRecord* lights, uint count, float u,
         light = lights[light.aliasIndex];
     }
 
+    if (light.kind == LIGHT_KIND_TRIANGLE) {
+        // A uniform point on the triangle: √u1 picks the slice so area is
+        // preserved, u2 the position along it.
+        let su = sqrt(uPoint.x);
+        return connectTriangle(light, float2(1.0 - su, uPoint.y * su), from);
+    }
+
     LightConnection c;
     c.pdf = 0.0;
     c.direction = float3(0.0);
     c.tmax = 1e30;
     c.radiance = light.emission;
-    c.delta = light.kind != LIGHT_KIND_TRIANGLE;
+    c.delta = true;
     c.instance = light.instance;
     c.primitive = light.primitive;
     c.bary = float2(0.0);
 
     switch (light.kind) {
-    case LIGHT_KIND_TRIANGLE: {
-        // A uniform point on the triangle: √u1 picks the slice so area is
-        // preserved, u2 the position along it.
-        let su = sqrt(uPoint.x);
-        c.bary = float2(1.0 - su, uPoint.y * su);
-        let position = light.anchor + c.bary.x * light.edge1 + c.bary.y * light.edge2;
-        let delta = position - from;
-        let r2 = dot(delta, delta);
-        let normal = normalize(cross(light.edge1, light.edge2));
-        let direction = delta * rsqrt(r2);
-        // One-sided: the winding-front normal must face the receiver, so the
-        // cosine is signed. A receiver behind the emitter gets nothing.
-        let cosLight = -dot(normal, direction);
-        if (r2 > 0.0 && cosLight > 0.0 && light.pdf > 0.0) {
-            c.direction = direction;
-            // The area pdf lifted to solid angle at the shading point —
-            // the measure BSDF sampling competes in.
-            c.pdf = light.pdf * r2 / cosLight;
-            // Reach the target with slack for its reconstruction error,
-            // but no farther: the identity test stays epsilon-free, while
-            // whatever sits *beyond* the light can neither occlude nor —
-            // if fractionally opaque — attenuate the connection.
-            c.tmax = sqrt(r2) * 1.001;
-        }
-        break;
-    }
     case LIGHT_KIND_DISTANT:
         c.direction = -light.anchor; // stored as the light's travel direction
         c.pdf = light.pdf;

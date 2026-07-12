@@ -56,7 +56,9 @@ use crate::error::Result;
 use crate::gpu::{Bindings, Buffer, ComputePipeline, Context, MemoryLocation, Pass};
 use crate::scene::Scene;
 use crate::shaders::Kernels;
-use crate::wavefront::{LightSampling, Wavefront};
+use crate::wavefront::{LightSampling, RestirInputs, Wavefront};
+
+pub use crate::wavefront::{DebugView, RenderMode};
 
 /// Workgroup width/height — must match `[numthreads(8, 8, 1)]` in the film
 /// kernels (`accumulate.slang`, `resolve.slang`, `tonemap.slang`). Named
@@ -124,6 +126,15 @@ pub struct Renderer {
     /// The path-length cap the wavefront was built with, kept so
     /// [`Renderer::reload`] rebuilds an identical engine.
     max_bounces: u32,
+    /// Which estimator owns the primary hit's direct lighting — the path
+    /// tracer, or `ReSTIR`-DI. Set by [`Renderer::set_render_mode`] and read
+    /// each [`Renderer::accumulate`]; the front-ends flip it (the viewer's
+    /// toggle, the CLI's `--restir`). Preserved across [`Renderer::reload`].
+    render_mode: RenderMode,
+    /// The D-092 debug view `restir_resolve` false-colours, or
+    /// [`DebugView::Off`]. Meaningful only in [`RenderMode::Restir`]. Preserved
+    /// across [`Renderer::reload`].
+    debug_view: DebugView,
 }
 
 impl Renderer {
@@ -176,6 +187,8 @@ impl Renderer {
                 Bindings::None,
             )?,
             max_bounces,
+            render_mode: RenderMode::PathTracer,
+            debug_view: DebugView::Off,
         })
     }
 
@@ -189,8 +202,39 @@ impl Renderer {
     ///
     /// Any [`crate::Error`] from pipeline or buffer creation.
     pub fn reload(&mut self, gpu: &Context, kernels: &Kernels) -> Result<()> {
+        let (render_mode, debug_view) = (self.render_mode, self.debug_view);
         *self = Self::from_kernels(gpu, kernels, self.max_bounces)?;
+        // A body edit must not silently drop the view's estimator choice.
+        self.render_mode = render_mode;
+        self.debug_view = debug_view;
         Ok(())
+    }
+
+    /// Choose the estimator for the primary hit's direct lighting — the path
+    /// tracer, or `ReSTIR`-DI (D-088). Takes effect on the next
+    /// [`Renderer::accumulate`]; the caller resets its film to switch cleanly.
+    pub fn set_render_mode(&mut self, mode: RenderMode) {
+        self.render_mode = mode;
+    }
+
+    /// The current estimator.
+    #[must_use]
+    pub fn render_mode(&self) -> RenderMode {
+        self.render_mode
+    }
+
+    /// Choose the D-092 debug view `restir_resolve` false-colours into the
+    /// debug buffer (or [`DebugView::Off`]). Meaningful only in
+    /// [`RenderMode::Restir`]; takes effect on the next
+    /// [`Renderer::accumulate`].
+    pub fn set_debug_view(&mut self, view: DebugView) {
+        self.debug_view = view;
+    }
+
+    /// The current debug view.
+    #[must_use]
+    pub fn debug_view(&self) -> DebugView {
+        self.debug_view
     }
 
     /// Render one `width`×`height` frame of `scene` — sample 0 of every
@@ -244,6 +288,21 @@ impl Renderer {
     /// Any [`crate::Error`] from submission.
     pub fn accumulate(&self, gpu: &Context, scene: &Scene, film: &mut Film) -> Result<()> {
         let accumulate = accumulate_params(film);
+        // In ReSTIR mode the reservoir stages own bounce 0's direct lighting;
+        // allocate this frame's reservoir (and, for a debug view, the debug
+        // buffer) lazily, so the path-tracer default carries neither.
+        let restir = match self.render_mode {
+            RenderMode::PathTracer => None,
+            RenderMode::Restir => {
+                let debug = self.debug_view != DebugView::Off;
+                film.ensure_restir(gpu, debug)?;
+                Some(RestirInputs {
+                    reservoir: film.reservoir(),
+                    debug: debug.then(|| film.debug()),
+                    debug_view: self.debug_view,
+                })
+            }
+        };
         self.wavefront.trace_then(
             gpu,
             scene,
@@ -252,10 +311,20 @@ impl Renderer {
             film.height,
             film.samples,
             Some(&film.aov_targets()),
+            restir.as_ref(),
             &[self.accumulate_pass(&accumulate)],
         )?;
         film.samples += 1;
         Ok(())
+    }
+
+    /// This frame's `ReSTIR` debug false-colour buffer, once at least one
+    /// [`Renderer::accumulate`] has run with a [`DebugView`] selected — the
+    /// render thread copies it into the published frame. `None` until then.
+    #[must_use]
+    pub fn debug_buffer<'f>(&self, film: &'f Film) -> Option<&'f Buffer> {
+        (self.render_mode == RenderMode::Restir && self.debug_view != DebugView::Off)
+            .then(|| film.debug())
     }
 
     /// Resolve `film`'s running sums into `targets` as linear averages: one

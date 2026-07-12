@@ -30,7 +30,9 @@ struct TonemapParams {
     height: u32,
     /// `exp2(exposure stops)` — the resolve kernel already averaged.
     exposure_scale: f32,
-    _pad0: f32,
+    /// Bool: skip exposure + ACES and sRGB-encode the input as-is — the
+    /// `ReSTIR` debug false-colour is already display-ready.
+    passthrough: u32,
 }
 
 /// The view-transform pipeline plus its output: exposure (in stops), the
@@ -68,7 +70,9 @@ impl Tonemap {
     /// Tonemap a `width`×`height` linear `average` into the display buffer:
     /// exposure (in stops), the ACES display transform, sRGB encode, RGBA8
     /// pack — everything [`crate::gpu::Presenter::present`] needs. Read the
-    /// result with [`Tonemap::display`].
+    /// result with [`Tonemap::display`]. `passthrough` skips exposure and the
+    /// tone curve, sRGB-encoding the input as-is — for the `ReSTIR` debug
+    /// surface, whose false-colour is already display-ready.
     ///
     /// # Errors
     ///
@@ -86,6 +90,7 @@ impl Tonemap {
         width: u32,
         height: u32,
         exposure: f32,
+        passthrough: bool,
     ) -> Result<()> {
         assert!(width > 0 && height > 0, "zero-sized tonemap");
         assert!(
@@ -99,7 +104,7 @@ impl Tonemap {
             width,
             height,
             exposure_scale: exposure.exp2(),
-            _pad0: 0.0,
+            passthrough: u32::from(passthrough),
         };
         gpu.dispatch(
             &self.pipeline,
@@ -185,7 +190,7 @@ mod tests {
             Tonemap::upload_average(&gpu, "tonemap.average.synthetic", &averages).expect("upload");
         let exposure = 0.5;
         tonemap
-            .apply(&gpu, &average, 6, 1, exposure)
+            .apply(&gpu, &average, 6, 1, exposure, false)
             .expect("tonemap");
 
         let display = gpu.download_buffer(tonemap.display()).expect("download");
@@ -195,6 +200,47 @@ mod tests {
             let rgb = aces_display([avg[0] * scale, avg[1] * scale, avg[2] * scale]);
             for channel in 0..3 {
                 let expected = (srgb_encode(rgb[channel]) * 255.0).round() as i16;
+                let difference = (i16::from(texel[channel]) - expected).abs();
+                assert!(
+                    difference <= 1,
+                    "pixel {index} channel {channel}: GPU {} vs CPU {expected}",
+                    texel[channel]
+                );
+            }
+            assert_eq!(texel[3], 255, "display frames are opaque");
+        }
+    }
+
+    /// Passthrough (the `ReSTIR` debug surface's presentation): the input is
+    /// sRGB-encoded as-is, with no exposure and no ACES tone curve — a
+    /// display-ready false-colour must reach the screen undistorted. Values
+    /// outside [0, 1] clamp; the exposure argument is ignored.
+    #[test]
+    fn passthrough_skips_the_tone_curve() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let mut tonemap = Tonemap::new(&gpu).expect("tonemap");
+        let averages: [f32; 24] = [
+            0.75, 0.75, 0.78, 1.0, // the env false-colour
+            0.20, 0.90, 0.30, 1.0, // a saturated hue
+            0.0, 0.0, 0.0, 1.0, // the zero-fill stays black
+            2.0, -1.0, 0.5, 1.0, // out of range clamps, not ACES-compressed
+            1.0, 1.0, 1.0, 1.0, // white stays white
+            0.5, 0.5, 0.5, 1.0, // mid grey, unshifted by any exposure
+        ];
+        let average =
+            Tonemap::upload_average(&gpu, "tonemap.passthrough.synthetic", &averages).expect("up");
+        // A non-zero exposure that passthrough must ignore.
+        tonemap
+            .apply(&gpu, &average, 6, 1, 2.0, true)
+            .expect("tonemap");
+
+        let display = gpu.download_buffer(tonemap.display()).expect("download");
+        for (index, texel) in display.chunks_exact(4).enumerate() {
+            let avg = &averages[index * 4..index * 4 + 3];
+            for channel in 0..3 {
+                let expected = (srgb_encode(avg[channel].clamp(0.0, 1.0)) * 255.0).round() as i16;
                 let difference = (i16::from(texel[channel]) - expected).abs();
                 assert!(
                     difference <= 1,

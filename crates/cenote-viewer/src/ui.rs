@@ -8,6 +8,7 @@
 use std::time::Duration;
 
 use cenote::gpu::GuiFrame;
+use cenote::render::DebugView;
 use cenote::scene::changeset::MaterialPatch;
 use cenote::scene::description::SceneDescription;
 use winit::event::WindowEvent;
@@ -34,6 +35,11 @@ pub struct Gui {
     state: egui_winit::State,
     /// Exposure in stops, applied by the tonemap kernel.
     exposure: f32,
+    /// Render with `ReSTIR`-DI at the primary hit instead of the path tracer —
+    /// the D-090 unbiasedness gate, driven live.
+    restir: bool,
+    /// Which D-092 debug view to false-colour (only while `restir` is on).
+    debug_view: DebugView,
     /// Show the OIDN-denoised view instead of the raw average.
     #[cfg(feature = "denoise")]
     denoise: bool,
@@ -56,6 +62,8 @@ impl Gui {
         Self {
             state,
             exposure: 0.0,
+            restir: false,
+            debug_view: DebugView::Off,
             #[cfg(feature = "denoise")]
             denoise: false,
             lookdev: Lookdev::default(),
@@ -65,6 +73,17 @@ impl Gui {
     /// Exposure in stops, for [`cenote::render::Tonemap::apply`].
     pub fn exposure(&self) -> f32 {
         self.exposure
+    }
+
+    /// Whether the `ReSTIR` estimator toggle is on.
+    pub fn restir(&self) -> bool {
+        self.restir
+    }
+
+    /// The selected D-092 debug view — [`DebugView::Off`] unless the panel's
+    /// picker chose one (and only meaningful while [`Gui::restir`] is on).
+    pub fn debug_view(&self) -> DebugView {
+        self.debug_view
     }
 
     /// Whether the panel's denoise toggle is on.
@@ -138,6 +157,39 @@ impl Gui {
                 ui.add(egui::Slider::new(&mut self.exposure, -4.0..=4.0).text("exposure"));
                 #[cfg(feature = "denoise")]
                 ui.checkbox(&mut self.denoise, "denoise");
+
+                ui.separator();
+                ui.checkbox(&mut self.restir, "ReSTIR");
+                // The debug picker only makes sense while ReSTIR owns the
+                // primary hit — restir_resolve is what writes the surface.
+                ui.add_enabled_ui(self.restir, |ui| {
+                    egui::ComboBox::from_label("debug view")
+                        .selected_text(debug_view_label(self.debug_view))
+                        .show_ui(ui, |ui| {
+                            for view in [
+                                DebugView::Off,
+                                DebugView::SelectedLight,
+                                DebugView::Confidence,
+                                DebugView::UnbiasedWeight,
+                            ] {
+                                ui.selectable_value(
+                                    &mut self.debug_view,
+                                    view,
+                                    debug_view_label(view),
+                                );
+                            }
+                        });
+                });
             });
+    }
+}
+
+/// The panel's short name for each D-092 debug view.
+fn debug_view_label(view: DebugView) -> &'static str {
+    match view {
+        DebugView::Off => "off",
+        DebugView::SelectedLight => "selected light",
+        DebugView::Confidence => "confidence (M)",
+        DebugView::UnbiasedWeight => "weight (W)",
     }
 }

@@ -42,31 +42,14 @@ void trace_shadow(uint3 tid: SV_DispatchThreadID) {
     // triangle of the light, so the connection is visible iff the nearest
     // solid thing along the ray *is* that (instance, primitive) — or
     // nothing, when the ray numerically grazes past its silhouette, aims
-    // at the environment, or aims at a delta light within `tmax`. The
-    // identity test needs no distance epsilon (see `ShadowRay` in
-    // pathstate.slang). Fractional-opacity candidates that aren't the
-    // target pass through, each multiplying its transparency into the
-    // connection; the target itself commits, opaque or not.
-    RayQuery<RAY_FLAG_NONE> query;
-    query.TraceRayInline(sceneTlas, RAY_FLAG_NONE, 0xFF, ray);
-    var attenuation = 1.0;
-    while (query.Proceed()) {
-        if (query.CandidateInstanceID() == shadow.light
-            && query.CandidatePrimitiveIndex() == shadow.primitive) {
-            query.CommitNonOpaqueTriangleHit();
-        } else {
-            attenuation *= 1.0 - opacityAt(params.scene, query.CandidateInstanceID(),
-                                           query.CandidatePrimitiveIndex(),
-                                           query.CandidateTriangleBarycentrics());
-            if (attenuation < 1e-4) {
-                return; // solidly occluded, to any precision that matters
-            }
-        }
-    }
-
-    if (query.CommittedStatus() == COMMITTED_NOTHING
-        || (query.CommittedInstanceID() == shadow.light
-            && query.CommittedPrimitiveIndex() == shadow.primitive)) {
+    // at the environment, or aims at a delta light within `tmax`.
+    // Fractional-opacity candidates that aren't the target pass through, each
+    // multiplying its transparency into the connection; the target itself
+    // commits, opaque or not. The identity, opacity, and epsilon-free reasoning
+    // all live in `shadowVisibility` (scene.slang), shared with restir_resolve.
+    let attenuation = shadowVisibility(sceneTlas, params.scene, ray,
+                                       shadow.light, shadow.primitive);
+    if (attenuation > 0.0) {
         params.radiance[shadow.pixel] += float4(shadow.contribution * attenuation, 0.0);
     }
 }

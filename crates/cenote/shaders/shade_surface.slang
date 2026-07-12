@@ -26,6 +26,7 @@ import openpbr;
 import pathstate;
 import rng;
 import scene;
+import surface;
 import textures;
 
 struct Params {
@@ -62,174 +63,6 @@ void recordGuides(AovTable* aov, uint pixel, float3 weight, float3 albedo,
     aov.normal[pixel] += float4(weight * normal, 0.0);
 }
 
-// One float3 out of a tightly packed vertex-attribute buffer.
-float3 fetch3(float* attributes, uint vertex) {
-    return float3(attributes[3 * vertex],
-                  attributes[3 * vertex + 1],
-                  attributes[3 * vertex + 2]);
-}
-
-// A reconstructed hit: where the next ray segment starts — nudged off
-// either face, since refraction continues on the far side — plus both
-// unit normals. The interpolated shading normal carries the BSDF frame —
-// it is what makes a coarse sphere render smooth — while the geometric
-// normal keeps the jobs that must match the actual triangle: the spawn
-// offsets, and the sidedness guards that reject directions passing
-// through the surface the shading frame pretends away.
-struct SpawnPoint {
-    float3 position; // nudged toward the arriving ray — reflections
-    float3 below;    // nudged past the surface — transmissions
-    float3 normal;  // geometric, facing the arriving ray
-    float3 shading; // interpolated, flipped to the geometric side
-    bool frontFace; // did the ray strike the winding-front side? (emission is one-sided)
-};
-
-// Reconstruct the world-space hit point and geometric normal, both facing
-// the arriving ray (surfaces are two-sided), and offset the point along
-// the normal by a rigorous bound on its own floating-point reconstruction
-// error — so the next segment can trace with TMin 0 and still never hit
-// the triangle it left, whichever side it leaves from. Ported from the
-// reference GLSL of "Solving Self-Intersection Artifacts in DirectX
-// Raytracing" (van Antwerpen, NVIDIA, 2023). Never a magic epsilon: every
-// term scales with the coordinates it bounds, so this holds at any scene
-// scale.
-SpawnPoint spawnPoint(GeometryRecord mesh, Hit hit, float3 rayDirection) {
-    uint base = 3 * hit.primitive;
-    let v0 = fetch3(mesh.positions, mesh.indices[base]);
-    let v1 = fetch3(mesh.positions, mesh.indices[base + 1]);
-    let v2 = fetch3(mesh.positions, mesh.indices[base + 2]);
-    let o2w = mesh.objectToWorld;
-    let w2o = mesh.worldToObject;
-
-    let edge1 = v1 - v0;
-    let edge2 = v2 - v0;
-    let objPosition = v0 + fma(float3(hit.barycentrics.x), edge1,
-                               hit.barycentrics.y * edge2);
-    let objNormal = cross(edge1, edge2);
-
-    let wldPosition = float3(
-        o2w[0].w + fma(o2w[0].x, objPosition.x,
-                       fma(o2w[0].y, objPosition.y, o2w[0].z * objPosition.z)),
-        o2w[1].w + fma(o2w[1].x, objPosition.x,
-                       fma(o2w[1].y, objPosition.y, o2w[1].z * objPosition.z)),
-        o2w[2].w + fma(o2w[2].x, objPosition.x,
-                       fma(o2w[2].y, objPosition.y, o2w[2].z * objPosition.z)));
-    // Normals transform by the inverse transpose: sum the world-to-object
-    // rows weighted by the object normal's components.
-    var wldNormal = w2o[0].xyz * objNormal.x
-                  + w2o[1].xyz * objNormal.y
-                  + w2o[2].xyz * objNormal.z;
-    let wldScale = rsqrt(dot(wldNormal, wldNormal));
-    wldNormal *= wldScale;
-
-    // The reference's error constants: c0/c1 bound the barycentric lerp's
-    // round-off, c1/c2 the transforms'.
-    const float c0 = 5.9604644775390625e-8;
-    const float c1 = 1.788139769587360206060111522674560546875e-7;
-    const float c2 = 1.19209317972490680404007434844970703125e-7;
-
-    let extent3 = abs(edge1) + abs(edge2) + abs(edge1 - edge2);
-    let extent = max(max(extent3.x, extent3.y), extent3.z);
-    var objErr = fma(float3(c0), abs(v0), float3(c1 * extent));
-
-    let wldErr = fma(float3(c1),
-                     float3(dot(abs(o2w[0].xyz), abs(objPosition)),
-                            dot(abs(o2w[1].xyz), abs(objPosition)),
-                            dot(abs(o2w[2].xyz), abs(objPosition))),
-                     c2 * abs(float3(o2w[0].w, o2w[1].w, o2w[2].w)));
-    objErr = fma(float3(c2),
-                 float3(dot(abs(w2o[0].xyz), abs(wldPosition)) + abs(w2o[0].w),
-                        dot(abs(w2o[1].xyz), abs(wldPosition)) + abs(w2o[1].w),
-                        dot(abs(w2o[2].xyz), abs(wldPosition)) + abs(w2o[2].w)),
-                 objErr);
-
-    var wldOffset = dot(wldErr, abs(wldNormal));
-    let objOffset = dot(objErr, abs(objNormal));
-    wldOffset = fma(wldScale, objOffset, wldOffset);
-
-    // Emission is one-sided: record which side the ray struck by the raw
-    // winding normal, before it is flushed to face the ray below.
-    let frontFace = dot(wldNormal, rayDirection) < 0.0;
-    // Face the arriving ray (instances disable facing cull), so the offset
-    // pushes off the side the scattered ray leaves from.
-    if (dot(wldNormal, rayDirection) > 0.0) {
-        wldNormal = -wldNormal;
-    }
-
-    // The shading normal: vertex normals lerped by the hit's barycentrics,
-    // through the same inverse transpose. Flipped to the geometric side —
-    // shading must agree with the face the ray actually struck.
-    let n0 = fetch3(mesh.normals, mesh.indices[base]);
-    let n1 = fetch3(mesh.normals, mesh.indices[base + 1]);
-    let n2 = fetch3(mesh.normals, mesh.indices[base + 2]);
-    let objShading = n0 + hit.barycentrics.x * (n1 - n0)
-                        + hit.barycentrics.y * (n2 - n0);
-    var shading = normalize(w2o[0].xyz * objShading.x
-                          + w2o[1].xyz * objShading.y
-                          + w2o[2].xyz * objShading.z);
-    if (dot(shading, wldNormal) < 0.0) {
-        shading = -shading;
-    }
-
-    SpawnPoint spawn;
-    spawn.position = fma(float3(wldOffset), wldNormal, wldPosition);
-    spawn.below = fma(float3(-wldOffset), wldNormal, wldPosition);
-    spawn.normal = wldNormal;
-    spawn.shading = shading;
-    spawn.frontFace = frontFace;
-    return spawn;
-}
-
-// The shading normal under a tangent-space normal map. The tangent frame
-// derives per hit from the triangle's positions and UVs (no authored
-// tangents until anisotropy demands them): solve the triangle's 2×2 UV
-// system for the world direction of +u, orthonormalize it against the
-// interpolated shading normal, and take the bitangent's sign from the
-// +v solution so mirrored UV islands map correctly. A degenerate
-// parameterization (zero UV area — including the all-zero stream of an
-// unauthored mesh) keeps the unmapped normal. Like the interpolated
-// normal it replaces, the result is flipped to the geometric side.
-float3 mappedShadingNormal(GeometryRecord mesh, Hit hit, float2 uv, uint map,
-                           SpawnPoint spawn) {
-    uint base = 3 * hit.primitive;
-    let i0 = mesh.indices[base];
-    let i1 = mesh.indices[base + 1];
-    let i2 = mesh.indices[base + 2];
-    let duv1 = mesh.uvs[i1] - mesh.uvs[i0];
-    let duv2 = mesh.uvs[i2] - mesh.uvs[i0];
-    let det = duv1.x * duv2.y - duv1.y * duv2.x;
-    if (abs(det) < 1e-12) {
-        return spawn.shading;
-    }
-    let e1 = fetch3(mesh.positions, i1) - fetch3(mesh.positions, i0);
-    let e2 = fetch3(mesh.positions, i2) - fetch3(mesh.positions, i0);
-    let o2w = mesh.objectToWorld;
-    // World-space edges — the transform's linear part only.
-    let we1 = float3(dot(o2w[0].xyz, e1), dot(o2w[1].xyz, e1), dot(o2w[2].xyz, e1));
-    let we2 = float3(dot(o2w[0].xyz, e2), dot(o2w[1].xyz, e2), dot(o2w[2].xyz, e2));
-    let dpdu = (duv2.y * we1 - duv1.y * we2) / det;
-    let dpdv = (duv1.x * we2 - duv2.x * we1) / det;
-    var tangent = dpdu - spawn.shading * dot(spawn.shading, dpdu);
-    let lenSqr = dot(tangent, tangent);
-    if (!(lenSqr > 1e-20)) {
-        return spawn.shading;
-    }
-    tangent *= rsqrt(lenSqr);
-    var bitangent = cross(spawn.shading, tangent);
-    if (dot(bitangent, dpdv) < 0.0) {
-        bitangent = -bitangent;
-    }
-    let texel = sampleNormal(map, uv);
-    var mapped = normalize(texel.x * tangent + texel.y * bitangent
-                         + texel.z * spawn.shading);
-    // Shading must agree with the face the ray actually struck, exactly
-    // as the interpolated normal it perturbs.
-    if (dot(mapped, spawn.normal) < 0.0) {
-        mapped = -mapped;
-    }
-    return mapped;
-}
-
 [shader("compute")]
 [numthreads(WORKGROUP_SIZE, 1, 1)]
 void shade_surface(uint3 tid: SV_DispatchThreadID) {
@@ -238,7 +71,17 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     }
     let bounce = params.packed & 0xff;
     let maxBounces = (params.packed >> 8) & 0xff;
-    let lightSampling = params.packed >> 16;
+    let lightSampling = (params.packed >> 16) & 0xff;
+    // Bit 24 marks ReSTIR mode, set on every bounce. At the primary hit
+    // (bounce 0) the reservoir stages own next-event estimation, so this kernel
+    // skips its own NEE there. At the primary continuation's first hit
+    // (bounce 1) the reservoir's internalized BSDF candidate already owns
+    // whatever emitter that ray lands on (D-088), so this kernel suppresses
+    // that emission — the two halves of "the reservoir owns primary direct
+    // lighting," which together keep ReSTIR-on and ReSTIR-off unbiased.
+    let restirEnabled = ((params.packed >> 24) & 1) != 0;
+    let restirPrimary = restirEnabled && bounce == 0;
+    let restirSuppressEmission = restirEnabled && bounce == 1;
     uint path = params.hits.entries[tid.x];
     uint pixel = params.paths.pixel[path];
     Hit hit = params.paths.hit[path];
@@ -280,7 +123,12 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     var contribution = float3(0.0);
     if (mesh.light != LIGHT_NONE && spawn.frontFace) {
         var weight = 1.0;
-        if (throughput.w > 0.0) {
+        if (restirSuppressEmission) {
+            // The primary continuation's first-hit emission is the BSDF
+            // strategy's reach to this light — already a reservoir candidate at
+            // bounce 0, so counting it here would double it.
+            weight = 0.0;
+        } else if (throughput.w > 0.0) {
             if (lightSampling == LIGHT_SAMPLING_NEE) {
                 weight = 0.0;
             } else if (lightSampling == LIGHT_SAMPLING_MIS) {
@@ -361,7 +209,7 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     // the surface. The contribution is fully weighted here; trace_shadow
     // just adds it if the connection is unoccluded.
     let envProb = params.scene.env.selectProb;
-    if (lightSampling != LIGHT_SAMPLING_BSDF
+    if (!restirPrimary && lightSampling != LIGHT_SAMPLING_BSDF
         && (params.scene.lightCount > 0 || envProb > 0.0)) {
         let uLight = sample_1d(pixel, params.sampleIndex,
                                bounceDimension(bounce, NEE_LIGHT));

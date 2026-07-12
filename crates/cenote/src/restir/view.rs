@@ -7,11 +7,14 @@
 //! deliberately NOT the `RenderInputs.generation` counter — the distinction
 //! that makes the warm-start work, spelled out on `ViewId` below.
 //!
-//! Like the identity registry, this substrate lands before its consumer (M3 §4
-//! step 2 before step 3): the `restir_*` stages are the first to read and write
-//! these buffers. Until they exist the state is exercised only by its lifecycle
-//! test (T4), so the module carries one scoped `dead_code` allowance — removed
-//! when step 3 wires the buffers into the wavefront.
+//! This substrate lands before its consumer. Single-frame initial RIS (step
+//! 3.2) needs only one reservoir per pixel and hands the wavefront a bare
+//! per-wave target; it is temporal reuse (step 5) that first makes the history
+//! *persist* across frames, and only then do the prev/curr ping-pong, the
+//! carry-across-move, and per-view ownership below earn their keep. Until then
+//! the state is exercised by its lifecycle test (T4), so the module keeps one
+//! scoped `dead_code` allowance — removed when the render loop owns per-view
+//! reservoirs for the warm-start.
 #![allow(dead_code)]
 
 use ash::vk;

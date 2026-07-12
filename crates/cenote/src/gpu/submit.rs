@@ -133,6 +133,17 @@ pub enum Pass<'a> {
         /// The `u32` repeated across the range.
         value: u32,
     },
+    /// Copy a byte range from one buffer to another (`vkCmdCopyBuffer`) — how
+    /// the render thread lifts a single-shot buffer (the `ReSTIR` debug surface)
+    /// into a published frame slot without a resolve pass.
+    CopyBuffer {
+        /// Source (needs `TRANSFER_SRC` usage).
+        src: &'a Buffer,
+        /// Destination (needs `TRANSFER_DST` usage).
+        dst: &'a Buffer,
+        /// Bytes to copy, from offset 0 of each; must fit both buffers.
+        size: u64,
+    },
     /// A compute dispatch with host-chosen workgroup counts.
     Dispatch {
         /// The pipeline to run.
@@ -303,6 +314,13 @@ impl Context {
                 );
                 return;
             }
+            Pass::CopyBuffer { src, dst, size } => {
+                assert!(
+                    size <= src.size() && size <= dst.size(),
+                    "copy reaches past the end of a buffer"
+                );
+                return;
+            }
             Pass::Dispatch {
                 pipeline,
                 scene,
@@ -418,6 +436,10 @@ fn record_pass(device: &ash::Device, cmd: vk::CommandBuffer, pass: &Pass) {
             value,
         } => unsafe {
             device.cmd_fill_buffer(cmd, buffer.handle(), offset, size, value);
+        },
+        Pass::CopyBuffer { src, dst, size } => unsafe {
+            let region = vk::BufferCopy::default().size(size);
+            device.cmd_copy_buffer(cmd, src.handle(), dst.handle(), &[region]);
         },
         Pass::Dispatch {
             pipeline,

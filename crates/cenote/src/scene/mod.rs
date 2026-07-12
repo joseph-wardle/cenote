@@ -35,6 +35,7 @@ use crate::environment::Environment;
 use crate::error::{Error, Result};
 use crate::gpu::{AccelerationStructure, Buffer, Context, SampledImage, TlasInstance};
 use crate::lights::{DeltaLight, LIGHT_NONE, TriangleLight};
+use crate::restir::{EmissiveLight, LightIdentityRegistry, RestirResources};
 use crate::material::{Material, TEXTURE_NONE};
 use crate::texture;
 
@@ -184,6 +185,15 @@ pub struct Scene {
     /// the image.
     env_size: (u32, u32),
     env_power: f64,
+    /// The stable light-identity registry (M3): persists across edits so a
+    /// reservoir's stored light id stays meaningful while the GPU light index
+    /// churns. Reconciled every build; rebuilds the [`restir`](Self::restir)
+    /// remap.
+    identity: LightIdentityRegistry,
+    /// The reservoir path's resident scene slice — candidate table, env
+    /// coin-flip probability, and the identity remap — rebuilt beside the
+    /// scene table whenever a light edit dirties it.
+    restir: RestirResources,
 }
 
 /// One material texture resident on the GPU, with the content hash of the
@@ -318,6 +328,15 @@ impl Scene {
             select_probability(power, crate::lights::total_power(&triangle_lights, &[])),
             light_count,
         )?;
+        let mut identity = LightIdentityRegistry::new();
+        let restir = build_restir(
+            gpu,
+            &mut identity,
+            &triangle_lights,
+            &[],
+            placements.len() as u32,
+            power,
+        )?;
 
         Ok(Self {
             tlas,
@@ -334,6 +353,8 @@ impl Scene {
             camera,
             env_size,
             env_power: power,
+            identity,
+            restir,
         })
     }
 
@@ -349,6 +370,14 @@ impl Scene {
     #[must_use]
     pub fn table(&self) -> &Buffer {
         &self.table
+    }
+
+    /// The reservoir path's scene slice (M3) — the `RestirScene` table the two
+    /// initial-RIS stages reach the candidate light table and identity remap
+    /// through, beside the shared [`table`](Self::table).
+    #[must_use]
+    pub fn restir_table(&self) -> &Buffer {
+        self.restir.table()
     }
 
     /// The environment radiance image, ready to bind next to the TLAS.
@@ -560,6 +589,49 @@ fn upload_instance_tables(
         usage,
     )?;
     Ok((geometry, materials, lights))
+}
+
+/// The emissive instances of a build, as the identity registry sees them: one
+/// entry per instance that owns a light record. Named by instance index today —
+/// enough for the single-frame stamp (`restir_candidates`) / resolve
+/// (`restir_resolve`) round-trip step 3 exercises. The source-name keying that
+/// lets a reservoir's history survive a scene edit lands with temporal reuse (M3
+/// step 5), where that carried history first exists to protect.
+fn emissive_lights(triangle_lights: &[TriangleLight]) -> Vec<EmissiveLight> {
+    let mut instances: Vec<u32> = triangle_lights.iter().map(|light| light.instance).collect();
+    instances.sort_unstable();
+    instances.dedup();
+    instances
+        .into_iter()
+        .map(|instance| EmissiveLight {
+            name: instance.to_string(),
+            fingerprint: instance.to_string(),
+            instance,
+        })
+        .collect()
+}
+
+/// Build the reservoir path's resident scene slice for one build: reconcile the
+/// identity registry against this build's emissive instances, then upload the
+/// triangle-only candidate table, the delta-only table (the exact additive term
+/// `restir_resolve` adds outside the reservoir, D-088), its remap, and the
+/// environment coin-flip probability weighed over the triangles *alone* (the
+/// reservoir excludes delta lights, so its selection is not diluted by their
+/// power the way the combined [`SceneTable::env_select_prob`] is).
+fn build_restir(
+    gpu: &Context,
+    identity: &mut LightIdentityRegistry,
+    triangle_lights: &[TriangleLight],
+    delta_lights: &[DeltaLight],
+    instance_count: u32,
+    env_power: f64,
+) -> Result<RestirResources> {
+    let remap = identity.reconcile(&emissive_lights(triangle_lights), instance_count);
+    let candidate_table = crate::lights::candidate_table(triangle_lights);
+    let delta_table = crate::lights::delta_table(delta_lights);
+    let env_select_prob =
+        select_probability(env_power, crate::lights::total_power(triangle_lights, &[]));
+    RestirResources::upload(gpu, &candidate_table, &delta_table, &remap, env_select_prob)
 }
 
 /// Upload the [`SceneTable`] — the one buffer of addresses every kernel

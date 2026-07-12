@@ -23,12 +23,13 @@ use super::changeset::Dirty;
 use super::description::SceneDescription;
 use super::lower::{InstanceSpec, all_dirty, host_phase};
 use super::{
-    GpuEnvironment, GpuMesh, Placement, ResidentBuffers, ResidentTexture, Scene, build_scene_tlas,
-    select_probability, upload_environment, upload_instance_tables, upload_mesh,
+    GpuEnvironment, GpuMesh, Placement, ResidentBuffers, ResidentTexture, Scene, build_restir,
+    build_scene_tlas, select_probability, upload_environment, upload_instance_tables, upload_mesh,
     upload_scene_table,
 };
 use crate::error::Result;
 use crate::gpu::Context;
+use crate::restir::LightIdentityRegistry;
 use crate::texture;
 
 impl Scene {
@@ -94,6 +95,15 @@ impl Scene {
             select_probability(power, host.light_power()),
             host.light_count(),
         )?;
+        let mut identity = LightIdentityRegistry::new();
+        let restir = build_restir(
+            gpu,
+            &mut identity,
+            &host.triangle_lights,
+            &host.delta_lights,
+            host.instances.len() as u32,
+            power,
+        )?;
         description.take_dirty();
         Ok(Self {
             tlas,
@@ -106,6 +116,8 @@ impl Scene {
             camera: host.camera.expect("a fresh build always adopts its camera"),
             env_size,
             env_power: power,
+            identity,
+            restir,
         })
     }
 
@@ -169,6 +181,17 @@ impl Scene {
             self.env_size,
             select_probability(self.env_power, host.light_power()),
             host.light_count(),
+        )?;
+        // The reservoir path's slice rides the same light-edit rebuild: the
+        // candidate table and the identity remap track the churn the combined
+        // table just absorbed.
+        self.restir = build_restir(
+            gpu,
+            &mut self.identity,
+            &host.triangle_lights,
+            &host.delta_lights,
+            host.instances.len() as u32,
+            self.env_power,
         )?;
         if let Some(camera) = host.camera {
             self.camera = camera;

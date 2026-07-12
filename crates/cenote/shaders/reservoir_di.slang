@@ -25,6 +25,23 @@ public struct DirectLightSample : IDefaultInitializable {
     public float2 barycentrics; // the sampled point on that triangle
 };
 
+// Reserved stable ids, mirroring `src/restir/identity.rs` (and `LIGHT_NONE` in
+// lights.slang, the same 0xffffffff). The environment (HDRI) is a reservoir
+// candidate too but is not an instance, so it carries a fixed sentinel;
+// instance ids begin above the reserved block. `LIGHT_ID_NONE` marks an empty
+// or dropped reservoir.
+public static const uint LIGHT_ID_ENVIRONMENT = 0;
+public static const uint LIGHT_ID_NONE = 0xffffffff;
+
+// An HDRI draw held in the reservoir: `light` names the environment, and
+// `barycentrics` hold the 2D sampling coordinate `Environment::sample` inverts
+// — not a point on a triangle. Storing the primary sample (rather than the
+// direction) makes the reconnection exact: `restir_resolve` re-samples the same
+// coordinate to reproduce the direction, radiance, and pdf bit for bit.
+public bool isEnvironmentSample(DirectLightSample sample) {
+    return sample.light == LIGHT_ID_ENVIRONMENT;
+}
+
 // The persistent per-pixel reservoir record: {sample, W, c} = 24 B exactly.
 // weightSum is deliberately absent — it is pass-local and rebuilt from scratch
 // every pass (the one invariant `reservoir.slang` documents at length), so
