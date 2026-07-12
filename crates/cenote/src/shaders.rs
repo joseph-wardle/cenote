@@ -55,6 +55,9 @@ pub struct Kernels {
     /// `ReSTIR` initial RIS: stream the primary hit's light candidates through
     /// a per-pixel reservoir.
     pub restir_candidates: Kernel,
+    /// `ReSTIR` spatial reuse: fold k screen-space neighbours' reservoirs into
+    /// each pixel's under defensive pairwise MIS.
+    pub restir_spatial: Kernel,
     /// `ReSTIR` resolve: shade the surviving light sample and queue its
     /// visibility ray.
     pub restir_resolve: Kernel,
@@ -88,6 +91,7 @@ impl Kernels {
             shade_surface: kernel(spirv!("shade_surface"), c"shade_surface"),
             trace_shadow: kernel(spirv!("trace_shadow"), c"trace_shadow"),
             restir_candidates: kernel(spirv!("restir_candidates"), c"restir_candidates"),
+            restir_spatial: kernel(spirv!("restir_spatial"), c"restir_spatial"),
             restir_resolve: kernel(spirv!("restir_resolve"), c"restir_resolve"),
             accumulate: kernel(spirv!("accumulate"), c"accumulate"),
             resolve: kernel(spirv!("resolve"), c"resolve"),
@@ -118,6 +122,7 @@ impl Kernels {
             shade_surface,
             trace_shadow,
             restir_candidates,
+            restir_spatial,
             restir_resolve,
             accumulate,
             resolve,
@@ -153,6 +158,10 @@ impl Kernels {
             restir_candidates: Kernel {
                 spirv: restir_candidates?,
                 entry: c"restir_candidates",
+            },
+            restir_spatial: Kernel {
+                spirv: restir_spatial?,
+                entry: c"restir_spatial",
             },
             restir_resolve: Kernel {
                 spirv: restir_resolve?,
@@ -289,7 +298,7 @@ mod tests {
         u32::from_le_bytes(bytes[..4].try_into().unwrap()) == 0x0723_0203
     }
 
-    fn all(kernels: &Kernels) -> [&Kernel; 10] {
+    fn all(kernels: &Kernels) -> [&Kernel; 11] {
         [
             &kernels.raygen,
             &kernels.intersect,
@@ -297,6 +306,7 @@ mod tests {
             &kernels.shade_surface,
             &kernels.trace_shadow,
             &kernels.restir_candidates,
+            &kernels.restir_spatial,
             &kernels.restir_resolve,
             &kernels.accumulate,
             &kernels.resolve,

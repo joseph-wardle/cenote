@@ -135,6 +135,12 @@ pub struct Renderer {
     /// [`DebugView::Off`]. Meaningful only in [`RenderMode::Restir`]. Preserved
     /// across [`Renderer::reload`].
     debug_view: DebugView,
+    /// Whether `ReSTIR` folds in spatial neighbours (M3 step 4). On by default —
+    /// it is the estimator's variance reduction — and meaningful only in
+    /// [`RenderMode::Restir`]; off runs single-frame RIS (the step-3 path), which
+    /// the unbiasedness gate flips to check that both converge to the same image.
+    /// Preserved across [`Renderer::reload`].
+    spatial_reuse: bool,
 }
 
 impl Renderer {
@@ -189,6 +195,7 @@ impl Renderer {
             max_bounces,
             render_mode: RenderMode::PathTracer,
             debug_view: DebugView::Off,
+            spatial_reuse: true,
         })
     }
 
@@ -202,11 +209,13 @@ impl Renderer {
     ///
     /// Any [`crate::Error`] from pipeline or buffer creation.
     pub fn reload(&mut self, gpu: &Context, kernels: &Kernels) -> Result<()> {
-        let (render_mode, debug_view) = (self.render_mode, self.debug_view);
+        let (render_mode, debug_view, spatial_reuse) =
+            (self.render_mode, self.debug_view, self.spatial_reuse);
         *self = Self::from_kernels(gpu, kernels, self.max_bounces)?;
-        // A body edit must not silently drop the view's estimator choice.
+        // A body edit must not silently drop the view's estimator choices.
         self.render_mode = render_mode;
         self.debug_view = debug_view;
+        self.spatial_reuse = spatial_reuse;
         Ok(())
     }
 
@@ -235,6 +244,20 @@ impl Renderer {
     #[must_use]
     pub fn debug_view(&self) -> DebugView {
         self.debug_view
+    }
+
+    /// Toggle `ReSTIR` spatial reuse (M3 step 4). On by default; off is the
+    /// single-frame-RIS path the unbiasedness gate compares against. Meaningful
+    /// only in [`RenderMode::Restir`]; takes effect on the next
+    /// [`Renderer::accumulate`], so the caller resets its film to switch cleanly.
+    pub fn set_spatial_reuse(&mut self, enabled: bool) {
+        self.spatial_reuse = enabled;
+    }
+
+    /// Whether spatial reuse is on.
+    #[must_use]
+    pub fn spatial_reuse(&self) -> bool {
+        self.spatial_reuse
     }
 
     /// Render one `width`×`height` frame of `scene` — sample 0 of every
@@ -295,9 +318,10 @@ impl Renderer {
             RenderMode::PathTracer => None,
             RenderMode::Restir => {
                 let debug = self.debug_view != DebugView::Off;
-                film.ensure_restir(gpu, debug)?;
+                film.ensure_restir(gpu, self.spatial_reuse, debug)?;
                 Some(RestirInputs {
                     reservoir: film.reservoir(),
+                    scratch: self.spatial_reuse.then(|| film.reservoir_scratch()),
                     debug: debug.then(|| film.debug()),
                     debug_view: self.debug_view,
                 })

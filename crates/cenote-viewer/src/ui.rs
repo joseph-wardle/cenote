@@ -38,6 +38,10 @@ pub struct Gui {
     /// Render with `ReSTIR`-DI at the primary hit instead of the path tracer —
     /// the D-090 unbiasedness gate, driven live.
     restir: bool,
+    /// Fold in spatial neighbours (M3 step 4). On by default; toggling it off
+    /// drops to single-frame RIS, the other half of the gate — both converge to
+    /// the same image. Only meaningful while `restir` is on.
+    spatial_reuse: bool,
     /// Which D-092 debug view to false-colour (only while `restir` is on).
     debug_view: DebugView,
     /// Show the OIDN-denoised view instead of the raw average.
@@ -63,6 +67,7 @@ impl Gui {
             state,
             exposure: 0.0,
             restir: false,
+            spatial_reuse: true,
             debug_view: DebugView::Off,
             #[cfg(feature = "denoise")]
             denoise: false,
@@ -78,6 +83,11 @@ impl Gui {
     /// Whether the `ReSTIR` estimator toggle is on.
     pub fn restir(&self) -> bool {
         self.restir
+    }
+
+    /// Whether spatial reuse is on (only acted on while [`Gui::restir`] is on).
+    pub fn spatial_reuse(&self) -> bool {
+        self.spatial_reuse
     }
 
     /// The selected D-092 debug view — [`DebugView::Off`] unless the panel's
@@ -160,9 +170,10 @@ impl Gui {
 
                 ui.separator();
                 ui.checkbox(&mut self.restir, "ReSTIR");
-                // The debug picker only makes sense while ReSTIR owns the
-                // primary hit — restir_resolve is what writes the surface.
+                // Spatial reuse and the debug picker only make sense while ReSTIR
+                // owns the primary hit — restir_resolve is what writes the surface.
                 ui.add_enabled_ui(self.restir, |ui| {
+                    ui.checkbox(&mut self.spatial_reuse, "spatial reuse");
                     egui::ComboBox::from_label("debug view")
                         .selected_text(debug_view_label(self.debug_view))
                         .show_ui(ui, |ui| {

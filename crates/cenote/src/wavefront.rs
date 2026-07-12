@@ -247,6 +247,38 @@ struct RestirResolveParams {
     sample_index: u32,
 }
 
+/// Push constants for the `ReSTIR` spatial-reuse stage
+/// (`shaders/restir_spatial.slang`). Runs at bounce 0 only, between candidates
+/// and resolve; reads the candidate reservoirs (self + neighbours), writes the
+/// merged survivors to the scratch buffer. Sits at Vulkan's guaranteed 128
+/// push-constant bytes exactly.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct RestirSpatialParams {
+    paths: PathsAddrs,
+    hits: QueueAddrs,
+    scene: vk::DeviceAddress,
+    restir: vk::DeviceAddress,
+    /// The candidate stage's output — read for the pixel and its neighbours.
+    reservoirs_in: vk::DeviceAddress,
+    /// The merged survivor's destination — the buffer resolve then reads.
+    reservoirs_out: vk::DeviceAddress,
+    sample_index: u32,
+    width: u32,
+    height: u32,
+    /// Path-pool capacity: a neighbour's path slot must be below it (the range
+    /// guard that keeps neighbour geometry reads in the live pool).
+    capacity: u32,
+    /// k — spatial neighbours gathered.
+    neighbours: u32,
+    /// Gather radius, pixels.
+    radius: f32,
+    /// Reuse gate: `dot(n_center, n_neighbour)` must exceed this.
+    normal_threshold: f32,
+    /// Reuse gate: relative camera-depth difference cap.
+    depth_threshold: f32,
+}
+
 /// Push constants for the shadow-ray kernel (`shaders/trace_shadow.slang`).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -538,8 +570,17 @@ pub enum DebugView {
 /// is not [`DebugView::Off`]; the wave zero-fills it so unreached pixels read
 /// black.
 pub struct RestirInputs<'a> {
-    /// This wave's per-pixel reservoirs (curr), sized to the target.
+    /// This wave's per-pixel reservoirs (curr), sized to the target: the
+    /// candidate stage writes it, and — with spatial reuse off — `restir_resolve`
+    /// reads it directly.
     pub reservoir: &'a Buffer,
+    /// The spatial stage's output reservoir (the "committed prior-pass" ping-pong
+    /// buffer), sized to the target. `Some` turns spatial reuse **on**: the wave
+    /// inserts `restir_spatial` between candidates and resolve, resolve reads
+    /// *this* buffer instead of `reservoir`, and the survivor arrives with its
+    /// visibility already folded into W (so resolve shades it without a shadow
+    /// ray). `None` is the step-3 single-frame-RIS path.
+    pub scratch: Option<&'a Buffer>,
     /// The debug false-colour target (one RGBA f32 per pixel), or `None` when
     /// no view is selected.
     pub debug: Option<&'a Buffer>,
@@ -559,6 +600,9 @@ pub struct Wavefront {
     /// M3 initial RIS: streams the primary hit's light candidates into the
     /// reservoir. Built alongside the rest; used only in [`RenderMode::Restir`].
     restir_candidates: ComputePipeline,
+    /// M3 spatial reuse: folds k neighbours' reservoirs into each pixel's.
+    /// Built alongside the rest; used only when spatial reuse is on.
+    restir_spatial: ComputePipeline,
     /// M3 resolve: shades the surviving light sample and queues its shadow ray.
     restir_resolve: ComputePipeline,
     paths: PathPool,
@@ -589,6 +633,36 @@ impl Wavefront {
     /// in validation; the estimator is unbiased at any M ≥ 1, so this trades
     /// variance for cost, never correctness.
     pub const RESTIR_CANDIDATES: u32 = 16;
+
+    /// Spatial neighbours gathered per pixel (D-088: ~5). The estimator is
+    /// unbiased at any k ≥ 0 — this trades variance (more reuse) for cost (a
+    /// visibility ray each) — so it is tuned in validation, not load-bearing.
+    pub const RESTIR_SPATIAL_NEIGHBOURS: u32 = 5;
+
+    /// Compile-time cap on k, mirrored by `MAX_SPATIAL_NEIGHBOURS` in
+    /// `shaders/restir_spatial.slang` (the shader's per-thread accepted-neighbour
+    /// store is a fixed array of this size). Raising it means raising both.
+    pub const RESTIR_MAX_SPATIAL_NEIGHBOURS: u32 = 8;
+
+    /// Spatial gather radius, pixels (RTXDI's default is 32; ~30 here).
+    pub const RESTIR_SPATIAL_RADIUS: f32 = 30.0;
+
+    /// Reuse gate — the neighbour's geometric normal must satisfy
+    /// `dot(n_center, n_neighbour) > this`. 0.9 (≈26°) is deliberately stricter
+    /// than RTXDI's 0.5 (≈60°): the conservative, correctness-first choice, and
+    /// the first knob to loosen before adding a second pass if convergence lags
+    /// (D-093).
+    pub const RESTIR_NORMAL_THRESHOLD: f32 = 0.9;
+
+    /// Reuse gate — relative camera-depth difference cap, matching RTXDI's 0.1.
+    pub const RESTIR_DEPTH_THRESHOLD: f32 = 0.1;
+
+    // k must fit the shader's fixed accepted-neighbour array — a build error,
+    // not a runtime clamp, if a tuning edit outgrows it.
+    const _SPATIAL_FITS: () = assert!(
+        Self::RESTIR_SPATIAL_NEIGHBOURS <= Self::RESTIR_MAX_SPATIAL_NEIGHBOURS,
+        "RESTIR_SPATIAL_NEIGHBOURS exceeds the shader's MAX_SPATIAL_NEIGHBOURS store"
+    );
 
     // Support-coverage guard (M3 plan §2, §6): the reservoir's *unshadowed*
     // target makes RIS unbiased only if some candidate covers the whole support
@@ -666,6 +740,13 @@ impl Wavefront {
             restir_candidates: pipeline(
                 &kernels.restir_candidates,
                 size_of::<RestirCandidatesParams>(),
+                Bindings::Scene,
+            )?,
+            // Also binds the scene set: the k+1 visibility rays trace the TLAS,
+            // and the target eval reads the environment and textured emitters.
+            restir_spatial: pipeline(
+                &kernels.restir_spatial,
+                size_of::<RestirSpatialParams>(),
                 Bindings::Scene,
             )?,
             restir_resolve: pipeline(
@@ -903,20 +984,28 @@ impl Wavefront {
             },
             // The reservoir stages run at bounce 0 only, when the caller brought
             // a reservoir target (ReSTIR mode).
-            restir: restir.map(|restir| self.restir_wave_params(scene, restir, radiance, sample)),
+            restir: restir
+                .map(|restir| self.restir_wave_params(scene, restir, radiance, width, height, sample)),
         }
     }
 
-    /// The two reservoir stages' push constants for one wave — built only in
+    /// The reservoir stages' push constants for one wave — built only in
     /// [`RenderMode::Restir`], when the caller supplies [`RestirInputs`].
-    /// Both stages address the same hit queue and per-pixel reservoir buffer;
-    /// candidates writes it, resolve reads it. Resolve also carries the debug
-    /// target and view, so it can false-colour the survivor (D-092).
+    ///
+    /// Candidates writes the `reservoir` buffer. With spatial reuse on
+    /// (`restir.scratch` is `Some`), `restir_spatial` reads that buffer (self +
+    /// neighbours) and writes the scratch, and resolve reads the scratch — the
+    /// committed-prior-pass ping-pong (M3 plan §2), with the survivor's
+    /// visibility already folded into W. With it off, resolve reads `reservoir`
+    /// directly and owes the survivor its own shadow ray. Resolve also carries
+    /// the debug target and view, so it can false-colour the survivor (D-092).
     fn restir_wave_params(
         &self,
         scene: &Scene,
         restir: &RestirInputs,
         radiance: &Buffer,
+        width: u32,
+        height: u32,
         sample: u32,
     ) -> RestirWaveParams {
         let paths = self.paths.addresses();
@@ -924,6 +1013,32 @@ impl Wavefront {
         let scene_table = scene.table().device_address();
         let restir_table = scene.restir_table().device_address();
         let reservoirs = restir.reservoir.device_address();
+
+        // Spatial reuse on: build its params, and route resolve at the scratch
+        // its survivor lands in. The `DEBUG_VISIBILITY_IN_WEIGHT` bit (0x100,
+        // mirrored in restir_resolve.slang) rides in the debug word — it tells
+        // resolve the survivor's visibility is already in W, so shade unshadowed.
+        let spatial = restir.scratch.map(|scratch| RestirSpatialParams {
+            paths,
+            hits,
+            scene: scene_table,
+            restir: restir_table,
+            reservoirs_in: reservoirs,
+            reservoirs_out: scratch.device_address(),
+            sample_index: sample,
+            width,
+            height,
+            capacity: self.capacity,
+            neighbours: Self::RESTIR_SPATIAL_NEIGHBOURS,
+            radius: Self::RESTIR_SPATIAL_RADIUS,
+            normal_threshold: Self::RESTIR_NORMAL_THRESHOLD,
+            depth_threshold: Self::RESTIR_DEPTH_THRESHOLD,
+        });
+        let (resolve_reservoirs, visibility_in_weight) = match restir.scratch {
+            Some(scratch) => (scratch.device_address(), 0x100),
+            None => (reservoirs, 0),
+        };
+
         RestirWaveParams {
             candidates: RestirCandidatesParams {
                 paths,
@@ -934,17 +1049,18 @@ impl Wavefront {
                 sample_index: sample,
                 candidates: Self::RESTIR_CANDIDATES,
             },
+            spatial,
             resolve: RestirResolveParams {
                 paths,
                 hits,
                 shadows: self.queues.addresses(queue::SHADOW, &self.queues.shadow),
                 scene: scene_table,
                 restir: restir_table,
-                reservoirs,
+                reservoirs: resolve_reservoirs,
                 radiance: radiance.device_address(),
                 // 0 when no view is selected; restir_resolve then writes nothing.
                 debug: restir.debug.map_or(0, Buffer::device_address),
-                debug_view: restir.debug_view as u32,
+                debug_view: restir.debug_view as u32 | visibility_in_weight,
                 sample_index: sample,
             },
         }
@@ -953,6 +1069,10 @@ impl Wavefront {
     /// Record one wave's pass sequence: zero the radiance target (and the
     /// AOV accumulators, when the wave carries them), then per pixel
     /// range, raygen and the bounce loop.
+    // The recorded sequence *is* the map of a frame (see the module header), so
+    // it reads top-to-bottom as one function rather than being split into
+    // helpers that would scatter the order a reader traces.
+    #[allow(clippy::too_many_lines, reason = "the linear pass sequence is the map")]
     fn record_wave<'a>(
         &'a self,
         scene: &'a Scene,
@@ -1022,6 +1142,19 @@ impl Wavefront {
                 value: 0,
             });
         }
+        // Spatial reuse reads *neighbour* reservoirs, so a miss or unreached
+        // pixel must read the empty reservoir (confidence 0), not stale VRAM —
+        // clear the candidate buffer once, before any range writes it. (Single-
+        // frame RIS needs no clear: resolve reads only the pixels candidates
+        // just wrote, at the same pixel it dispatched from.)
+        if let Some(restir) = restir.filter(|restir| restir.scratch.is_some()) {
+            passes.push(Pass::Fill {
+                buffer: restir.reservoir,
+                offset: 0,
+                size: pixels * size_of::<crate::restir::StoredReservoir>() as u64,
+                value: 0,
+            });
+        }
         for raygen in &params.ranges {
             passes.push(fill(queue::RAY));
             passes.push(Pass::Dispatch {
@@ -1054,18 +1187,27 @@ impl Wavefront {
                     bytemuck::bytes_of(&params.shade_miss[bounce as usize]),
                     queue::MISS,
                 ));
-                // ReSTIR mode, primary hit: stream the reservoir candidates and
-                // resolve the survivor before shade_surface (whose bounce-0 NEE
-                // is off). Both dispatch from the hit queue without consuming it
-                // — candidates writes the reservoir, resolve reads it, the
-                // barrier between passes ordering the two. Later bounces are the
-                // ordinary path.
+                // ReSTIR mode, primary hit: stream the reservoir candidates,
+                // optionally fold in spatial neighbours, then resolve the
+                // survivor — all before shade_surface (whose bounce-0 NEE is
+                // off). Each dispatches from the hit queue without consuming it,
+                // and the full barrier between passes orders them: candidates
+                // writes the reservoir, spatial reads it (self + neighbours) and
+                // writes the scratch, resolve reads whichever holds the survivor.
+                // Later bounces are the ordinary path.
                 if let Some(restir) = params.restir.as_ref().filter(|_| bounce == 0) {
                     passes.push(indirect(
                         &self.restir_candidates,
                         bytemuck::bytes_of(&restir.candidates),
                         queue::HIT,
                     ));
+                    if let Some(spatial) = restir.spatial.as_ref() {
+                        passes.push(indirect(
+                            &self.restir_spatial,
+                            bytemuck::bytes_of(spatial),
+                            queue::HIT,
+                        ));
+                    }
                     passes.push(indirect(
                         &self.restir_resolve,
                         bytemuck::bytes_of(&restir.resolve),
@@ -1107,9 +1249,12 @@ struct WaveParams {
     restir: Option<RestirWaveParams>,
 }
 
-/// The two reservoir stages' push constants for one wave — bounce 0 only.
+/// The reservoir stages' push constants for one wave — bounce 0 only.
 struct RestirWaveParams {
     candidates: RestirCandidatesParams,
+    /// The spatial stage, present only when spatial reuse is on
+    /// (`RestirInputs::scratch` was `Some`).
+    spatial: Option<RestirSpatialParams>,
     resolve: RestirResolveParams,
 }
 
@@ -1827,23 +1972,32 @@ mod tests {
         }
     }
 
-    /// The M3 step-3 unbiasedness gate: the `ReSTIR`-DI estimator (initial RIS
-    /// at the primary hit, one visibility ray at resolve) and the M2 path tracer
-    /// must converge to the same image. They share every secondary bounce; only
-    /// the primary *direct* term differs — the reservoir owns the whole of it (M
-    /// light candidates plus one internalized BSDF candidate, combined under the
-    /// count-weighted balance heuristic), so `ReSTIR` suppresses the primary
-    /// continuation's bounce-1 emission that the path tracer's BSDF strategy
-    /// adds. It is the same integral estimated two ways: a biased reservoir (a
-    /// dropped Jacobian, a wrong count in the balance heuristic, a stale target,
-    /// a missed suppression) would shift the converged mean a few percent —
-    /// exactly what this catches. The scene is a lit environment *and* an area
-    /// emitter, so both light-candidate branches — the env coin flip and the
-    /// triangle table — and the BSDF candidate's reconnection to each are all
-    /// exercised. No delta lights: they stay on exact additive NEE outside the
+    /// The M3 unbiasedness gate (D-090), run for both reservoir estimators: the
+    /// single-frame RIS of step 3 *and* the spatial reuse of step 4 must each
+    /// converge to the same image as the M2 path tracer. They share every
+    /// secondary bounce; only the primary *direct* term differs — the reservoir
+    /// owns the whole of it (M light candidates plus one internalized BSDF
+    /// candidate, combined under the count-weighted balance heuristic), so
+    /// `ReSTIR` suppresses the primary continuation's bounce-1 emission that the
+    /// path tracer's BSDF strategy adds. It is the same integral estimated three
+    /// ways: a biased reservoir (a dropped Jacobian, a wrong count in a balance
+    /// or pairwise-MIS weight, a stale target, a mishandled visibility fold, a
+    /// missed suppression) would shift the converged mean a few percent — exactly
+    /// what this catches. Spatial adds the neighbour gather, the defensive
+    /// pairwise MIS, and the k+1 visibility rays on top, so its agreement gates
+    /// the whole step-4 estimator end to end. The scene is a lit environment
+    /// *and* an area emitter, so both light-candidate branches — the env coin
+    /// flip and the triangle table — and the BSDF candidate's reconnection to
+    /// each are all exercised, including the spatial shift's env-vs-area branch
+    /// (D-093). No delta lights: they stay on exact additive NEE outside the
     /// reservoir (D-088), a separate term this gate deliberately leaves out.
     #[test]
-    fn restir_di_matches_the_path_tracer() {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the scene literal plus the three-way path/RIS/spatial comparison \
+                  is one gate — splitting it would scatter what it checks"
+    )]
+    fn restir_matches_the_path_tracer() {
         let Some(gpu) = crate::gpu::test_context() else {
             return;
         };
@@ -1900,26 +2054,39 @@ mod tests {
             LightSampling::Mis,
         )
         .expect("wavefront");
-        let inputs = RestirInputs {
+        // Spatial reuse (step 4) reads a second reservoir buffer — the scratch
+        // the merged survivor lands in — so it too must converge to the same
+        // image (D-090's gate runs from step 3 onward). The wave clears `reservoir`
+        // itself when spatial is on, so no host-side clear is needed here.
+        let scratch = gpu
+            .create_buffer(
+                "test.reservoir.scratch",
+                u64::from(width) * u64::from(height) * size_of::<crate::restir::StoredReservoir>() as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                    | vk::BufferUsageFlags::TRANSFER_DST,
+                MemoryLocation::GpuOnly,
+            )
+            .expect("scratch buffer");
+        let reservoir_di = RestirInputs {
             reservoir: &reservoir,
+            scratch: None,
             debug: None,
             debug_view: DebugView::Off,
         };
-        let mean = |restir: bool| -> f64 {
+        let reservoir_spatial = RestirInputs {
+            reservoir: &reservoir,
+            scratch: Some(&scratch),
+            debug: None,
+            debug_view: DebugView::Off,
+        };
+        let mean = |inputs: Option<&RestirInputs>| -> f64 {
             let radiance = radiance_buffer(&gpu, width, height);
             let mut total = 0.0;
             for sample in 0..samples {
                 wavefront
                     .trace_then(
-                        &gpu,
-                        &scene,
-                        &radiance,
-                        width,
-                        height,
-                        sample,
-                        None,
-                        restir.then_some(&inputs),
-                        &[],
+                        &gpu, &scene, &radiance, width, height, sample, None, inputs, &[],
                     )
                     .expect("trace");
                 let pixels: Vec<f32> = bytemuck::pod_collect_to_vec(
@@ -1933,14 +2100,21 @@ mod tests {
             total / f64::from(samples * width * height)
         };
 
-        let path = mean(false);
-        let restir = mean(true);
+        let path = mean(None);
         assert!(path > 0.01, "the scene should be lit, got mean {path}");
-        let deviation = (restir - path).abs() / path;
-        assert!(
-            deviation < 0.03,
-            "ReSTIR disagrees with the path tracer: {restir} vs {path} ({deviation:.4} relative)"
-        );
+        // Both the single-frame RIS estimator (step 3) and the spatial-reuse
+        // estimator (step 4) are the same integral as the path tracer.
+        for (label, inputs) in [
+            ("initial RIS", &reservoir_di),
+            ("spatial reuse", &reservoir_spatial),
+        ] {
+            let restir = mean(Some(inputs));
+            let deviation = (restir - path).abs() / path;
+            assert!(
+                deviation < 0.03,
+                "{label} disagrees with the path tracer: {restir} vs {path} ({deviation:.4} relative)"
+            );
+        }
     }
 
     /// The delta-light half of D-088: delta lights stay *outside* the reservoir,
@@ -2043,6 +2217,7 @@ mod tests {
         .expect("wavefront");
         let inputs = RestirInputs {
             reservoir: &reservoir,
+            scratch: None,
             debug: None,
             debug_view: DebugView::Off,
         };
@@ -2139,6 +2314,7 @@ mod tests {
         .expect("wavefront");
         let inputs = RestirInputs {
             reservoir: &reservoir,
+            scratch: None,
             debug: None,
             debug_view: DebugView::Off,
         };
@@ -2248,6 +2424,7 @@ mod tests {
 
         let inputs = RestirInputs {
             reservoir: &reservoir,
+            scratch: None,
             debug: Some(&debug),
             debug_view: DebugView::SelectedLight,
         };
@@ -2348,21 +2525,27 @@ mod tests {
 
         // One full run of the ReSTIR chain from a fresh reservoir, concatenating
         // every sample's raw film bytes — so a difference in any single sample
-        // is caught exactly, not just in the sum where two could cancel.
-        let run = || -> Vec<u8> {
+        // is caught exactly, not just in the sum where two could cancel. Run for
+        // both estimators: spatial reuse reads *neighbour* reservoirs, so its
+        // determinism leans harder on the committed-prior-pass ping-pong (a
+        // barrier between candidates and spatial, and a separate scratch buffer)
+        // — a stray read of a half-written neighbour would surface here.
+        let reservoir_usage = vk::BufferUsageFlags::STORAGE_BUFFER
+            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+            | vk::BufferUsageFlags::TRANSFER_DST;
+        let bytes = u64::from(width)
+            * u64::from(height)
+            * size_of::<crate::restir::StoredReservoir>() as u64;
+        let run = |spatial: bool| -> Vec<u8> {
             let reservoir = gpu
-                .create_buffer(
-                    "test.determinism.reservoir",
-                    u64::from(width)
-                        * u64::from(height)
-                        * size_of::<crate::restir::StoredReservoir>() as u64,
-                    vk::BufferUsageFlags::STORAGE_BUFFER
-                        | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-                    MemoryLocation::GpuOnly,
-                )
+                .create_buffer("test.determinism.reservoir", bytes, reservoir_usage, MemoryLocation::GpuOnly)
                 .expect("reservoir buffer");
+            let scratch = gpu
+                .create_buffer("test.determinism.scratch", bytes, reservoir_usage, MemoryLocation::GpuOnly)
+                .expect("scratch buffer");
             let inputs = RestirInputs {
                 reservoir: &reservoir,
+                scratch: spatial.then_some(&scratch),
                 debug: None,
                 debug_view: DebugView::Off,
             };
@@ -2371,15 +2554,7 @@ mod tests {
             for sample in 0..8 {
                 wavefront
                     .trace_then(
-                        &gpu,
-                        &scene,
-                        &radiance,
-                        width,
-                        height,
-                        sample,
-                        None,
-                        Some(&inputs),
-                        &[],
+                        &gpu, &scene, &radiance, width, height, sample, None, Some(&inputs), &[],
                     )
                     .expect("trace");
                 film.extend_from_slice(&gpu.download_buffer(&radiance).expect("download"));
@@ -2387,6 +2562,7 @@ mod tests {
             film
         };
 
-        assert_eq!(run(), run(), "the ReSTIR path is not bitwise deterministic");
+        assert_eq!(run(false), run(false), "the ReSTIR RIS path is not bitwise deterministic");
+        assert_eq!(run(true), run(true), "the ReSTIR spatial path is not bitwise deterministic");
     }
 }

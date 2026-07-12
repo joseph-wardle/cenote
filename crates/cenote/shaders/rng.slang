@@ -89,6 +89,31 @@ public uint restirDeltaDimension() {
     return RESTIR_DELTA;
 }
 
+// ReSTIR spatial-reuse dimensions (step 4). The spatial stage gathers k
+// neighbours around the primary hit and streams each — plus the pixel's own
+// canonical reservoir — through a fresh reservoir under defensive pairwise MIS.
+// Each neighbour needs a 2D disk offset (which pixel) and a 1D reservoir-merge
+// acceptance; the canonical needs one acceptance of its own. A dedicated high
+// block, clear of the initial-RIS candidate (256) and BSDF (512) blocks, so the
+// spatial draws never correlate with the candidates that built the reservoirs
+// being reused. Neighbour n's slot s is `restirSpatialDimension(n, s)`.
+public static const uint RESTIR_SPATIAL_BASE = 768;
+static const uint RESTIR_SPATIAL_SLOTS = 4;      // 3 named + 1 reserved
+public static const uint RESTIR_SPATIAL_OFFSET = 0; // disk offset on the neighbour (2D: slots 0,1)
+public static const uint RESTIR_SPATIAL_ACCEPT = 2; // reservoir-merge acceptance
+
+public uint restirSpatialDimension(uint neighbor, uint slot) {
+    return RESTIR_SPATIAL_BASE + neighbor * RESTIR_SPATIAL_SLOTS + slot;
+}
+
+// The canonical reservoir's own merge acceptance — one 1D draw, fixed past the
+// neighbour block for k up to 64 so growing k never shifts it.
+public static const uint RESTIR_SPATIAL_CANONICAL = RESTIR_SPATIAL_BASE + 64 * RESTIR_SPATIAL_SLOTS;
+
+public uint restirSpatialCanonicalDimension() {
+    return RESTIR_SPATIAL_CANONICAL;
+}
+
 // -- Implementation ----------------------------------------------------
 
 // Generator-matrix columns of the Sobol sequence's second dimension, one

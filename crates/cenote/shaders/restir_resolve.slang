@@ -58,8 +58,12 @@ struct Params {
     // exactly when debugView != DEBUG_NONE. One RGBA float per pixel, zero-
     // filled before this wave, so pixels this stage never reaches read black.
     float4* debug;
-    // Which debug view to false-colour into `debug`, or DEBUG_NONE to write
-    // none. Mirrors src/wavefront.rs's DebugView.
+    // Which debug view to false-colour into `debug`, plus one packed flag. Low
+    // byte: the DebugView enum (DEBUG_NONE etc.), mirroring src/wavefront.rs.
+    // Bit 8: visibility-in-weight — set when the spatial stage ran, meaning the
+    // survivor's W already carries its own visibility (the spatial pass spent the
+    // ray). The block sits at Vulkan's guaranteed 128 push-constant bytes, so the
+    // flag rides here rather than in a field of its own.
     uint debugView;
     uint sampleIndex;            // this wave's sample — the delta term's one NEE draw
 };
@@ -78,6 +82,11 @@ static const uint DEBUG_NONE = 0;
 static const uint DEBUG_SELECTED_LIGHT = 1; // false-colour by stable light id
 static const uint DEBUG_CONFIDENCE = 2;     // M heatmap
 static const uint DEBUG_UNBIASED_WEIGHT = 3; // W heatmap
+
+// The packed `debugView` word: the enum above in the low byte, the
+// visibility-in-weight flag in bit 8.
+static const uint DEBUG_VIEW_MASK = 0xff;
+static const uint DEBUG_VISIBILITY_IN_WEIGHT = 0x100;
 
 // A saturated colour from a hue in [0, 1): HSV(h, 1, 1) → RGB. Distinct hues
 // make neighbouring light ids read apart at a glance.
@@ -102,7 +111,9 @@ float3 heat(float t) {
 
 // The false-colour for the survivor under the selected view. `reservoir` is the
 // held reservoir; its confidence is M and its unbiasedWeight is W.
-float3 debugColor(uint view, Reservoir<DirectLightSample> reservoir) {
+// `confidenceScale` is the M value the heatmap saturates near — the candidate
+// count for single-frame RIS, its multiple after spatial reuse compounds M.
+float3 debugColor(uint view, Reservoir<DirectLightSample> reservoir, float confidenceScale) {
     switch (view) {
     case DEBUG_SELECTED_LIGHT:
         // The environment reads as one steady near-white; instances scatter
@@ -114,8 +125,9 @@ float3 debugColor(uint view, Reservoir<DirectLightSample> reservoir) {
         return hueColor(frac(float(reservoir.sample.light) * 0.6180339887));
     case DEBUG_CONFIDENCE:
         // M — the generalized sample count. Flat at the candidate count for
-        // single-frame RIS; the slot that fills in once reuse compounds it.
-        return heat(1.0 - exp(-reservoir.confidence / 16.0));
+        // single-frame RIS; after spatial reuse it compounds toward c_tot, so the
+        // heatmap's scale grows with it (D-093) rather than saturating at once.
+        return heat(1.0 - exp(-reservoir.confidence / confidenceScale));
     case DEBUG_UNBIASED_WEIGHT:
         // W — the unbiased contribution weight, Reinhard-mapped so any
         // magnitude lands in [0, 1).
@@ -202,11 +214,19 @@ void restir_resolve(uint3 tid: SV_DispatchThreadID) {
     }
     DirectLightSample sample = reservoir.sample;
 
+    // Unpack the debug word: the view enum, and whether the spatial stage already
+    // folded the survivor's visibility into W (so no shadow ray is owed here).
+    let debugView = params.debugView & DEBUG_VIEW_MASK;
+    let visibilityInWeight = (params.debugView & DEBUG_VISIBILITY_IN_WEIGHT) != 0;
+
     // The debug surface shows what the reservoir *selected*, so it is written
     // here — before the connection is reconstructed — independent of whether
-    // the shadow ray or the shade below fires.
-    if (params.debugView != DEBUG_NONE) {
-        params.debug[pixel] = float4(debugColor(params.debugView, reservoir), 1.0);
+    // the shadow ray or the shade below fires. The confidence heatmap's scale
+    // grows once spatial reuse compounds M (D-093); a rough 6× covers the
+    // default k ≈ 5 neighbours, the single-frame candidate count otherwise.
+    if (debugView != DEBUG_NONE) {
+        let confidenceScale = visibilityInWeight ? 96.0 : 16.0;
+        params.debug[pixel] = float4(debugColor(debugView, reservoir, confidenceScale), 1.0);
     }
 
     // Reconstruct the survivor's connection — the exact direction, radiance,
@@ -271,18 +291,31 @@ void restir_resolve(uint3 tid: SV_DispatchThreadID) {
     // applying one here would double-weight the survivor.
     let f = throughput * radiance * evalBsdf(closure, wiLight, wo) * abs(wiLight.z);
     let contribution = f * reservoir.unbiasedWeight;
-    if (any(contribution > 0.0)) {
-        ShadowRay shadow;
-        shadow.origin = throughSurface ? spawn.below : spawn.position;
-        shadow.light = shadowLight;
-        shadow.direction = toLight;
-        shadow.primitive = shadowPrimitive;
-        shadow.contribution = contribution;
-        shadow.tmax = shadowTmax;
-        shadow.pixel = pixel;
-        shadow.pad0 = 0;
-        shadow.pad1 = 0;
-        shadow.pad2 = 0;
-        params.shadows.push(shadow);
+    if (!any(contribution > 0.0)) {
+        return;
     }
+
+    if (visibilityInWeight) {
+        // The spatial stage already traced this survivor's visibility and folded
+        // it into W (W = weightSum/U, the unshadowed target — see restir_spatial):
+        // so shade unshadowed and add straight to the film. Pixel-owned, exactly
+        // like the delta term above, so no shadow queue and determinism holds.
+        params.radiance[pixel] += float4(contribution, 0.0);
+        return;
+    }
+
+    // No reuse ran (single-frame RIS): the survivor still owes its one visibility
+    // ray. Queue it — trace_shadow applies visibility and lands the contribution.
+    ShadowRay shadow;
+    shadow.origin = throughSurface ? spawn.below : spawn.position;
+    shadow.light = shadowLight;
+    shadow.direction = toLight;
+    shadow.primitive = shadowPrimitive;
+    shadow.contribution = contribution;
+    shadow.tmax = shadowTmax;
+    shadow.pixel = pixel;
+    shadow.pad0 = 0;
+    shadow.pad1 = 0;
+    shadow.pad2 = 0;
+    params.shadows.push(shadow);
 }

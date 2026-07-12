@@ -2026,3 +2026,60 @@ render setting and written by `restir_resolve` through a single enum-selected de
 buffer — lean, deliberately *not* the full D-080 AOV registry, in keeping with the
 charter's lightweight bias. It doubles as discoverability: the debug views *are*
 documentation of what each stage does.
+
+## 2026-07-12 — M3 step 4: spatial reuse
+
+*The step-4 design was locked via a structured interview, then re-validated by a sourced
+pass over the RTXDI source tree, the 2023 SIGGRAPH "A Gentle Introduction to ReSTIR"
+course notes, and the GRIS supplemental, read against how production offline renderers
+sample many lights (Cycles X / Arnold / MoonRay / RenderMan / Manuka). The validation
+confirmed the plan is correctly sized — every choice maps to a documented reference
+default or the course-recommended variant, nothing invented, nothing premature. It also
+established the correct reference frame: **no shipping offline renderer does cross-pixel
+reservoir reuse at all** — they converge on light-tree/BVH importance sampling + MIS +
+adaptive sampling + shadow rays (Cycles and Arnold literally share the Conty & Kulla
+light tree). ReSTIR spatial reuse is a real-time technique; its only offline cousins are
+research ReSTIR-PT variants that drop temporal and average initial+spatial passes — which
+is why cenote's own high-spp brute-force accumulation (D-090), not an external renderer,
+is the only meaningful oracle. The three entries below carry the correctness hazards that
+validation surfaced — implementation-time care, not design changes.*
+
+### D-093: Step-4 spatial-reuse implementation watch-items
+Status: accepted. Three places where the step-4 estimator is silently bug-prone, recorded
+so the care is deliberate and the tests are aimed, not discovered late.
+
+*The visibility-consistent pairwise MIS is the load-bearing hazard.* cenote takes the
+course-recommended **visibility-aware target** (V inside p̂), which is a higher-quality,
+still-unbiased variant of RTXDI's shipped split (unshadowed target + a separate
+ray-traced bias-correction ray) — and is *required*, not gold-plating, because the step-4
+checkpoint demands an unbiased converge-to-reference result that RTXDI's biased "Basic"
+mode could not meet (D-087, D-090). Its two consistency obligations are exactly where
+bias hides: (1) the pairwise MIS weights must satisfy **Σmᵢ(y) = 1** with V living in p̂
+*and* the defensive/normalizer divisor keyed to the **accepted** neighbour count, not the
+nominal k — because a geometrically pre-rejected neighbour cannot generate `y`, so it must
+leave the count entirely (the canonical sample, covering full support, absorbs its
+normalization); and (2) V must be re-evaluated at the **current pixel's** surface after
+the shift — never the neighbour's stored V — and the *same* V-inclusive p̂ must appear in
+both the resampling-weight numerator and the final 1/p̂ UCW, or the p̂ factors do not
+cancel. Guard: the D-090 test suite's **analytic microtest with synthetic per-neighbour
+visibility** is purpose-built for this and is the correctness spine; additionally
+**numerically cross-check one scene config against RTXDI's "Ray Traced" mode** as the
+reference unbiased estimator, since a residual Σm≠1 shows as a small consistent bias the
+convergence curve would otherwise excuse as noise.
+
+*Environment/distant-light samples in the shift are a second, quieter trap.* A stored env
+sample is a **direction**, position-independent, so the identity shift and Jacobian = 1
+still hold (unlike a stored *area* point, the trap D-087 already sidesteps) — but the p̂
+recompute at the neighbour surface **must branch on light type**: an area emitter carries
+the cosθ_light/d² geometry term, an environment sample does not. The shift must handle a
+mixed area+env reservoir uniformly; the convergence gate (D-090) gets an explicit
+env-light case so this path is exercised, not assumed.
+
+*The geometric gate is deliberately stricter than the reference, and that is the first
+knob — not a second pass.* cenote gates neighbours at **normal·normal > 0.9** (≈26°) where
+RTXDI defaults to 0.5 (≈60°); the depth gate (<10% relative) matches RTXDI's 0.1 exactly.
+The strict normal threshold is the conservative correctness-first choice — it rejects more
+and reuses less. If spatial-only convergence lags the target, **loosen the normal
+threshold before adding a second spatial pass**: the single pass keeps `curr` untouched
+for step-5's temporal carry (D-091), and a second pass is a convergence optimization the
+plan correctly defers, not a correctness fix.

@@ -63,6 +63,12 @@ struct RenderArgs {
     #[arg(long)]
     restir: bool,
 
+    /// Drop ReSTIR's spatial-reuse pass, leaving single-frame initial RIS.
+    /// Only meaningful with --restir; lets a batch isolate what the
+    /// k-neighbour gather buys over the candidates pass alone.
+    #[arg(long)]
+    no_spatial: bool,
+
     /// Re-render whenever a shader source is edited (hot reload).
     /// Compiles kernels from the source checkout; a broken edit prints
     /// the compiler's diagnostics and keeps the last good image.
@@ -143,6 +149,7 @@ fn render(args: &RenderArgs) -> anyhow::Result<()> {
     } else {
         cenote::render::RenderMode::PathTracer
     });
+    renderer.set_spatial_reuse(!args.no_spatial);
     let mut film = cenote::render::Film::new(&gpu, width, height)?;
     // One OIDN device for the process — built here, reused every reload,
     // rather than opened and dropped inside each frame.

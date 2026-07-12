@@ -96,6 +96,11 @@ struct RenderInputs {
     /// straight into each sample — the debug surface is single-shot and live,
     /// so a change needs no accumulation restart.
     debug_view: DebugView,
+    /// Whether `ReSTIR` folds in spatial neighbours (M3 step 4). Meaningful only
+    /// in [`RenderMode::Restir`]; like `render_mode`, a change restarts
+    /// accumulation so the on/off images (both the same integral) never mix — the
+    /// D-090 unbiasedness gate the viewer drives.
+    spatial_reuse: bool,
     /// Cleared to stop the thread; checked at the top of every iteration.
     running: bool,
 }
@@ -251,6 +256,7 @@ impl Session {
                 generation: 0,
                 render_mode: RenderMode::PathTracer,
                 debug_view: DebugView::Off,
+                spatial_reuse: true,
                 running: true,
             }),
             edits: Mutex::new(Vec::new()),
@@ -312,6 +318,22 @@ impl Session {
             .lock()
             .expect("inputs mutex poisoned")
             .debug_view = view;
+    }
+
+    /// Toggle `ReSTIR` spatial reuse (M3 step 4). Meaningful only in
+    /// [`RenderMode::Restir`]; the render thread adopts a change and restarts
+    /// accumulation, so the on/off images stay unmixed — the interactive form of
+    /// the D-090 unbiasedness gate.
+    ///
+    /// # Panics
+    ///
+    /// If the render thread panicked while holding the input lock.
+    pub fn set_spatial_reuse(&self, enabled: bool) {
+        self.lanes
+            .inputs
+            .lock()
+            .expect("inputs mutex poisoned")
+            .spatial_reuse = enabled;
     }
 
     /// Note a new render-target size; the render thread rebuilds its film to
@@ -484,6 +506,7 @@ fn render_loop(
     // Which estimator is in the renderer, so a viewer toggle restarts
     // accumulation on the switch (matching `Session::new`'s default).
     let mut applied_render_mode = RenderMode::PathTracer;
+    let mut applied_spatial_reuse = true;
     let mut last_publish: Option<Instant> = None;
     // Dirt whose re-prep was rejected (this build can't render the edited
     // description). It survives here so the *next* applied edit retries the
@@ -538,6 +561,15 @@ fn render_loop(
             log::debug!("render mode adopted; accumulation restarts");
             renderer.set_render_mode(input.render_mode);
             applied_render_mode = input.render_mode;
+            film.reset();
+            last_publish = None;
+        }
+        // The spatial-reuse toggle is the other estimator switch, restarted the
+        // same way so an on/off comparison never mixes the two.
+        if input.spatial_reuse != applied_spatial_reuse {
+            log::debug!("spatial reuse adopted; accumulation restarts");
+            renderer.set_spatial_reuse(input.spatial_reuse);
+            applied_spatial_reuse = input.spatial_reuse;
             film.reset();
             last_publish = None;
         }

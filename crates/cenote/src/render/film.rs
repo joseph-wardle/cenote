@@ -84,9 +84,17 @@ pub struct Film {
     /// The `ReSTIR` per-pixel reservoir (curr), lazily allocated the first time
     /// a wave runs in [`RenderMode::Restir`](crate::wavefront::RenderMode). Pure
     /// per-frame scratch for single-frame RIS: the candidate stage overwrites
-    /// each hit pixel every wave, so it neither accumulates nor needs clearing.
-    /// Absent (and unallocated) in the path-tracer default.
+    /// each hit pixel every wave, so it neither accumulates nor (for single-frame
+    /// RIS) needs clearing — the wave clears it itself when spatial reuse reads
+    /// neighbours. Absent (and unallocated) in the path-tracer default.
     reservoir: Option<Buffer>,
+    /// The spatial stage's output reservoir — the committed-prior-pass ping-pong
+    /// buffer (M3 plan §2): `restir_spatial` reads `reservoir` (self + neighbours)
+    /// and writes the merged survivor here, then `restir_resolve` shades from
+    /// here. Lazily allocated only when spatial reuse is on, so the step-3
+    /// baseline pays nothing. Step 4's minimal stand-in for the full per-view
+    /// prev/curr/scratch `ViewState`, which lands with temporal (step 5).
+    reservoir_scratch: Option<Buffer>,
     /// The D-092 debug surface's single-shot false-colour buffer, lazily
     /// allocated the first time a [`DebugView`](crate::wavefront::DebugView) is
     /// selected. `restir_resolve` writes it (zero-filled each wave); the render
@@ -132,6 +140,7 @@ impl Film {
             guide,
             aov_table,
             reservoir: None,
+            reservoir_scratch: None,
             debug: None,
             width,
             height,
@@ -140,21 +149,35 @@ impl Film {
     }
 
     /// Ensure the `ReSTIR` targets for this frame exist: the per-pixel
-    /// reservoir, and — when `debug` — the debug false-colour buffer. Both are
-    /// lazily allocated so the path-tracer default pays for neither. Idempotent;
-    /// call before a [`RenderMode::Restir`](crate::wavefront::RenderMode) wave.
+    /// reservoir, the spatial stage's scratch buffer (when `spatial`), and — when
+    /// `debug` — the debug false-colour buffer. All are lazily allocated so the
+    /// path-tracer default pays for none. Idempotent; call before a
+    /// [`RenderMode::Restir`](crate::wavefront::RenderMode) wave.
     ///
     /// # Errors
     ///
     /// Any [`crate::Error`] from buffer creation.
-    pub(super) fn ensure_restir(&mut self, gpu: &Context, debug: bool) -> Result<()> {
+    pub(super) fn ensure_restir(&mut self, gpu: &Context, spatial: bool, debug: bool) -> Result<()> {
         let texels = u64::from(self.width) * u64::from(self.height);
+        let stride = size_of::<crate::restir::StoredReservoir>() as u64;
+        // The reservoir carries a `TRANSFER_DST`: the wave zero-fills it before
+        // candidates when spatial reuse reads neighbours (see the wavefront).
+        let reservoir_usage = vk::BufferUsageFlags::STORAGE_BUFFER
+            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+            | vk::BufferUsageFlags::TRANSFER_DST;
         if self.reservoir.is_none() {
-            let stride = size_of::<crate::restir::StoredReservoir>() as u64;
             self.reservoir = Some(gpu.create_buffer(
                 "film.restir.reservoir",
                 texels * stride,
-                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                reservoir_usage,
+                MemoryLocation::GpuOnly,
+            )?);
+        }
+        if spatial && self.reservoir_scratch.is_none() {
+            self.reservoir_scratch = Some(gpu.create_buffer(
+                "film.restir.reservoir.scratch",
+                texels * stride,
+                reservoir_usage,
                 MemoryLocation::GpuOnly,
             )?);
         }
@@ -183,6 +206,18 @@ impl Film {
         self.reservoir
             .as_ref()
             .expect("ensure_restir has not run yet")
+    }
+
+    /// The spatial stage's scratch reservoir, present after
+    /// [`Film::ensure_restir`]`(gpu, true, _)`.
+    ///
+    /// # Panics
+    ///
+    /// If called before spatial reuse allocated it — a caller bug.
+    pub(super) fn reservoir_scratch(&self) -> &Buffer {
+        self.reservoir_scratch
+            .as_ref()
+            .expect("ensure_restir did not allocate the spatial scratch")
     }
 
     /// The debug false-colour buffer, present after

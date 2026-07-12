@@ -338,6 +338,109 @@ mod tests {
         );
     }
 
+    /// The step-4 correctness spine (D-093): the defensive pairwise-MIS spatial
+    /// combine — its MIS weights, its accepted-count normalizer, and its
+    /// visibility-aware target folded into W — is unbiased. Each of ~260k threads
+    /// runs `shaders/restir_spatial_test.slang`, an independent estimate of
+    /// ∫₀¹ x·V(x) dx with a synthetic binary visibility V = [x ≥ ½], whose closed
+    /// form is ∫_½¹ x dx = 3/8. A wrong MIS normalizer, a mishandled accepted
+    /// count, or dividing the finalize by `p̂_c` instead of the unshadowed target
+    /// moves the mean off 3/8 by far more than this thread count's noise — the
+    /// silent-bias class no image test would catch.
+    ///
+    /// Run at K = 5 (the shipping neighbour count) *and* K = 0: both must land on
+    /// 3/8, which is the accepted-count normalizer working — a combine that
+    /// divided by the nominal k rather than the accepted count would diverge as K
+    /// changed. The merged confidence is pinned at `c_tot` = `M_c` + K·`M_i`.
+    #[test]
+    fn spatial_pairwise_mis_is_unbiased() {
+        const COUNT: u32 = 1 << 18; // ~260k independent estimates
+        const CANON_M: u32 = 12; // M_c — canonical RIS candidate count
+        const NEIGHBOUR_M: u32 = 20; // M_i — each neighbour's candidate count
+
+        /// Mirrors `struct Params` in `shaders/restir_spatial_test.slang`.
+        #[repr(C)]
+        #[derive(Clone, Copy, Pod, Zeroable)]
+        struct SpatialParams {
+            estimate: vk::DeviceAddress,
+            merged_m: vk::DeviceAddress,
+            count: u32,
+            canon_m: u32,
+            neighbour_m: u32,
+            neighbours: u32,
+            _pad0: u32,
+            _pad1: u32,
+        }
+
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let spirv = crate::shaders::compile_fixture("restir_spatial_test")
+            .expect("compile restir_spatial_test");
+        let pipeline = gpu
+            .create_compute_pipeline(
+                &spirv,
+                c"restir_spatial_test",
+                size_of::<SpatialParams>() as u32,
+                Bindings::None,
+            )
+            .expect("pipeline");
+
+        let usage = vk::BufferUsageFlags::STORAGE_BUFFER
+            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+            | vk::BufferUsageFlags::TRANSFER_SRC;
+        let dump = |name: &str| {
+            gpu.create_buffer(name, u64::from(COUNT) * 4, usage, MemoryLocation::GpuOnly)
+                .expect("buffer")
+        };
+
+        let run = |neighbours: u32| -> (f64, Vec<f32>) {
+            let estimate = dump("test.spatial.estimate");
+            let merged_m = dump("test.spatial.m");
+            let params = SpatialParams {
+                estimate: estimate.device_address(),
+                merged_m: merged_m.device_address(),
+                count: COUNT,
+                canon_m: CANON_M,
+                neighbour_m: NEIGHBOUR_M,
+                neighbours,
+                _pad0: 0,
+                _pad1: 0,
+            };
+            gpu.dispatch(
+                &pipeline,
+                None,
+                bytemuck::bytes_of(&params),
+                [COUNT.div_ceil(64), 1, 1],
+            )
+            .expect("dispatch");
+            let read = |buffer| -> Vec<f32> {
+                bytemuck::pod_collect_to_vec(&gpu.download_buffer(buffer).expect("download"))
+            };
+            let estimates = read(&estimate);
+            let mean = f64::from(estimates.iter().sum::<f32>()) / estimates.len() as f64;
+            (mean, read(&merged_m))
+        };
+
+        // The binary-visibility integral: ∫_½¹ x dx = 3/8. The window is wide
+        // enough to clear the estimator's own noise at this thread count, yet
+        // shuts on the several-percent shift a broken combine produces.
+        let truth = 0.375_f64;
+        for neighbours in [5u32, 0] {
+            let (mean, confidence) = run(neighbours);
+            assert!(
+                (mean - truth).abs() < 1e-2,
+                "K={neighbours}: spatial combine is biased: {mean} vs {truth}"
+            );
+            // The combine sums every history: c_tot = M_c + K·M_i, exactly.
+            let expected = (CANON_M + neighbours * NEIGHBOUR_M) as f32;
+            assert!(
+                confidence.iter().all(|&m| (m - expected).abs() < 1e-3),
+                "K={neighbours}: merged confidence is not c_tot = {expected}"
+            );
+        }
+    }
+
     /// T3: the persistent reservoir record round-trips between the GPU's
     /// `StoredReservoir` and this host mirror, byte for byte, and load/store
     /// are inverse. The fixture gives every scalar field a distinct transform
