@@ -3,7 +3,7 @@
 A portable, GPU-first, interactive-progressive production path tracer built on Vulkan
 ray tracing, with GRIS/ReSTIR as its theoretical core. An exploration into how ReSTIR 
 can benefit lookdev for offline rendering. What the artist sees at one second is an 
-honest prediction of the frame at one hour.
+honest prediction of the frame at one hour.[^estimator]
 
 Where CPU production renderers optimize for memory capacity on unbounded scenes,
 Cenote makes the inverse bet: extreme single-GPU performance on scenes that fit in
@@ -169,3 +169,12 @@ cargo test --workspace   # on the GPU machine — includes the goldens
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option.
+
+[^estimator]: Honest at the level that matters — the converged still. Frame to
+    frame the preview and the final are not literally one estimator: while the
+    camera moves, the preview warm-starts from the previous frame's reservoirs
+    (temporal reuse); on a held camera that reuse decays to nothing and the
+    frame converges spatial-only with fresh per-frame randomness — independent
+    unbiased samples averaging to the same image a brute-force path trace
+    produces. There is no biased preview mode and no final-gather switch, only
+    reuse that is provably annealed away as the still resolves.

@@ -223,6 +223,153 @@ struct RestirCandidatesParams {
     candidates: u32,
 }
 
+/// Push constants for the `ReSTIR` temporal-reuse stage
+/// (`shaders/restir_temporal.slang`). Runs at bounce 0 only, between candidates
+/// and spatial when temporal reuse is on; folds this frame's `cand` and last
+/// frame's `prev` into `curr` at the same pixel, unshadowed and M-capped. Reads
+/// only its own pixel, so — unlike spatial — it carries no pool capacity or
+/// resolution.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct RestirTemporalParams {
+    paths: PathsAddrs,
+    hits: QueueAddrs,
+    scene: vk::DeviceAddress,
+    restir: vk::DeviceAddress,
+    /// This frame's candidate reservoirs (`cand`) — the canonical, read.
+    reservoirs_in: vk::DeviceAddress,
+    /// Last frame's committed reservoirs (`prev`) — the history, read.
+    reservoirs_prev: vk::DeviceAddress,
+    /// The temporal survivors (`curr`) — written; spatial, or resolve, reads it.
+    reservoirs_out: vk::DeviceAddress,
+    /// The per-frame reprojection block (`Reproject`): the previous camera basis,
+    /// the ping-ponged G-buffer addresses, and the reuse-gate thresholds. One
+    /// push pointer; the block itself is host-written before the wave.
+    reproject: vk::DeviceAddress,
+    sample_index: u32,
+    /// History-length multiplier: `c_prev` is clamped to `m_cap · c_cand` before
+    /// the combine — the stage's one bias-critical numeric (D-094).
+    m_cap: f32,
+    /// Decay window: history confidence is scaled by `saturate(1 −
+    /// sample_index/decay_frames)`, so a held camera hands temporal off to
+    /// spatial-only accumulation (step 5d). `0` disables the ramp — the
+    /// pinned-temporal gate forces temporal live. Sourced from
+    /// [`TemporalReuse::decay_frames`].
+    decay_frames: u32,
+    /// Explicit tail padding to the struct's 8-byte alignment (three trailing
+    /// `u32`s would otherwise be implicit padding, which `Pod` forbids).
+    pad0: u32,
+}
+
+/// The GPU mirror of `struct Reproject` in `shaders/restir_reproject.slang`: the
+/// previous frame's camera basis (to reproject this frame's shading points into
+/// last frame's screen), the ping-ponged G-buffer addresses, the frame
+/// dimensions, and the reuse-gate thresholds. Host-written into a `CpuToGpu`
+/// buffer each frame ([`Buffer::write`]) and reached by `restir_temporal` through
+/// one push pointer. `std430`: each `[f32; 3]` packs a trailing scalar into its
+/// 16-byte slot, exactly as the shader's `float3 … ; float … ;` pairs do.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct Reproject {
+    /// Previous camera eye; the trailing float is the normal reuse-gate threshold.
+    position: [f32; 3],
+    normal_threshold: f32,
+    /// Previous basis right (scaled by tan(vfov/2)·aspect); trailing depth gate.
+    right: [f32; 3],
+    depth_threshold: f32,
+    /// Previous basis up (scaled by tan(vfov/2)).
+    up: [f32; 3],
+    pad0: f32,
+    /// Previous basis forward (unit).
+    forward: [f32; 3],
+    pad1: f32,
+    /// Last frame's per-pixel hits — reprojection reads these.
+    prev_gbuffer: vk::DeviceAddress,
+    /// This frame's per-pixel hits — `restir_temporal` writes these.
+    curr_gbuffer: vk::DeviceAddress,
+    width: u32,
+    height: u32,
+    /// 1 once a previous camera exists (from the second frame after a reset or
+    /// resize); 0 disables reprojection, so the empty same-pixel history reads
+    /// as nothing.
+    valid: u32,
+    pad2: u32,
+}
+
+// The host mirror and the shader struct — and the `REPROJECT_STRIDE` the view
+// sizes the buffer to — must agree byte for byte, or the previous camera decodes
+// to garbage and reprojection silently reads the wrong pixel.
+const _: () = assert!(size_of::<Reproject>() == 96);
+
+/// The previous frame's pinhole camera, captured after each accumulate so the
+/// next frame can reproject its shading points into last frame's screen. Position
+/// plus the orthogonal [`RayBasis`](crate::scene::RayBasis) (right/up scaled by
+/// tan(vfov/2)·aspect, forward unit) — exactly what inverts raygen's ray
+/// construction (`restir_reproject.slang`). The *pinhole* basis even for a
+/// thin-lens camera: reprojection places the real hit, not a focal point.
+#[derive(Clone, Copy)]
+pub struct ReprojectCamera {
+    /// The camera eye.
+    pub position: Vec3,
+    /// Basis right, scaled by tan(vfov/2)·aspect (a pixel's NDC-x extent).
+    pub right: Vec3,
+    /// Basis up, scaled by tan(vfov/2).
+    pub up: Vec3,
+    /// Unit forward (the view axis).
+    pub forward: Vec3,
+}
+
+impl Reproject {
+    /// Assemble the per-frame reprojection block. `prev` is last frame's camera,
+    /// or `None` on the first frame after a reset or resize — which sets `valid`
+    /// to 0, so `restir_temporal` skips reprojection and the (empty) same-pixel
+    /// history reads as nothing. The G-buffer addresses are this frame's, after
+    /// the swap. Thresholds are the shared reuse-gate constants, so temporal and
+    /// spatial gate identically.
+    #[must_use]
+    pub fn new(
+        prev: Option<ReprojectCamera>,
+        prev_gbuffer: vk::DeviceAddress,
+        curr_gbuffer: vk::DeviceAddress,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        let valid = u32::from(prev.is_some());
+        // A dummy basis when there is no previous camera; `valid == 0` makes it
+        // unread, but it must still be finite (a NaN basis could trip a checker).
+        let cam = prev.unwrap_or(ReprojectCamera {
+            position: Vec3::ZERO,
+            right: Vec3::X,
+            up: Vec3::Y,
+            forward: Vec3::NEG_Z,
+        });
+        Self {
+            position: cam.position.to_array(),
+            normal_threshold: Self::NORMAL_THRESHOLD,
+            right: cam.right.to_array(),
+            depth_threshold: Self::DEPTH_THRESHOLD,
+            up: cam.up.to_array(),
+            pad0: 0.0,
+            forward: cam.forward.to_array(),
+            pad1: 0.0,
+            prev_gbuffer,
+            curr_gbuffer,
+            width,
+            height,
+            valid,
+            pad2: 0,
+        }
+    }
+
+    /// The temporal disocclusion gate reuses spatial's normal threshold
+    /// ([`Wavefront::RESTIR_NORMAL_THRESHOLD`]) — one gate semantics across both
+    /// reuse stages.
+    const NORMAL_THRESHOLD: f32 = Wavefront::RESTIR_NORMAL_THRESHOLD;
+    /// The temporal disocclusion gate reuses spatial's depth threshold
+    /// ([`Wavefront::RESTIR_DEPTH_THRESHOLD`]).
+    const DEPTH_THRESHOLD: f32 = Wavefront::RESTIR_DEPTH_THRESHOLD;
+}
+
 /// Push constants for the `ReSTIR` resolve stage
 /// (`shaders/restir_resolve.slang`). Runs at bounce 0 only; reads the reservoir
 /// and queues the survivor's shadow ray.
@@ -570,22 +717,57 @@ pub enum DebugView {
 /// is not [`DebugView::Off`]; the wave zero-fills it so unreached pixels read
 /// black.
 pub struct RestirInputs<'a> {
-    /// This wave's per-pixel reservoirs (curr), sized to the target: the
-    /// candidate stage writes it, and — with spatial reuse off — `restir_resolve`
-    /// reads it directly.
+    /// This wave's committed per-pixel reservoirs (`curr`), sized to the target.
+    /// With temporal reuse off, the candidate stage writes it directly; with
+    /// temporal on, `restir_temporal` writes it from [`TemporalReuse::cand`] +
+    /// [`TemporalReuse::prev`]. With spatial reuse off, `restir_resolve` reads it.
     pub reservoir: &'a Buffer,
+    /// The two extra reservoirs temporal reuse threads through, or `None` for the
+    /// single-frame path. `Some` turns temporal reuse **on**: candidates write
+    /// `cand` (not `reservoir`), and `restir_temporal` folds `cand` + `prev` into
+    /// `reservoir` (`curr`) before spatial — the warm-start (D-094).
+    pub temporal: Option<TemporalReuse<'a>>,
     /// The spatial stage's output reservoir (the "committed prior-pass" ping-pong
     /// buffer), sized to the target. `Some` turns spatial reuse **on**: the wave
-    /// inserts `restir_spatial` between candidates and resolve, resolve reads
-    /// *this* buffer instead of `reservoir`, and the survivor arrives with its
-    /// visibility already folded into W (so resolve shades it without a shadow
-    /// ray). `None` is the step-3 single-frame-RIS path.
+    /// inserts `restir_spatial` after the candidate/temporal reservoir (`curr`)
+    /// and before resolve, resolve reads *this* buffer instead of `reservoir`,
+    /// and the survivor arrives with its visibility already folded into W (so
+    /// resolve shades it without a shadow ray). `None` is the step-3
+    /// single-frame-RIS path.
     pub scratch: Option<&'a Buffer>,
     /// The debug false-colour target (one RGBA f32 per pixel), or `None` when
     /// no view is selected.
     pub debug: Option<&'a Buffer>,
     /// Which view `restir_resolve` writes into `debug`.
     pub debug_view: DebugView,
+}
+
+/// The two extra reservoirs temporal reuse reads, present in [`RestirInputs`]
+/// exactly when temporal reuse is on. `cand` is candidates' write target (so it
+/// no longer aliases `curr`, keeping the candidate lineage that feeds `prev`
+/// distinct from next frame's history — the feed convention, D-094); `prev` is
+/// last frame's committed `curr`, delivered by the film's frame-end swap.
+pub struct TemporalReuse<'a> {
+    /// This frame's candidate reservoirs — candidates' write target with temporal
+    /// on, the temporal combine's canonical input.
+    pub cand: &'a Buffer,
+    /// Last frame's committed reservoirs — the temporal combine's history input,
+    /// read at the *reprojected* pixel (step 5c).
+    pub prev: &'a Buffer,
+    /// The per-frame reprojection block (`Reproject`), already host-written this
+    /// frame: the previous camera basis, the two G-buffer addresses, and the
+    /// reuse-gate thresholds. `restir_temporal` reaches it by address. Building
+    /// its contents (which needs the previous camera) is the caller's — the
+    /// wavefront only forwards the pointer.
+    pub reproject: &'a Buffer,
+    /// The temporal decay window (step 5d): history confidence is scaled by
+    /// `saturate(1 − samples_since_reset / decay_frames)` so a held camera hands
+    /// off to spatial-only accumulation. The renderer passes
+    /// [`Wavefront::RESTIR_TEMPORAL_DECAY_FRAMES`]; `0` disables the ramp, which is
+    /// how the pinned-temporal gate forces temporal live to convergence (D-094).
+    /// Carried here rather than fixed like the M-cap because that gate is exactly
+    /// the caller that must override it.
+    pub decay_frames: u32,
 }
 
 /// The engine: five stage pipelines over one path pool and its queues.
@@ -600,6 +782,9 @@ pub struct Wavefront {
     /// M3 initial RIS: streams the primary hit's light candidates into the
     /// reservoir. Built alongside the rest; used only in [`RenderMode::Restir`].
     restir_candidates: ComputePipeline,
+    /// M3 temporal reuse: folds last frame's `prev` reservoir into this frame's
+    /// `cand`. Built alongside the rest; used only when temporal reuse is on.
+    restir_temporal: ComputePipeline,
     /// M3 spatial reuse: folds k neighbours' reservoirs into each pixel's.
     /// Built alongside the rest; used only when spatial reuse is on.
     restir_spatial: ComputePipeline,
@@ -656,6 +841,28 @@ impl Wavefront {
 
     /// Reuse gate — relative camera-depth difference cap, matching RTXDI's 0.1.
     pub const RESTIR_DEPTH_THRESHOLD: f32 = 0.1;
+
+    /// Temporal history-length multiplier (D-094): last frame's reservoir
+    /// confidence is clamped to `M_CAP · c_cand` before the combine, so history
+    /// saturates at ~20 candidate-frames rather than growing without bound. A
+    /// *multiplier*, not an absolute confidence — a candidates frame already
+    /// credits ~`RESTIR_CANDIDATES + 1` confidence, so an absolute cap near that
+    /// would throttle history to nothing. Unbiased at any positive value (it only
+    /// reweights the MIS); tuned for lag-vs-noise, not correctness — the shipping
+    /// ~20 of the RTXDI lineage.
+    pub const RESTIR_TEMPORAL_M_CAP: f32 = 20.0;
+
+    /// Temporal decay window (D-094): on a held camera the history confidence is
+    /// scaled by `saturate(1 − samples_since_reset / DECAY_FRAMES)`, reaching
+    /// *exactly* zero after this many frames — from there the estimator is
+    /// temporal-free (spatial-only, fresh per-frame RNG), so the converged still
+    /// is a mean of independent unbiased frames converging at 1/N to the
+    /// brute-force reference. A moving camera resets the film each frame, holding
+    /// the ramp near one (temporal live, the warm-start). Short by design so the
+    /// motion→hold handoff has no visible pop; unbiased at any window (it only
+    /// reweights the MIS), tuned for lag-vs-decorrelation. `0` disables the ramp —
+    /// the pinned-temporal CI gate uses it to force temporal live to convergence.
+    pub const RESTIR_TEMPORAL_DECAY_FRAMES: u32 = 16;
 
     // k must fit the shader's fixed accepted-neighbour array — a build error,
     // not a runtime clamp, if a tuning edit outgrows it.
@@ -740,6 +947,14 @@ impl Wavefront {
             restir_candidates: pipeline(
                 &kernels.restir_candidates,
                 size_of::<RestirCandidatesParams>(),
+                Bindings::Scene,
+            )?,
+            // Binds the scene set for the environment and textured emitters its
+            // unshadowed target reads; it traces nothing (temporal adds no
+            // shadow rays), so the TLAS in that set goes unused.
+            restir_temporal: pipeline(
+                &kernels.restir_temporal,
+                size_of::<RestirTemporalParams>(),
                 Bindings::Scene,
             )?,
             // Also binds the scene set: the k+1 visibility rays trace the TLAS,
@@ -992,13 +1207,16 @@ impl Wavefront {
     /// The reservoir stages' push constants for one wave — built only in
     /// [`RenderMode::Restir`], when the caller supplies [`RestirInputs`].
     ///
-    /// Candidates writes the `reservoir` buffer. With spatial reuse on
-    /// (`restir.scratch` is `Some`), `restir_spatial` reads that buffer (self +
-    /// neighbours) and writes the scratch, and resolve reads the scratch — the
-    /// committed-prior-pass ping-pong (M3 plan §2), with the survivor's
-    /// visibility already folded into W. With it off, resolve reads `reservoir`
-    /// directly and owes the survivor its own shadow ray. Resolve also carries
-    /// the debug target and view, so it can false-colour the survivor (D-092).
+    /// The buffer routing is the four-role wiring of D-094. Candidates writes
+    /// `cand` when temporal reuse is on (`restir.temporal` is `Some`) else
+    /// `reservoir` (`curr`) directly; with temporal on, `restir_temporal` folds
+    /// `cand` + `prev` into `curr`. With spatial reuse on (`restir.scratch` is
+    /// `Some`), `restir_spatial` reads `curr` (self + neighbours) and writes the
+    /// scratch, and resolve reads the scratch — the committed-prior-pass ping-pong
+    /// (M3 plan §2), the survivor's visibility already folded into W. With spatial
+    /// off, resolve reads `curr` directly and owes the survivor its own shadow
+    /// ray. Resolve also carries the debug target and view, so it can
+    /// false-colour the survivor (D-092).
     fn restir_wave_params(
         &self,
         scene: &Scene,
@@ -1013,6 +1231,29 @@ impl Wavefront {
         let scene_table = scene.table().device_address();
         let restir_table = scene.restir_table().device_address();
         let reservoirs = restir.reservoir.device_address();
+
+        // Temporal reuse on: candidates write `cand` (not `curr`), and
+        // `restir_temporal` folds `cand` + `prev` into `curr` (`reservoirs`).
+        // Off: candidates write `curr` directly, the step-3/4 path. Either way
+        // `curr` is what spatial or resolve reads next.
+        let candidate_reservoirs = restir
+            .temporal
+            .as_ref()
+            .map_or(reservoirs, |t| t.cand.device_address());
+        let temporal = restir.temporal.as_ref().map(|t| RestirTemporalParams {
+            paths,
+            hits,
+            scene: scene_table,
+            restir: restir_table,
+            reservoirs_in: t.cand.device_address(),
+            reservoirs_prev: t.prev.device_address(),
+            reservoirs_out: reservoirs,
+            reproject: t.reproject.device_address(),
+            sample_index: sample,
+            m_cap: Self::RESTIR_TEMPORAL_M_CAP,
+            decay_frames: t.decay_frames,
+            pad0: 0,
+        });
 
         // Spatial reuse on: build its params, and route resolve at the scratch
         // its survivor lands in. The `DEBUG_VISIBILITY_IN_WEIGHT` bit (0x100,
@@ -1038,6 +1279,11 @@ impl Wavefront {
             Some(scratch) => (scratch.device_address(), 0x100),
             None => (reservoirs, 0),
         };
+        // The temporal-ran flag (0x200, mirrored in restir_resolve.slang) rides
+        // the same word — it only sets the confidence heatmap's scale, since
+        // temporal compounds M toward its M-cap ceiling far past the candidate
+        // count, and an unscaled heatmap would clip a warmed pixel to solid red.
+        let temporal_in_weight = if restir.temporal.is_some() { 0x200 } else { 0 };
 
         RestirWaveParams {
             candidates: RestirCandidatesParams {
@@ -1045,10 +1291,11 @@ impl Wavefront {
                 hits,
                 scene: scene_table,
                 restir: restir_table,
-                reservoirs,
+                reservoirs: candidate_reservoirs,
                 sample_index: sample,
                 candidates: Self::RESTIR_CANDIDATES,
             },
+            temporal,
             spatial,
             resolve: RestirResolveParams {
                 paths,
@@ -1060,7 +1307,7 @@ impl Wavefront {
                 radiance: radiance.device_address(),
                 // 0 when no view is selected; restir_resolve then writes nothing.
                 debug: restir.debug.map_or(0, Buffer::device_address),
-                debug_view: restir.debug_view as u32 | visibility_in_weight,
+                debug_view: restir.debug_view as u32 | visibility_in_weight | temporal_in_weight,
                 sample_index: sample,
             },
         }
@@ -1142,12 +1389,18 @@ impl Wavefront {
                 value: 0,
             });
         }
-        // Spatial reuse reads *neighbour* reservoirs, so a miss or unreached
-        // pixel must read the empty reservoir (confidence 0), not stale VRAM —
-        // clear the candidate buffer once, before any range writes it. (Single-
-        // frame RIS needs no clear: resolve reads only the pixels candidates
-        // just wrote, at the same pixel it dispatched from.)
-        if let Some(restir) = restir.filter(|restir| restir.scratch.is_some()) {
+        // Clear `curr` once, before any range writes it, so its miss and
+        // unreached pixels read as the empty reservoir (confidence 0) rather than
+        // stale VRAM. Two readers need that: spatial reads *neighbour* reservoirs
+        // of `curr`, and — with temporal on — next frame's temporal reads this
+        // frame's `curr` as `prev` (the swap), so a missed pixel must not persist
+        // as bogus high-confidence history. (Single-frame RIS with neither on
+        // needs no clear: resolve reads only the pixels candidates just wrote, at
+        // the same pixel it dispatched from. `cand` likewise needs none — temporal
+        // reads it only at its own hit pixel.)
+        if let Some(restir) =
+            restir.filter(|restir| restir.scratch.is_some() || restir.temporal.is_some())
+        {
             passes.push(Pass::Fill {
                 buffer: restir.reservoir,
                 offset: 0,
@@ -1188,19 +1441,28 @@ impl Wavefront {
                     queue::MISS,
                 ));
                 // ReSTIR mode, primary hit: stream the reservoir candidates,
-                // optionally fold in spatial neighbours, then resolve the
-                // survivor — all before shade_surface (whose bounce-0 NEE is
-                // off). Each dispatches from the hit queue without consuming it,
-                // and the full barrier between passes orders them: candidates
-                // writes the reservoir, spatial reads it (self + neighbours) and
-                // writes the scratch, resolve reads whichever holds the survivor.
-                // Later bounces are the ordinary path.
+                // optionally fold in last frame's history (temporal) then the
+                // spatial neighbours, and resolve the survivor — all before
+                // shade_surface (whose bounce-0 NEE is off). Each dispatches from
+                // the hit queue without consuming it, and the full barrier between
+                // passes orders them: candidates writes `cand` (or `curr` with
+                // temporal off), temporal folds `cand` + `prev` into `curr`,
+                // spatial reads `curr` (self + neighbours) and writes the scratch,
+                // resolve reads whichever holds the survivor. Later bounces are the
+                // ordinary path.
                 if let Some(restir) = params.restir.as_ref().filter(|_| bounce == 0) {
                     passes.push(indirect(
                         &self.restir_candidates,
                         bytemuck::bytes_of(&restir.candidates),
                         queue::HIT,
                     ));
+                    if let Some(temporal) = restir.temporal.as_ref() {
+                        passes.push(indirect(
+                            &self.restir_temporal,
+                            bytemuck::bytes_of(temporal),
+                            queue::HIT,
+                        ));
+                    }
                     if let Some(spatial) = restir.spatial.as_ref() {
                         passes.push(indirect(
                             &self.restir_spatial,
@@ -1252,6 +1514,9 @@ struct WaveParams {
 /// The reservoir stages' push constants for one wave — bounce 0 only.
 struct RestirWaveParams {
     candidates: RestirCandidatesParams,
+    /// The temporal stage, present only when temporal reuse is on
+    /// (`RestirInputs::temporal` was `Some`).
+    temporal: Option<RestirTemporalParams>,
     /// The spatial stage, present only when spatial reuse is on
     /// (`RestirInputs::scratch` was `Some`).
     spatial: Option<RestirSpatialParams>,
@@ -2070,12 +2335,14 @@ mod tests {
             .expect("scratch buffer");
         let reservoir_di = RestirInputs {
             reservoir: &reservoir,
+            temporal: None,
             scratch: None,
             debug: None,
             debug_view: DebugView::Off,
         };
         let reservoir_spatial = RestirInputs {
             reservoir: &reservoir,
+            temporal: None,
             scratch: Some(&scratch),
             debug: None,
             debug_view: DebugView::Off,
@@ -2113,6 +2380,387 @@ mod tests {
             assert!(
                 deviation < 0.03,
                 "{label} disagrees with the path tracer: {restir} vs {path} ({deviation:.4} relative)"
+            );
+        }
+    }
+
+    /// The scene the temporal gates share — a lit environment *and* an area
+    /// emitter, so both candidate branches (environment and area light) feed the
+    /// compounding history — and the held camera that views it.
+    fn temporal_gate_scene(gpu: &crate::gpu::Context) -> (Scene, Camera) {
+        let objects = [
+            Object {
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::Y),
+                material: Material::glossy(Vec3::splat(0.6), 0.4, 0.3).with_metalness(0.5),
+            },
+            Object {
+                mesh: ground_plane(4.0),
+                transform: Mat4::IDENTITY,
+                material: Material::glossy(Vec3::splat(0.7), 0.0, 0.2),
+            },
+            Object {
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::Y * 3.0)
+                    * Mat4::from_scale(Vec3::splat(0.7)),
+                material: Material::emitter(Vec3::splat(4.0)),
+            },
+        ];
+        let camera = Camera {
+            position: Vec3::new(0.0, 2.5, 6.0),
+            look_at: Vec3::new(0.0, 1.0, 0.0),
+            up: Vec3::Y,
+            vfov_degrees: 45.0,
+            lens: None,
+        };
+        let scene = Scene::new(gpu, &objects, camera, &Environment::constant(Vec3::splat(0.3)))
+            .expect("scene");
+        (scene, camera)
+    }
+
+    /// Run the step-5 temporal pipeline (held camera, spatial off) and the
+    /// matching path-tracer reference on that scene, both to `samples` spp, and
+    /// return `(temporal_mean, path_mean)`. `decay_frames` is the ramp window
+    /// forwarded to `restir_temporal` (`0` disables it —
+    /// [`Wavefront::RESTIR_TEMPORAL_DECAY_FRAMES`]); the two convergence gates
+    /// below differ only in that argument. Factored out so the wiring — the
+    /// four-buffer routing, the per-frame reprojection block, and the frame-end
+    /// prev/curr + G-buffer swap — is written and audited once. On the held camera
+    /// reprojection is the identity pixel, the disocclusion gate passes, and the
+    /// G-buffer is written, swapped, and read every frame while history compounds
+    /// under the M-cap.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the four-buffer temporal wiring and the per-frame swap are one \
+                  harness — splitting them would scatter what the gates check"
+    )]
+    fn temporal_gate_means(gpu: &crate::gpu::Context, samples: u32, decay_frames: u32) -> (f64, f64) {
+        let (scene, camera) = temporal_gate_scene(gpu);
+        let kernels = Kernels::embedded();
+        let (width, height) = (32u32, 32u32);
+        let wavefront = Wavefront::new(
+            gpu,
+            &kernels,
+            4096,
+            Wavefront::DEFAULT_MAX_BOUNCES,
+            LightSampling::Mis,
+        )
+        .expect("wavefront");
+
+        let reservoir_bytes =
+            u64::from(width) * u64::from(height) * size_of::<crate::restir::StoredReservoir>() as u64;
+        let gbuffer_bytes = u64::from(width) * u64::from(height) * 48;
+        let store_usage = vk::BufferUsageFlags::STORAGE_BUFFER
+            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+            | vk::BufferUsageFlags::TRANSFER_DST;
+        let reservoir = |name: &str| {
+            gpu.create_buffer(name, reservoir_bytes, store_usage, MemoryLocation::GpuOnly)
+                .expect("reservoir")
+        };
+        let gbuffer = |name: &str| {
+            gpu.create_buffer(name, gbuffer_bytes, store_usage, MemoryLocation::GpuOnly)
+                .expect("gbuffer")
+        };
+
+        // The path-tracer reference: the same integral, no reservoir at all.
+        let path = {
+            let radiance = radiance_buffer(gpu, width, height);
+            let mut total = 0.0_f64;
+            for sample in 0..samples {
+                wavefront
+                    .trace_then(gpu, &scene, &radiance, width, height, sample, None, None, &[])
+                    .expect("trace");
+                let pixels: Vec<f32> = bytemuck::pod_collect_to_vec(
+                    &gpu.download_buffer(&radiance).expect("download"),
+                );
+                total += pixels
+                    .chunks_exact(4)
+                    .map(|p| f64::from(p[0]) + f64::from(p[1]) + f64::from(p[2]))
+                    .sum::<f64>();
+            }
+            total / f64::from(samples * width * height)
+        };
+        assert!(path > 0.01, "the scene should be lit, got mean {path}");
+
+        // Temporal reuse, held camera, spatial off — the full step-5 pipeline.
+        let temporal = {
+            let cand = reservoir("test.temporal.cand");
+            let mut prev = reservoir("test.temporal.prev");
+            let mut curr = reservoir("test.temporal.curr");
+            let mut gbuffer_prev = gbuffer("test.temporal.gbuffer.prev");
+            let mut gbuffer_curr = gbuffer("test.temporal.gbuffer.curr");
+            // Empty reservoirs / G-buffers to start (frame 0 reads `prev` before
+            // any candidate streamed; the wave clears `curr` itself each frame).
+            gpu.submit_passes(&[
+                Pass::Fill { buffer: &cand, offset: 0, size: reservoir_bytes, value: 0 },
+                Pass::Fill { buffer: &prev, offset: 0, size: reservoir_bytes, value: 0 },
+                Pass::Fill { buffer: &curr, offset: 0, size: reservoir_bytes, value: 0 },
+                Pass::Fill { buffer: &gbuffer_prev, offset: 0, size: gbuffer_bytes, value: 0 },
+                Pass::Fill { buffer: &gbuffer_curr, offset: 0, size: gbuffer_bytes, value: 0 },
+            ])
+            .expect("clear");
+            let mut reproject_buf = gpu
+                .create_buffer(
+                    "test.temporal.reproject",
+                    96,
+                    vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                    MemoryLocation::CpuToGpu,
+                )
+                .expect("reproject");
+            // Held camera: the previous camera equals the current one every frame.
+            let basis = camera.basis(width as f32 / height as f32);
+            let cam = ReprojectCamera {
+                position: camera.position,
+                right: basis.right,
+                up: basis.up,
+                forward: basis.forward,
+            };
+
+            let radiance = radiance_buffer(gpu, width, height);
+            let mut total = 0.0_f64;
+            for sample in 0..samples {
+                // The renderer's per-frame reprojection block: `valid` from the
+                // second frame on (a previous camera then exists), the current
+                // G-buffer addresses.
+                let reproject = Reproject::new(
+                    (sample > 0).then_some(cam),
+                    gbuffer_prev.device_address(),
+                    gbuffer_curr.device_address(),
+                    width,
+                    height,
+                );
+                reproject_buf.write(bytemuck::bytes_of(&reproject));
+                let inputs = RestirInputs {
+                    reservoir: &curr,
+                    temporal: Some(TemporalReuse {
+                        cand: &cand,
+                        prev: &prev,
+                        reproject: &reproject_buf,
+                        decay_frames,
+                    }),
+                    scratch: None,
+                    debug: None,
+                    debug_view: DebugView::Off,
+                };
+                wavefront
+                    .trace_then(
+                        gpu, &scene, &radiance, width, height, sample, None, Some(&inputs), &[],
+                    )
+                    .expect("trace");
+                let pixels: Vec<f32> = bytemuck::pod_collect_to_vec(
+                    &gpu.download_buffer(&radiance).expect("download"),
+                );
+                total += pixels
+                    .chunks_exact(4)
+                    .map(|p| f64::from(p[0]) + f64::from(p[1]) + f64::from(p[2]))
+                    .sum::<f64>();
+                // Frame end: wind the ping-pong, reservoirs and G-buffers together.
+                std::mem::swap(&mut prev, &mut curr);
+                std::mem::swap(&mut gbuffer_prev, &mut gbuffer_curr);
+            }
+            total / f64::from(samples * width * height)
+        };
+
+        (temporal, path)
+    }
+
+    /// The pinned-temporal gate (D-094's CI spine): temporal reuse forced live —
+    /// spatial off, decay *off* (window 0) — must still converge to the path
+    /// tracer. The default estimator decays temporal off on a held camera (step
+    /// 5d), which would leave the ordinary converge-to-reference gate blind to a
+    /// temporal bias; so this holds temporal on to convergence instead. It runs
+    /// the full step-5 pipeline the renderer does — the four-buffer routing, the
+    /// frame-end prev/curr swap, and the per-frame reprojection block. History
+    /// compounds under the M-cap across all 256 frames; a broken M-cap, a mixed
+    /// feed convention, a stale target, or a gate that corrupted the surface it
+    /// compares would shift the converged mean off the reference.
+    #[test]
+    fn temporal_reuse_matches_the_path_tracer() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        // Decay off: if the ramp were live it would anneal temporal away by frame
+        // `RESTIR_TEMPORAL_DECAY_FRAMES`, silently turning this into a
+        // candidate-only convergence check, blind to a temporal bias (D-094).
+        let (temporal, path) = temporal_gate_means(&gpu, 256, 0);
+        let deviation = (temporal - path).abs() / path;
+        assert!(
+            deviation < 0.03,
+            "temporal reuse disagrees with the path tracer: {temporal} vs {path} ({deviation:.4} relative)"
+        );
+    }
+
+    /// Step 5d's default handoff gate (D-094): the *shipping* estimator — temporal
+    /// on with the decay ramp live — must still converge to the path tracer on a
+    /// held camera. This is the path a user renders: the first frames after the
+    /// camera settled are temporal-warm, then the ramp anneals temporal off by
+    /// `RESTIR_TEMPORAL_DECAY_FRAMES`, handing off to spatial-only fresh-RNG
+    /// accumulation. Unlike the pinned gate (decay off), this exercises the ramp
+    /// *interior* — the partial-decay frames — integrated to convergence, so a
+    /// decay that scaled confidence inconsistently across the MIS weights and the
+    /// merge, or overshot, would shift the mean off the reference.
+    #[test]
+    fn temporal_decay_hands_off_to_the_reference() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let (temporal, path) =
+            temporal_gate_means(&gpu, 256, Wavefront::RESTIR_TEMPORAL_DECAY_FRAMES);
+        let deviation = (temporal - path).abs() / path;
+        assert!(
+            deviation < 0.03,
+            "decay-on temporal disagrees with the path tracer: {temporal} vs {path} ({deviation:.4} relative)"
+        );
+    }
+
+    /// Step 5d's exact-zero endpoint: once the decay ramp reaches zero (a held
+    /// camera past the window), the temporal stage is a *no-op* — `curr ≡ cand` —
+    /// so the converged still is temporal-free (spatial-only, fresh per-frame RNG),
+    /// the property that makes it provably the brute-force reference (D-094). This
+    /// distinguishes the linear ramp, which hits *exactly* zero, from any
+    /// asymptotic decay that would leave the image forever correlated: it builds a
+    /// real, valid history (frame 0, then swap), then runs one frame at
+    /// `sampleIndex == decayFrames` (decay 0) and checks the temporal output equals
+    /// the candidate reservoir — bit-for-bit in confidence, to a hair in W. The
+    /// history is asserted non-empty first, so the zeroing is real, not vacuous. At
+    /// decay 0 `prev.confidence` is scaled to zero *before* the combine, so the
+    /// neighbour drops out whatever it held and whichever pixel reprojection read —
+    /// the no-op is unconditional across every hit pixel; `cand`/`curr` are cleared
+    /// so miss pixels (written by neither stage) compare equal as zero too.
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the two-frame build-then-handoff and its per-pixel no-op check \
+                  are one flow — splitting them would scatter what it pins"
+    )]
+    #[expect(
+        clippy::float_cmp,
+        reason = "exact equality is the claim: at decay 0 the merge adds 0.0 to the \
+                  candidate confidence, so `curr ≡ cand` bit-for-bit, not merely close"
+    )]
+    fn temporal_decay_is_a_noop_past_its_window() {
+        use crate::restir::StoredReservoir;
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let (scene, camera) = temporal_gate_scene(&gpu);
+        let kernels = Kernels::embedded();
+        let (width, height) = (32u32, 32u32);
+        let window = Wavefront::RESTIR_TEMPORAL_DECAY_FRAMES;
+        let wavefront = Wavefront::new(
+            &gpu,
+            &kernels,
+            4096,
+            Wavefront::DEFAULT_MAX_BOUNCES,
+            LightSampling::Mis,
+        )
+        .expect("wavefront");
+
+        let reservoir_bytes =
+            u64::from(width) * u64::from(height) * size_of::<StoredReservoir>() as u64;
+        let gbuffer_bytes = u64::from(width) * u64::from(height) * 48;
+        let store_usage = vk::BufferUsageFlags::STORAGE_BUFFER
+            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+            | vk::BufferUsageFlags::TRANSFER_DST;
+        let buffer = |name: &str, bytes: u64| {
+            gpu.create_buffer(name, bytes, store_usage, MemoryLocation::GpuOnly)
+                .expect("buffer")
+        };
+        let cand = buffer("test.decay.cand", reservoir_bytes);
+        let mut prev = buffer("test.decay.prev", reservoir_bytes);
+        let mut curr = buffer("test.decay.curr", reservoir_bytes);
+        let mut gbuffer_prev = buffer("test.decay.gbuffer.prev", gbuffer_bytes);
+        let mut gbuffer_curr = buffer("test.decay.gbuffer.curr", gbuffer_bytes);
+        gpu.submit_passes(&[
+            Pass::Fill { buffer: &cand, offset: 0, size: reservoir_bytes, value: 0 },
+            Pass::Fill { buffer: &prev, offset: 0, size: reservoir_bytes, value: 0 },
+            Pass::Fill { buffer: &curr, offset: 0, size: reservoir_bytes, value: 0 },
+            Pass::Fill { buffer: &gbuffer_prev, offset: 0, size: gbuffer_bytes, value: 0 },
+            Pass::Fill { buffer: &gbuffer_curr, offset: 0, size: gbuffer_bytes, value: 0 },
+        ])
+        .expect("clear");
+        let mut reproject_buf = gpu
+            .create_buffer(
+                "test.decay.reproject",
+                96,
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                MemoryLocation::CpuToGpu,
+            )
+            .expect("reproject");
+        let basis = camera.basis(width as f32 / height as f32);
+        let cam = ReprojectCamera {
+            position: camera.position,
+            right: basis.right,
+            up: basis.up,
+            forward: basis.forward,
+        };
+        let radiance = radiance_buffer(&gpu, width, height);
+
+        // One temporal frame at `sample` with reprojection validity `valid`.
+        let mut frame = |sample: u32, valid: bool, gp: &Buffer, gc: &Buffer, pv: &Buffer, cu: &Buffer| {
+            let reproject = Reproject::new(
+                valid.then_some(cam),
+                gp.device_address(),
+                gc.device_address(),
+                width,
+                height,
+            );
+            reproject_buf.write(bytemuck::bytes_of(&reproject));
+            let inputs = RestirInputs {
+                reservoir: cu,
+                temporal: Some(TemporalReuse {
+                    cand: &cand,
+                    prev: pv,
+                    reproject: &reproject_buf,
+                    decay_frames: window,
+                }),
+                scratch: None,
+                debug: None,
+                debug_view: DebugView::Off,
+            };
+            wavefront
+                .trace_then(&gpu, &scene, &radiance, width, height, sample, None, Some(&inputs), &[])
+                .expect("trace");
+        };
+
+        // Frame 0 builds a history into `curr`; the swap makes it next frame's
+        // `prev` (and its G-buffer the one reprojection reads).
+        frame(0, false, &gbuffer_prev, &gbuffer_curr, &prev, &curr);
+        std::mem::swap(&mut prev, &mut curr);
+        std::mem::swap(&mut gbuffer_prev, &mut gbuffer_curr);
+
+        let history: Vec<StoredReservoir> =
+            bytemuck::pod_collect_to_vec(&gpu.download_buffer(&prev).expect("download prev"));
+        let history_max = history.iter().map(|r| r.confidence).fold(0.0_f32, f32::max);
+        assert!(history_max > 0.0, "frame 0 should leave a history for the ramp to decay");
+
+        // Clear `cand`/`curr` so the miss pixels neither stage touches this frame
+        // compare equal as zero; `prev` (the history) is kept.
+        gpu.submit_passes(&[
+            Pass::Fill { buffer: &cand, offset: 0, size: reservoir_bytes, value: 0 },
+            Pass::Fill { buffer: &curr, offset: 0, size: reservoir_bytes, value: 0 },
+        ])
+        .expect("clear");
+
+        // The handoff frame: sampleIndex == window ⇒ decay = saturate(1 − 1) = 0.
+        frame(window, true, &gbuffer_prev, &gbuffer_curr, &prev, &curr);
+
+        let cand_r: Vec<StoredReservoir> =
+            bytemuck::pod_collect_to_vec(&gpu.download_buffer(&cand).expect("download cand"));
+        let curr_r: Vec<StoredReservoir> =
+            bytemuck::pod_collect_to_vec(&gpu.download_buffer(&curr).expect("download curr"));
+        for (i, (c, u)) in cand_r.iter().zip(&curr_r).enumerate() {
+            assert_eq!(
+                u.confidence, c.confidence,
+                "pixel {i}: decay-0 temporal changed confidence ({} vs {}) — history leaked in",
+                u.confidence, c.confidence
+            );
+            let dw = (u.unbiased_weight - c.unbiased_weight).abs();
+            assert!(
+                dw <= 1e-4 * (1.0 + c.unbiased_weight.abs()),
+                "pixel {i}: decay-0 temporal changed W: {} vs {}",
+                u.unbiased_weight,
+                c.unbiased_weight
             );
         }
     }
@@ -2217,6 +2865,7 @@ mod tests {
         .expect("wavefront");
         let inputs = RestirInputs {
             reservoir: &reservoir,
+            temporal: None,
             scratch: None,
             debug: None,
             debug_view: DebugView::Off,
@@ -2314,6 +2963,7 @@ mod tests {
         .expect("wavefront");
         let inputs = RestirInputs {
             reservoir: &reservoir,
+            temporal: None,
             scratch: None,
             debug: None,
             debug_view: DebugView::Off,
@@ -2424,6 +3074,7 @@ mod tests {
 
         let inputs = RestirInputs {
             reservoir: &reservoir,
+            temporal: None,
             scratch: None,
             debug: Some(&debug),
             debug_view: DebugView::SelectedLight,
@@ -2545,6 +3196,7 @@ mod tests {
                 .expect("scratch buffer");
             let inputs = RestirInputs {
                 reservoir: &reservoir,
+                temporal: None,
                 scratch: spatial.then_some(&scratch),
                 debug: None,
                 debug_view: DebugView::Off,

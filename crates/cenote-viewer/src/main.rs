@@ -311,6 +311,7 @@ impl Viewer {
             RenderMode::PathTracer
         });
         self.session.set_spatial_reuse(self.gui.spatial_reuse());
+        self.session.set_temporal_reuse(self.gui.temporal_reuse());
         let debug_view = if restir {
             self.gui.debug_view()
         } else {

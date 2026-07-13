@@ -15,7 +15,8 @@ use ash::vk;
 
 use crate::error::Result;
 use crate::gpu::{Buffer, Context, MemoryLocation};
-use crate::wavefront::{AovTargets, upload_aov_table};
+use crate::restir::{ViewId, ViewState};
+use crate::wavefront::{AovTargets, ReprojectCamera, upload_aov_table};
 
 /// One film buffer's accumulation pair: the per-pixel target a wave writes
 /// its sample into (`TRANSFER_DST`: each wave starts by zero-filling it),
@@ -81,20 +82,26 @@ pub struct Film {
     /// The uploaded table the shading kernels reach the four buffers
     /// above through.
     aov_table: Buffer,
-    /// The `ReSTIR` per-pixel reservoir (curr), lazily allocated the first time
-    /// a wave runs in [`RenderMode::Restir`](crate::wavefront::RenderMode). Pure
-    /// per-frame scratch for single-frame RIS: the candidate stage overwrites
-    /// each hit pixel every wave, so it neither accumulates nor (for single-frame
-    /// RIS) needs clearing — the wave clears it itself when spatial reuse reads
-    /// neighbours. Absent (and unallocated) in the path-tracer default.
-    reservoir: Option<Buffer>,
-    /// The spatial stage's output reservoir — the committed-prior-pass ping-pong
-    /// buffer (M3 plan §2): `restir_spatial` reads `reservoir` (self + neighbours)
-    /// and writes the merged survivor here, then `restir_resolve` shades from
-    /// here. Lazily allocated only when spatial reuse is on, so the step-3
-    /// baseline pays nothing. Step 4's minimal stand-in for the full per-view
-    /// prev/curr/scratch `ViewState`, which lands with temporal (step 5).
-    reservoir_scratch: Option<Buffer>,
+    /// This view's `ReSTIR` reservoirs — the `prev`/`curr` temporal ping-pong
+    /// plus the spatial `scratch` — lazily built the first time a wave runs in
+    /// [`RenderMode::Restir`](crate::wavefront::RenderMode) and carried across a
+    /// [`Film::reset`], so the temporal history survives a camera move (the
+    /// warm-start; a resize builds a new film and so a fresh state). Absent (and
+    /// unallocated) in the path-tracer default. The candidate stage writes
+    /// `curr`; with spatial reuse on, `restir_spatial` reads `curr` and writes
+    /// `scratch`, and `restir_resolve` shades from `scratch` — the
+    /// committed-prior-pass ping-pong (M3 plan §2). `prev` has no reader until
+    /// the temporal combine (step 5b); [`Film::swap_reservoirs`] keeps the
+    /// ping-pong wound for it.
+    view: Option<ViewState>,
+    /// Last frame's camera, captured at the end of each accumulate, so the next
+    /// frame's temporal reprojection can map its shading points into last frame's
+    /// screen (step 5c). `None` until the first frame completes and after a
+    /// resize (a new film) — which forces the first reprojection to `valid = 0` —
+    /// but *preserved* across [`Film::reset`], so a camera move reprojects the
+    /// pre-move history rather than dropping it (the warm-start). Follows the
+    /// [`ViewState`] lifecycle exactly, since both hang off the film.
+    prev_reproject: Option<ReprojectCamera>,
     /// The D-092 debug surface's single-shot false-colour buffer, lazily
     /// allocated the first time a [`DebugView`](crate::wavefront::DebugView) is
     /// selected. `restir_resolve` writes it (zero-filled each wave); the render
@@ -139,8 +146,8 @@ impl Film {
             depth,
             guide,
             aov_table,
-            reservoir: None,
-            reservoir_scratch: None,
+            view: None,
+            prev_reproject: None,
             debug: None,
             width,
             height,
@@ -148,38 +155,20 @@ impl Film {
         })
     }
 
-    /// Ensure the `ReSTIR` targets for this frame exist: the per-pixel
-    /// reservoir, the spatial stage's scratch buffer (when `spatial`), and — when
-    /// `debug` — the debug false-colour buffer. All are lazily allocated so the
-    /// path-tracer default pays for none. Idempotent; call before a
-    /// [`RenderMode::Restir`](crate::wavefront::RenderMode) wave.
+    /// Ensure the `ReSTIR` targets for this frame exist: this view's reservoir
+    /// state ([`ViewState`] — `prev`/`curr`/`scratch`) and — when `debug` — the
+    /// false-colour buffer. Both are lazily allocated so the path-tracer default
+    /// pays for neither; the state is built once and carried across
+    /// [`Film::reset`] (the warm-start), so a camera move keeps it. Idempotent;
+    /// call before a [`RenderMode::Restir`](crate::wavefront::RenderMode) wave.
     ///
     /// # Errors
     ///
     /// Any [`crate::Error`] from buffer creation.
-    pub(super) fn ensure_restir(&mut self, gpu: &Context, spatial: bool, debug: bool) -> Result<()> {
+    pub(super) fn ensure_restir(&mut self, gpu: &Context, debug: bool) -> Result<()> {
         let texels = u64::from(self.width) * u64::from(self.height);
-        let stride = size_of::<crate::restir::StoredReservoir>() as u64;
-        // The reservoir carries a `TRANSFER_DST`: the wave zero-fills it before
-        // candidates when spatial reuse reads neighbours (see the wavefront).
-        let reservoir_usage = vk::BufferUsageFlags::STORAGE_BUFFER
-            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-            | vk::BufferUsageFlags::TRANSFER_DST;
-        if self.reservoir.is_none() {
-            self.reservoir = Some(gpu.create_buffer(
-                "film.restir.reservoir",
-                texels * stride,
-                reservoir_usage,
-                MemoryLocation::GpuOnly,
-            )?);
-        }
-        if spatial && self.reservoir_scratch.is_none() {
-            self.reservoir_scratch = Some(gpu.create_buffer(
-                "film.restir.reservoir.scratch",
-                texels * stride,
-                reservoir_usage,
-                MemoryLocation::GpuOnly,
-            )?);
+        if self.view.is_none() {
+            self.view = Some(ViewState::new(gpu, ViewId::PRIMARY, self.width, self.height)?);
         }
         if debug && self.debug.is_none() {
             self.debug = Some(gpu.create_buffer(
@@ -197,31 +186,140 @@ impl Film {
         Ok(())
     }
 
-    /// The `ReSTIR` reservoir buffer, present after [`Film::ensure_restir`].
+    /// This frame's committed reservoir (`curr`) — the candidate stage's write
+    /// target with temporal reuse off, the temporal combine's with it on —
+    /// present after [`Film::ensure_restir`].
     ///
     /// # Panics
     ///
-    /// If called before [`Film::ensure_restir`] allocated it — a caller bug.
+    /// If called before [`Film::ensure_restir`] built the state — a caller bug.
     pub(super) fn reservoir(&self) -> &Buffer {
-        self.reservoir
+        self.view
             .as_ref()
             .expect("ensure_restir has not run yet")
+            .curr()
+    }
+
+    /// This frame's candidate reservoir (`cand`) and last frame's committed one
+    /// (`prev`) — the temporal combine's two inputs, present after
+    /// [`Film::ensure_restir`].
+    ///
+    /// # Panics
+    ///
+    /// If called before [`Film::ensure_restir`] built the state — a caller bug.
+    pub(super) fn reservoir_cand(&self) -> &Buffer {
+        self.view
+            .as_ref()
+            .expect("ensure_restir has not run yet")
+            .cand()
+    }
+
+    /// Last frame's committed reservoir (`prev`) — see [`Film::reservoir_cand`].
+    ///
+    /// # Panics
+    ///
+    /// If called before [`Film::ensure_restir`] built the state — a caller bug.
+    pub(super) fn reservoir_prev(&self) -> &Buffer {
+        self.view
+            .as_ref()
+            .expect("ensure_restir has not run yet")
+            .prev()
     }
 
     /// The spatial stage's scratch reservoir, present after
-    /// [`Film::ensure_restir`]`(gpu, true, _)`.
+    /// [`Film::ensure_restir`].
     ///
     /// # Panics
     ///
-    /// If called before spatial reuse allocated it — a caller bug.
+    /// If called before [`Film::ensure_restir`] built the state — a caller bug.
     pub(super) fn reservoir_scratch(&self) -> &Buffer {
-        self.reservoir_scratch
+        self.view
             .as_ref()
-            .expect("ensure_restir did not allocate the spatial scratch")
+            .expect("ensure_restir has not run yet")
+            .scratch()
+    }
+
+    /// The temporal reprojection block (`Reproject`) — the buffer `restir_temporal`
+    /// reaches by address, present after [`Film::ensure_restir`]. Rewrite its
+    /// contents each frame with [`Film::write_reproject`] before the wave.
+    ///
+    /// # Panics
+    ///
+    /// If called before [`Film::ensure_restir`] built the state — a caller bug.
+    pub(super) fn reproject(&self) -> &Buffer {
+        self.view
+            .as_ref()
+            .expect("ensure_restir has not run yet")
+            .reproject()
+    }
+
+    /// Last frame's per-pixel G-buffer (`prev`) and this frame's (`curr`) — the
+    /// surfaces temporal reprojection reads and writes. The renderer feeds both
+    /// addresses into the reprojection block it writes each frame.
+    ///
+    /// # Panics
+    ///
+    /// If called before [`Film::ensure_restir`] built the state — a caller bug.
+    pub(super) fn gbuffer_prev(&self) -> &Buffer {
+        self.view
+            .as_ref()
+            .expect("ensure_restir has not run yet")
+            .gbuffer_prev()
+    }
+
+    /// This frame's per-pixel G-buffer (`curr`) — see [`Film::gbuffer_prev`].
+    ///
+    /// # Panics
+    ///
+    /// If called before [`Film::ensure_restir`] built the state — a caller bug.
+    pub(super) fn gbuffer_curr(&self) -> &Buffer {
+        self.view
+            .as_ref()
+            .expect("ensure_restir has not run yet")
+            .gbuffer_curr()
+    }
+
+    /// Overwrite this frame's reprojection block (`restir.reproject`) with `data`
+    /// — the host-built [`Reproject`](crate::wavefront::Reproject), rewritten each
+    /// frame before the wave since the previous camera and the ping-ponged
+    /// G-buffer addresses change every frame.
+    ///
+    /// # Panics
+    ///
+    /// If called before [`Film::ensure_restir`] built the state — a caller bug.
+    pub(super) fn write_reproject(&mut self, data: &[u8]) {
+        self.view
+            .as_mut()
+            .expect("ensure_restir has not run yet")
+            .reproject_mut()
+            .write(data);
+    }
+
+    /// Last frame's captured camera, for building this frame's reprojection
+    /// block; `None` on the first frame and after a resize.
+    pub(super) fn prev_reproject(&self) -> Option<ReprojectCamera> {
+        self.prev_reproject
+    }
+
+    /// Record this frame's camera as next frame's reprojection source, at frame
+    /// end. Preserved across [`Film::reset`] (the warm-start), dropped only when
+    /// a resize builds a new film.
+    pub(super) fn set_prev_reproject(&mut self, camera: ReprojectCamera) {
+        self.prev_reproject = Some(camera);
+    }
+
+    /// Commit this frame's reservoirs: `curr` becomes next frame's `prev`.
+    /// The renderer calls this at frame end when temporal reuse is on, so the
+    /// next frame's temporal pass reads a fully-committed prior buffer. A no-op
+    /// before any `ReSTIR` wave has built the state.
+    pub(super) fn swap_reservoirs(&mut self) {
+        if let Some(view) = self.view.as_mut() {
+            view.swap();
+        }
     }
 
     /// The debug false-colour buffer, present after
-    /// [`Film::ensure_restir`]`(gpu, true)`.
+    /// [`Film::ensure_restir`]`(gpu, true)` selected a view.
     ///
     /// # Panics
     ///
@@ -242,7 +340,11 @@ impl Film {
     }
 
     /// Start over (the view changed): the next sample overwrites the sums
-    /// instead of adding, so nothing needs clearing now.
+    /// instead of adding, so nothing needs clearing now. The `ReSTIR`
+    /// reservoirs ([`ViewState`]) are deliberately *not* dropped — the temporal
+    /// history carries across the reset, which is the warm-start: a camera move
+    /// resets the film's accumulation but reuses last frame's reservoirs, and
+    /// the decay ramp (step 5d) rides the fresh sample count from here.
     pub fn reset(&mut self) {
         self.samples = 0;
     }

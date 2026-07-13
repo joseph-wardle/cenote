@@ -83,10 +83,12 @@ static const uint DEBUG_SELECTED_LIGHT = 1; // false-colour by stable light id
 static const uint DEBUG_CONFIDENCE = 2;     // M heatmap
 static const uint DEBUG_UNBIASED_WEIGHT = 3; // W heatmap
 
-// The packed `debugView` word: the enum above in the low byte, the
-// visibility-in-weight flag in bit 8.
+// The packed `debugView` word: the enum above in the low byte, then two
+// which-stages-ran flags that set the confidence heatmap's scale — the
+// spatial visibility-in-weight flag in bit 8, the temporal-ran flag in bit 9.
 static const uint DEBUG_VIEW_MASK = 0xff;
 static const uint DEBUG_VISIBILITY_IN_WEIGHT = 0x100;
+static const uint DEBUG_TEMPORAL_IN_WEIGHT = 0x200;
 
 // A saturated colour from a hue in [0, 1): HSV(h, 1, 1) → RGB. Distinct hues
 // make neighbouring light ids read apart at a glance.
@@ -112,7 +114,8 @@ float3 heat(float t) {
 // The false-colour for the survivor under the selected view. `reservoir` is the
 // held reservoir; its confidence is M and its unbiasedWeight is W.
 // `confidenceScale` is the M value the heatmap saturates near — the candidate
-// count for single-frame RIS, its multiple after spatial reuse compounds M.
+// count for single-frame RIS, its multiple after temporal or spatial reuse
+// compounds M (the caller sets it from which stages ran).
 float3 debugColor(uint view, Reservoir<DirectLightSample> reservoir, float confidenceScale) {
     switch (view) {
     case DEBUG_SELECTED_LIGHT:
@@ -125,8 +128,11 @@ float3 debugColor(uint view, Reservoir<DirectLightSample> reservoir, float confi
         return hueColor(frac(float(reservoir.sample.light) * 0.6180339887));
     case DEBUG_CONFIDENCE:
         // M — the generalized sample count. Flat at the candidate count for
-        // single-frame RIS; after spatial reuse it compounds toward c_tot, so the
-        // heatmap's scale grows with it (D-093) rather than saturating at once.
+        // single-frame RIS; temporal history ramps it toward the M-cap and
+        // spatial reuse compounds it toward c_tot, so the heatmap's scale grows
+        // with the stages that ran (D-093) rather than saturating at once. On a
+        // held camera the decay ramp (D-094) hands temporal off, so M visibly
+        // relaxes back toward the candidate count as the frame converges.
         return heat(1.0 - exp(-reservoir.confidence / confidenceScale));
     case DEBUG_UNBIASED_WEIGHT:
         // W — the unbiased contribution weight, Reinhard-mapped so any
@@ -214,18 +220,23 @@ void restir_resolve(uint3 tid: SV_DispatchThreadID) {
     }
     DirectLightSample sample = reservoir.sample;
 
-    // Unpack the debug word: the view enum, and whether the spatial stage already
-    // folded the survivor's visibility into W (so no shadow ray is owed here).
+    // Unpack the debug word: the view enum, whether the spatial stage already
+    // folded the survivor's visibility into W (so no shadow ray is owed here),
+    // and whether temporal ran (a scale-only signal for the confidence heatmap).
     let debugView = params.debugView & DEBUG_VIEW_MASK;
     let visibilityInWeight = (params.debugView & DEBUG_VISIBILITY_IN_WEIGHT) != 0;
+    let temporalInWeight = (params.debugView & DEBUG_TEMPORAL_IN_WEIGHT) != 0;
 
     // The debug surface shows what the reservoir *selected*, so it is written
     // here — before the connection is reconstructed — independent of whether
     // the shadow ray or the shade below fires. The confidence heatmap's scale
-    // grows once spatial reuse compounds M (D-093); a rough 6× covers the
-    // default k ≈ 5 neighbours, the single-frame candidate count otherwise.
+    // tracks the M actually present so it never clips: the single-frame
+    // candidate count on its own; temporal compounds M toward its M-cap ceiling
+    // (≈ RESTIR_TEMPORAL_M_CAP × candidates ≈ 320, mirrored from wavefront.rs);
+    // spatial reuse a further rough 6× for the default k ≈ 5 neighbours (D-093).
     if (debugView != DEBUG_NONE) {
-        let confidenceScale = visibilityInWeight ? 96.0 : 16.0;
+        var confidenceScale = temporalInWeight ? 320.0 : 16.0;
+        if (visibilityInWeight) { confidenceScale *= 6.0; }
         params.debug[pixel] = float4(debugColor(debugView, reservoir, confidenceScale), 1.0);
     }
 

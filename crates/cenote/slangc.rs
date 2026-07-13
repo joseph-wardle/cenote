@@ -7,15 +7,17 @@
 /// them in this order. Not listed: shared modules (`pathstate.slang`,
 /// `rng.slang`, `openpbr.slang`, `lights.slang`, `environment.slang`,
 /// `scene.slang`, `surface.slang`, `reservoir.slang`, `reservoir_di.slang`,
-/// `restir_scene.slang`) compile into their importers, and test-only fixtures
-/// (`rng_test.slang`) compile at test time.
-pub const KERNELS: [&str; 11] = [
+/// `restir_scene.slang`, `restir_target.slang`, `restir_reproject.slang`)
+/// compile into their importers, and test-only fixtures (`rng_test.slang`)
+/// compile at test time.
+pub const KERNELS: [&str; 12] = [
     "raygen",
     "intersect",
     "shade_miss",
     "shade_surface",
     "trace_shadow",
     "restir_candidates",
+    "restir_temporal",
     "restir_spatial",
     "restir_resolve",
     "accumulate",

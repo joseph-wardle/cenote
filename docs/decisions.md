@@ -2083,3 +2083,88 @@ and reuses less. If spatial-only convergence lags the target, **loosen the norma
 threshold before adding a second spatial pass**: the single pass keeps `curr` untouched
 for step-5's temporal carry (D-091), and a second pass is a convergence optimization the
 plan correctly defers, not a correctness fix.
+
+## 2026-07-12 — M3 step 5: temporal reuse
+
+*The step-5 design was locked via a structured interview walking the whole dependency
+tree one question at a time, each answer grounded in the code the change touches rather
+than assumed. The through-line: temporal reuse's **bias surface is small and nameable**.
+Reprojection and disocclusion — the parts that look hard — are quality-only; a stale or
+mismatched reprojected reservoir just contributes a bad sample that pairwise MIS
+down-weights to correctness. Only two elements can actually shift the converged mean, and
+the design pins each to a structural guarantee and an aimed test. The entry below carries
+the resolved architecture and those two hazards, so the care is deliberate.*
+
+### D-094: Step-5 temporal-reuse design and implementation watch-items
+Status: accepted. The eight decisions the interview resolved, the two bias-critical
+elements they isolate, and the buffer-by-buffer staging that lands them.
+
+*Ownership rides the film's lifecycle.* The per-view reservoir state (`ViewState`) lives
+in the [`Film`], not a separate registry, because the two share an identical lifecycle: a
+film is per-resolution and rebuilt on resize — which is exactly when pixel-to-reservoir
+correspondence breaks and the history *must* drop — and it persists across a `reset`,
+which is exactly a camera move, where the history *must* carry (the warm-start). So
+"rebuild on resize, carry across move" falls out of Film's own construction/reset for
+free, with no generation-counter check. The `ViewId`-keyed `Views` map stays dormant
+until a second viewport exists (step 6, multi-view); today one film owns one state under
+`ViewId::PRIMARY`.
+
+*The four-buffer fixed-role routing is the structural bias guarantee.* Four reservoirs per
+view — `cand`, `prev`, `curr`, `scratch` — with candidates writing `cand`, the temporal
+combine writing `curr` from `cand` + the reprojected `prev`, spatial writing `scratch`
+from `curr`, resolve reading `scratch`, and a frame-end `swap(prev, curr)`. This makes the
+plan's "**never feed a spatial result back into the temporal reservoir**" a property of
+the wiring, not a discipline: `scratch` — carrying the *visibility-folded* W (D-093) — is
+a dead-end only resolve reads, and `prev` only ever receives the `curr` (candidate /
+temporal) lineage, which carries the *unshadowed* W. Mixing those two W conventions across
+the ping-pong would bias silently; the routing makes that mix unrepresentable. The extra
+`cand` buffer (distinct from `curr`, next frame's `prev`) is a deliberate **+1 over the
+plan §2 three-buffer budget** — it buys the clean feed-convention rather than aliasing two
+disjoint-lifetime roles onto one buffer, a footgun the first added reader would spring.
+
+*A persisted prev-frame G-buffer is unavoidable, and it is the reprojection substrate.* A
+`StoredReservoir` holds only the light point (id + primitive + barycentrics), nothing
+about the receiving surface — so the disocclusion gate, which must compare this pixel's
+current surface against the surface `prev` was resampled for, needs last frame's hit
+persisted as its own prev/curr G-buffer pair. This is state the shift for spatial (which
+reads live path state at the current pixel) never needed.
+
+*Temporal stays unshadowed; visibility is still applied exactly once.* The combine adds no
+shadow rays — it reuses `prev` under the same unshadowed target the candidates use — so
+the committed visibility path (spatial's V-fold, or resolve's traced shadow ray) is
+untouched. The `visibility_in_weight` signal still means "spatial ran".
+
+*Two elements bias, and only two.* (1) **The M-cap** — `c_prev ← min(c_prev, M_CAP ·
+c_cand)` — must be a *history-length multiplier* (≈20), not an absolute confidence,
+because a candidates frame already credits ~16 confidence; an absolute cap near that would
+throttle history to nothing, and an unbounded one lets a stale reservoir dominate forever.
+The clamp is the one bias-critical numeric, guarded by the analytic temporal microtest.
+(2) **The feed-convention** above. Everything else — reprojection accuracy, the
+disocclusion normal/world-position gate, off-screen and dead-light drops — is variance and
+quality: a wrong reuse is a bad candidate MIS corrects, never a bias. The RNG follows the
+established registry pattern: a `RESTIR_TEMPORAL` dimension block reserved after
+`RESTIR_SPATIAL`, so the combine's WRS acceptance draw never correlates with the candidate
+or spatial streams (mirroring how the spatial block is kept clear of the per-bounce
+dimensions, D-091).
+
+*The decay handoff is what makes the converged still provable.* Temporal confidence is
+scaled by a short ramp on the film's samples-since-`reset`; on a held camera the ramp
+reaches zero, so the converged image is temporal-*free* — spatial-only with fresh RNG,
+independent unbiased frames averaging by 1/N to the exact brute-force reference (the D-085
+anchor). The corollary is a testing hazard: because the default estimator decays temporal
+*off*, the ordinary converge-to-reference gate (D-090) is trivially blind to temporal
+bias. So the CI spine is a **pinned-temporal gate** — decay off *and* spatial off, temporal
+forced live to convergence, converging to the reference — plus the analytic microtest;
+the default handoff gate and the determinism gate ride on top. Fallback if the smooth
+handoff misbehaves (plan §5): a hard temporal→spatial switch on camera hold, a visible
+one-frame settle, substrate unchanged.
+
+*Staging: each buffer lands with its first reader, not all up front.* Step 5a wakes the
+existing three-buffer `ViewState` into the film, routes the temporal-off path through it,
+and plumbs the temporal toggle (`Renderer::set_temporal_reuse`, the CLI `--no-temporal`)
+and the frame-end swap — all **behaviour-neutral**, since no stage reads `prev` yet, and
+proven so by a byte-for-byte gate against the step-4 build across every ReSTIR config. 5b
+adds `cand` and the `restir_temporal` combine (`prev`'s first reader) with the M-cap and
+the analytic microtest; 5c adds the prev-Hit G-buffers, reprojection, and the disocclusion
+gate with the pinned-temporal gate; 5d adds the decay ramp. Buffers tie to readers, and
+each is verifiable the checkpoint it appears.

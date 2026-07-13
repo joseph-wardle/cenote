@@ -7,14 +7,18 @@
 //! deliberately NOT the `RenderInputs.generation` counter — the distinction
 //! that makes the warm-start work, spelled out on `ViewId` below.
 //!
-//! This substrate lands before its consumer. Single-frame initial RIS (step
-//! 3.2) needs only one reservoir per pixel and hands the wavefront a bare
-//! per-wave target; it is temporal reuse (step 5) that first makes the history
-//! *persist* across frames, and only then do the prev/curr ping-pong, the
-//! carry-across-move, and per-view ownership below earn their keep. Until then
-//! the state is exercised by its lifecycle test (T4), so the module keeps one
-//! scoped `dead_code` allowance — removed when the render loop owns per-view
-//! reservoirs for the warm-start.
+//! Temporal reuse (step 5) is what makes the history *persist* across frames:
+//! the [`Film`](crate::render::Film) now owns one [`ViewState`], swapping
+//! `prev`/`curr` at frame end so the ping-pong carries the reservoirs across a
+//! camera move — the warm-start. As of step 5b the `restir_temporal` combine
+//! reads `prev` and writes `curr` from `cand` + `prev` — the four-buffer routing
+//! of D-094 is now fully live; step 5c adds the reprojection substrate that rides
+//! it: a per-pixel G-buffer pair (`gbuffer_prev`/`gbuffer_curr`), ping-ponged in
+//! lockstep so each committed reservoir keeps the surface it was resolved for,
+//! and a small `reproject` block the host rewrites each frame with the previous
+//! camera. What remains dormant keeps a scoped `dead_code` allowance: the
+//! [`ViewId`]-keyed [`Views`] map stays unused until a second viewport exists
+//! (step 6). The allowance lifts when `Views` goes live.
 #![allow(dead_code)]
 
 use ash::vk;
@@ -47,65 +51,126 @@ impl ViewId {
 /// 24 B/pixel figure.
 const RESERVOIR_STRIDE: u64 = size_of::<StoredReservoir>() as u64;
 
-/// The three reservoir buffers one view owns, sized to its current resolution.
-/// `AoS` and row-major (see the note in the parent module); one per pixel.
+/// Bytes one G-buffer entry occupies — the `GBufEntry` stride in
+/// `shaders/restir_reproject.slang` (a `Hit` at 16 B plus two `float4`), one per
+/// pixel. Mirrored here rather than from a host type because the entry is written
+/// and read only by the shader; the host merely sizes the buffer.
+const GBUFFER_STRIDE: u64 = 48;
+
+/// Bytes the per-frame reprojection block occupies — the `Reproject` struct in
+/// `shaders/restir_reproject.slang`, mirrored by `Reproject` in `wavefront.rs`
+/// (whose `size_of` a static assert pins to this). One struct per view, not one
+/// per pixel.
+const REPROJECT_STRIDE: u64 = 96;
+
+/// The four reservoir buffers one view owns (D-094's fixed-role routing), sized
+/// to its current resolution. `AoS` and row-major (see the note in the parent
+/// module); one per pixel.
 pub struct ViewState {
     id: ViewId,
     width: u32,
     height: u32,
-    /// Last frame's committed reservoir — temporal/spatial reuse reads it.
-    /// Ping-pongs with `curr` at frame end.
+    /// This frame's fresh candidate reservoir, written by `restir_candidates`
+    /// when temporal reuse is on — the temporal combine's canonical input. Held
+    /// distinct from `curr` (next frame's `prev`) so the candidate lineage that
+    /// seeds history never aliases the history buffer itself. Rebuilt each frame,
+    /// never swapped.
+    cand: Buffer,
+    /// Last frame's committed reservoir — the temporal combine reads it as its
+    /// history. Ping-pongs with `curr` at frame end.
     prev: Buffer,
-    /// This frame's reservoir, written by the candidate and reuse stages and
-    /// committed at frame end; becomes next frame's `prev` on [`Self::swap`].
+    /// This frame's committed reservoir: written by the candidate stage (temporal
+    /// off) or the temporal combine (temporal on), read by spatial; becomes next
+    /// frame's `prev` on [`Self::swap`].
     curr: Buffer,
     /// The spatial pass's working buffer: it reads the committed prior-pass
     /// reservoir and writes here, never feeding its own output back (the
     /// determinism-preserving ping-pong the plan's §2 determinism note names).
     scratch: Buffer,
+    /// Last frame's per-pixel primary hits — the G-buffer temporal reprojection
+    /// reads to rebuild the previous surface for its disocclusion gate and its
+    /// `p̂_i` (D-094). Ping-pongs with `gbuffer_curr` alongside `prev`/`curr`, so
+    /// the surface that produced a `prev` reservoir travels with it.
+    gbuffer_prev: Buffer,
+    /// This frame's per-pixel primary hits, written by `restir_temporal`;
+    /// becomes `gbuffer_prev` on the next [`Self::swap`].
+    gbuffer_curr: Buffer,
+    /// The per-frame reprojection block (`Reproject`): the previous camera basis,
+    /// the two G-buffer addresses, the frame dimensions, and the reuse-gate
+    /// thresholds. Host-written each frame ([`Buffer::write`]) before the wave —
+    /// `CpuToGpu`, one small struct — and reached by `restir_temporal` through a
+    /// single push pointer.
+    reproject: Buffer,
 }
 
 impl ViewState {
-    /// Allocate a view's three reservoir buffers for a `width`×`height` frame,
+    /// Allocate a view's four reservoir buffers for a `width`×`height` frame,
     /// every reservoir initialized empty.
     pub fn new(gpu: &Context, id: ViewId, width: u32, height: u32) -> Result<Self> {
-        let bytes = u64::from(width) * u64::from(height) * RESERVOIR_STRIDE;
+        let pixels = u64::from(width) * u64::from(height);
+        let bytes = pixels * RESERVOIR_STRIDE;
         // Reuse stages address the reservoirs through buffer-reference
         // pointers, like the path pool; TRANSFER_DST is for the empty-init fill.
         let usage = vk::BufferUsageFlags::STORAGE_BUFFER
             | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
             | vk::BufferUsageFlags::TRANSFER_DST;
         let buffer = |name: &str| gpu.create_buffer(name, bytes, usage, MemoryLocation::GpuOnly);
+        let gbuffer_bytes = pixels * GBUFFER_STRIDE;
+        let gbuffer = |name: &str| gpu.create_buffer(name, gbuffer_bytes, usage, MemoryLocation::GpuOnly);
         let state = Self {
             id,
             width,
             height,
+            cand: buffer("restir.reservoir.cand")?,
             prev: buffer("restir.reservoir.prev")?,
             curr: buffer("restir.reservoir.curr")?,
             scratch: buffer("restir.reservoir.scratch")?,
+            gbuffer_prev: gbuffer("restir.gbuffer.prev")?,
+            gbuffer_curr: gbuffer("restir.gbuffer.curr")?,
+            // Host-written every frame before the wave (never through a transfer),
+            // so it needs neither TRANSFER_DST nor an init fill.
+            reproject: gpu.create_buffer(
+                "restir.reproject",
+                REPROJECT_STRIDE,
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                MemoryLocation::CpuToGpu,
+            )?,
         };
 
         // An all-zero reservoir is the empty one: sample 0, W 0, and — the
         // part that matters — confidence 0, which reads as "nothing selected".
         // So a frame-0 temporal read of `prev`, before any candidate has been
         // streamed, contributes nothing rather than interpreting uninitialized
-        // VRAM as a bogus high-confidence sample.
-        let fill = |buffer| Pass::Fill {
+        // VRAM as a bogus high-confidence sample. The G-buffers zero the same
+        // way: their entries are only ever read where the matching `prev`
+        // reservoir carries confidence, so a zeroed (never-written) entry is
+        // structurally unreachable, but the fill keeps VRAM defined regardless.
+        let fill = |buffer, size| Pass::Fill {
             buffer,
             offset: 0,
-            size: bytes,
+            size,
             value: 0,
         };
-        gpu.submit_passes(&[fill(&state.prev), fill(&state.curr), fill(&state.scratch)])?;
+        gpu.submit_passes(&[
+            fill(&state.cand, bytes),
+            fill(&state.prev, bytes),
+            fill(&state.curr, bytes),
+            fill(&state.scratch, bytes),
+            fill(&state.gbuffer_prev, gbuffer_bytes),
+            fill(&state.gbuffer_curr, gbuffer_bytes),
+        ])?;
         Ok(state)
     }
 
-    /// Commit this frame's reservoir: `curr` becomes next frame's `prev`. One
-    /// swap, at frame end — the ping-pong that lets the temporal pass read a
-    /// fully-committed prior buffer with a barrier between, never a
-    /// half-written one.
+    /// Commit this frame's reservoir: `curr` becomes next frame's `prev`, and
+    /// the matching `gbuffer_curr` becomes `gbuffer_prev` so the surface that
+    /// produced each committed reservoir travels with it (the disocclusion gate
+    /// compares against exactly that surface). One swap of each pair, at frame
+    /// end — the ping-pong that lets the temporal pass read a fully-committed
+    /// prior buffer with a barrier between, never a half-written one.
     pub fn swap(&mut self) {
         std::mem::swap(&mut self.prev, &mut self.curr);
+        std::mem::swap(&mut self.gbuffer_prev, &mut self.gbuffer_curr);
     }
 
     /// The view this state belongs to.
@@ -123,19 +188,51 @@ impl ViewState {
         self.width * self.height
     }
 
-    /// The committed prior-frame reservoir's GPU address (temporal read).
-    pub fn prev_address(&self) -> vk::DeviceAddress {
-        self.prev.device_address()
+    /// This frame's candidate reservoir — `restir_candidates`' write target with
+    /// temporal reuse on, the temporal combine's canonical input.
+    pub fn cand(&self) -> &Buffer {
+        &self.cand
     }
 
-    /// This frame's reservoir's GPU address (candidate/reuse write).
-    pub fn curr_address(&self) -> vk::DeviceAddress {
-        self.curr.device_address()
+    /// The committed prior-frame reservoir — the temporal pass's history read.
+    pub fn prev(&self) -> &Buffer {
+        &self.prev
     }
 
-    /// The spatial pass's working buffer's GPU address.
-    pub fn scratch_address(&self) -> vk::DeviceAddress {
-        self.scratch.device_address()
+    /// This frame's reservoir — the candidate/reuse stages' write target, and
+    /// next frame's `prev` after [`Self::swap`].
+    pub fn curr(&self) -> &Buffer {
+        &self.curr
+    }
+
+    /// The spatial pass's working buffer — it reads the committed prior-pass
+    /// reservoir and writes here, never feeding its own output back.
+    pub fn scratch(&self) -> &Buffer {
+        &self.scratch
+    }
+
+    /// Last frame's per-pixel G-buffer — temporal reprojection reads it at the
+    /// reprojected pixel to rebuild the previous surface.
+    pub fn gbuffer_prev(&self) -> &Buffer {
+        &self.gbuffer_prev
+    }
+
+    /// This frame's per-pixel G-buffer — `restir_temporal` writes each hit's
+    /// surface here; it becomes `gbuffer_prev` on the next [`Self::swap`].
+    pub fn gbuffer_curr(&self) -> &Buffer {
+        &self.gbuffer_curr
+    }
+
+    /// The per-frame reprojection block, for the host to rewrite each frame
+    /// before the wave (the previous camera basis and the current G-buffer
+    /// addresses), then hand to `restir_temporal` by address.
+    pub fn reproject(&self) -> &Buffer {
+        &self.reproject
+    }
+
+    /// The reprojection block as mutable, for [`Buffer::write`].
+    pub fn reproject_mut(&mut self) -> &mut Buffer {
+        &mut self.reproject
     }
 }
 
@@ -223,9 +320,13 @@ mod tests {
             assert_eq!(state.dimensions(), (128, 72));
             assert_eq!(state.reservoir_count(), 128 * 72);
             (
-                state.prev_address(),
-                state.curr_address(),
-                state.scratch_address(),
+                state.cand().device_address(),
+                state.prev().device_address(),
+                state.curr().device_address(),
+                state.scratch().device_address(),
+                state.gbuffer_prev().device_address(),
+                state.gbuffer_curr().device_address(),
+                state.reproject().device_address(),
             )
         };
         assert_eq!(views.len(), 1);
@@ -239,12 +340,16 @@ mod tests {
                 .expect("same-size lookup");
             assert_eq!(
                 (
-                    state.prev_address(),
-                    state.curr_address(),
-                    state.scratch_address()
+                    state.cand().device_address(),
+                    state.prev().device_address(),
+                    state.curr().device_address(),
+                    state.scratch().device_address(),
+                    state.gbuffer_prev().device_address(),
+                    state.gbuffer_curr().device_address(),
+                    state.reproject().device_address()
                 ),
                 addresses,
-                "a camera move must not reallocate the reservoirs"
+                "a camera move must not reallocate the reservoirs or G-buffers"
             );
         }
         assert_eq!(views.len(), 1, "a move mints no new view");
@@ -264,14 +369,15 @@ mod tests {
         let second = ViewId(1);
         let second_curr = {
             let state = views.for_view(&gpu, second, 128, 72).expect("second view");
-            state.curr_address()
+            state.curr().device_address()
         };
         assert_eq!(views.len(), 2);
         // The primary view (now 200×100) is untouched and distinct.
         let primary_curr = views
             .for_view(&gpu, ViewId::PRIMARY, 200, 100)
             .expect("primary intact")
-            .curr_address();
+            .curr()
+            .device_address();
         assert_ne!(
             primary_curr, second_curr,
             "two views must not share a reservoir buffer"
@@ -293,14 +399,24 @@ mod tests {
         let state = views
             .for_view(&gpu, ViewId::PRIMARY, 64, 64)
             .expect("allocate");
-        let (prev, curr, scratch) = (
-            state.prev_address(),
-            state.curr_address(),
-            state.scratch_address(),
+        let (cand, prev, curr, scratch, gprev, gcurr, reproject) = (
+            state.cand().device_address(),
+            state.prev().device_address(),
+            state.curr().device_address(),
+            state.scratch().device_address(),
+            state.gbuffer_prev().device_address(),
+            state.gbuffer_curr().device_address(),
+            state.reproject().device_address(),
         );
         state.swap();
-        assert_eq!(state.prev_address(), curr, "prev takes curr's buffer");
-        assert_eq!(state.curr_address(), prev, "curr takes prev's buffer");
-        assert_eq!(state.scratch_address(), scratch, "scratch is untouched");
+        assert_eq!(state.prev().device_address(), curr, "prev takes curr's buffer");
+        assert_eq!(state.curr().device_address(), prev, "curr takes prev's buffer");
+        // The G-buffer pair ping-pongs in lockstep with the reservoirs, so a
+        // committed reservoir's surface stays paired with it.
+        assert_eq!(state.gbuffer_prev().device_address(), gcurr, "gbuffer_prev takes gbuffer_curr");
+        assert_eq!(state.gbuffer_curr().device_address(), gprev, "gbuffer_curr takes gbuffer_prev");
+        assert_eq!(state.cand().device_address(), cand, "cand is untouched");
+        assert_eq!(state.scratch().device_address(), scratch, "scratch is untouched");
+        assert_eq!(state.reproject().device_address(), reproject, "reproject is not swapped");
     }
 }

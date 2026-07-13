@@ -114,6 +114,21 @@ public uint restirSpatialCanonicalDimension() {
     return RESTIR_SPATIAL_CANONICAL;
 }
 
+// ReSTIR temporal-reuse dimensions (step 5). The temporal stage folds last
+// frame's `prev` reservoir into this frame's `cand` at the same pixel, so it
+// needs just two reservoir-merge acceptance draws: one for the canonical
+// (`cand`), one for the single neighbour (`prev`). A dedicated block past the
+// spatial canonical (which sits at `RESTIR_SPATIAL_BASE + 64·4` = 1024), so the
+// combine's acceptance never correlates with the candidate or spatial streams
+// that ran at the same vertex (D-091, D-094).
+public static const uint RESTIR_TEMPORAL_BASE = 1280;
+public static const uint RESTIR_TEMPORAL_CANONICAL = 0; // `cand`'s merge acceptance
+public static const uint RESTIR_TEMPORAL_PREV = 1;      // `prev`'s merge acceptance
+
+public uint restirTemporalDimension(uint slot) {
+    return RESTIR_TEMPORAL_BASE + slot;
+}
+
 // -- Implementation ----------------------------------------------------
 
 // Generator-matrix columns of the Sobol sequence's second dimension, one

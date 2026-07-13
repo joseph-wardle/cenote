@@ -68,16 +68,15 @@
 // barrier orders, so no thread reads a half-written neighbour and determinism
 // holds (M3 plan §2).
 
-import lights;
 import openpbr;
 import pathstate;
 import reservoir;
 import reservoir_di;
 import restir_scene;
+import restir_target;
 import rng;
 import scene;
 import surface;
-import textures;
 
 // The scene TLAS, shared with `intersect`/`trace_shadow`: the k+1 visibility
 // rays trace it through the shared `shadowVisibility` helper.
@@ -109,138 +108,12 @@ struct Params {
 [vk::push_constant]
 Params params;
 
-// Relative luminance of an ACEScg (AP1) colour — the reservoir's scalar target
-// (identical to the one in restir_candidates; the target must agree pointwise).
-float luminance(float3 acescg) {
-    return dot(acescg, float3(0.2722287168, 0.6740817658, 0.0536895174));
-}
-
-// A reconstructed shading point: everything the target function needs to weigh
-// a light sample here, rebuilt from a Hit exactly as restir_candidates does, so
-// the reservoir's target and its reuse land on the same surface as the path
-// tracer (a drift would be a silent bias — see surface.slang).
-struct Surface {
-    float3 position;
-    float3 below;
-    float3 normal;   // geometric, faced toward the arriving ray
-    float3 origin;   // the ray's origin — camera-plane depth is |pos − origin|·cosCam
-    float depth;     // camera-plane z, for the reuse gate
-    Frame frame;
-    float3 wo;
-    Closure closure;
-    bool valid;
-};
-
-// Rebuild the surface at path slot `slot`'s primary hit. `slot` indexes the
-// path pool directly (its Hit, its ray). An out-of-range or non-hit slot is the
-// caller's responsibility to exclude; this assumes a live primary hit.
-Surface reconstructSurface(uint slot) {
-    Hit hit = params.paths.hit[slot];
-    let ray = params.paths.direction[slot];
-    let direction = ray.xyz;
-    let origin = params.paths.origin[slot].xyz;
-
-    GeometryRecord mesh = params.scene.geometry[hit.instance];
-    let uv = interpolateUv(mesh, hit.primitive, hit.barycentrics);
-    let material = resolveMaterial(params.scene.materials[hit.instance], uv);
-    let spawn = spawnPoint(mesh, hit, direction);
-    var shading = spawn.shading;
-    if (material.normalTexture != TEXTURE_NONE) {
-        shading = mappedShadingNormal(mesh, hit, uv, material.normalTexture, spawn);
-    }
-
-    Surface s;
-    s.position = spawn.position;
-    s.below = spawn.below;
-    s.normal = spawn.normal;
-    s.origin = origin;
-    // Camera-plane z: hit distance projected onto the camera forward axis, whose
-    // cosine raygen stashed in direction.w (the depth-AOV trick, decisions §D-062).
-    s.depth = length(spawn.position - origin) * ray.w;
-    s.frame = Frame(shading);
-    s.wo = s.frame.toLocal(-direction);
-    s.closure = resolveClosure(params.scene.bsdfTables, material, s.wo, false);
-    s.valid = true;
-    return s;
-}
-
-// A light sample reconnected to a shading point: the direction, radiance, and
-// shadow-ray target a stored `DirectLightSample` makes at `from`. The one place
-// the light-type branch lives (D-093): an environment sample is a *direction*,
-// position-independent, so the same `connect` serves every surface; a triangle
-// sample re-derives its cosθ/d² geometry against `from`. A dropped light (id no
-// longer present) or a degenerate/back-face connection returns `valid = false`.
-struct Connection {
-    float3 toLight;   // unit, from `from` toward the light point
-    float3 radiance;  // arriving radiance, emission map folded in
-    bool valid;
-    uint shadowLight;     // shadow-ray identity target (TLAS index), or LIGHT_NONE
-    uint shadowPrimitive;
-    float shadowTmax;
-};
-
-Connection connectSampleAt(DirectLightSample sample, float3 from) {
-    Connection c;
-    c.toLight = float3(0.0);
-    c.radiance = float3(0.0);
-    c.valid = false;
-    c.shadowLight = LIGHT_NONE;
-    c.shadowPrimitive = 0;
-    c.shadowTmax = 1e30;
-
-    if (isEnvironmentSample(sample)) {
-        let e = params.scene.env.connect(sample.barycentrics);
-        if (e.pdf > 0.0) {
-            c.toLight = e.direction;
-            c.radiance = e.radiance;
-            c.valid = true;
-        }
-        return c; // env: nothing to hit — LIGHT_NONE, open tmax already set
-    }
-
-    // Translate the stable id back to the current instance; a light deleted
-    // since the neighbour stored this sample resolves to nothing (drop).
-    let instance = params.restir.idToInstance[sample.light];
-    if (instance == LIGHT_NONE) {
-        return c;
-    }
-    let lightMesh = params.scene.geometry[instance];
-    LightRecord record = params.restir.candidateLights[lightMesh.light + sample.primitive];
-    var tri = connectTriangle(record, sample.barycentrics, from);
-    if (tri.pdf > 0.0) {
-        let emitter = params.scene.materials[instance];
-        if (emitter.emissionTexture != TEXTURE_NONE) {
-            tri.radiance *= sampleColor(
-                emitter.emissionTexture,
-                interpolateUv(lightMesh, sample.primitive, sample.barycentrics));
-        }
-        c.toLight = tri.direction;
-        c.radiance = tri.radiance;
-        c.valid = true;
-        c.shadowLight = instance;
-        c.shadowPrimitive = sample.primitive;
-        c.shadowTmax = tri.tmax;
-    }
-    return c;
-}
-
-// The unshadowed target p̂ = luminance(L·f·|cosθ|) of a light sample at a
-// surface, over the real closure. Zero for a sample the surface can't carry
-// (below a horizon the base doesn't transmit through, or a degenerate
-// connection). This is p̂_i — a neighbour's own-domain target — evaluated
-// without a shadow ray.
-float targetUnshadowed(Surface s, DirectLightSample sample) {
-    let c = connectSampleAt(sample, s.position);
-    if (!c.valid) {
-        return 0.0;
-    }
-    let wiLight = s.frame.toLocal(c.toLight);
-    let throughSurface = dot(c.toLight, s.normal) < 0.0;
-    if (wiLight.z == 0.0 || (wiLight.z < 0.0) != throughSurface) {
-        return 0.0;
-    }
-    return luminance(c.radiance * evalBsdf(s.closure, wiLight, s.wo) * abs(wiLight.z));
-}
+// The reconstructed `Surface`, the light-sample `connectSampleAt`, and the
+// unshadowed target `targetUnshadowed` this stage shares with the temporal
+// combine live in `restir_target.slang` (imported above) — one copy, so the two
+// reuse stages can never drift into a silent bias. Only the visibility-aware
+// canonical target below stays here: it traces this stage's TLAS binding, a
+// resource a shared module cannot own.
 
 // The visibility-aware canonical target p̂_c = U_c·V of a light sample at *this*
 // surface, tracing one shadow ray. Returns p̂_c and reports the unshadowed U_c
@@ -249,7 +122,7 @@ float targetUnshadowed(Surface s, DirectLightSample sample) {
 // is already zero (nothing to shade, so nothing to occlude).
 float targetVisAware(Surface s, DirectLightSample sample, out float unshadowed) {
     unshadowed = 0.0;
-    let c = connectSampleAt(sample, s.position);
+    let c = connectSampleAt(params.scene, params.restir, sample, s.position);
     if (!c.valid) {
         return 0.0;
     }
@@ -299,7 +172,7 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
     // (neighbourPixel − base) addresses the same pixel back.
     uint base = pixel - slot;
 
-    Surface canonical = reconstructSurface(slot);
+    Surface canonical = reconstructSurface(params.paths, params.scene, slot);
     Reservoir<DirectLightSample> canonicalReservoir = loadReservoir(params.reservoirsIn[pixel]);
     let cCanon = canonicalReservoir.confidence; // c_c ≥ M+1 > 0 for any hit pixel
 
@@ -357,7 +230,7 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
             continue;
         }
 
-        Surface neighbourSurface = reconstructSurface(neighbourSlot);
+        Surface neighbourSurface = reconstructSurface(params.paths, params.scene, neighbourSlot);
         // The reuse gate: neighbours must share this surface's orientation and
         // camera depth, or their light samples describe a different shading
         // context (D-093, stricter than RTXDI's 0.5/0.1 on the normal — the
@@ -374,9 +247,11 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
         // (one ray, at this surface); the two own-domain p̂_i are unshadowed.
         float ucYi = 0.0;
         let pcYi = targetVisAware(canonical, neighbour.sample, ucYi); // p̂_c(Y_i), 1 ray
-        let piYi = targetUnshadowed(neighbourSurface, neighbour.sample); // p̂_i(Y_i)
+        let piYi = targetUnshadowed(params.scene, params.restir,
+                                    neighbourSurface, neighbour.sample); // p̂_i(Y_i)
         let piYc = canonicalReservoir.unbiasedWeight > 0.0
-            ? targetUnshadowed(neighbourSurface, canonicalReservoir.sample) // p̂_i(Y_c)
+            ? targetUnshadowed(params.scene, params.restir,
+                               neighbourSurface, canonicalReservoir.sample) // p̂_i(Y_c)
             : 0.0;
 
         let ci = neighbour.confidence;

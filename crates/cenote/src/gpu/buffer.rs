@@ -53,6 +53,24 @@ impl Buffer {
         self.address
             .expect("buffer was created without SHADER_DEVICE_ADDRESS usage")
     }
+
+    /// Overwrite the buffer's first `data.len()` bytes directly through its
+    /// host mapping — for small `CpuToGpu` constants rewritten each frame (the
+    /// temporal reprojection block), sparing the staging copy and its submit.
+    /// The host write is ordered before the next queue submission's reads, so a
+    /// caller that writes before recording is safe (the blocking-submit model,
+    /// [`Context::submit_passes`]).
+    ///
+    /// # Panics
+    ///
+    /// If the buffer is not host-mapped (created outside `CpuToGpu`), or `data`
+    /// is larger than the buffer — both programmer bugs.
+    pub fn write(&mut self, data: &[u8]) {
+        self.allocation
+            .mapped_slice_mut()
+            .expect("write() needs CpuToGpu (host-mapped) memory")[..data.len()]
+            .copy_from_slice(data);
+    }
 }
 
 impl Drop for Buffer {

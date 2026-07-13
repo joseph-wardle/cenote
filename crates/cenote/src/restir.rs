@@ -203,10 +203,13 @@ impl RestirResources {
 // with its unit tests (T2).
 mod identity;
 
-// Per-view reservoir ownership — the three buffers a viewport's reuse reads
-// and writes, keyed by a stable view identity — lives in its own file,
-// colocated with its lifecycle test (T4).
+// Per-view reservoir ownership — the reservoir buffers a viewport's reuse
+// reads and writes, keyed by a stable view identity — lives in its own file,
+// colocated with its lifecycle test (T4). The render loop owns one `ViewState`
+// per film for the temporal ping-pong (step 5); the `ViewId`-keyed `Views` map
+// is the still-dormant multi-view seam (step 6).
 mod view;
+pub(crate) use view::{ViewId, ViewState};
 
 #[cfg(test)]
 mod tests {
@@ -439,6 +442,273 @@ mod tests {
                 "K={neighbours}: merged confidence is not c_tot = {expected}"
             );
         }
+    }
+
+    /// The step-5b correctness spine (D-094): the defensive pairwise-MIS
+    /// *temporal* combine — folding one M-capped history reservoir into the
+    /// canonical — is unbiased, and the M-cap is applied consistently. Each of
+    /// ~260k threads runs `shaders/restir_temporal_test.slang`, an independent
+    /// estimate of ∫₀¹ x dx = ½ (unshadowed, so no synthetic visibility unlike
+    /// the spatial test). A wrong MIS normalizer moves the mean off ½ by far more
+    /// than this thread count's noise.
+    ///
+    /// The integral alone cannot catch a broken M-cap — the estimator is unbiased
+    /// for *any* partition-of-unity weights, so clamping confidence never shifts
+    /// the mean. The merged confidence does: it must be `c_c + min(c_prev,
+    /// M_CAP·c_c)`, so the test runs one config where the cap does *not* bind
+    /// (`c_prev` below the cap) and one where it does (well above), and pins the
+    /// merged confidence in both — a cap applied to the MIS weights but not the
+    /// merged count (or vice versa) lands a value the host did not predict.
+    #[test]
+    fn temporal_pairwise_mis_is_unbiased_and_capped() {
+        const COUNT: u32 = 1 << 18; // ~260k independent estimates
+        const CANON_M: u32 = 12; // M_c — canonical RIS candidate count
+        const M_CAP: f32 = 20.0; // the shipping history-length multiplier
+
+        /// Mirrors `struct Params` in `shaders/restir_temporal_test.slang`.
+        #[repr(C)]
+        #[derive(Clone, Copy, Pod, Zeroable)]
+        struct TemporalParams {
+            estimate: vk::DeviceAddress,
+            merged_m: vk::DeviceAddress,
+            count: u32,
+            canon_m: u32,
+            prev_m: u32,
+            m_cap: f32,
+            _pad0: u32,
+            _pad1: u32,
+        }
+
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let spirv = crate::shaders::compile_fixture("restir_temporal_test")
+            .expect("compile restir_temporal_test");
+        let pipeline = gpu
+            .create_compute_pipeline(
+                &spirv,
+                c"restir_temporal_test",
+                size_of::<TemporalParams>() as u32,
+                Bindings::None,
+            )
+            .expect("pipeline");
+
+        let usage = vk::BufferUsageFlags::STORAGE_BUFFER
+            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+            | vk::BufferUsageFlags::TRANSFER_SRC;
+        let dump = |name: &str| {
+            gpu.create_buffer(name, u64::from(COUNT) * 4, usage, MemoryLocation::GpuOnly)
+                .expect("buffer")
+        };
+
+        let run = |prev_m: u32| -> (f64, Vec<f32>) {
+            let estimate = dump("test.temporal.estimate");
+            let merged_m = dump("test.temporal.m");
+            let params = TemporalParams {
+                estimate: estimate.device_address(),
+                merged_m: merged_m.device_address(),
+                count: COUNT,
+                canon_m: CANON_M,
+                prev_m,
+                m_cap: M_CAP,
+                _pad0: 0,
+                _pad1: 0,
+            };
+            gpu.dispatch(
+                &pipeline,
+                None,
+                bytemuck::bytes_of(&params),
+                [COUNT.div_ceil(64), 1, 1],
+            )
+            .expect("dispatch");
+            let read = |buffer| -> Vec<f32> {
+                bytemuck::pod_collect_to_vec(&gpu.download_buffer(buffer).expect("download"))
+            };
+            let estimates = read(&estimate);
+            let mean = f64::from(estimates.iter().sum::<f32>()) / estimates.len() as f64;
+            (mean, read(&merged_m))
+        };
+
+        // The unshadowed integral: ∫₀¹ x dx = ½.
+        let truth = 0.5_f64;
+        // `cap` = M_CAP·M_c = 240. Below it the cap is inert; above it, it binds.
+        let cap = (M_CAP * CANON_M as f32) as u32;
+        for prev_m in [CANON_M * 8, cap * 2] {
+            let (mean, confidence) = run(prev_m);
+            assert!(
+                (mean - truth).abs() < 1e-2,
+                "prev_M={prev_m}: temporal combine is biased: {mean} vs {truth}"
+            );
+            // The merged history is c_c + the *capped* prev confidence, exactly.
+            let expected = (CANON_M + prev_m.min(cap)) as f32;
+            assert!(
+                confidence.iter().all(|&m| (m - expected).abs() < 1e-3),
+                "prev_M={prev_m}: merged confidence is not c_c + min(c_prev, cap) = {expected}"
+            );
+        }
+    }
+
+    /// Step 5c: `reprojectPixel` (`shaders/restir_reproject.slang`) is the exact
+    /// inverse of raygen's pixel→ray construction. The whole held-camera argument
+    /// — that temporal reuse reduces to same-pixel reuse when the camera does not
+    /// move — rests on a point seen at pixel p reprojecting back to p through the
+    /// same camera. Each thread runs the *real* shader function on a world point
+    /// synthesized as the hit of a known pixel (`origin + t·dir(p)`, raygen's own
+    /// ray) and must recover exactly p; points behind the camera and off the
+    /// screen must be rejected. A sign flip, a dropped aspect factor, or a swapped
+    /// ndc→uv axis lands the wrong pixel here. (Reprojection is variance-only, not
+    /// bias — D-094 — but a broken inverse would silently gut reuse quality, and
+    /// the identity reduction the convergence gate leans on would be a fiction.)
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the camera, the synthesized ray-hit grid, and the reject cases \
+                  are one round-trip gate — splitting them would scatter it"
+    )]
+    fn reprojection_inverts_raygen() {
+        use glam::{Vec2, Vec3};
+
+        use crate::scene::Camera;
+        use crate::wavefront::{Reproject, ReprojectCamera};
+
+        /// Mirrors `struct Params` in `shaders/restir_reproject_test.slang`.
+        #[repr(C)]
+        #[derive(Clone, Copy, Pod, Zeroable)]
+        struct ReprojectParams {
+            reproject: vk::DeviceAddress,
+            points: vk::DeviceAddress,
+            pixel_out: vk::DeviceAddress,
+            count: u32,
+            _pad0: u32,
+            _pad1: u32,
+            _pad2: u32,
+        }
+
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let spirv = crate::shaders::compile_fixture("restir_reproject_test")
+            .expect("compile restir_reproject_test");
+        let pipeline = gpu
+            .create_compute_pipeline(
+                &spirv,
+                c"restir_reproject_test",
+                size_of::<ReprojectParams>() as u32,
+                Bindings::None,
+            )
+            .expect("pipeline");
+
+        let (width, height) = (64_u32, 48_u32);
+        let camera = Camera {
+            position: Vec3::new(0.0, 1.0, 4.0),
+            look_at: Vec3::new(0.3, 0.5, 0.0),
+            up: Vec3::Y,
+            vfov_degrees: 45.0,
+            lens: None,
+        };
+        let basis = camera.basis(width as f32 / height as f32);
+        let reproject = Reproject::new(
+            Some(ReprojectCamera {
+                position: camera.position,
+                right: basis.right,
+                up: basis.up,
+                forward: basis.forward,
+            }),
+            0, // G-buffer addresses are unused by reprojectPixel
+            0,
+            width,
+            height,
+        );
+
+        // The world hit raygen's pixel-`p` ray would reach: NDC from the pixel
+        // *centre* (jitter is immaterial — it stays inside the pixel and floor
+        // recovers p), `dir = normalize(forward + ndc.x·right + ndc.y·up)`,
+        // walked `t` along. Textually raygen's forward map, so this pins its
+        // inverse.
+        let hit_of = |x: u32, y: u32, t: f32| -> Vec3 {
+            let uv = Vec2::new(
+                (x as f32 + 0.5) / width as f32,
+                (y as f32 + 0.5) / height as f32,
+            );
+            let ndc = Vec2::new(2.0 * uv.x - 1.0, 1.0 - 2.0 * uv.y);
+            let dir = (basis.forward + ndc.x * basis.right + ndc.y * basis.up).normalize();
+            camera.position + dir * t
+        };
+
+        // A grid of pixels, each at a different depth, must round-trip exactly.
+        let mut points: Vec<[f32; 4]> = Vec::new();
+        let mut expected: Vec<u32> = Vec::new();
+        for y in (0..height).step_by(5) {
+            for x in (0..width).step_by(3) {
+                let t = 2.0 + (x + y) as f32 * 0.1; // vary the distance
+                points.push(hit_of(x, y, t).extend(0.0).to_array());
+                expected.push(y * width + x);
+            }
+        }
+        // Rejects: a point behind the camera, and one off the side of the frame
+        // (ndc.x ≫ 1). Both must come back 0xffffffff.
+        let reject_from = points.len();
+        points.push((camera.position - basis.forward * 2.0).extend(0.0).to_array());
+        points.push(
+            (camera.position + (basis.forward + basis.right * 5.0).normalize() * 3.0)
+                .extend(0.0)
+                .to_array(),
+        );
+        let count = points.len() as u32;
+
+        let reproject_buf = gpu
+            .upload_buffer(
+                "test.reproject",
+                bytemuck::bytes_of(&reproject),
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            )
+            .expect("reproject buffer");
+        let points_buf = gpu
+            .upload_buffer(
+                "test.reproject.points",
+                bytemuck::cast_slice(&points),
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            )
+            .expect("points buffer");
+        let pixel_out = gpu
+            .create_buffer(
+                "test.reproject.out",
+                u64::from(count) * 4,
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                    | vk::BufferUsageFlags::TRANSFER_SRC,
+                MemoryLocation::GpuOnly,
+            )
+            .expect("out buffer");
+
+        gpu.dispatch(
+            &pipeline,
+            None,
+            bytemuck::bytes_of(&ReprojectParams {
+                reproject: reproject_buf.device_address(),
+                points: points_buf.device_address(),
+                pixel_out: pixel_out.device_address(),
+                count,
+                _pad0: 0,
+                _pad1: 0,
+                _pad2: 0,
+            }),
+            [count.div_ceil(64), 1, 1],
+        )
+        .expect("dispatch");
+
+        let out: Vec<u32> = bytemuck::pod_collect_to_vec(
+            &gpu.download_buffer(&pixel_out).expect("download"),
+        );
+        for (i, &want) in expected.iter().enumerate() {
+            assert_eq!(
+                out[i], want,
+                "pixel {want} did not reproject to itself (got {})",
+                out[i]
+            );
+        }
+        assert_eq!(out[reject_from], 0xffff_ffff, "a point behind the camera must reject");
+        assert_eq!(out[reject_from + 1], 0xffff_ffff, "an off-screen point must reject");
     }
 
     /// T3: the persistent reservoir record round-trips between the GPU's

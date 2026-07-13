@@ -56,7 +56,9 @@ use crate::error::Result;
 use crate::gpu::{Bindings, Buffer, ComputePipeline, Context, MemoryLocation, Pass};
 use crate::scene::Scene;
 use crate::shaders::Kernels;
-use crate::wavefront::{LightSampling, RestirInputs, Wavefront};
+use crate::wavefront::{
+    LightSampling, Reproject, ReprojectCamera, RestirInputs, TemporalReuse, Wavefront,
+};
 
 pub use crate::wavefront::{DebugView, RenderMode};
 
@@ -141,6 +143,16 @@ pub struct Renderer {
     /// the unbiasedness gate flips to check that both converge to the same image.
     /// Preserved across [`Renderer::reload`].
     spatial_reuse: bool,
+    /// Whether `ReSTIR` reuses last frame's reservoirs (M3 step 5). On by
+    /// default and meaningful only in [`RenderMode::Restir`]; when on, candidates
+    /// write `cand`, `restir_temporal` folds `cand` + the frame-end-swapped `prev`
+    /// into `curr` (M-capped, unshadowed), and the ping-pong carries the history
+    /// across a camera move — the warm-start (steps 5b–5c, D-094). Step 5c reads
+    /// `prev` at the *reprojected* pixel: each frame the renderer records the
+    /// camera and writes a reprojection block, so next frame's shading points map
+    /// back through last frame's camera and a disocclusion gate drops history the
+    /// camera moved off. Preserved across [`Renderer::reload`].
+    temporal_reuse: bool,
 }
 
 impl Renderer {
@@ -196,6 +208,7 @@ impl Renderer {
             render_mode: RenderMode::PathTracer,
             debug_view: DebugView::Off,
             spatial_reuse: true,
+            temporal_reuse: true,
         })
     }
 
@@ -209,13 +222,14 @@ impl Renderer {
     ///
     /// Any [`crate::Error`] from pipeline or buffer creation.
     pub fn reload(&mut self, gpu: &Context, kernels: &Kernels) -> Result<()> {
-        let (render_mode, debug_view, spatial_reuse) =
-            (self.render_mode, self.debug_view, self.spatial_reuse);
+        let (render_mode, debug_view, spatial_reuse, temporal_reuse) =
+            (self.render_mode, self.debug_view, self.spatial_reuse, self.temporal_reuse);
         *self = Self::from_kernels(gpu, kernels, self.max_bounces)?;
         // A body edit must not silently drop the view's estimator choices.
         self.render_mode = render_mode;
         self.debug_view = debug_view;
         self.spatial_reuse = spatial_reuse;
+        self.temporal_reuse = temporal_reuse;
         Ok(())
     }
 
@@ -258,6 +272,22 @@ impl Renderer {
     #[must_use]
     pub fn spatial_reuse(&self) -> bool {
         self.spatial_reuse
+    }
+
+    /// Toggle `ReSTIR` temporal reuse (M3 step 5): reusing last frame's
+    /// reservoirs across a camera move (the warm-start). On by default and
+    /// meaningful only in [`RenderMode::Restir`]; off is the fresh-RNG
+    /// spatial-only path the D-085 correctness anchor converges against. Takes
+    /// effect on the next [`Renderer::accumulate`], so the caller resets its
+    /// film to switch cleanly.
+    pub fn set_temporal_reuse(&mut self, enabled: bool) {
+        self.temporal_reuse = enabled;
+    }
+
+    /// Whether temporal reuse is on.
+    #[must_use]
+    pub fn temporal_reuse(&self) -> bool {
+        self.temporal_reuse
     }
 
     /// Render one `width`×`height` frame of `scene` — sample 0 of every
@@ -318,9 +348,34 @@ impl Renderer {
             RenderMode::PathTracer => None,
             RenderMode::Restir => {
                 let debug = self.debug_view != DebugView::Off;
-                film.ensure_restir(gpu, self.spatial_reuse, debug)?;
+                film.ensure_restir(gpu, debug)?;
+                // Temporal reuse reprojects through last frame's camera, so build
+                // this frame's reprojection block (previous camera + the current
+                // G-buffer addresses) and host-write it before the wave. Reads of
+                // the addresses (Copy `u64`) release their borrows before the
+                // mutable write.
+                if self.temporal_reuse {
+                    let reproject = Reproject::new(
+                        film.prev_reproject(),
+                        film.gbuffer_prev().device_address(),
+                        film.gbuffer_curr().device_address(),
+                        film.width,
+                        film.height,
+                    );
+                    film.write_reproject(bytemuck::bytes_of(&reproject));
+                }
                 Some(RestirInputs {
                     reservoir: film.reservoir(),
+                    temporal: self.temporal_reuse.then(|| TemporalReuse {
+                        cand: film.reservoir_cand(),
+                        prev: film.reservoir_prev(),
+                        reproject: film.reproject(),
+                        // The decay ramp reads samples-since-reset (the wave's
+                        // sample index = `film.samples`) on the GPU; the host only
+                        // hands it the window. Held-camera handoff to spatial-only
+                        // convergence (D-094, step 5d).
+                        decay_frames: Wavefront::RESTIR_TEMPORAL_DECAY_FRAMES,
+                    }),
                     scratch: self.spatial_reuse.then(|| film.reservoir_scratch()),
                     debug: debug.then(|| film.debug()),
                     debug_view: self.debug_view,
@@ -339,6 +394,25 @@ impl Renderer {
             &[self.accumulate_pass(&accumulate)],
         )?;
         film.samples += 1;
+        // Frame end: wind the temporal ping-pong so next frame's `prev` is this
+        // frame's committed `curr`, which `restir_temporal` folds into next
+        // frame's candidates (the warm-start). Only in ReSTIR mode with temporal
+        // reuse on; a no-op before the first ReSTIR wave built the state.
+        if self.render_mode == RenderMode::Restir && self.temporal_reuse {
+            film.swap_reservoirs();
+            // Record this frame's camera as next frame's reprojection source. The
+            // pinhole basis (raygen's, before any aperture scale), since
+            // reprojection places the real world hit, not a focal point.
+            let basis = scene
+                .camera()
+                .basis(film.width as f32 / film.height as f32);
+            film.set_prev_reproject(ReprojectCamera {
+                position: scene.camera().position,
+                right: basis.right,
+                up: basis.up,
+                forward: basis.forward,
+            });
+        }
         Ok(())
     }
 

@@ -101,6 +101,12 @@ struct RenderInputs {
     /// accumulation so the on/off images (both the same integral) never mix — the
     /// D-090 unbiasedness gate the viewer drives.
     spatial_reuse: bool,
+    /// Whether `ReSTIR` warm-starts from the previous frame's reservoirs (M3
+    /// step 5). Meaningful only in [`RenderMode::Restir`]; a change restarts
+    /// accumulation like the other estimator switches. On a held camera the
+    /// decay ramp (D-094) anneals temporal off regardless, so on/off converge to
+    /// the same still — this toggle is for watching the warm-start live.
+    temporal_reuse: bool,
     /// Cleared to stop the thread; checked at the top of every iteration.
     running: bool,
 }
@@ -257,6 +263,7 @@ impl Session {
                 render_mode: RenderMode::PathTracer,
                 debug_view: DebugView::Off,
                 spatial_reuse: true,
+                temporal_reuse: true,
                 running: true,
             }),
             edits: Mutex::new(Vec::new()),
@@ -334,6 +341,23 @@ impl Session {
             .lock()
             .expect("inputs mutex poisoned")
             .spatial_reuse = enabled;
+    }
+
+    /// Toggle `ReSTIR` temporal reuse — the warm-start from the previous frame's
+    /// reservoirs (M3 step 5). Meaningful only in [`RenderMode::Restir`]; the
+    /// render thread adopts a change and restarts accumulation, so an on/off
+    /// comparison never mixes the two (both converge to the same still, since the
+    /// decay ramp hands temporal off on a held camera regardless — D-094).
+    ///
+    /// # Panics
+    ///
+    /// If the render thread panicked while holding the input lock.
+    pub fn set_temporal_reuse(&self, enabled: bool) {
+        self.lanes
+            .inputs
+            .lock()
+            .expect("inputs mutex poisoned")
+            .temporal_reuse = enabled;
     }
 
     /// Note a new render-target size; the render thread rebuilds its film to
@@ -507,6 +531,7 @@ fn render_loop(
     // accumulation on the switch (matching `Session::new`'s default).
     let mut applied_render_mode = RenderMode::PathTracer;
     let mut applied_spatial_reuse = true;
+    let mut applied_temporal_reuse = true;
     let mut last_publish: Option<Instant> = None;
     // Dirt whose re-prep was rejected (this build can't render the edited
     // description). It survives here so the *next* applied edit retries the
@@ -570,6 +595,17 @@ fn render_loop(
             log::debug!("spatial reuse adopted; accumulation restarts");
             renderer.set_spatial_reuse(input.spatial_reuse);
             applied_spatial_reuse = input.spatial_reuse;
+            film.reset();
+            last_publish = None;
+        }
+        // The temporal-reuse toggle restarts the same way. Note the film reset
+        // (accumulation from sample 0) is also the decay clock's reset, so
+        // flipping temporal on restarts its warm-start from a fresh ramp — the
+        // on state is visibly the warm-start, the off state its absence.
+        if input.temporal_reuse != applied_temporal_reuse {
+            log::debug!("temporal reuse adopted; accumulation restarts");
+            renderer.set_temporal_reuse(input.temporal_reuse);
+            applied_temporal_reuse = input.temporal_reuse;
             film.reset();
             last_publish = None;
         }

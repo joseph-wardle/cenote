@@ -69,6 +69,12 @@ struct RenderArgs {
     #[arg(long)]
     no_spatial: bool,
 
+    /// Drop ReSTIR's temporal reuse, leaving each frame's reservoirs
+    /// independent. Only meaningful with --restir; the fresh-RNG spatial-only
+    /// path the D-085 correctness anchor converges against.
+    #[arg(long)]
+    no_temporal: bool,
+
     /// Re-render whenever a shader source is edited (hot reload).
     /// Compiles kernels from the source checkout; a broken edit prints
     /// the compiler's diagnostics and keeps the last good image.
@@ -150,6 +156,7 @@ fn render(args: &RenderArgs) -> anyhow::Result<()> {
         cenote::render::RenderMode::PathTracer
     });
     renderer.set_spatial_reuse(!args.no_spatial);
+    renderer.set_temporal_reuse(!args.no_temporal);
     let mut film = cenote::render::Film::new(&gpu, width, height)?;
     // One OIDN device for the process — built here, reused every reload,
     // rather than opened and dropped inside each frame.

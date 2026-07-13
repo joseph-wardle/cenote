@@ -31,6 +31,16 @@ pub struct FrameStats {
 }
 
 /// The egui context/winit bridge and the panel's widget state.
+// The panel's toggles are independent orthogonal switches, not a state — a state
+// machine would model transitions that don't exist. Only trips with `denoise`,
+// which adds the fourth bool; cfg-gated so the expect isn't unfulfilled without it.
+#[cfg_attr(
+    feature = "denoise",
+    expect(
+        clippy::struct_excessive_bools,
+        reason = "independent UI toggles, not a state to machine"
+    )
+)]
 pub struct Gui {
     state: egui_winit::State,
     /// Exposure in stops, applied by the tonemap kernel.
@@ -42,6 +52,11 @@ pub struct Gui {
     /// drops to single-frame RIS, the other half of the gate — both converge to
     /// the same image. Only meaningful while `restir` is on.
     spatial_reuse: bool,
+    /// Warm-start from the previous frame's reservoirs (M3 step 5). On by
+    /// default; toggling it off shows the reuse-free preview. Both converge to
+    /// the same still (the decay ramp hands temporal off on hold — D-094). Only
+    /// meaningful while `restir` is on.
+    temporal_reuse: bool,
     /// Which D-092 debug view to false-colour (only while `restir` is on).
     debug_view: DebugView,
     /// Show the OIDN-denoised view instead of the raw average.
@@ -68,6 +83,7 @@ impl Gui {
             exposure: 0.0,
             restir: false,
             spatial_reuse: true,
+            temporal_reuse: true,
             debug_view: DebugView::Off,
             #[cfg(feature = "denoise")]
             denoise: false,
@@ -88,6 +104,11 @@ impl Gui {
     /// Whether spatial reuse is on (only acted on while [`Gui::restir`] is on).
     pub fn spatial_reuse(&self) -> bool {
         self.spatial_reuse
+    }
+
+    /// Whether temporal reuse is on (only acted on while [`Gui::restir`] is on).
+    pub fn temporal_reuse(&self) -> bool {
+        self.temporal_reuse
     }
 
     /// The selected D-092 debug view — [`DebugView::Off`] unless the panel's
@@ -173,6 +194,7 @@ impl Gui {
                 // Spatial reuse and the debug picker only make sense while ReSTIR
                 // owns the primary hit — restir_resolve is what writes the surface.
                 ui.add_enabled_ui(self.restir, |ui| {
+                    ui.checkbox(&mut self.temporal_reuse, "temporal reuse");
                     ui.checkbox(&mut self.spatial_reuse, "spatial reuse");
                     egui::ComboBox::from_label("debug view")
                         .selected_text(debug_view_label(self.debug_view))

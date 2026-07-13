@@ -55,6 +55,9 @@ pub struct Kernels {
     /// `ReSTIR` initial RIS: stream the primary hit's light candidates through
     /// a per-pixel reservoir.
     pub restir_candidates: Kernel,
+    /// `ReSTIR` temporal reuse: fold last frame's `prev` reservoir into this
+    /// frame's `cand` at the same pixel, M-capped, under defensive pairwise MIS.
+    pub restir_temporal: Kernel,
     /// `ReSTIR` spatial reuse: fold k screen-space neighbours' reservoirs into
     /// each pixel's under defensive pairwise MIS.
     pub restir_spatial: Kernel,
@@ -91,6 +94,7 @@ impl Kernels {
             shade_surface: kernel(spirv!("shade_surface"), c"shade_surface"),
             trace_shadow: kernel(spirv!("trace_shadow"), c"trace_shadow"),
             restir_candidates: kernel(spirv!("restir_candidates"), c"restir_candidates"),
+            restir_temporal: kernel(spirv!("restir_temporal"), c"restir_temporal"),
             restir_spatial: kernel(spirv!("restir_spatial"), c"restir_spatial"),
             restir_resolve: kernel(spirv!("restir_resolve"), c"restir_resolve"),
             accumulate: kernel(spirv!("accumulate"), c"accumulate"),
@@ -122,6 +126,7 @@ impl Kernels {
             shade_surface,
             trace_shadow,
             restir_candidates,
+            restir_temporal,
             restir_spatial,
             restir_resolve,
             accumulate,
@@ -158,6 +163,10 @@ impl Kernels {
             restir_candidates: Kernel {
                 spirv: restir_candidates?,
                 entry: c"restir_candidates",
+            },
+            restir_temporal: Kernel {
+                spirv: restir_temporal?,
+                entry: c"restir_temporal",
             },
             restir_spatial: Kernel {
                 spirv: restir_spatial?,
@@ -298,7 +307,7 @@ mod tests {
         u32::from_le_bytes(bytes[..4].try_into().unwrap()) == 0x0723_0203
     }
 
-    fn all(kernels: &Kernels) -> [&Kernel; 11] {
+    fn all(kernels: &Kernels) -> [&Kernel; 12] {
         [
             &kernels.raygen,
             &kernels.intersect,
@@ -306,6 +315,7 @@ mod tests {
             &kernels.shade_surface,
             &kernels.trace_shadow,
             &kernels.restir_candidates,
+            &kernels.restir_temporal,
             &kernels.restir_spatial,
             &kernels.restir_resolve,
             &kernels.accumulate,
