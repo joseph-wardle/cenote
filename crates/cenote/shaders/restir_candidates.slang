@@ -38,6 +38,7 @@
 // neither is read here. The BSDF candidate's trace is closest-hit inline
 // traversal against the same TLAS the wavefront's other stages bind.
 
+import bluenoise;
 import lights;
 import openpbr;
 import pathstate;
@@ -62,6 +63,8 @@ struct Params {
     StoredReservoir* reservoirs; // this frame's per-pixel reservoirs (curr), written here
     uint sampleIndex;      // which sample of every pixel's sequence this wave is
     uint candidates;       // M — the initial-RIS light-candidate count
+    uint width;            // frame width — decodes the pixel's (x,y) for the blue-noise key
+    uint pad0;             // matches the host's tail padding to 8-byte alignment
 };
 
 [vk::push_constant]
@@ -119,6 +122,11 @@ void restir_candidates(uint3 tid: SV_DispatchThreadID) {
     }
     uint path = params.hits.entries[tid.x];
     uint pixel = params.paths.pixel[path];
+    // The blue-noise-ranked sample index, shared across every draw this stage
+    // makes for the pixel, so its RIS error lands as screen-space blue noise at
+    // low sample counts (D-095). One rank per (pixel, sample), keyed by the mask.
+    let ranked = blueRank(uint2(pixel % params.width, pixel / params.width),
+                          params.sampleIndex);
     Hit hit = params.paths.hit[path];
     let direction = params.paths.direction[path].xyz;
 
@@ -148,12 +156,12 @@ void restir_candidates(uint3 tid: SV_DispatchThreadID) {
 
     // -- M light candidates: the alias table + the environment coin flip -----
     for (uint i = 0; i < M; i++) {
-        let uLight = sample_1d(pixel, params.sampleIndex,
-                               restirCandidateDimension(i, RESTIR_LIGHT));
-        let uPoint = sample_2d(pixel, params.sampleIndex,
-                               restirCandidateDimension(i, RESTIR_POINT));
-        let uAccept = sample_1d(pixel, params.sampleIndex,
-                                restirCandidateDimension(i, RESTIR_ACCEPT));
+        let uLight = sample_ranked_1d(pixel, ranked,
+                                      restirCandidateDimension(i, RESTIR_LIGHT));
+        let uPoint = sample_ranked_2d(pixel, ranked,
+                                      restirCandidateDimension(i, RESTIR_POINT));
+        let uAccept = sample_ranked_1d(pixel, ranked,
+                                       restirCandidateDimension(i, RESTIR_ACCEPT));
 
         DirectLightSample sample;
         float3 toLight;
@@ -208,12 +216,12 @@ void restir_candidates(uint3 tid: SV_DispatchThreadID) {
     // reservoir (rather than a separate MIS'd term) is what makes the reservoir
     // the single owner of primary direct lighting.
     {
-        let uLobe = sample_1d(pixel, params.sampleIndex,
-                              restirBsdfDimension(RESTIR_BSDF_LOBE));
-        let uDir = sample_2d(pixel, params.sampleIndex,
-                             restirBsdfDimension(RESTIR_BSDF_DIR));
-        let uAccept = sample_1d(pixel, params.sampleIndex,
-                                restirBsdfDimension(RESTIR_BSDF_ACCEPT));
+        let uLobe = sample_ranked_1d(pixel, ranked,
+                                     restirBsdfDimension(RESTIR_BSDF_LOBE));
+        let uDir = sample_ranked_2d(pixel, ranked,
+                                    restirBsdfDimension(RESTIR_BSDF_DIR));
+        let uAccept = sample_ranked_1d(pixel, ranked,
+                                       restirBsdfDimension(RESTIR_BSDF_ACCEPT));
 
         let scatter = sampleBsdf(closure, wo, uLobe, uDir);
         let wiWorld = frame.toWorld(scatter.wi);

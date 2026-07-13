@@ -380,6 +380,7 @@ impl Context {
                     other.tlas.handle() == scene.tlas.handle()
                         && std::ptr::eq(other.environment, scene.environment)
                         && std::ptr::eq(other.textures, scene.textures)
+                        && std::ptr::eq(other.blue_noise, scene.blue_noise)
                 }),
             "one pipeline, two scenes — its single descriptor set can hold only one"
         );
@@ -387,16 +388,21 @@ impl Context {
     }
 
     /// Write one validated [`SceneBindings`] into a pipeline's descriptor
-    /// set: the TLAS at binding 0, the environment at binding 1, and the
+    /// set: the TLAS at binding 0, the environment at binding 1, the
     /// bindless texture table at binding 2 — only as far as the scene
     /// fills it, since the binding is partially bound and kernels never
-    /// index past what the material records name.
+    /// index past what the material records name — and the blue-noise mask
+    /// at binding 3.
     fn write_scene_descriptors(&self, pipeline: &ComputePipeline, scene: SceneBindings) {
         let descriptors = pipeline.scene.as_ref().expect("checked against bindings");
         let handles = [scene.tlas.handle()];
         let mut tlas_write = vk::WriteDescriptorSetAccelerationStructureKHR::default()
             .acceleration_structures(&handles);
         let image_info = scene.environment.descriptor();
+        let blue_noise_info = vk::DescriptorBufferInfo::default()
+            .buffer(scene.blue_noise.handle())
+            .offset(0)
+            .range(vk::WHOLE_SIZE);
         let mut writes = vec![
             vk::WriteDescriptorSet::default()
                 .dst_set(descriptors.set)
@@ -411,6 +417,13 @@ impl Context {
                 .dst_binding(1)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .image_info(slice::from_ref(&image_info)),
+            // The blue-noise mask (D-095) at binding 3 — a renderer-global
+            // storage buffer, always present.
+            vk::WriteDescriptorSet::default()
+                .dst_set(descriptors.set)
+                .dst_binding(3)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(slice::from_ref(&blue_noise_info)),
         ];
         if !scene.textures.is_empty() {
             writes.push(

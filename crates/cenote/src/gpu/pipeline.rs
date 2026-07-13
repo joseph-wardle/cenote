@@ -8,8 +8,9 @@
 //! (filtered reads need real descriptors), so a kernel that touches any
 //! declares [`Bindings::Scene`] and carries set 0 — binding 0 the TLAS,
 //! binding 1 the environment, binding 2 the bindless material-texture
-//! array (partially bound: a scene binds only as many as it holds) —
-//! written at submission time. Kernels that only chew buffers
+//! array (partially bound: a scene binds only as many as it holds), and
+//! binding 3 the renderer-global blue-noise mask (D-095) — written at
+//! submission time. Kernels that only chew buffers
 //! ([`Bindings::None`]) have no descriptors at all.
 //!
 //! Running a pipeline lives next door in `submit.rs`: [`Context::dispatch`]
@@ -21,7 +22,7 @@ use std::slice;
 use ash::vk;
 
 use crate::error::Result;
-use crate::gpu::{AccelerationStructure, Context, SampledImage};
+use crate::gpu::{AccelerationStructure, Buffer, Context, SampledImage};
 
 /// The descriptor bindings a kernel needs. Buffers travel as device
 /// addresses in push constants, so the only question is whether the kernel
@@ -56,6 +57,11 @@ pub struct SceneBindings<'a> {
     /// The material textures (binding 2), in bindless-index order — the
     /// order material records index. At most [`MAX_SCENE_TEXTURES`].
     pub textures: &'a [vk::DescriptorImageInfo],
+    /// The blue-noise mask (binding 3): a renderer-global void-and-cluster tile
+    /// the reservoir stages key their sample-index ranking on (D-095). Not scene
+    /// data — it rides this set only because it is the binding model's home for
+    /// the read-only sampling resources those stages share.
+    pub blue_noise: &'a Buffer,
 }
 
 /// A compute pipeline plus its layout and (for scene-resource kernels) its
@@ -198,11 +204,20 @@ impl Context {
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .descriptor_count(MAX_SCENE_TEXTURES)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            // The blue-noise mask (D-095): a small renderer-global storage
+            // buffer the reservoir stages read, always written, so no
+            // partially-bound flag.
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(3)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
         ];
         let binding_flags = [
             vk::DescriptorBindingFlags::empty(),
             vk::DescriptorBindingFlags::empty(),
             vk::DescriptorBindingFlags::PARTIALLY_BOUND,
+            vk::DescriptorBindingFlags::empty(),
         ];
         let mut flags_info =
             vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&binding_flags);
@@ -218,6 +233,9 @@ impl Context {
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .descriptor_count(1 + MAX_SCENE_TEXTURES),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1),
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(1)

@@ -62,17 +62,55 @@ use crate::scene::changeset::{ChangeSet, Dirty, Kind};
 use crate::scene::description::SceneDescription;
 use crate::scene::{Camera, Scene};
 
-/// The shortest gap between published frames. The render thread accumulates
-/// flat out but resolves and publishes at most this often — resolving every
-/// sample would burn GPU time a consumer can't display faster than its
-/// refresh anyway. Set just under a 60 Hz frame so a vsync'd viewer always
-/// finds a fresh frame waiting.
-const PUBLISH_INTERVAL: Duration = Duration::from_millis(15);
+/// The shortest gap between published frames, early in an accumulation. The
+/// render thread accumulates flat out but resolves and publishes at most this
+/// often — resolving every sample would burn GPU time a consumer can't display
+/// faster than its refresh anyway. Set just under a 60 Hz frame so a vsync'd
+/// viewer always finds a fresh frame waiting. See [`publish_interval`].
+const PUBLISH_INTERVAL_MIN: Duration = Duration::from_millis(15);
+
+/// The longest gap between published frames, once an accumulation has slowed.
+/// A converging image improves as ~1/N, so late samples move it imperceptibly;
+/// backing the publish rate off to a few per second there saves resolves the
+/// consumer can't see anyway. See [`publish_interval`].
+const PUBLISH_INTERVAL_MAX: Duration = Duration::from_millis(250);
+
+/// Sample count over which the publish gap widens by one [`PUBLISH_INTERVAL_MIN`]
+/// step (see [`publish_interval`]) — the knee where per-sample change has fallen
+/// enough that a slower publish rate is invisible.
+const PUBLISH_INTERVAL_STEP: u32 = 64;
 
 /// How long the render thread sleeps when there is nothing to draw (a
-/// minimized, zero-area window) before re-reading its inputs — long enough
-/// not to spin, short enough to wake promptly when the window returns.
+/// minimized, zero-area window) or when a settled render has parked, before
+/// re-reading its inputs — long enough not to spin, short enough to wake
+/// promptly when the window returns or the view changes.
 const IDLE_NAP: Duration = Duration::from_millis(16);
+
+/// When the render thread stops accumulating and parks — a settled render must
+/// not pin the GPU forever (M3 step 6c, the D-089 interactivity bundle).
+/// `max_samples` is the hard cap every render obeys; `noise_threshold`, when
+/// set, is an additional early stop once [`Renderer::CONVERGENCE_TARGET`] of the
+/// pixels have reached that relative estimator standard error. A parked thread
+/// wakes and re-accumulates the moment any input restarts the film.
+#[derive(Clone, Copy)]
+pub struct AutoStop {
+    /// The sample count at which accumulation stops regardless of convergence —
+    /// the backstop the viewer always sets, so an idle view releases the GPU.
+    pub max_samples: u32,
+    /// The convergence early-out threshold, or `None` to stop only at
+    /// `max_samples`. Passed through to [`Renderer::set_noise_threshold`], so it
+    /// is also what [`Film::converged_fraction`] measures against.
+    pub noise_threshold: Option<f32>,
+}
+
+/// Grow the publish gap with the sample count: publish every frame while the
+/// image is changing fast, then back off toward [`PUBLISH_INTERVAL_MAX`] as it
+/// converges (improvement ~1/N, so late publishes carry vanishing new detail).
+/// Linear in the sample count — one [`PUBLISH_INTERVAL_MIN`] step per
+/// [`PUBLISH_INTERVAL_STEP`] samples — clamped at both ends.
+fn publish_interval(samples: u32) -> Duration {
+    (PUBLISH_INTERVAL_MIN * (samples / PUBLISH_INTERVAL_STEP).max(1)).min(PUBLISH_INTERVAL_MAX)
+}
 
 /// What the viewer feeds the render thread, latest-wins, snapshotted once per
 /// sample. No exposure: that is the consumer's view transform, applied
@@ -107,6 +145,15 @@ struct RenderInputs {
     /// decay ramp (D-094) anneals temporal off regardless, so on/off converge to
     /// the same still — this toggle is for watching the warm-start live.
     temporal_reuse: bool,
+    /// Hard cap on accumulated samples (M3 step 6c). At this count the render
+    /// thread parks — stops accumulating and idles — until an input restarts the
+    /// film, so a settled view stops pinning the GPU.
+    max_samples: u32,
+    /// Convergence early-out threshold, or `None` to park only at `max_samples`.
+    /// When set, the thread also parks once [`Renderer::CONVERGENCE_TARGET`] of
+    /// pixels reach it; adopted into the renderer, so it is what the accumulate
+    /// kernel counts and [`Film::converged_fraction`] reads.
+    noise_threshold: Option<f32>,
     /// Cleared to stop the thread; checked at the top of every iteration.
     running: bool,
 }
@@ -239,13 +286,20 @@ impl Session {
     /// `scene` (its prepped residency), `renderer`, and a [`Context`]
     /// handle, and starts accumulating `camera` at `width`×`height`
     /// immediately; the first [`Session::take_frame`] to return `Some`
-    /// marks the first frame ready.
+    /// marks the first frame ready. `auto_stop` bounds accumulation: the
+    /// thread parks at its sample cap (and optional convergence threshold)
+    /// so a settled view releases the GPU.
     ///
     /// # Panics
     ///
     /// If the OS refuses to spawn the render thread — an environment failure
     /// at startup, not something a caller can recover from here.
     #[must_use]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "distinct owned resources handed to the render thread at startup; \
+                  grouping them into a struct would only rename the argument list"
+    )]
     pub fn new(
         gpu: Arc<Context>,
         description: SceneDescription,
@@ -254,6 +308,7 @@ impl Session {
         camera: Camera,
         width: u32,
         height: u32,
+        auto_stop: AutoStop,
     ) -> Self {
         let lanes = Arc::new(Lanes {
             inputs: Mutex::new(RenderInputs {
@@ -264,6 +319,8 @@ impl Session {
                 debug_view: DebugView::Off,
                 spatial_reuse: true,
                 temporal_reuse: true,
+                max_samples: auto_stop.max_samples,
+                noise_threshold: auto_stop.noise_threshold,
                 running: true,
             }),
             edits: Mutex::new(Vec::new()),
@@ -532,7 +589,17 @@ fn render_loop(
     let mut applied_render_mode = RenderMode::PathTracer;
     let mut applied_spatial_reuse = true;
     let mut applied_temporal_reuse = true;
+    // The auto-stop threshold currently in the renderer (M3 step 6c). `None` =
+    // the renderer's default; a change is adopted without a reset, since it only
+    // moves what counts as converged, not the beauty.
+    let mut applied_noise_threshold: Option<f32> = None;
     let mut last_publish: Option<Instant> = None;
+    // Wall-clock of the most recent sample, reported with each publish — kept so
+    // the frame forced out when the render parks still carries a real timing.
+    let mut last_sample_time = Duration::ZERO;
+    // Whether accumulation has settled (hit the sample cap or converged) and the
+    // thread is idling. Cleared whenever a reset below zeroes the film.
+    let mut parked = false;
     // Dirt whose re-prep was rejected (this build can't render the edited
     // description). It survives here so the *next* applied edit retries the
     // whole backlog — nothing goes silently stale.
@@ -610,49 +677,116 @@ fn render_loop(
             last_publish = None;
         }
         renderer.set_debug_view(input.debug_view);
+        // The auto-stop threshold changes only what the accumulate kernel counts
+        // as converged, so it is adopted without a reset — the per-sample count
+        // self-heals on the next sample. `None` restores the renderer default.
+        if input.noise_threshold != applied_noise_threshold {
+            renderer.set_noise_threshold(
+                input.noise_threshold.unwrap_or(Renderer::NOISE_THRESHOLD),
+            );
+            applied_noise_threshold = input.noise_threshold;
+        }
+        // Any reset above zeroed the film, which wakes a parked render.
+        if film.samples() == 0 {
+            parked = false;
+        }
+        // Parked: a settled render idles here without touching the GPU, until one
+        // of the resets above zeroes the film and clears the flag.
+        if parked {
+            std::thread::sleep(IDLE_NAP);
+            continue;
+        }
+
+        // Stop accumulating once the film has hit its sample cap or (with a
+        // threshold set) converged — a settled render must not pin the GPU. The
+        // cap is checked first, so the `converged_fraction` readback runs only
+        // when a threshold is set and the cap has not already fired.
+        let complete = film.samples() >= input.max_samples
+            || auto_stopped(gpu, film, input.noise_threshold)?;
+        if complete {
+            // Force the settled image out once (past the throttle) so the
+            // converged frame is definitely the latest, then park. If both slots
+            // are busy the publish is retried on the next tick.
+            if publish(gpu, &renderer, film, frames, lanes, last_sample_time)? {
+                parked = true;
+            }
+            std::thread::sleep(IDLE_NAP);
+            continue;
+        }
 
         let started = Instant::now();
         renderer.accumulate(gpu, &scene, film)?;
-        let sample_time = started.elapsed();
+        last_sample_time = started.elapsed();
 
-        // Publish on the throttle, but only into a buffer no consumer still
-        // holds. If both are busy, skip: the next tick catches up, and the
-        // renderer never waits on the consumer.
-        if last_publish.is_none_or(|at| at.elapsed() >= PUBLISH_INTERVAL)
-            && let Some(free) = frames.iter().find(|frame| Arc::strong_count(frame) == 1)
+        // Publish on the throttle — which widens as the image converges (see
+        // `publish_interval`) — but only into a buffer no consumer still holds.
+        // If both are busy, skip: the next tick catches up, and the renderer
+        // never waits on the consumer.
+        if last_publish.is_none_or(|at| at.elapsed() >= publish_interval(film.samples()))
+            && publish(gpu, &renderer, film, frames, lanes, last_sample_time)?
         {
-            renderer.resolve(
-                gpu,
-                film,
-                &ResolveTargets {
-                    beauty: &free.beauty,
-                    albedo: &free.albedo,
-                    normal: &free.normal,
-                    depth: &free.depth,
-                },
-            )?;
-            // The debug surface isn't a film accumulation channel — it's a
-            // single-shot buffer the wave just wrote — so it's lifted into the
-            // frame slot by a plain copy rather than a resolve. Only when a view
-            // is active (then `accumulate` allocated the film's debug buffer).
-            if let Some(debug) = renderer.debug_buffer(film) {
-                gpu.submit_passes(&[Pass::CopyBuffer {
-                    src: debug,
-                    dst: &free.debug,
-                    size: u64::from(width) * u64::from(height) * 16,
-                }])?;
-            }
-            let frame = Frame {
-                buffers: Arc::clone(free),
-                width,
-                height,
-                samples: film.samples(),
-                sample_time,
-            };
-            *lanes.published.lock().expect("published mutex poisoned") = Some(frame);
             last_publish = Some(Instant::now());
         }
     }
+}
+
+/// Resolve the film's current average into a free publish slot and post it for
+/// the consumer, returning whether a slot was free. Both slots busy means the
+/// consumer still holds the last two frames — the caller retries next tick and
+/// the renderer never blocks. Lifts the debug false-colour into the slot too
+/// when a [`DebugView`] is active (`accumulate` allocated the film's buffer then).
+fn publish(
+    gpu: &Context,
+    renderer: &Renderer,
+    film: &Film,
+    frames: &[Arc<FrameBuffers>; 2],
+    lanes: &Lanes,
+    sample_time: Duration,
+) -> Result<bool> {
+    let Some(free) = frames.iter().find(|frame| Arc::strong_count(frame) == 1) else {
+        return Ok(false);
+    };
+    renderer.resolve(
+        gpu,
+        film,
+        &ResolveTargets {
+            beauty: &free.beauty,
+            albedo: &free.albedo,
+            normal: &free.normal,
+            depth: &free.depth,
+        },
+    )?;
+    // The debug surface isn't a film accumulation channel — it's a single-shot
+    // buffer the wave just wrote — so it's lifted into the frame slot by a plain
+    // copy rather than a resolve.
+    if let Some(debug) = renderer.debug_buffer(film) {
+        gpu.submit_passes(&[Pass::CopyBuffer {
+            src: debug,
+            dst: &free.debug,
+            size: u64::from(film.width()) * u64::from(film.height()) * 16,
+        }])?;
+    }
+    let frame = Frame {
+        buffers: Arc::clone(free),
+        width: film.width(),
+        height: film.height(),
+        samples: film.samples(),
+        sample_time,
+    };
+    *lanes.published.lock().expect("published mutex poisoned") = Some(frame);
+    Ok(true)
+}
+
+/// Whether an auto-stop threshold is set and the film has reached it — the
+/// convergence-idle stop. Below [`Renderer::CONVERGENCE_MIN_SAMPLES`] the metric
+/// is untrusted (D-094), so it never stops there; above it, it reads the film's
+/// converged fraction (a 4-byte device readback) against
+/// [`Renderer::CONVERGENCE_TARGET`]. `None` never stops — the cap alone bounds it.
+fn auto_stopped(gpu: &Context, film: &Film, threshold: Option<f32>) -> Result<bool> {
+    if threshold.is_none() || film.samples() < Renderer::CONVERGENCE_MIN_SAMPLES {
+        return Ok(false);
+    }
+    Ok(film.converged_fraction(gpu)? >= Renderer::CONVERGENCE_TARGET)
 }
 
 /// Drain and apply the queued edits, re-prepping what they dirtied. True
@@ -755,9 +889,22 @@ mod tests {
     use crate::scene::changeset::{MaterialPatch, Op};
     use crate::scene::description::Texturable;
 
-    /// A demo session: the description, its prepped scene, and the thread
-    /// already accumulating.
+    /// A demo session that never parks — the sample cap is effectively
+    /// unbounded, so the accumulation-and-edit tests see samples climb freely.
     fn demo_session(gpu: &Arc<Context>, size: u32) -> Session {
+        demo_session_with(
+            gpu,
+            size,
+            AutoStop {
+                max_samples: u32::MAX,
+                noise_threshold: None,
+            },
+        )
+    }
+
+    /// A demo session with an explicit auto-stop policy: the description, its
+    /// prepped scene, and the thread already accumulating.
+    fn demo_session_with(gpu: &Arc<Context>, size: u32, auto_stop: AutoStop) -> Session {
         let mut description = SceneDescription::new();
         description.apply(&ChangeSet::demo()).expect("demo applies");
         let scene = Scene::prep(gpu, &mut description).expect("demo preps");
@@ -771,6 +918,7 @@ mod tests {
             camera,
             size,
             size,
+            auto_stop,
         )
     }
 
@@ -879,6 +1027,70 @@ mod tests {
         let a = wait_for_frame(&session).samples();
         let b = wait_for_frame(&session).samples();
         assert!(b > a, "rendering stalled after a rejected edit");
+    }
+
+    /// The sample cap parks the render thread (M3 step 6c): with a low
+    /// `max_samples`, accumulation climbs to the cap and stops there — the count
+    /// never overshoots it, and once settled the thread idles instead of
+    /// publishing on, so a converged view stops pinning the GPU.
+    #[test]
+    fn the_sample_cap_parks_accumulation() {
+        const CAP: u32 = 8;
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let gpu = Arc::new(gpu);
+        let mut session = demo_session_with(
+            &gpu,
+            32,
+            AutoStop {
+                max_samples: CAP,
+                noise_threshold: None,
+            },
+        );
+
+        // Accumulation reaches the cap without ever overshooting it.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let frame = wait_for_frame(&session);
+            assert!(
+                frame.samples() <= CAP,
+                "accumulated past the cap: {}",
+                frame.samples()
+            );
+            if frame.samples() == CAP {
+                break;
+            }
+            assert!(Instant::now() < deadline, "never reached the cap");
+        }
+
+        // Parked: drain any queued frame, then confirm the idle thread publishes
+        // nothing further — and is still alive, not crashed into the cap.
+        while session.take_frame().is_some() {}
+        std::thread::sleep(Duration::from_millis(200));
+        session.check().expect("render thread survives parking");
+        if let Some(frame) = session.take_frame() {
+            assert_eq!(frame.samples(), CAP, "resumed past the cap while parked");
+        }
+    }
+
+    /// The publish gap widens with the sample count and clamps at both ends
+    /// (M3 step 6c): every frame early, a few per second once converging.
+    #[test]
+    fn publish_interval_grows_and_clamps() {
+        // Below the first step it holds at the floor; a later step is strictly
+        // wider; and it is monotonic and bounded across a full sweep.
+        assert_eq!(publish_interval(0), PUBLISH_INTERVAL_MIN);
+        assert_eq!(publish_interval(PUBLISH_INTERVAL_STEP), PUBLISH_INTERVAL_MIN);
+        assert!(publish_interval(2 * PUBLISH_INTERVAL_STEP) > PUBLISH_INTERVAL_MIN);
+        let mut last = Duration::ZERO;
+        for samples in (0..20_000).step_by(37) {
+            let interval = publish_interval(samples);
+            assert!(interval >= last, "publish interval dipped at {samples}");
+            assert!((PUBLISH_INTERVAL_MIN..=PUBLISH_INTERVAL_MAX).contains(&interval));
+            last = interval;
+        }
+        assert_eq!(publish_interval(u32::MAX), PUBLISH_INTERVAL_MAX);
     }
 
     /// Poll `take_frame` until one appears, with a generous timeout so a slow

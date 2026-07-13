@@ -2168,3 +2168,47 @@ adds `cand` and the `restir_temporal` combine (`prev`'s first reader) with the M
 the analytic microtest; 5c adds the prev-Hit G-buffers, reprojection, and the disocclusion
 gate with the pinned-temporal gate; 5d adds the decay ramp. Buffers tie to readers, and
 each is verifiable the checkpoint it appears.
+
+### D-095: Step-6 blue-noise sample-index ordering, and the STBN→2D reversal
+Status: accepted. D-089 folded "blue-noise sample-index ordering" into the step-6 bundle
+as a one-liner (D-021 earmarked the Sobol-Burley sampler for exactly this drop-in); the
+implementation resolved *which* blue-noise construction, and reversed the obvious choice.
+The win is perceptual: a per-pixel permutation of the Sobol sample index, keyed by a
+screen-space blue-noise mask, so at low sample counts the Monte-Carlo error lands as **blue
+noise across the frame** rather than white — far cleaner to the eye at equal spp,
+converging to the identical image (Heitz et al. 2019).
+
+*The temporal axis is the reversal.* Spatiotemporal blue noise (STBN, Wolfe 2021) varies
+the permutation per sample to decorrelate consecutive frames — right for a renderer that
+displays one sample per frame (real-time + TAA), wrong here. cenote **accumulates**: every
+kernel takes a `sampleIndex` and the film averages 0,1,2,… into the displayed mean, and
+Sobol's value is that a pixel walking indices 0,1,2,… covers the sequence *progressively*.
+A per-sample-varying permutation would make each pixel draw a pseudo-random Sobol index
+every sample, throwing away that progressive coverage and reverting per-pixel convergence
+toward white-noise √N. A **fixed** per-pixel permutation keyed by a 2-D mask keeps both:
+Sobol's convergence rate *and* blue screen-space error (the pure Heitz 2019 construction).
+So the temporal axis is deliberately absent — the theoretically correct call for a renderer
+that integrates over the sample axis.
+
+*The mask is generated and committed, not downloaded.* A deterministic void-and-cluster
+generator (Ulichney 1993) lives in-tree (`src/bluenoise.rs`); the 64×64 toroidal tile is
+committed as `assets/bluenoise_64.bin` and loaded at startup. Provenance is the generator,
+not an opaque blob — a test regenerates and asserts the committed bytes match, and a
+spectral test asserts the tile is genuinely blue (high-band power dominates DC), not merely
+a valid permutation. No new crate, no external library, fully reproducible (honours D-011).
+
+*The seam keeps the path tracer untouched.* `rng.slang` splits *ranking* (which sample
+index) from *scrambling* (the Owen-scrambled point) so ranking is pluggable: `sample_1d/2d`
+keep their per-dimension padding shuffle **bit-identical** — the classic path tracer and
+both FLIP goldens (which render in `PathTracer` mode) are unchanged, no regeneration — while
+`sample_ranked_1d/2d` take a blue-ranked index shared across a sample's dimensions (Heitz's
+shared-ranking, per-dimension-scrambling). The mask rides the scene descriptor set (set 0,
+binding 3, beside the environment) rather than a push-constant device address, because
+spatial and temporal already sit at Vulkan's guaranteed 128 push bytes — and a
+renderer-global sampling resource belongs beside the environment anyway. Ranking is applied
+in the three reservoir stages (`candidates`, `spatial`, `temporal` — the high-variance
+direct-lighting streams), coherent on one per-pixel key; `resolve`'s lone delta-NEE draw
+and raygen's AA jitter stay on the padded sampler (low variance, and it keeps raygen
+descriptor-free). A fixed permutation is a bijection and still a pure function of
+(pixel, sample, dimension), so the unbiasedness and bitwise-determinism gates
+(`restir_matches_the_path_tracer`, `restir_is_bitwise_deterministic`) hold by construction.

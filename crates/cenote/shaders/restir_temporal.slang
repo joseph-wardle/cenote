@@ -66,6 +66,7 @@
 // consumes. Writes `curr` and this frame's G-buffer at its own pixel; reads
 // `cand` at its own pixel and `prev` (+ its G-buffer) at the reprojected pixel.
 
+import bluenoise;
 import pathstate;
 import reservoir;
 import reservoir_di;
@@ -108,6 +109,13 @@ void restir_temporal(uint3 tid: SV_DispatchThreadID) {
     uint slot = params.hits.entries[tid.x];
     uint pixel = params.paths.pixel[slot];
     Reproject reproject = params.reproject[0];
+
+    // The blue-noise-ranked sample index, coherent with candidates/spatial for
+    // this (pixel, sample) so the reuse error stays screen-space blue (D-095).
+    // Width rides the reprojection block — temporal carries no resolution of its
+    // own.
+    let ranked = blueRank(uint2(pixel % reproject.width, pixel / reproject.width),
+                          params.sampleIndex);
 
     Surface surface = reconstructSurface(params.paths, params.scene, slot);
 
@@ -202,8 +210,8 @@ void restir_temporal(uint3 tid: SV_DispatchThreadID) {
     // The canonical: m_c = t_c + (1−t_c)·(1/V)·canonShare. With prev empty the
     // share term vanishes (t_c = 1) and cand passes through as its sole candidate.
     let mCanon = tc + (1.0 - tc) * invV * canonShare;
-    let acceptCanon = sample_1d(pixel, params.sampleIndex,
-                                restirTemporalDimension(RESTIR_TEMPORAL_CANONICAL));
+    let acceptCanon = sample_ranked_1d(pixel, ranked,
+                                       restirTemporalDimension(RESTIR_TEMPORAL_CANONICAL));
     if (reservoirMerge(merged, cand, mCanon * pcYc * cand.unbiasedWeight, acceptCanon)) {
         survivorTarget = pcYc;
     }
@@ -213,8 +221,8 @@ void restir_temporal(uint3 tid: SV_DispatchThreadID) {
     // confidence, so the merged M is c_c + min(c_prev, M_CAP·c_c) — the bounded
     // history.
     if (prevValid) {
-        let acceptPrev = sample_1d(pixel, params.sampleIndex,
-                                   restirTemporalDimension(RESTIR_TEMPORAL_PREV));
+        let acceptPrev = sample_ranked_1d(pixel, ranked,
+                                          restirTemporalDimension(RESTIR_TEMPORAL_PREV));
         let weight = (1.0 - tc) * invV * bi * pcYi * prev.unbiasedWeight;
         if (reservoirMerge(merged, prev, weight, acceptPrev)) {
             survivorTarget = pcYi;

@@ -68,6 +68,7 @@
 // barrier orders, so no thread reads a half-written neighbour and determinism
 // holds (M3 plan §2).
 
+import bluenoise;
 import openpbr;
 import pathstate;
 import reservoir;
@@ -188,6 +189,11 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
     let px = int(pixel % params.width);
     let py = int(pixel / params.width);
 
+    // The blue-noise-ranked sample index, shared across this stage's draws for
+    // the pixel so its reuse error stays screen-space blue noise (D-095) —
+    // coherent with candidates, which ranked the same (pixel, sample) key.
+    let ranked = blueRank(uint2(uint(px), uint(py)), params.sampleIndex);
+
     // -- Gather: gate each neighbour, spend its ray, stash it --------------------
     AcceptedNeighbour accepted[MAX_SPATIAL_NEIGHBOURS];
     uint validCount = 0;             // V — accepted neighbours
@@ -196,8 +202,8 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
 
     let k = min(params.neighbours, MAX_SPATIAL_NEIGHBOURS);
     for (uint n = 0; n < k; n++) {
-        let uOffset = sample_2d(pixel, params.sampleIndex,
-                                restirSpatialDimension(n, RESTIR_SPATIAL_OFFSET));
+        let uOffset = sample_ranked_2d(pixel, ranked,
+                                       restirSpatialDimension(n, RESTIR_SPATIAL_OFFSET));
         // A uniform point on the gather disk (√u for area-uniform radius), rounded
         // to a pixel offset. The self pixel (zero offset) is the canonical — never
         // reused as its own neighbour, or it would double-count.
@@ -267,8 +273,8 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
         a.confidence = ci;
         a.weightNumer = bi * pcYi * neighbour.unbiasedWeight;
         a.unshadowed = ucYi;
-        a.accept = sample_1d(pixel, params.sampleIndex,
-                             restirSpatialDimension(n, RESTIR_SPATIAL_ACCEPT));
+        a.accept = sample_ranked_1d(pixel, ranked,
+                                    restirSpatialDimension(n, RESTIR_SPATIAL_ACCEPT));
         accepted[validCount] = a;
         validCount++;
         cTot += ci;
@@ -285,7 +291,7 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
     // The canonical: m_c = t_c + (1−t_c)·(1/V)·Σ shares. With V=0 the sum term
     // vanishes (t_c=1) and it passes through as its sole candidate.
     let mCanon = tc + (1.0 - tc) * invV * canonShareSum;
-    let acceptCanon = sample_1d(pixel, params.sampleIndex, restirSpatialCanonicalDimension());
+    let acceptCanon = sample_ranked_1d(pixel, ranked, restirSpatialCanonicalDimension());
     if (reservoirMerge(merged, canonicalReservoir, mCanon * pcYc * canonicalReservoir.unbiasedWeight,
                        acceptCanon)) {
         survivorUnshadowed = ucYc;

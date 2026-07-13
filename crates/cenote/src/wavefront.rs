@@ -221,6 +221,14 @@ struct RestirCandidatesParams {
     sample_index: u32,
     /// M — the initial-RIS candidate count.
     candidates: u32,
+    /// Frame width — the kernel decodes the pixel's `(x, y)` from its linear
+    /// index for the blue-noise sample-index key (D-095). Spatial reads its own
+    /// `width`; temporal reads the reprojection block's; candidates carried
+    /// neither, so it gains this scalar (its block has the room).
+    width: u32,
+    /// Explicit tail padding to the struct's 8-byte alignment (`Pod` forbids the
+    /// implicit padding a lone trailing `u32` would leave).
+    pad0: u32,
 }
 
 /// Push constants for the `ReSTIR` temporal-reuse stage
@@ -796,6 +804,11 @@ pub struct Wavefront {
     /// no AOV targets — `enabled` 0, so the kernels skip every guide read
     /// and write.
     aov_disabled: Buffer,
+    /// The blue-noise mask (D-095): a renderer-global void-and-cluster tile the
+    /// reservoir stages key their sample-index ranking on, uploaded once and
+    /// bound at set 0 binding 3. Owned here — scene-independent, renderer
+    /// lifetime — and handed to every [`SceneBindings`].
+    blue_noise: Buffer,
     capacity: u32,
     max_bounces: u32,
     light_sampling: LightSampling,
@@ -975,6 +988,13 @@ impl Wavefront {
                 "wavefront.aov.disabled",
                 bytemuck::bytes_of(&AovTableData::zeroed()),
                 vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            )?,
+            // The blue-noise mask: read through the descriptor (binding 3), so
+            // no device address — a plain storage buffer (D-095).
+            blue_noise: gpu.upload_buffer(
+                "wavefront.bluenoise",
+                bytemuck::cast_slice(crate::bluenoise::mask().as_slice()),
+                vk::BufferUsageFlags::STORAGE_BUFFER,
             )?,
             capacity,
             max_bounces,
@@ -1294,6 +1314,8 @@ impl Wavefront {
                 reservoirs: candidate_reservoirs,
                 sample_index: sample,
                 candidates: Self::RESTIR_CANDIDATES,
+                width,
+                pad0: 0,
             },
             temporal,
             spatial,
@@ -1336,6 +1358,7 @@ impl Wavefront {
             tlas: scene.tlas(),
             environment: scene.environment(),
             textures: scene.texture_descriptors(),
+            blue_noise: &self.blue_noise,
         };
         // An indirect stage: workgroup counts read from its queue's header,
         // which the producing stage maintained.

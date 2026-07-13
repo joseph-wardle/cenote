@@ -43,6 +43,7 @@
 //! between the two surfaces as a failed golden-image test, never as silent
 //! corruption.
 
+mod bluenoise;
 pub mod color;
 #[cfg(feature = "denoise")]
 pub mod denoise;

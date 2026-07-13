@@ -1500,7 +1500,7 @@ fn non_finite_contributions_are_dropped() {
     // Drive the accumulation kernel directly — the same pass the render
     // paths fold into the wave, here submitted alone against a poisoned
     // sample the primary kernel could never produce.
-    let overwrite = accumulate_params(&film);
+    let overwrite = renderer.accumulate_params(&film);
     gpu.submit_passes(&[renderer.accumulate_pass(&overwrite)])
         .expect("overwrite path");
     let expected_once = [
@@ -1511,10 +1511,212 @@ fn non_finite_contributions_are_dropped() {
     ];
     assert_eq!(download_f32(&gpu, &film.beauty.sum), expected_once);
 
+    // The second moment is taken over the *same* guarded samples: the three
+    // poisoned pixels drop to 0, and the clean pixel carries luminance², so
+    // mean(L²) − mean(L)² can never disagree with the beauty sum on which
+    // samples counted.
+    let luminance =
+        |rgb: [f32; 3]| rgb[0] * 0.272_228_72 + rgb[1] * 0.674_081_74 + rgb[2] * 0.053_689_517;
+    let clean_l2 = luminance([0.25, 0.5, 0.75]).powi(2);
+    let moment2 = download_f32(&gpu, &film.moment2);
+    assert_eq!(&moment2[..3], &[0.0, 0.0, 0.0], "poisoned pixels drop to 0");
+    assert!(
+        (moment2[3] - clean_l2).abs() < 1e-7,
+        "clean pixel second moment: {} vs {clean_l2}",
+        moment2[3]
+    );
+
     film.samples = 1;
-    let additive = accumulate_params(&film);
+    let additive = renderer.accumulate_params(&film);
     gpu.submit_passes(&[renderer.accumulate_pass(&additive)])
         .expect("additive path");
     let doubled: Vec<f32> = expected_once.iter().map(|value| 2.0 * value).collect();
     assert_eq!(download_f32(&gpu, &film.beauty.sum), doubled);
+    // The additive path doubles the second moment in lockstep with the sum.
+    let moment2 = download_f32(&gpu, &film.moment2);
+    assert_eq!(&moment2[..3], &[0.0, 0.0, 0.0]);
+    assert!((moment2[3] - 2.0 * clean_l2).abs() < 1e-7);
+}
+
+/// The variance substrate's headline property (M3 step 6a): on a static
+/// scene the estimator standard error `sqrt(Var / N)` falls as `1/sqrt(N)`,
+/// because the per-sample luminance variance `Var` is a fixed property of the
+/// pixel that the growing sample count only measures better. Rendering is
+/// bitwise deterministic, so this is an exact comparison, not a statistical
+/// one: quadrupling the samples must halve the mean standard error over the
+/// noisy pixels.
+#[test]
+fn standard_error_falls_as_one_over_sqrt_samples() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let scene = Scene::demo(&gpu).expect("demo scene");
+    let renderer = Renderer::new(&gpu).expect("renderer");
+    let size = 64;
+
+    let standard_error = |samples: u32| -> Vec<f32> {
+        let mut film = Film::new(&gpu, size, size).expect("film");
+        for _ in 0..samples {
+            renderer
+                .accumulate(&gpu, &scene, &mut film)
+                .expect("accumulate");
+        }
+        let se = film.standard_error(&gpu).expect("standard error");
+        assert!(
+            se.iter().all(|e| e.is_finite() && *e >= 0.0),
+            "standard error must be finite and non-negative"
+        );
+        se
+    };
+
+    let coarse = standard_error(32);
+    let fine = standard_error(128); // 4× the samples → half the error
+
+    // Per-pixel error ratios over the pixels carrying real noise at the coarse
+    // count (lit, stochastic surfaces; the smooth sky and black background have
+    // essentially none). The *median* is the right statistic: it reads the
+    // 1/sqrt(N) law off the well-behaved bulk while rejecting the heavy-tailed
+    // firefly pixels (the sharp glossy front row) whose rare bright samples
+    // make them converge slower than the law — the mean would be dragged down
+    // by exactly those outliers.
+    let mut ratios: Vec<f32> = coarse
+        .iter()
+        .zip(&fine)
+        .filter(|(c, _)| **c > 1e-4)
+        .map(|(c, f)| c / f)
+        .collect();
+    assert!(
+        ratios.len() > 100,
+        "expected a meaningful noisy region, got {} pixels",
+        ratios.len()
+    );
+    ratios.sort_by(f32::total_cmp);
+    let median = ratios[ratios.len() / 2];
+    assert!(
+        (median - 2.0).abs() < 0.2,
+        "quadrupling samples should halve a typical pixel's standard error: median ratio {median}"
+    );
+}
+
+/// The global auto-stop metric (M3 step 6b): the converged tally tracks real
+/// per-pixel noise, not the sample count. It is exactly zero below the metric's
+/// trust floor (`CONVERGENCE_MIN_SAMPLES`), reads a near-exact image as fully
+/// converged, and reads a noisier one at the same sample count as less. And the
+/// GPU tally matches, pixel for pixel, an independent host recount from the 6a
+/// variance substrate — the kernel computes exactly the documented relative
+/// standard-error formula, not an approximation of it.
+#[test]
+fn converged_fraction_tracks_the_noise() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let renderer = Renderer::new(&gpu).expect("renderer");
+    let size = 64;
+    let total = (size * size) as f32;
+    let luminance =
+        |rgb: &[f32]| rgb[0] * 0.272_228_72 + rgb[1] * 0.674_081_74 + rgb[2] * 0.053_689_517;
+
+    // Accumulate `samples` of `scene`, then return the GPU converged fraction —
+    // after asserting it equals a host recount over the 6a substrate that
+    // mirrors the kernel exactly, gate and all: below the trust floor the kernel
+    // counts nothing, so the mirror does too.
+    let measure = |scene: &Scene, samples: u32| -> f32 {
+        let mut film = Film::new(&gpu, size, size).expect("film");
+        for _ in 0..samples {
+            renderer
+                .accumulate(&gpu, scene, &mut film)
+                .expect("accumulate");
+        }
+        let fraction = film.converged_fraction(&gpu).expect("fraction");
+        let host = if samples < Renderer::CONVERGENCE_MIN_SAMPLES {
+            0
+        } else {
+            let se = film.standard_error(&gpu).expect("standard error");
+            let beauty = download_f32(&gpu, &film.beauty.sum);
+            let n = samples as f32;
+            se.iter()
+                .zip(beauty.chunks_exact(4))
+                .filter(|(error, rgba)| {
+                    let mean_l = luminance(rgba) / n;
+                    **error / mean_l.max(Renderer::NOISE_FLOOR) < Renderer::NOISE_THRESHOLD
+                })
+                .count()
+        };
+        assert_eq!(
+            (fraction * total).round() as usize,
+            host,
+            "the GPU tally must match the host recount from the variance substrate"
+        );
+        fraction
+    };
+
+    // Below the trust floor no pixel is counted, even at the last sample before
+    // it — the variance estimate isn't trusted yet.
+    let demo = Scene::demo(&gpu).expect("demo scene");
+    // Genuinely zero — a single converged pixel would read 1/4096 ≈ 2.4e-4.
+    assert!(
+        measure(&demo, Renderer::CONVERGENCE_MIN_SAMPLES - 1) < f32::EPSILON,
+        "no pixel counts below CONVERGENCE_MIN_SAMPLES"
+    );
+
+    // A delta-lit white Lambert plane is per-sample near-exact — negligible
+    // variance — so once past the floor essentially every pixel reads converged.
+    let exact = delta_light_scene(
+        &gpu,
+        crate::scene::description::Light::Distant {
+            direction: [0.0, -1.0, 0.0],
+            irradiance: [std::f32::consts::PI; 3],
+        },
+    );
+    let converged = measure(&exact, Renderer::CONVERGENCE_MIN_SAMPLES);
+    assert!(
+        converged >= 0.99,
+        "a near-exact image should read fully converged: {converged}"
+    );
+
+    // The demo, genuinely noisy at the same count, converges a strictly smaller
+    // fraction — the metric reads per-pixel noise, not the sample clock.
+    let noisy = measure(&demo, Renderer::CONVERGENCE_MIN_SAMPLES);
+    assert!(
+        noisy < converged,
+        "the noisier image must converge fewer pixels: {noisy} vs {converged}"
+    );
+}
+
+/// The runtime auto-stop threshold (M3 step 6c) reaches the kernel: on one noisy
+/// film, loosening [`Renderer::set_noise_threshold`] counts strictly more pixels
+/// as converged than tightening it. Were the setter ignored, both would render
+/// at the 6b default and read identical — so the strict inequality proves the
+/// renderer's live threshold, not the baked-in constant, is what the accumulate
+/// kernel measures against (the substrate the CLI `--noise-threshold` and the
+/// session's convergence-idle both ride).
+#[test]
+fn the_noise_threshold_reaches_the_kernel() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let mut renderer = Renderer::new(&gpu).expect("renderer");
+    let demo = Scene::demo(&gpu).expect("demo scene");
+    let size = 64;
+
+    // Accumulate a fixed, replayed sample sequence, so the only variable across
+    // the two runs is the threshold the renderer carries into the kernel.
+    let converged_at = |renderer: &Renderer| -> f32 {
+        let mut film = Film::new(&gpu, size, size).expect("film");
+        for _ in 0..Renderer::CONVERGENCE_MIN_SAMPLES {
+            renderer
+                .accumulate(&gpu, &demo, &mut film)
+                .expect("accumulate");
+        }
+        film.converged_fraction(&gpu).expect("fraction")
+    };
+
+    renderer.set_noise_threshold(0.001);
+    let tight = converged_at(&renderer);
+    renderer.set_noise_threshold(0.5);
+    let loose = converged_at(&renderer);
+    assert!(
+        loose > tight,
+        "a looser threshold must converge strictly more pixels: {loose} vs {tight}"
+    );
 }

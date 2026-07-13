@@ -26,14 +26,28 @@ enum Command {
     Import(ImportArgs),
 }
 
+// The flags are independent orthogonal switches, not a state — a state machine
+// would model transitions that don't exist (mirrors the viewer's `Gui`).
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent CLI toggles, not a state to machine"
+)]
 #[derive(clap::Args)]
 struct RenderArgs {
     /// Scene file, `.ron` or `.pbrt`. Omitted renders the built-in demo.
     scene: Option<PathBuf>,
 
-    /// Samples per pixel. Defaults to the scene's settings (demo: 64).
+    /// Samples per pixel. With --noise-threshold this is the hard cap; without
+    /// it, the exact count rendered. Defaults to the scene's settings (demo: 64).
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     spp: Option<u32>,
+
+    /// Stop early once 98% of pixels reach this relative estimator standard
+    /// error, instead of always running the full --spp (which stays the hard
+    /// cap). A fraction in (0, 1]; 0.01 is a perceptually tight default.
+    /// Omitted renders the whole sample budget.
+    #[arg(long, value_parser = parse_noise_threshold)]
+    noise_threshold: Option<f32>,
 
     /// Output width in pixels. Defaults to the scene's settings.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
@@ -63,13 +77,13 @@ struct RenderArgs {
     #[arg(long)]
     restir: bool,
 
-    /// Drop ReSTIR's spatial-reuse pass, leaving single-frame initial RIS.
+    /// Drop `ReSTIR`'s spatial-reuse pass, leaving single-frame initial RIS.
     /// Only meaningful with --restir; lets a batch isolate what the
     /// k-neighbour gather buys over the candidates pass alone.
     #[arg(long)]
     no_spatial: bool,
 
-    /// Drop ReSTIR's temporal reuse, leaving each frame's reservoirs
+    /// Drop `ReSTIR`'s temporal reuse, leaving each frame's reservoirs
     /// independent. Only meaningful with --restir; the fresh-RNG spatial-only
     /// path the D-085 correctness anchor converges against.
     #[arg(long)]
@@ -91,6 +105,19 @@ struct ImportArgs {
     /// beside it, and the scene's references are relativized against it.
     #[arg(long)]
     out: PathBuf,
+}
+
+/// Parse and validate `--noise-threshold`: a relative standard-error fraction
+/// in (0, 1]. Above 1 every pixel is trivially "converged"; zero or negative is
+/// nonsense — reject both at the flag rather than let them stop the render at
+/// sample one (or never).
+fn parse_noise_threshold(raw: &str) -> Result<f32, String> {
+    let value: f32 = raw.parse().map_err(|_| format!("`{raw}` is not a number"))?;
+    if value > 0.0 && value <= 1.0 {
+        Ok(value)
+    } else {
+        Err("must be in (0, 1] — a relative standard-error fraction".to_owned())
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -157,6 +184,9 @@ fn render(args: &RenderArgs) -> anyhow::Result<()> {
     });
     renderer.set_spatial_reuse(!args.no_spatial);
     renderer.set_temporal_reuse(!args.no_temporal);
+    if let Some(threshold) = args.noise_threshold {
+        renderer.set_noise_threshold(threshold);
+    }
     let mut film = cenote::render::Film::new(&gpu, width, height)?;
     // One OIDN device for the process — built here, reused every reload,
     // rather than opened and dropped inside each frame.
@@ -228,6 +258,16 @@ fn render_frame(
 ) -> anyhow::Result<()> {
     for _ in 0..spp {
         renderer.accumulate(gpu, scene, film)?;
+        // With --noise-threshold, stop as soon as enough of the image has
+        // converged; --spp is the hard cap the loop bound already enforces.
+        // Below CONVERGENCE_MIN_SAMPLES the metric is untrusted (D-094), so the
+        // guard short-circuits the 4-byte readback there.
+        if args.noise_threshold.is_some()
+            && film.samples() >= cenote::render::Renderer::CONVERGENCE_MIN_SAMPLES
+            && film.converged_fraction(gpu)? >= cenote::render::Renderer::CONVERGENCE_TARGET
+        {
+            break;
+        }
     }
     let averages = film.averages(gpu)?;
     cenote::output::write_aov_exr(
@@ -244,7 +284,7 @@ fn render_frame(
         args.out.display(),
         film.width(),
         film.height(),
-        spp
+        film.samples()
     );
     #[cfg(feature = "denoise")]
     if let Some(denoiser) = denoiser {

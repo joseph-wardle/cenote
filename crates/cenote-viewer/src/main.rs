@@ -167,6 +167,12 @@ struct Viewer {
     cursor: Option<PhysicalPosition<f64>>,
 }
 
+/// Sample cap the viewer hands the render session (M3 step 6c): once a held
+/// view reaches it the render thread parks, so a converged scene left on screen
+/// stops pinning the GPU. High enough that the image is long since visually
+/// settled by the time it fires — a backstop, not a quality limit.
+const VIEWER_MAX_SAMPLES: u32 = 8192;
+
 impl Viewer {
     fn new(event_loop: &ActiveEventLoop, scene_path: Option<&Path>) -> anyhow::Result<Self> {
         let window = event_loop.create_window(
@@ -222,6 +228,10 @@ impl Viewer {
             camera.camera(),
             size.width,
             size.height,
+            cenote::render::AutoStop {
+                max_samples: VIEWER_MAX_SAMPLES,
+                noise_threshold: None,
+            },
         );
         // Not every platform sends an initial redraw request unprompted.
         window.request_redraw();

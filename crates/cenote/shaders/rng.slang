@@ -214,22 +214,67 @@ public float hashUniform(uint pixel, uint sampleIndex, uint bounce, uint crossin
     return toUnitFloat(h);
 }
 
+// A dimension's Owen-scrambled point at an *explicit* sample index — the
+// scramble half of the sampler, split from the choice of *which* index so that
+// choice is pluggable: the per-dimension padding shuffle of sample_2d/1d, or
+// the shared blue-noise ranking of sample_ranked_2d/1d (D-095). The scramble is
+// keyed per (pixel, dimension) either way — the padding that decorrelates the
+// axes and neighbouring pixels' point *values*. The hex salts only separate
+// each axis's scramble stream.
+float2 scrambledPoint2d(uint pixel, uint index, uint dimension) {
+    let seed = lowbias32(pixel ^ lowbias32(dimension));
+    return float2(scrambledSobol(index, 0, lowbias32(seed ^ 0xe0aaaf76u)),
+                  scrambledSobol(index, 1, lowbias32(seed ^ 0x94964d4eu)));
+}
+
+float scrambledPoint1d(uint pixel, uint index, uint dimension) {
+    let seed = lowbias32(pixel ^ lowbias32(dimension));
+    return scrambledSobol(index, 0, lowbias32(seed ^ 0x635fc02fu));
+}
+
 // A dimension's 2D point for one pixel's sampleIndex-th sample. The index
 // shuffle gives every pixel its own ordering of an Owen-scrambled sequence:
 // each pixel's samples are individually well-stratified (so its average
 // converges fast) yet independent of every other pixel's (so error stays
-// white noise across the frame). The hex salts only separate the shuffle
-// stream from each axis's scramble stream.
+// white noise across the frame). The salt separates the shuffle stream from
+// the scramble streams. The ReSTIR light streams take the blue-noise-ranked
+// counterpart below; everything else (camera jitter, the path tracer) keeps
+// this per-dimension padding.
 public float2 sample_2d(uint pixel, uint sampleIndex, uint dimension) {
     let seed = lowbias32(pixel ^ lowbias32(dimension));
     let index = nestedUniformScramble(sampleIndex, lowbias32(seed ^ 0xf8ade99au));
-    return float2(scrambledSobol(index, 0, lowbias32(seed ^ 0xe0aaaf76u)),
-                  scrambledSobol(index, 1, lowbias32(seed ^ 0x94964d4eu)));
+    return scrambledPoint2d(pixel, index, dimension);
 }
 
 // The 1D counterpart, for scalar decisions (lobe choice, Russian roulette).
 public float sample_1d(uint pixel, uint sampleIndex, uint dimension) {
     let seed = lowbias32(pixel ^ lowbias32(dimension));
     let index = nestedUniformScramble(sampleIndex, lowbias32(seed ^ 0xbff95bfeu));
-    return scrambledSobol(index, 0, lowbias32(seed ^ 0x635fc02fu));
+    return scrambledPoint1d(pixel, index, dimension);
+}
+
+// -- Blue-noise sample-index ranking (D-095) ---------------------------
+// A fixed per-pixel permutation of the sample index, keyed by a screen-space
+// blue-noise value (`key`, from bluenoise.slang's mask). Unlike sample_*'s
+// per-dimension padding shuffle, one ranking is *shared* across all of a
+// sample's dimensions, so the whole pixel estimate's Monte-Carlo error
+// correlates with the key and — the key being blue across the screen — lands as
+// blue noise rather than white. Fixed across sampleIndex (the seed depends only
+// on the key, not the sample): each pixel still walks a progressive
+// low-discrepancy set, so this renderer's per-pixel convergence is unharmed and
+// the converged image is identical — only the low-sample error *distribution*
+// changes. (Heitz et al. 2019.)
+public uint blueRankedIndex(uint key, uint sampleIndex) {
+    return nestedUniformScramble(sampleIndex, lowbias32(key ^ 0x9e3779b9u));
+}
+
+// A dimension's 2D / 1D point at a pre-ranked sample index — the blue-noise
+// counterpart of sample_2d/1d. The caller ranks once per (pixel, sample) with
+// blueRankedIndex and passes that index for every dimension of the sample.
+public float2 sample_ranked_2d(uint pixel, uint rankedIndex, uint dimension) {
+    return scrambledPoint2d(pixel, rankedIndex, dimension);
+}
+
+public float sample_ranked_1d(uint pixel, uint rankedIndex, uint dimension) {
+    return scrambledPoint1d(pixel, rankedIndex, dimension);
 }
