@@ -9,7 +9,7 @@ Where CPU production renderers optimize for memory capacity on unbounded scenes,
 Cenote makes the inverse bet: extreme single-GPU performance on scenes that fit in
 VRAM.
 
-**Status: M2 complete** — the six-kernel wavefront engine
+**Status: M3 complete** — the six-kernel wavefront engine
 (indirect dispatch, zero mid-frame readbacks), Sobol-Burley sampling, the
 full `OpenPBR` closure — coat, fuzz, rough glass with interior absorption,
 thin-walled surfaces, variable IOR, fractional opacity — energy-compensated
@@ -26,6 +26,12 @@ pass-through, first-hit depth) accumulated beside the beauty and written as
 one multi-layer EXR, OIDN denoising over those guides (a CLI flag and a
 viewer toggle, in builds with the `denoise` feature), a progressive viewer,
 and a batch CLI that writes exactly the image the viewer converges to.
+
+M3 adds the renderer's theoretical core — **ReSTIR-DI**: screen-space
+reservoir resampling at the primary hit, spatial and temporal reuse folded
+under defensive pairwise MIS, unbiased by construction so it converges to the
+very image the path tracer does and gets there faster where the lights are
+many ([below](#many-lights-resampled)).
 
 ![A 5×5 grid of terracotta spheres resting on a glossy gray floor — roughness increasing left to right, metalness back to front — under a blue sky](docs/demo.png)
 
@@ -74,6 +80,42 @@ scene, same seconds.*
 pbrt renders spectrally and writes linear `Rec.709`; cenote renders RGB in
 `ACEScg`.The reference is pbrt-v4 at
 [`5f7a606`](https://github.com/mmp/pbrt-v4/commit/5f7a606806a4ac7b939131ded9d7a30ebd02416e).
+
+## Many lights, resampled
+
+ReSTIR is cenote's theoretical core, and the many-light scene is the case it
+exists for: 256 small emitters raining light onto a cluster of matte occluders
+under a black sky. The M2 path tracer meets it by next-event estimation — one
+of the 256 lights drawn per sample and shadowed. A single draw among that many
+is mostly wasted, so the image arrives as a storm of shadow grain. ReSTIR-DI
+resamples instead: each pixel keeps a running reservoir of the good light
+samples it and its neighbours have found, spends one shadow ray confirming the
+survivor, and reuses the rest. Same integrator, same lights, one shadow ray at
+the primary hit either way — the samples just land where they carry the image.
+
+![Brute force and ReSTIR on the 256-light scene, both at 8 samples per pixel — the brute-force half a storm of shadow grain, the ReSTIR half nearly settled](docs/restir-equal-sample.png)
+
+*Equal samples — 8 spp, one shadow ray at the primary hit either way. Left, the
+path tracer's lone next-event draw among 256 lights; right, ReSTIR resampling
+and borrowing its neighbours'. Same budget, and the grain on the right is
+plainly the finer.*
+
+![Log-log relative-MSE curves on the 256-light scene: brute force and ReSTIR-DI both fall toward the reference as near-parallel lines, ReSTIR consistently below](docs/restir-convergence.png)
+
+*The convergence behind that image: relative MSE against a converged reference,
+both estimators on the same scene. Both fall — ReSTIR is unbiased, so it
+descends toward the very image brute force does[^estimator] — and ReSTIR carries
+visibly less error at every matched sample budget. That constant gap is the
+whole method: the variance reduction, measured rather than promised.*
+
+Both curves are pinned by a test (`crates/cenote/tests/convergence.rs`), and at
+converged samples the two estimators agree to ~1e-4 per channel — so the ReSTIR
+image rides the same FLIP goldens the path tracer does. The scene ships as
+inspectable data, so the comparison reproduces:
+
+```sh
+cargo run --release -p cenote-cli -- render scenes/many-lights.ron --restir --spp 256 --out many-lights.exr
+```
 
 ## Quickstart
 
