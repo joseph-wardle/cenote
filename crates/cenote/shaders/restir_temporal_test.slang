@@ -26,6 +26,7 @@
 
 import rng;
 import reservoir;
+import restir_mis;
 
 // The microtest's sample: a coordinate on [0, 1].
 struct ScalarSample : IDefaultInitializable {
@@ -71,6 +72,11 @@ Reservoir<ScalarSample> build(uint pixel, uint m, uint stream, bool canonical) {
     return r;
 }
 
+// The two merge-acceptance draws use a stream distinct from build()'s canonical
+// (0) and history (1) streams, so an acceptance coin never correlates with the
+// candidate draw that produced the sample it is accepting.
+static const uint MERGE_STREAM = 99;
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void restir_temporal_test(uint3 tid: SV_DispatchThreadID) {
@@ -102,21 +108,18 @@ void restir_temporal_test(uint3 tid: SV_DispatchThreadID) {
     let tc = cTot > 0.0 ? cCanon / cTot : 1.0;
     let invV = ci > 0.0 ? 1.0 : 0.0; // one neighbour when prev carries history
 
-    let bDenom = ci * piYi + cCanon * pcYi;
-    let bi = bDenom > 0.0 ? (ci * piYi) / bDenom : 0.0;
-    let shareDenom = ci * piYc + cCanon * pcYc;
-    let canonShare = shareDenom > 0.0 ? (cCanon * pcYc) / shareDenom : 0.0;
+    let mis = pairwiseMis(ci, piYi, piYc, cCanon, pcYi, pcYc);
 
     Reservoir<ScalarSample> merged = reservoirInit<ScalarSample>();
     float survivorTarget = 0.0;
 
-    let mCanon = tc + (1.0 - tc) * invV * canonShare;
+    let mCanon = tc + (1.0 - tc) * invV * mis.canonShare;
     if (reservoirMerge(merged, canon, mCanon * pcYc * canon.unbiasedWeight,
-                       hashUniform(pixel, 0, 99, 0))) {
+                       hashUniform(pixel, 0, MERGE_STREAM, 0))) {
         survivorTarget = pcYc;
     }
-    let weight = (1.0 - tc) * invV * bi * pcYi * prev.unbiasedWeight;
-    if (reservoirMerge(merged, prev, weight, hashUniform(pixel, 1, 99, 0))) {
+    let weight = (1.0 - tc) * invV * mis.bi * pcYi * prev.unbiasedWeight;
+    if (reservoirMerge(merged, prev, weight, hashUniform(pixel, 1, MERGE_STREAM, 0))) {
         survivorTarget = pcYi;
     }
     reservoirFinalize(merged, survivorTarget);

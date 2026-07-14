@@ -70,6 +70,7 @@ import bluenoise;
 import pathstate;
 import reservoir;
 import reservoir_di;
+import restir_mis;
 import restir_reproject;
 import restir_scene;
 import restir_target;
@@ -86,13 +87,13 @@ struct Params {
     StoredReservoir* reservoirsOut;  // the temporal survivors (`curr`) — written
     Reproject* reproject;            // prev camera + G-buffers + gate thresholds (5c)
     uint sampleIndex;
-    /// History-length multiplier: c_prev is clamped to `mCap · c_cand` before
-    /// the combine (the bias-critical numeric — see the header).
+    // History-length multiplier: c_prev is clamped to `mCap · c_cand` before
+    // the combine (the bias-critical numeric — see the header).
     float mCap;
-    /// Decay window: history confidence is scaled by `saturate(1 −
-    /// sampleIndex/decayFrames)` so a held camera hands temporal off to
-    /// spatial-only accumulation (step 5d). `0` disables the ramp (the pinned CI
-    /// gate); see the header.
+    // Decay window: history confidence is scaled by `saturate(1 −
+    // sampleIndex/decayFrames)` so a held camera hands temporal off to
+    // spatial-only accumulation (step 5d). `0` disables the ramp (the pinned CI
+    // gate); see the header.
     uint decayFrames;
     uint pad0; // matches the host's tail padding to 8-byte alignment
 };
@@ -198,10 +199,9 @@ void restir_temporal(uint3 tid: SV_DispatchThreadID) {
         let piYc = cand.unbiasedWeight > 0.0
             ? targetUnshadowed(params.scene, params.restir, prevSurface, cand.sample)
             : 0.0;
-        let bDenom = ci * piYi + cCanon * pcYi;
-        bi = bDenom > 0.0 ? (ci * piYi) / bDenom : 0.0;
-        let shareDenom = ci * piYc + cCanon * pcYc;
-        canonShare = shareDenom > 0.0 ? (cCanon * pcYc) / shareDenom : 0.0;
+        let mis = pairwiseMis(ci, piYi, piYc, cCanon, pcYi, pcYc);
+        bi = mis.bi;
+        canonShare = mis.canonShare;
     }
 
     Reservoir<DirectLightSample> merged = reservoirInit<DirectLightSample>();

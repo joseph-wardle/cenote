@@ -213,6 +213,36 @@ fn diffuse_furnace_closes() {
     );
 }
 
+/// The same white furnace, closed by the full `ReSTIR` estimator — the
+/// first test to drive [`RenderMode::Restir`] end to end. `ReSTIR` owns
+/// bounce 0's direct lighting, resampling environment directions
+/// (spatial and temporal reuse both on, so pairwise MIS, the reservoir
+/// weights, and the reproject warm-start all run) while the path tracer
+/// carries the indirect bounces the albedo-1 plane needs to close. If
+/// the resampled estimator loses or invents energy — a wrong reservoir
+/// weight, an unnormalised target, a dropped Jacobian — the furnace
+/// stops closing. Stochastic like the rough furnace above, so the mean
+/// over many samples carries the assertion.
+#[test]
+fn restir_furnace_closes() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let mut renderer = Renderer::new(&gpu).expect("renderer");
+    renderer.set_render_mode(RenderMode::Restir);
+    let sky = 0.5;
+
+    let scene = furnace_scene(&gpu, Material::matte(Vec3::ONE, 0.0), Vec3::ZERO, 1.0, None);
+    let samples = 64;
+    let sum = accumulate_sum(&gpu, &renderer, &scene, 32, samples);
+    let mean =
+        sum.chunks_exact(4).map(|chunk| chunk[0]).sum::<f32>() / (32.0 * 32.0 * samples as f32);
+    assert!(
+        (mean - sky).abs() < 0.005,
+        "ReSTIR furnace leaked: mean {mean} vs {sky}"
+    );
+}
+
 /// The spawn-point offsets hold at scene scale — the property the van
 /// Antwerpen rigorous error bounds exist for. A half-albedo Lambert
 /// furnace, with the plane pushed 10⁴ m from the origin and scaled

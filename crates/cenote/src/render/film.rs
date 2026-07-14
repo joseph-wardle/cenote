@@ -235,97 +235,18 @@ impl Film {
         Ok(())
     }
 
-    /// This frame's committed reservoir (`curr`) — the candidate stage's write
-    /// target with temporal reuse off, the temporal combine's with it on —
-    /// present after [`Film::ensure_restir`].
+    /// This view's `ReSTIR` state — the `prev`/`curr`/`scratch` reservoirs, the
+    /// reprojection block, and the ping-ponged G-buffers — present after
+    /// [`Film::ensure_restir`]. Callers reach the individual buffers through its
+    /// accessors (`film.view().curr()`, `.cand()`, `.gbuffer_prev()`, …).
     ///
     /// # Panics
     ///
     /// If called before [`Film::ensure_restir`] built the state — a caller bug.
-    pub(super) fn reservoir(&self) -> &Buffer {
+    pub(super) fn view(&self) -> &ViewState {
         self.view
             .as_ref()
             .expect("ensure_restir has not run yet")
-            .curr()
-    }
-
-    /// This frame's candidate reservoir (`cand`) and last frame's committed one
-    /// (`prev`) — the temporal combine's two inputs, present after
-    /// [`Film::ensure_restir`].
-    ///
-    /// # Panics
-    ///
-    /// If called before [`Film::ensure_restir`] built the state — a caller bug.
-    pub(super) fn reservoir_cand(&self) -> &Buffer {
-        self.view
-            .as_ref()
-            .expect("ensure_restir has not run yet")
-            .cand()
-    }
-
-    /// Last frame's committed reservoir (`prev`) — see [`Film::reservoir_cand`].
-    ///
-    /// # Panics
-    ///
-    /// If called before [`Film::ensure_restir`] built the state — a caller bug.
-    pub(super) fn reservoir_prev(&self) -> &Buffer {
-        self.view
-            .as_ref()
-            .expect("ensure_restir has not run yet")
-            .prev()
-    }
-
-    /// The spatial stage's scratch reservoir, present after
-    /// [`Film::ensure_restir`].
-    ///
-    /// # Panics
-    ///
-    /// If called before [`Film::ensure_restir`] built the state — a caller bug.
-    pub(super) fn reservoir_scratch(&self) -> &Buffer {
-        self.view
-            .as_ref()
-            .expect("ensure_restir has not run yet")
-            .scratch()
-    }
-
-    /// The temporal reprojection block (`Reproject`) — the buffer `restir_temporal`
-    /// reaches by address, present after [`Film::ensure_restir`]. Rewrite its
-    /// contents each frame with [`Film::write_reproject`] before the wave.
-    ///
-    /// # Panics
-    ///
-    /// If called before [`Film::ensure_restir`] built the state — a caller bug.
-    pub(super) fn reproject(&self) -> &Buffer {
-        self.view
-            .as_ref()
-            .expect("ensure_restir has not run yet")
-            .reproject()
-    }
-
-    /// Last frame's per-pixel G-buffer (`prev`) and this frame's (`curr`) — the
-    /// surfaces temporal reprojection reads and writes. The renderer feeds both
-    /// addresses into the reprojection block it writes each frame.
-    ///
-    /// # Panics
-    ///
-    /// If called before [`Film::ensure_restir`] built the state — a caller bug.
-    pub(super) fn gbuffer_prev(&self) -> &Buffer {
-        self.view
-            .as_ref()
-            .expect("ensure_restir has not run yet")
-            .gbuffer_prev()
-    }
-
-    /// This frame's per-pixel G-buffer (`curr`) — see [`Film::gbuffer_prev`].
-    ///
-    /// # Panics
-    ///
-    /// If called before [`Film::ensure_restir`] built the state — a caller bug.
-    pub(super) fn gbuffer_curr(&self) -> &Buffer {
-        self.view
-            .as_ref()
-            .expect("ensure_restir has not run yet")
-            .gbuffer_curr()
     }
 
     /// Overwrite this frame's reprojection block (`restir.reproject`) with `data`

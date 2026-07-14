@@ -16,14 +16,24 @@
 
 use std::path::Path;
 
-use cenote::gpu::Context;
 use cenote::output::{read_exr, write_exr};
-use cenote::render::{Film, Renderer};
+use cenote::render::{RenderMode, Renderer};
 use cenote::scene::Scene;
+
+mod common;
+use common::{accumulate, test_context};
 
 /// Golden resolution. Small on purpose: enough pixels to pin every feature
 /// of the demo image, small enough to live in the repo forever.
 const SIZE: u32 = 256;
+
+/// Sample count for the accumulated goldens (the many-light reference and
+/// both `ReSTIR` pins). Enough that the image is settled — a representative
+/// pin rather than single-sample noise — and, for `ReSTIR`, enough frames
+/// that temporal reuse warms up and spatial reuse runs; small enough that
+/// three GPU renders stay quick. Deterministic either way: a reset replays
+/// the exact sequence, so the golden reproduces bit for bit.
+const ACCUM_SPP: u32 = 32;
 
 /// Mean-FLIP failure threshold. Identical images score 0, and FP reordering
 /// across driver/compiler updates moves noise and silhouette edges by a
@@ -62,27 +72,59 @@ fn accumulated_demo_matches_golden() {
     };
     let scene = Scene::demo(&gpu).expect("demo scene");
     let renderer = Renderer::new(&gpu).expect("renderer");
-    let mut film = Film::new(&gpu, SIZE, SIZE).expect("film");
-    for _ in 0..SPP {
-        renderer
-            .accumulate(&gpu, &scene, &mut film)
-            .expect("accumulate");
-    }
-    let actual = film.beauty_average(&gpu).expect("average");
+    let actual = accumulate(&gpu, &renderer, &scene, SIZE, SPP);
     compare_with_golden("demo-64spp", &actual);
 }
 
-/// GPU gate, mirroring the unit tests' `gpu::test_context`: `None` skips
-/// the test with a note on stderr, so GPU-less machines pass cleanly.
-fn test_context() -> Option<Context> {
-    let _ = env_logger::builder().is_test(true).try_init();
-    match Context::new() {
-        Ok(gpu) => Some(gpu),
-        Err(err) => {
-            eprintln!("skipping: no capable GPU here ({err})");
-            None
-        }
-    }
+/// The many-light validation scene by brute force: the path tracer's
+/// NEE+MIS estimator draws one of the 256 emitters per sample and shadows
+/// it. This is the reference `ReSTIR` is measured against — the
+/// ground-truth image both estimators must converge to (D-085) — pinned
+/// here so a change to the reference itself surfaces before it silently
+/// moves the target.
+#[test]
+fn many_lights_matches_golden() {
+    let Some(gpu) = test_context() else {
+        return;
+    };
+    let scene = Scene::many_lights(&gpu).expect("many-lights scene");
+    let renderer = Renderer::new(&gpu).expect("renderer");
+    let actual = accumulate(&gpu, &renderer, &scene, SIZE, ACCUM_SPP);
+    compare_with_golden("many-lights", &actual);
+}
+
+/// The flagship demo through `ReSTIR`-DI — the first golden to pin the
+/// `ReSTIR` estimator's output. Spatial and temporal reuse both on (the
+/// default, flagship config), so the reservoir stages, pairwise MIS, and
+/// the reproject warm-start all sit under the pin: a regression in any of
+/// them moves this image while the path-traced `demo` goldens stay put.
+#[test]
+fn restir_demo_matches_golden() {
+    let Some(gpu) = test_context() else {
+        return;
+    };
+    let scene = Scene::demo(&gpu).expect("demo scene");
+    let mut renderer = Renderer::new(&gpu).expect("renderer");
+    renderer.set_render_mode(RenderMode::Restir);
+    let actual = accumulate(&gpu, &renderer, &scene, SIZE, ACCUM_SPP);
+    compare_with_golden("restir-demo", &actual);
+}
+
+/// The many-light scene through `ReSTIR` — the estimator on the case it
+/// exists for, where the brute-force single draw starves among hundreds of
+/// lights and resampling pays off. Pinned deterministically here; that it
+/// *converges to* the `many-lights` reference above is the convergence
+/// test's job (step 7 part 3), not this regression pin's.
+#[test]
+fn restir_many_lights_matches_golden() {
+    let Some(gpu) = test_context() else {
+        return;
+    };
+    let scene = Scene::many_lights(&gpu).expect("many-lights scene");
+    let mut renderer = Renderer::new(&gpu).expect("renderer");
+    renderer.set_render_mode(RenderMode::Restir);
+    let actual = accumulate(&gpu, &renderer, &scene, SIZE, ACCUM_SPP);
+    compare_with_golden("restir-many-lights", &actual);
 }
 
 /// Compare a fresh `SIZE`² render against `tests/golden/{name}.exr` — or,
@@ -149,7 +191,13 @@ fn compare_with_golden(name: &str, actual: &[f32]) {
 /// FLIP consumes 8-bit RGB: clamp to [0, 1], quantize, drop alpha (always 1
 /// here). The renders are linear HDR, so this compares them as if displayed
 /// without exposure or tonemap — highlights above 1 clip to white on both
-/// sides — and the threshold is far coarser than one 8-bit step.
+/// sides — and the threshold is far coarser than one 8-bit step. The clamp is
+/// a deliberate blind spot: drift confined to values already above white (a
+/// brightened firefly, an emitter-power change that only lifts an
+/// already-clipped highlight) moves no pixel here and passes the pin. That
+/// class is caught instead by the white furnace (absolute energy) and the
+/// convergence gate (relMSE on the unclamped linear HDR), both of which see
+/// the full range — see D-096.
 fn flip_image(width: u32, height: u32, pixels: &[f32]) -> nv_flip::FlipImageRgb8 {
     let rgb: Vec<u8> = pixels
         .chunks_exact(4)

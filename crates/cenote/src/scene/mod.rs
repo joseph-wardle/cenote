@@ -15,11 +15,18 @@
 //! winding, handedness, shading-normal, or energy mistakes are instantly
 //! visible, under a warm quad light and the bundled Kloofendal sky. It is
 //! [`changeset::ChangeSet::demo`] prepped: the demo scene is data first.
+//!
+//! [`Scene::many_lights`] is M3's validation subject — hundreds of small
+//! emitters over matte occluders under a black sky, the many-light case
+//! `ReSTIR`'s resampling exists for. It is
+//! [`changeset::ChangeSet::many_lights`] prepped, the same scene-as-data
+//! path as the demo.
 
 pub mod changeset;
 mod demo;
 pub mod description;
 mod lower;
+mod many_lights;
 mod prep;
 mod shapes;
 

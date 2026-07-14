@@ -58,13 +58,14 @@ struct Params {
     // exactly when debugView != DEBUG_NONE. One RGBA float per pixel, zero-
     // filled before this wave, so pixels this stage never reaches read black.
     float4* debug;
-    // Which debug view to false-colour into `debug`, plus one packed flag. Low
-    // byte: the DebugView enum (DEBUG_NONE etc.), mirroring src/wavefront.rs.
-    // Bit 8: visibility-in-weight — set when the spatial stage ran, meaning the
-    // survivor's W already carries its own visibility (the spatial pass spent the
-    // ray). The block sits at Vulkan's guaranteed 128 push-constant bytes, so the
-    // flag rides here rather than in a field of its own.
-    uint debugView;
+    // Packed control word: the DebugView enum in the low byte (which view to
+    // false-colour into `debug`, DEBUG_NONE etc.), mirroring src/wavefront.rs.
+    // Bit 8: visibility-in-weight — the spatial stage ran, so the survivor's W
+    // already carries its own visibility (the spatial pass spent the ray). Bit 9:
+    // temporal-ran — scales the confidence heatmap. Both flags ride here rather
+    // than in fields of their own: the block sits at Vulkan's guaranteed 128
+    // push-constant bytes.
+    uint flags;
     uint sampleIndex;            // this wave's sample — the delta term's one NEE draw
 };
 
@@ -83,7 +84,7 @@ static const uint DEBUG_SELECTED_LIGHT = 1; // false-colour by stable light id
 static const uint DEBUG_CONFIDENCE = 2;     // M heatmap
 static const uint DEBUG_UNBIASED_WEIGHT = 3; // W heatmap
 
-// The packed `debugView` word: the enum above in the low byte, then two
+// The packed `flags` word: the enum above in the low byte, then two
 // which-stages-ran flags that set the confidence heatmap's scale — the
 // spatial visibility-in-weight flag in bit 8, the temporal-ran flag in bit 9.
 static const uint DEBUG_VIEW_MASK = 0xff;
@@ -223,9 +224,9 @@ void restir_resolve(uint3 tid: SV_DispatchThreadID) {
     // Unpack the debug word: the view enum, whether the spatial stage already
     // folded the survivor's visibility into W (so no shadow ray is owed here),
     // and whether temporal ran (a scale-only signal for the confidence heatmap).
-    let debugView = params.debugView & DEBUG_VIEW_MASK;
-    let visibilityInWeight = (params.debugView & DEBUG_VISIBILITY_IN_WEIGHT) != 0;
-    let temporalInWeight = (params.debugView & DEBUG_TEMPORAL_IN_WEIGHT) != 0;
+    let debugView = params.flags & DEBUG_VIEW_MASK;
+    let visibilityInWeight = (params.flags & DEBUG_VISIBILITY_IN_WEIGHT) != 0;
+    let temporalInWeight = (params.flags & DEBUG_TEMPORAL_IN_WEIGHT) != 0;
 
     // The debug surface shows what the reservoir *selected*, so it is written
     // here — before the connection is reconstructed — independent of whether

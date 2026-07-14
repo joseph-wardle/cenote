@@ -51,11 +51,22 @@ impl ViewId {
 /// 24 B/pixel figure.
 const RESERVOIR_STRIDE: u64 = size_of::<StoredReservoir>() as u64;
 
-/// Bytes one G-buffer entry occupies — the `GBufEntry` stride in
-/// `shaders/restir_reproject.slang` (a `Hit` at 16 B plus two `float4`), one per
-/// pixel. Mirrored here rather than from a host type because the entry is written
-/// and read only by the shader; the host merely sizes the buffer.
-const GBUFFER_STRIDE: u64 = 48;
+/// Host layout mirror of `GBufEntry` in `shaders/restir_reproject.slang`, sizing
+/// the per-pixel G-buffer below. The entry is written and read only by the shader
+/// — the host never inspects a field — so this exists purely so `size_of` pins
+/// the stride to the shader's layout, the way `Reproject` pins its own (never
+/// instantiated; the module's `dead_code` allowance covers it).
+#[repr(C)]
+struct GBufEntry {
+    hit: [u32; 4],       // Hit: instance + primitive + float2 barycentrics
+    origin: [f32; 4],    // xyz ray origin (w unused)
+    direction: [f32; 4], // xyz unit direction; w = camera-forward cosine
+}
+
+/// Bytes one G-buffer entry occupies — one per pixel — pinned to the shader's
+/// `GBufEntry` layout by the mirror above rather than hand-counted.
+const GBUFFER_STRIDE: u64 = size_of::<GBufEntry>() as u64;
+const _: () = assert!(GBUFFER_STRIDE == 48);
 
 /// Bytes the per-frame reprojection block occupies — the `Reproject` struct in
 /// `shaders/restir_reproject.slang`, mirrored by `Reproject` in `wavefront.rs`

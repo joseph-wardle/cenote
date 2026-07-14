@@ -441,26 +441,26 @@ impl Renderer {
                 if self.temporal_reuse {
                     let reproject = Reproject::new(
                         film.prev_reproject(),
-                        film.gbuffer_prev().device_address(),
-                        film.gbuffer_curr().device_address(),
+                        film.view().gbuffer_prev().device_address(),
+                        film.view().gbuffer_curr().device_address(),
                         film.width,
                         film.height,
                     );
                     film.write_reproject(bytemuck::bytes_of(&reproject));
                 }
                 Some(RestirInputs {
-                    reservoir: film.reservoir(),
+                    reservoir: film.view().curr(),
                     temporal: self.temporal_reuse.then(|| TemporalReuse {
-                        cand: film.reservoir_cand(),
-                        prev: film.reservoir_prev(),
-                        reproject: film.reproject(),
+                        cand: film.view().cand(),
+                        prev: film.view().prev(),
+                        reproject: film.view().reproject(),
                         // The decay ramp reads samples-since-reset (the wave's
                         // sample index = `film.samples`) on the GPU; the host only
                         // hands it the window. Held-camera handoff to spatial-only
                         // convergence (D-094, step 5d).
                         decay_frames: Wavefront::RESTIR_TEMPORAL_DECAY_FRAMES,
                     }),
-                    scratch: self.spatial_reuse.then(|| film.reservoir_scratch()),
+                    scratch: self.spatial_reuse.then(|| film.view().scratch()),
                     debug: debug.then(|| film.debug()),
                     debug_view: self.debug_view,
                 })

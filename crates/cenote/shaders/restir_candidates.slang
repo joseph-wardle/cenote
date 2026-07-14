@@ -39,6 +39,7 @@
 // traversal against the same TLAS the wavefront's other stages bind.
 
 import bluenoise;
+import color;
 import lights;
 import openpbr;
 import pathstate;
@@ -70,13 +71,6 @@ struct Params {
 [vk::push_constant]
 Params params;
 
-// Relative luminance of an ACEScg (AP1) color — the CIE Y row of the AP1→XYZ
-// matrix. The reservoir's scalar target weighs candidates by brightness; the
-// RGB is recovered exactly at resolve, where L·f·cos is evaluated for real.
-float luminance(float3 acescg) {
-    return dot(acescg, float3(0.2722287168, 0.6740817658, 0.0536895174));
-}
-
 // Fold one reconnected candidate into the reservoir under the count-weighted
 // balance heuristic. `toLight`/`radiance` reconstruct the connection; `lightPdf`
 // is p_L (the next-event solid-angle density of this point, selection folded in,
@@ -88,7 +82,7 @@ float luminance(float3 acescg) {
 // balance heuristic's counts must match the draws. On selection the caller's
 // running p̂(Y) is updated so finalize needs no re-evaluation.
 void streamCandidate(inout Reservoir<DirectLightSample> reservoir,
-                     inout float targetAtSurvivor, Closure closure, Frame frame,
+                     inout float survivorTarget, Closure closure, Frame frame,
                      float3 spawnNormal, float3 wo, DirectLightSample sample,
                      float3 toLight, float3 radiance, float lightPdf, bool reachable,
                      uint M, float uAccept) {
@@ -110,7 +104,7 @@ void streamCandidate(inout Reservoir<DirectLightSample> reservoir,
         }
     }
     if (reservoirUpdate(reservoir, sample, weight, uAccept)) {
-        targetAtSurvivor = target;
+        survivorTarget = target;
     }
 }
 
@@ -120,15 +114,15 @@ void restir_candidates(uint3 tid: SV_DispatchThreadID) {
     if (tid.x >= params.hits.count()) {
         return;
     }
-    uint path = params.hits.entries[tid.x];
-    uint pixel = params.paths.pixel[path];
+    uint slot = params.hits.entries[tid.x];
+    uint pixel = params.paths.pixel[slot];
     // The blue-noise-ranked sample index, shared across every draw this stage
     // makes for the pixel, so its RIS error lands as screen-space blue noise at
     // low sample counts (D-095). One rank per (pixel, sample), keyed by the mask.
     let ranked = blueRank(uint2(pixel % params.width, pixel / params.width),
                           params.sampleIndex);
-    Hit hit = params.paths.hit[path];
-    let direction = params.paths.direction[path].xyz;
+    Hit hit = params.paths.hit[slot];
+    let direction = params.paths.direction[slot].xyz;
 
     // Reconstruct the same surface and closure `shade_surface` would — the
     // reservoir must weigh candidates on the exact BSDF the path tracer shades.
@@ -152,7 +146,7 @@ void restir_candidates(uint3 tid: SV_DispatchThreadID) {
     Reservoir<DirectLightSample> reservoir = reservoirInit<DirectLightSample>();
     // p̂ at the held survivor, tracked as the stream runs so finalize needs no
     // re-evaluation (the survivor's target is whatever won the last acceptance).
-    float targetAtSurvivor = 0.0;
+    float survivorTarget = 0.0;
 
     // -- M light candidates: the alias table + the environment coin flip -----
     for (uint i = 0; i < M; i++) {
@@ -205,7 +199,7 @@ void restir_candidates(uint3 tid: SV_DispatchThreadID) {
             lightPdf = (1.0 - envProb) * c.pdf;
         }
 
-        streamCandidate(reservoir, targetAtSurvivor, closure, frame, spawn.normal, wo,
+        streamCandidate(reservoir, survivorTarget, closure, frame, spawn.normal, wo,
                         sample, toLight, radiance, lightPdf, lightPdf > 0.0, M, uAccept);
     }
 
@@ -296,10 +290,10 @@ void restir_candidates(uint3 tid: SV_DispatchThreadID) {
             }
         }
 
-        streamCandidate(reservoir, targetAtSurvivor, closure, frame, spawn.normal, wo,
+        streamCandidate(reservoir, survivorTarget, closure, frame, spawn.normal, wo,
                         sample, toLight, radiance, lightPdf, found, M, uAccept);
     }
 
-    reservoirFinalize(reservoir, targetAtSurvivor);
+    reservoirFinalize(reservoir, survivorTarget);
     params.reservoirs[pixel] = storeReservoir(reservoir);
 }

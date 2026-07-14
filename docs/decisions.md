@@ -2212,3 +2212,106 @@ and raygen's AA jitter stay on the padded sampler (low variance, and it keeps ra
 descriptor-free). A fixed permutation is a bijection and still a pure function of
 (pixel, sample, dimension), so the unbiasedness and bitwise-determinism gates
 (`restir_matches_the_path_tracer`, `restir_is_bitwise_deterministic`) hold by construction.
+
+## 2026-07-13 — M3 step 7: validation harness and the flagship demo
+
+*Step 7 is the milestone's proof: the harness that shows `ReSTIR` converges to the same
+image brute force does and gets there with less noise, plus the flagship scene that
+demonstrates it. This entry is the validation write-up — what shipped, what each gate
+proves, the one deliberate divergence from the DoD's literal wording, the Falcor
+behaviour spot-check, and what step 7 consciously left for step 8. The care worth
+recording is that the harness proves the estimator, not the scaffolding around it: every
+gate is aimed at the silent-bias class §6 names, and the one place the implementation
+reads differently from the plan is called out as a decision rather than left to be found
+as a discrepancy.*
+
+### D-096: Step-7 validation harness — what it proves, the Falcor spot-check, the residual items
+Status: accepted. The four gates that close M3, the deliberate relMSE-for-FLIP divergence
+from the DoD, the Falcor behavioural note, the committed flagship scene, and what stays
+for step 8.
+
+*The harness is four gates, each aimed at a different failure mode.* (1) The **`ReSTIR`
+white furnace** (`restir_furnace_closes`, `render/tests.rs`) drives an albedo-1 plane
+under a uniform emitter through the full resampling estimator — spatial and temporal both
+on — and asserts energy neutrality; a missing π, a factor-of-2, or MIS weights that don't
+sum to 1 (the exact silent-bias class) fail it fast, without waiting for a converged FLIP
+run. It is the §6 cheap tripwire, now driven through `ReSTIR` rather than only the path
+tracer. (2) The **numerical convergence gate**
+(`tests/convergence.rs::restir_converges_faster_than_brute_force`) measures both
+estimators' per-channel relMSE against a shared high-spp `ReSTIR` reference on the
+many-light scene: both fall as samples accumulate, brute force closes to <0.05 relMSE by
+32 spp — unbiasedness read off the *path tracer's* clean numbers, so the reference
+privileging `ReSTIR`'s own noise floor cannot manufacture the result — and `ReSTIR` carries
+≥1.5× less error at every matched budget, the reuse win measured rather than asserted. (3)
+The **four FLIP goldens** (`many-lights`, `restir-demo`, `restir-many-lights`, and the
+existing `demo`) are deterministic regression pins; because at converged spp `ReSTIR` ≡
+brute force, the FLIP goldens are the free regression gate D-090 promised. (4) The
+**step-3 on-vs-off and determinism gates** (`restir_matches_the_path_tracer`,
+`restir_is_bitwise_deterministic`, D-094) stay green through the reservoir buffers. All GPU
+gates skip cleanly without a capable GPU, and — per the standing hazard — run serially
+(`--test-threads=1`).
+
+*The unbiasedness gate is realized numerically, not as a 4096-spp FLIP — a deliberate
+divergence from the DoD's literal wording, recorded as a decision.* §7's DoD names
+"`render many-lights.ron --spp 4096`, `ReSTIR` on vs off, FLIP under threshold." What
+shipped instead reads the same claim as relMSE against a shared reference at 8/32/256 spp,
+because one relMSE test quantifies *both* halves of the thesis — the unbiasedness
+(brute → reference) and the reuse win (`ReSTIR` vs brute at matched budget) — where a raw
+FLIP at 4096 spp proves only the first, and slowly. The FLIP form's spirit (the two are
+the same image) is still carried: the `many-lights` and `restir-many-lights` goldens agree
+in the mean to ~1e-4/channel (the Part-2 pins), and convergence asserts brute force closes
+on the `ReSTIR` image. The literal `--spp 4096` CLI invocation stays a documented manual
+check, not a CI gate — a 4096-spp × 256² render is too slow for the serial-GPU suite. The
+divergence is a choice about *how* to prove unbiasedness cheaply and completely, not a
+weakening of the bar.
+
+*The Falcor spot-check is a note, by design — not a gate.* D-090 fixed cenote's own brute
+force as the *numerical* oracle (measuring against Falcor would measure primary-ray,
+tonemap, and closure differences, not the estimator); Falcor is the *behaviour* oracle
+only. The spot-check confirms cenote's `ReSTIR` shows the qualitative signatures Falcor's
+published ReSTIR-DI does: variance falls as candidate count M rises; spatial reuse turns
+per-pixel blotches into a smooth low-frequency residual rather than white noise; the
+temporal warm-start converges a held camera faster than a cold start; and the equal-time
+figure shows the many-light reuse win. It also records the one *intentional* behavioural
+divergence — cenote uses **defensive** pairwise MIS (Bitterli 2022 thesis Eq. 7.8) where
+RTXDI/Falcor ship the **non-defensive** variant, the higher-variance-floor but
+provably-bounded choice (D-087, D-093). No Falcor build runs here or in CI; the spot-check
+is a documented behavioural comparison matching D-090's "spot-check" wording, and a live
+Falcor A/B stays deferred (deferrals.md).
+
+*The flagship scene is committed as inspectable data and guarded against drift.*
+`scenes/many-lights.ron` is `ChangeSet::many_lights()` serialized — the CLI renders a scene
+*file* or the built-in `demo`, never a Rust builder, so committing the scene is what makes
+`cenote-cli render many-lights.ron --restir --spp N` work and lets a stranger open the case
+`ReSTIR` exists for. A CPU-only test (`committed_many_lights_ron_matches_the_builder`,
+regenerated with `UPDATE_SCENES=1`) fails if the builder drifts from the committed file, so
+the figures can never silently describe a stale scene. The two figures —
+`docs/restir-convergence.png` (the relMSE curves) and `docs/restir-equal-sample.png` (brute
+vs `ReSTIR` at 8 spp) — regenerate deterministically from the untracked `.git/demo`
+pipeline (matplotlib plot + `magick montage`), and are skipped gracefully where those tools
+are absent, exactly as the pbrt-v4 figures are.
+
+*Each gate has one blind spot, covered by a sibling — worth naming so the harness isn't read
+as tighter than it is.* The four FLIP goldens clamp linear HDR to [0, 1] before comparing
+(`flip_image`, `golden.rs`), so a change confined to values already above white — a firefly
+that brightens from 3 to 30, an emitter-power tweak that only lifts an already-clipped
+highlight — moves no clamped pixel and passes the pin. That class is not unguarded: the
+white furnace asserts absolute energy on the full unclamped range, and the convergence
+gate's relMSE runs on the linear HDR directly (no clamp), so super-white drift surfaces as
+changed energy or changed error even where the goldens are blind. Symmetrically, the
+convergence reference is *empirical* — `ReSTIR` at 256 spp, not an analytic image — so that
+gate proves the two estimators *agree* and measures the variance win; it does not, on its
+own, pin *absolute* correctness, since a bias shared against analytic truth would move
+reference and estimate together. Absolute unbiasedness is the furnace's job (a closed-form
+energy target nothing empirical anchors); the goldens and the ~1e-4 mean agreement pin that
+the two estimators land on the same image. No single gate is the whole proof — the four
+interlock, and this paragraph is where the seams are.
+
+*What step 7 consciously left for step 8, and what stays deferred.* The imported many-light
+**showcase** — the un-gated README beauty shot (D-090) — is the pre-agreed first fallback
+(§5) and did not land: the validated procedural demo is the milestone, the beauty shot is
+not. The **README flagship section** and the **D-085 thesis footnote** (D-091) are step-8
+polish, held deliberately so the prose is written once against the final figures rather
+than twice. A live **Falcor A/B** and the **GRIS/CRIS** charter-scope question remain
+deferred (deferrals.md). None of these gate M3's done-ness — the four validation gates
+above do, and they are green.

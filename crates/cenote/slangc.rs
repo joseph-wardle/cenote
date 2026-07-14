@@ -5,11 +5,11 @@
 /// Every kernel under `shaders/`, one compute entry point each, named after
 /// its file. The build embeds them in this order and hot reload recompiles
 /// them in this order. Not listed: shared modules (`pathstate.slang`,
-/// `rng.slang`, `bluenoise.slang`, `openpbr.slang`, `lights.slang`, `environment.slang`,
-/// `scene.slang`, `surface.slang`, `reservoir.slang`, `reservoir_di.slang`,
-/// `restir_scene.slang`, `restir_target.slang`, `restir_reproject.slang`)
-/// compile into their importers, and test-only fixtures (`rng_test.slang`)
-/// compile at test time.
+/// `rng.slang`, `bluenoise.slang`, `color.slang`, `openpbr.slang`, `lights.slang`,
+/// `environment.slang`, `scene.slang`, `surface.slang`, `reservoir.slang`,
+/// `reservoir_di.slang`, `restir_scene.slang`, `restir_mis.slang`,
+/// `restir_target.slang`, `restir_reproject.slang`) compile into their importers,
+/// and test-only fixtures (`rng_test.slang`) compile at test time.
 pub const KERNELS: [&str; 12] = [
     "raygen",
     "intersect",

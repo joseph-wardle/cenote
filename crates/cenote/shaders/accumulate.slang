@@ -32,6 +32,8 @@
 // glitch in one AOV never censors the others — and depth is the deliberate
 // exception: +inf *is* its miss value, so only NaN is dropped there.
 
+import color;
+
 // Everything the kernel reads, visible in one struct. The samples are the
 // wave's per-pixel accumulators, row-major width×height; each sum shares
 // its sample's layout.
@@ -58,13 +60,6 @@ struct Params {
 
 [vk::push_constant]
 Params params;
-
-// Relative luminance of an ACEScg (AP1) colour — the CIE Y row of the
-// AP1→XYZ matrix, identical to restir_target's `luminance`, so the film's
-// noise metric sorts brightness exactly as the reservoir target does.
-float luminance(float3 acescg) {
-    return dot(acescg, float3(0.2722287168, 0.6740817658, 0.0536895174));
-}
 
 // One guarded sample: NaN/Inf in any channel drops the whole sample for this
 // buffer (0 adds as a no-op and overwrites as the clear a reset wants).

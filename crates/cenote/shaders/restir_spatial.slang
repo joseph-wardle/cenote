@@ -73,6 +73,7 @@ import openpbr;
 import pathstate;
 import reservoir;
 import reservoir_di;
+import restir_mis;
 import restir_scene;
 import restir_target;
 import rng;
@@ -122,28 +123,19 @@ Params params;
 // V into W (see the header). One inline ray, or none when the unshadowed target
 // is already zero (nothing to shade, so nothing to occlude).
 float targetVisAware(Surface s, DirectLightSample sample, out float unshadowed) {
-    unshadowed = 0.0;
-    let c = connectSampleAt(params.scene, params.restir, sample, s.position);
-    if (!c.valid) {
-        return 0.0;
+    let t = evalTarget(params.scene, params.restir, s, sample);
+    unshadowed = t.unshadowed;
+    if (!(t.unshadowed > 0.0)) {
+        return 0.0; // nothing to shade, so nothing to occlude — skip the ray
     }
-    let wiLight = s.frame.toLocal(c.toLight);
-    let throughSurface = dot(c.toLight, s.normal) < 0.0;
-    if (wiLight.z == 0.0 || (wiLight.z < 0.0) != throughSurface) {
-        return 0.0;
-    }
-    let u = luminance(c.radiance * evalBsdf(s.closure, wiLight, s.wo) * abs(wiLight.z));
-    unshadowed = u;
-    if (!(u > 0.0)) {
-        return 0.0;
-    }
+    let c = t.connection;
     RayDesc ray;
-    ray.Origin = throughSurface ? s.below : s.position;
+    ray.Origin = t.throughSurface ? s.below : s.position;
     ray.Direction = c.toLight;
     ray.TMin = 0.0;
     ray.TMax = c.shadowTmax;
     let v = shadowVisibility(sceneTlas, params.scene, ray, c.shadowLight, c.shadowPrimitive);
-    return u * v;
+    return t.unshadowed * v;
 }
 
 // One accepted neighbour, held between the gather pass (which spends its rays)
@@ -261,24 +253,20 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
             : 0.0;
 
         let ci = neighbour.confidence;
-        // b_i at Y_i, and the canonical's share of this pair at Y_c. Guard both
-        // denominators: an all-zero pair contributes nothing and must not divide.
-        let bDenom = ci * piYi + cCanon * pcYi;
-        let bi = bDenom > 0.0 ? (ci * piYi) / bDenom : 0.0;
-        let shareDenom = ci * piYc + cCanon * pcYc;
-        let canonShare = shareDenom > 0.0 ? (cCanon * pcYc) / shareDenom : 0.0;
+        // b_i at Y_i, and the canonical's share of this pair at Y_c.
+        let mis = pairwiseMis(ci, piYi, piYc, cCanon, pcYi, pcYc);
 
         AcceptedNeighbour a;
         a.sample = neighbour.sample;
         a.confidence = ci;
-        a.weightNumer = bi * pcYi * neighbour.unbiasedWeight;
+        a.weightNumer = mis.bi * pcYi * neighbour.unbiasedWeight;
         a.unshadowed = ucYi;
         a.accept = sample_ranked_1d(pixel, ranked,
                                     restirSpatialDimension(n, RESTIR_SPATIAL_ACCEPT));
         accepted[validCount] = a;
         validCount++;
         cTot += ci;
-        canonShareSum += canonShare;
+        canonShareSum += mis.canonShare;
     }
 
     // -- Stream: now that t_c and V are known, combine under the MIS weights -----
@@ -286,7 +274,7 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
     let invV = validCount > 0 ? 1.0 / float(validCount) : 0.0;
 
     Reservoir<DirectLightSample> merged = reservoirInit<DirectLightSample>();
-    float survivorUnshadowed = 0.0;
+    float survivorTarget = 0.0;
 
     // The canonical: m_c = t_c + (1−t_c)·(1/V)·Σ shares. With V=0 the sum term
     // vanishes (t_c=1) and it passes through as its sole candidate.
@@ -294,7 +282,7 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
     let acceptCanon = sample_ranked_1d(pixel, ranked, restirSpatialCanonicalDimension());
     if (reservoirMerge(merged, canonicalReservoir, mCanon * pcYc * canonicalReservoir.unbiasedWeight,
                        acceptCanon)) {
-        survivorUnshadowed = ucYc;
+        survivorTarget = ucYc;
     }
 
     // Each accepted neighbour: m_i = (1−t_c)·(1/V)·b_i, its resampling weight the
@@ -307,13 +295,13 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
         nb.confidence = a.confidence;
         let weight = (1.0 - tc) * invV * a.weightNumer;
         if (reservoirMerge(merged, nb, weight, a.accept)) {
-            survivorUnshadowed = a.unshadowed;
+            survivorTarget = a.unshadowed;
         }
     }
 
     // Finalize by the *unshadowed* survivor target: W = weightSum/U_c folds the
     // survivor's own visibility into W (it was resampled ∝ p̂_c = U_c·V), so
     // restir_resolve shades it unshadowed with no further ray.
-    reservoirFinalize(merged, survivorUnshadowed);
+    reservoirFinalize(merged, survivorTarget);
     params.reservoirsOut[pixel] = storeReservoir(merged);
 }

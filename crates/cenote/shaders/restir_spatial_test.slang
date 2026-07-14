@@ -22,6 +22,7 @@
 
 import rng;
 import reservoir;
+import restir_mis;
 
 // The most neighbours a test thread combines — the fixed local-array bound,
 // mirroring the host's `K`.
@@ -108,36 +109,33 @@ void restir_spatial_test(uint3 tid: SV_DispatchThreadID) {
         let piYi = neighbourTarget(yi);   // p̂_i(Y_i), unshadowed
         let piYc = neighbourTarget(ycx);  // p̂_i(Y_c), unshadowed
 
-        let bDenom = ci * piYi + cCanon * pcYi;
-        let bi = bDenom > 0.0 ? (ci * piYi) / bDenom : 0.0;
-        let shareDenom = ci * piYc + cCanon * pcYc;
-        let share = shareDenom > 0.0 ? (cCanon * pcYc) / shareDenom : 0.0;
+        let mis = pairwiseMis(ci, piYi, piYc, cCanon, pcYi, pcYc);
 
         nbRes[i] = nb;
-        nbWeight[i] = bi * pcYi * nb.unbiasedWeight;
+        nbWeight[i] = mis.bi * pcYi * nb.unbiasedWeight;
         nbUc[i] = canonUnshadowed(yi);
         cTot += ci;
-        canonShareSum += share;
+        canonShareSum += mis.canonShare;
     }
 
     let tc = cTot > 0.0 ? cCanon / cTot : 1.0;
     let invV = k > 0 ? 1.0 / float(k) : 0.0;
 
     Reservoir<ScalarSample> merged = reservoirInit<ScalarSample>();
-    float survivorUc = 0.0;
+    float survivorTarget = 0.0;
 
     let mCanon = tc + (1.0 - tc) * invV * canonShareSum;
     if (reservoirMerge(merged, canon, mCanon * pcYc * canon.unbiasedWeight,
                        hashUniform(pixel, 0, 99, 0))) {
-        survivorUc = ucYc;
+        survivorTarget = ucYc;
     }
     for (uint i = 0; i < k; i++) {
         let weight = (1.0 - tc) * invV * nbWeight[i];
         if (reservoirMerge(merged, nbRes[i], weight, hashUniform(pixel, 1 + i, 99, 0))) {
-            survivorUc = nbUc[i];
+            survivorTarget = nbUc[i];
         }
     }
-    reservoirFinalize(merged, survivorUc);
+    reservoirFinalize(merged, survivorTarget);
 
     // The estimate is integrand(Y)·W with the *unshadowed* integrand — the
     // survivor's own visibility is already folded into W (finalize by U_c, not

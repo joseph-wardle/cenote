@@ -11,6 +11,7 @@
 // ray against that stage's TLAS binding — a resource a module cannot own. The
 // temporal combine is unshadowed (D-094), so it needs only the pieces here.
 
+import color;
 import lights;
 import openpbr;
 import pathstate;
@@ -19,13 +20,6 @@ import restir_scene;
 import scene;
 import surface;
 import textures;
-
-// Relative luminance of an ACEScg (AP1) colour — the CIE Y row of the AP1→XYZ
-// matrix, the reservoir's scalar target. Every stage that weighs a candidate by
-// brightness sorts on this one function, so they agree pointwise.
-public float luminance(float3 acescg) {
-    return dot(acescg, float3(0.2722287168, 0.6740817658, 0.0536895174));
-}
 
 // A reconstructed shading point: everything the target function needs to weigh a
 // light sample here, rebuilt from a `Hit` exactly as `restir_candidates` does,
@@ -148,22 +142,41 @@ public Connection connectSampleAt(SceneTable* scene, RestirScene* restir,
     return c;
 }
 
+// The unshadowed target and the light connection at a surface, the shared core
+// of every reuse target. `unshadowed` is p̂ = luminance(L·f·|cosθ|), zero for a
+// sample the surface can't carry (below a horizon the base doesn't transmit
+// through, or a degenerate connection); `connection` and `throughSurface` carry
+// the shadow-ray geometry the visibility-aware target needs on top of it.
+public struct TargetEval {
+    public float unshadowed;
+    public Connection connection;
+    public bool throughSurface;  // the light is on the far side of the surface
+};
+
+public TargetEval evalTarget(SceneTable* scene, RestirScene* restir,
+                             Surface s, DirectLightSample sample) {
+    TargetEval t;
+    t.connection = connectSampleAt(scene, restir, sample, s.position);
+    t.throughSurface = false;
+    t.unshadowed = 0.0;
+    if (!t.connection.valid) {
+        return t;
+    }
+    let wiLight = s.frame.toLocal(t.connection.toLight);
+    t.throughSurface = dot(t.connection.toLight, s.normal) < 0.0;
+    if (wiLight.z == 0.0 || (wiLight.z < 0.0) != t.throughSurface) {
+        return t;
+    }
+    t.unshadowed = luminance(t.connection.radiance
+                             * evalBsdf(s.closure, wiLight, s.wo) * abs(wiLight.z));
+    return t;
+}
+
 // The unshadowed target p̂ = luminance(L·f·|cosθ|) of a light sample at a
-// surface, over the real closure. Zero for a sample the surface can't carry
-// (below a horizon the base doesn't transmit through, or a degenerate
-// connection). This is the own-domain target p̂ every reuse stage evaluates
-// without a shadow ray; the visibility-aware canonical target adds one ray on
-// top (`targetVisAware`, in restir_spatial.slang).
+// surface: the own-domain target p̂ every reuse stage evaluates without a shadow
+// ray. The visibility-aware canonical target adds one ray on top of the same
+// `evalTarget` core (`targetVisAware`, in restir_spatial.slang).
 public float targetUnshadowed(SceneTable* scene, RestirScene* restir,
                               Surface s, DirectLightSample sample) {
-    let c = connectSampleAt(scene, restir, sample, s.position);
-    if (!c.valid) {
-        return 0.0;
-    }
-    let wiLight = s.frame.toLocal(c.toLight);
-    let throughSurface = dot(c.toLight, s.normal) < 0.0;
-    if (wiLight.z == 0.0 || (wiLight.z < 0.0) != throughSurface) {
-        return 0.0;
-    }
-    return luminance(c.radiance * evalBsdf(s.closure, wiLight, s.wo) * abs(wiLight.z));
+    return evalTarget(scene, restir, s, sample).unshadowed;
 }

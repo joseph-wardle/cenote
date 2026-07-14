@@ -228,7 +228,7 @@ struct RestirCandidatesParams {
     width: u32,
     /// Explicit tail padding to the struct's 8-byte alignment (`Pod` forbids the
     /// implicit padding a lone trailing `u32` would leave).
-    pad0: u32,
+    _pad0: u32,
 }
 
 /// Push constants for the `ReSTIR` temporal-reuse stage
@@ -266,7 +266,7 @@ struct RestirTemporalParams {
     decay_frames: u32,
     /// Explicit tail padding to the struct's 8-byte alignment (three trailing
     /// `u32`s would otherwise be implicit padding, which `Pod` forbids).
-    pad0: u32,
+    _pad0: u32,
 }
 
 /// The GPU mirror of `struct Reproject` in `shaders/restir_reproject.slang`: the
@@ -287,10 +287,10 @@ pub struct Reproject {
     depth_threshold: f32,
     /// Previous basis up (scaled by tan(vfov/2)).
     up: [f32; 3],
-    pad0: f32,
+    _pad0: f32,
     /// Previous basis forward (unit).
     forward: [f32; 3],
-    pad1: f32,
+    _pad1: f32,
     /// Last frame's per-pixel hits — reprojection reads these.
     prev_gbuffer: vk::DeviceAddress,
     /// This frame's per-pixel hits — `restir_temporal` writes these.
@@ -301,7 +301,7 @@ pub struct Reproject {
     /// resize); 0 disables reprojection, so the empty same-pixel history reads
     /// as nothing.
     valid: u32,
-    pad2: u32,
+    _pad2: u32,
 }
 
 // The host mirror and the shader struct — and the `REPROJECT_STRIDE` the view
@@ -357,15 +357,15 @@ impl Reproject {
             right: cam.right.to_array(),
             depth_threshold: Self::DEPTH_THRESHOLD,
             up: cam.up.to_array(),
-            pad0: 0.0,
+            _pad0: 0.0,
             forward: cam.forward.to_array(),
-            pad1: 0.0,
+            _pad1: 0.0,
             prev_gbuffer,
             curr_gbuffer,
             width,
             height,
             valid,
-            pad2: 0,
+            _pad2: 0,
         }
     }
 
@@ -394,10 +394,13 @@ struct RestirResolveParams {
     /// (a pixel-owned write — one resolve thread per primary hit).
     radiance: vk::DeviceAddress,
     /// The D-092 debug false-colour target, or 0 when no [`DebugView`] is
-    /// selected (`debug_view` is then [`DebugView::Off`]).
+    /// selected (the low byte of `flags` is then [`DebugView::Off`]).
     debug: vk::DeviceAddress,
-    /// The [`DebugView`] as `u32` — which view to write into `debug`.
-    debug_view: u32,
+    /// Packed control word: the [`DebugView`] enum in the low byte (which view to
+    /// write into `debug`), plus [`DebugView::VISIBILITY_IN_WEIGHT`] and
+    /// [`DebugView::TEMPORAL_IN_WEIGHT`] in bits 8–9. Mirrors `flags` in
+    /// `shaders/restir_resolve.slang`.
+    flags: u32,
     /// This wave's sample index — the delta term's one next-event draw.
     sample_index: u32,
 }
@@ -716,6 +719,18 @@ pub enum DebugView {
     Confidence = 2,
     /// The unbiased contribution weight W as a heatmap — the bias detector.
     UnbiasedWeight = 3,
+}
+
+impl DebugView {
+    /// Bit 8 of the resolve stage's packed `flags` word: the spatial stage ran,
+    /// so the survivor's visibility is already folded into W and `restir_resolve`
+    /// shades it unshadowed. Mirrors `DEBUG_VISIBILITY_IN_WEIGHT` in
+    /// `shaders/restir_resolve.slang`.
+    const VISIBILITY_IN_WEIGHT: u32 = 0x100;
+    /// Bit 9 of that word: the temporal stage ran, so the confidence heatmap
+    /// scales to temporal's compounded M-cap ceiling rather than the candidate
+    /// count. Mirrors `DEBUG_TEMPORAL_IN_WEIGHT` in `shaders/restir_resolve.slang`.
+    const TEMPORAL_IN_WEIGHT: u32 = 0x200;
 }
 
 /// The bounce-0 `ReSTIR` targets a wave writes into, in [`RenderMode::Restir`]:
@@ -1272,13 +1287,14 @@ impl Wavefront {
             sample_index: sample,
             m_cap: Self::RESTIR_TEMPORAL_M_CAP,
             decay_frames: t.decay_frames,
-            pad0: 0,
+            _pad0: 0,
         });
 
         // Spatial reuse on: build its params, and route resolve at the scratch
-        // its survivor lands in. The `DEBUG_VISIBILITY_IN_WEIGHT` bit (0x100,
-        // mirrored in restir_resolve.slang) rides in the debug word — it tells
-        // resolve the survivor's visibility is already in W, so shade unshadowed.
+        // its survivor lands in. The visibility-in-weight bit
+        // (DebugView::VISIBILITY_IN_WEIGHT, mirrored in restir_resolve.slang)
+        // rides in the packed `flags` word — it tells resolve the survivor's
+        // visibility is already in W, so shade unshadowed.
         let spatial = restir.scratch.map(|scratch| RestirSpatialParams {
             paths,
             hits,
@@ -1296,14 +1312,19 @@ impl Wavefront {
             depth_threshold: Self::RESTIR_DEPTH_THRESHOLD,
         });
         let (resolve_reservoirs, visibility_in_weight) = match restir.scratch {
-            Some(scratch) => (scratch.device_address(), 0x100),
+            Some(scratch) => (scratch.device_address(), DebugView::VISIBILITY_IN_WEIGHT),
             None => (reservoirs, 0),
         };
-        // The temporal-ran flag (0x200, mirrored in restir_resolve.slang) rides
-        // the same word — it only sets the confidence heatmap's scale, since
-        // temporal compounds M toward its M-cap ceiling far past the candidate
-        // count, and an unscaled heatmap would clip a warmed pixel to solid red.
-        let temporal_in_weight = if restir.temporal.is_some() { 0x200 } else { 0 };
+        // The temporal-ran flag (DebugView::TEMPORAL_IN_WEIGHT, mirrored in
+        // restir_resolve.slang) rides the same word — it only sets the confidence
+        // heatmap's scale, since temporal compounds M toward its M-cap ceiling far
+        // past the candidate count, and an unscaled heatmap would clip a warmed
+        // pixel to solid red.
+        let temporal_in_weight = if restir.temporal.is_some() {
+            DebugView::TEMPORAL_IN_WEIGHT
+        } else {
+            0
+        };
 
         RestirWaveParams {
             candidates: RestirCandidatesParams {
@@ -1315,7 +1336,7 @@ impl Wavefront {
                 sample_index: sample,
                 candidates: Self::RESTIR_CANDIDATES,
                 width,
-                pad0: 0,
+                _pad0: 0,
             },
             temporal,
             spatial,
@@ -1329,7 +1350,7 @@ impl Wavefront {
                 radiance: radiance.device_address(),
                 // 0 when no view is selected; restir_resolve then writes nothing.
                 debug: restir.debug.map_or(0, Buffer::device_address),
-                debug_view: restir.debug_view as u32 | visibility_in_weight | temporal_in_weight,
+                flags: restir.debug_view as u32 | visibility_in_weight | temporal_in_weight,
                 sample_index: sample,
             },
         }
