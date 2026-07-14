@@ -2315,3 +2315,220 @@ polish, held deliberately so the prose is written once against the final figures
 than twice. A live **Falcor A/B** and the **GRIS/CRIS** charter-scope question remain
 deferred (deferrals.md). None of these gate M3's done-ness — the four validation gates
 above do, and they are green.
+
+## 2026-07-14 — M4 opening: the Hydra 2 delegate and the out-of-process render server
+
+*M4's eight structural decisions, locked by a structured interview over two sourced
+research passes — the Hydra render-delegate contract and the Arras/MoonRay
+out-of-process precedent — then re-verified by an adversarial fact-checking pass, and
+finally **pivoted to Hydra 2** by a third, source-level pass over OpenUSD 25.11–26.05
+and dev (the scene-index observer machinery, hdPrman's experimental Riley observer back
+end, the `HdRenderer` stub, the AOUSD deprecation roadmap). The working plan is
+[m4-plan.md](m4-plan.md); this entry carries the rationale, the four standing deferrals
+the milestone picks up, and what step 0 (the transport spine) actually shipped.*
+
+### D-097: usdview-live is the milestone; Houdini-ready by rule; pinned to stock USD 26.05
+Status: accepted. Done means cenote appears in usdview's Renderer menu and renders and
+refreshes a real USD stage live. The render server and transport obey one standing rule:
+nothing may assume usdview specifically, or bake in a stock-USD-only assumption an HDK
+rebuild couldn't satisfy — so Houdini/Solaris later is a recompile-and-package step, not
+a rearchitecture (its deferral, with the ABI details, lives in deferrals.md).
+
+*Why usdview:* the charter names it as the legible pipeline-TD artifact, and stock USD
+is one pinned version, compile- and GPU-testable without a DCC license; folding the HDK
+ABI maze into M4 would roughly double the integration surface on the fragile step. *Why
+26.05:* it is the newest release and the first where scene-index consumption is the
+blessed default. Nothing older is calmer — an older pin just defers the same breaks to
+the first upgrade.
+
+### D-098: The delegate is scene-index-native — zero Rprims, an observer on the terminal scene index
+Status: accepted. The delegate is a thin translator, out-of-process from the renderer.
+It lists **no supported Rprim types** (back-end emulation then instantiates nothing) and
+consumes the scene by overriding `SetTerminalSceneIndex()`: notices batch in a stock
+`HdsiPrimTypeNoticeBatchingSceneIndex` and flush through a prim-managing observer in
+`Update()` — Hydra's serial per-frame hook, run before task execution. Hydra's dirty
+*locators* map onto cenote's patches (a locator-guarded pull is an `Option<…>` field;
+clean attributes stay `None`); `PrimsRemoved` is `Op::Remove`, which was written for
+exactly this. All validation, reference resolution, and prep stay server-side —
+`SceneDescription::apply` is already validate-then-apply-atomic with an equality gate,
+and re-implementing that in C++ is the exact duplication the thin shape avoids.
+
+*Why the forefront bet is safe enough:* the classic Sync path was condemned while M4 was
+being planned — 26.03 made scene-index mode the UsdImaging default and deprecated
+scene-delegate mode, with removal on Team Hydra's stated roadmap — while the consuming
+contract is verifiably stable (`HdSceneIndexObserver` unchanged in two years, the
+prim-managing observer byte-identical since 24.03, the geometry schemas frozen). The
+zero-Rprim shape is verified legal against source (`HdSceneIndexAdapterSceneDelegate`
+silently skips unsupported prim types), and the pattern is hdPrman's own experimental
+Riley observer back end, taken to its logical end. The pure `HdRenderer` is *not* the
+target: the class is a verbatim stub whose only implementation is the adapter wrapping a
+render delegate — which is exactly how cenote runs under the 26.03+ engine (deferral in
+deferrals.md, trigger: the API gains real methods). Threading is retired as a risk class
+by this choice: one `Update()` flush → one atomic `ChangeSet`, single-threaded by
+construction; the classic design's parallel-Sync accumulator lock is deleted, not
+ported. The pre-agreed fallback if the all-observer shape hits an unforeseen wall is a
+classic Sync delegate *on the same wire* — only the C++ consumption ring swaps.
+
+### D-099: Crash isolation, not recovery
+Status: accepted. Isolation comes from the process boundary alone: on server death the
+delegate degrades gracefully (dead-socket detection, no self-crash) and recovers on the
+next destroy/recreate — a renderer toggle or stage reload hands the recreated delegate a
+fresh terminal scene index, and the observer receives `PrimsAdded` for the whole stage.
+No delegate-held replay state. The connection is genesis-then-deltas shaped
+(`Replace` then `Apply`s), so automatic replay is a clean later bolt-on with no wire
+change (deferral in deferrals.md).
+
+*Why:* a render delegate can't cleanly self-trigger a Hydra repopulate, so the real
+options are manual-zero-state or a full delegate-side scene mirror; the mirror costs a
+second copy of *geometry* in the delegate process plus respawn orchestration —
+unjustified when re-populating usdview is a two-second toggle. Verified against source:
+hdMoonray pays exactly that mirror (its retained `SceneContext`, which its RDL delta
+encoding needs as a baseline anyway; Arras restarts nothing), where cenote's patches
+come straight from dirty locators and need no baseline at all.
+
+### D-100: Control transport — loopback TCP + a spawn-time token, MessagePack change-sets, strict request/response
+Status: accepted. The control channel is loopback TCP (`127.0.0.1`, ephemeral port) with
+a spawn-time token, u32-LE length-prefixed MessagePack frames (`rmp-serde` defaults,
+positional struct arrays), strict request/response — the server never speaks unprompted,
+so the C++ client needs no reader thread. The payload is the existing serde `ChangeSet`
+as a **full 1:1 wire mirror** (`cenote-wire`, deps `serde` + `rmp-serde` only), plus the
+small control surface for what is not scene data: `SetCamera` (the inputs-lane fast
+path — mandatory, because `Session`'s inputs-lane camera overwrites the scene camera at
+every wave, so a `CameraPatch` would be silently dead), `Resize` (the shm handshake),
+`Ping`. Continuous status (frame counter, samples, converged, rejected-edit count) rides
+the shm header, never the socket. An `Ack` is a receipt, not a validation: edits apply
+at wave boundaries, rejections accumulate onto the next response, and the header's
+monotonic `rejected_edits` counter tells an idle client to `Ping` for the strings. EOF
+is shutdown — the server is spawned per-delegate, so there is no shutdown message.
+Cross-language agreement is pinned by a **byte-exact golden corpus** with Rust as the
+authority: the corpus builder generates checked-in golden bytes (regenerated
+`UPDATE_GOLDENS`-style, consciously, in the same commit as any wire change), the C++
+encoder must reproduce them byte for byte, and a Rust test decodes the goldens and
+asserts the values so the goldens themselves cannot rot. Not gRPC, not UDS.
+
+*Why:* minimal C++ dependencies *is* a Houdini-ready requirement — gRPC drags in
+protobuf + abseil, which a host ships its own ABI-incompatible copies of, and it would
+force a second `.proto` schema beside the one source of truth. The C++ standard library
+has no IPC at all, and loopback TCP is the one transport that is single-source-path on
+every platform in both languages (`std::net`; BSD sockets ≈ Winsock to within four
+lines), with no stale socket files; the token closes the any-local-process gap UDS
+permissions covered. The corpus test replaces gRPC's codegen as the drift guard, aimed
+squarely at the 20-field material patch, and runs in CI with no USD and no GPU. This
+decision **realizes two standing deferrals**: the C ABI (D-052) arrives as serialized
+change-sets over a socket rather than per-attribute FFI — the MoonRay `RDLMessage` shape
+D-052 always named — and the binary change-set wire format (D-055) arrives as
+MessagePack, a drop-in because file = wire = the same serde value by construction.
+
+### D-101: Pixel transport — CPU shared memory, double-buffered, beauty + depth, server-side Rec.709
+Status: accepted. Pixels cross by POSIX named shm (`shm_open` + `mmap` — the one
+deliberately platform-specific piece; the Windows twin is a deferral), one segment per
+size, named `/cenote-<pid>-<generation>` and carried in-band in `FbDesc`; the previous
+segment is unlinked when the client's next request proves the reply was processed. The
+layout is one 4 KiB header page (magic + layout version, dims, plane offsets,
+`front_index`, `frame_counter`, `samples`, `converged`, `rejected_edits`) plus two
+buffers, each beauty RGBA f32 + depth f32. The tear protocol is lock-free: the writer
+fills the back buffer, flips the index, and release-increments the counter; a reader's
+copy is valid iff the counter advanced ≤ 1 across it. No locks, no futexes — the client
+can never block the render. The beauty is converted server-side from `ACEScg` to linear
+`Rec.709` (one 3×3, `color::rec709_from_acescg()` — the runtime inverse of the one
+authored constant, so a second hand-typed matrix never exists) before every shm write;
+depth crosses unconverted. `HdRenderBuffer::GetResource()`'s GPU-texture path stays a
+*measured* later upgrade (deferral).
+
+*Why:* at lookdev viewport resolution the readback (~1.3 ms/1080p) hides behind the next
+frame's render, and the high-res regime where it would bite is the converged still,
+where per-frame latency stops mattering. The pivot re-verified the seam: `renderBuffer`
+Bprims remain the only pixel path even under the 26.03+ engine (`HdxAovInputTask`
+`Map()`s CPU pixels). The color conversion is not optional: usdview's default color
+correction applies only the sRGB transfer curve — no gamut conversion exists anywhere in
+its default path — so an `ACEScg` frame would render silently oversaturated; hdPrman on
+dev ships the same delegate-converts fix. The step-0 integration test drives a saturated
+`Rec.709` primary through the whole spine precisely so dropping the 3×3 fails loudly.
+
+### D-102: Material scope — UsdPreviewSurface only
+Status: accepted. A bounded switch from the `surface` terminal of the material network
+schema (nodes, parameters, connections read as data sources; the universal render
+context is the empty token, read explicitly — 26.03 removed the cross-context fallback)
+covering `UsdPreviewSurface` + `UsdUVTexture` + `UsdPrimvarReader_*` into
+`MaterialPatch`. Meshes with no bound material shade from `displayColor`. Four
+documented exceptions: `useSpecularWorkflow=1`'s direct F0 approximates through the
+specular tint; `displacement` and `occlusion` have no OpenPBR home; `opacityThreshold`'s
+cutout applies delegate-side. `open_pbr_surface` recognition and MaterialX-graph
+evaluation are deferrals.
+
+*Why:* UsdPreviewSurface is the USD lingua franca every asset ships or falls back to,
+and its default workflow maps near-losslessly onto cenote's shipped closure. cenote is a
+fixed-closure renderer, so the MaterialX-SDK-codegen path is architecturally moot — not
+deferred, nonexistent for this design — while `open_pbr_surface` (whose params *are*
+cenote's) is a one-branch fast-follow on the same switch.
+
+### D-103: Lights — UsdLux onto cenote's existing paths
+Status: accepted. Params read lazily by name from the member-less light container
+(UsdLux attribute names through `Get(name)`; enumeration is impossible by design;
+`treatAsPoint` via raw-attribute fallthrough). distant → `Distant` delta (its default
+0.53° angle collapsed — the stated floor); sphere+`treatAsPoint` → point delta; dome →
+the equirect `Environment` (one active); rect/disk/sphere-area/cylinder → a synthesized
+emissive mesh + emissive material + instance, placed by the light transform, radiance
+`intensity·2^exposure·color`, × the blackbody RGB under `enableColorTemperature`, ÷
+emitting area under `normalize`, rect/disk wound one-sided (−Z emits, matching UsdLux).
+Light textures, the per-lobe response multipliers, the shaping API, and native analytic
+area lights are deferrals.
+
+*Why:* cenote already *has* area lights — emissive meshes, MIS-consistent,
+ReSTIR-integrated, golden-covered, one-sided like UsdLux's — so synthesis is the correct
+mechanism, not a workaround. Native analytic sampling is a core-estimator feature
+justified by measured variance, never by the presence of a UsdLux prim type.
+
+### D-104: Repo, build, and ABI shape — three components against system USD
+Status: accepted. `cenote-wire` (the USD-free wire mirror + MessagePack + framing + the
+shm layout constants — the Rust half of the drift guard), `cenote-server` (a binary
+wrapping `render::Session`: TCP listener, request/response loop, the exhaustive
+destructuring wire→`Op` translation — a field added on either side is a compile error —
+and the shm framebuffer writer), and `hydra/` (a C++ CMake tree outside the Cargo
+workspace: the adapter-ring delegate shell with zero Rprims, the scene-index observer,
+a C++ wire mirror, transport client, and server spawn; the renderer-plugin bootstrap
+glue isolated in one thin file, since that surface broke in 23.02 and 25.11 and dev
+already carries 26.08's break). Built against **system-provided USD** (stock 26.05, or
+the HDK — the Houdini pivot), never a vendored USD build.
+
+*Why:* the server is plumbing around code that already exists; keeping the wire encoder
+USD-free lets the drift guard run in CI with no USD and no GPU; stock ↔ HDK as a
+build-root change on USD-version-agnostic source *is* the Houdini-ready rule made
+concrete. Vendoring USD's enormous build is unjustified for a solo project. This
+decision also hosts the remaining two deferral pickups: the **array instancer op**
+(D-073) lands at step 5 as the form Hydra's instancer prims deliver, and the **viewer
+single-source-of-truth scene graph** (D-064/D-082/D-083) is realized by the delegate's
+model — the render index owns the scene and the delegate syncs deltas — retiring the
+hand-mirrored `ui_desc` replica as the M4 answer to the M2 device.
+
+### What step 0 shipped (the transport spine)
+Status: shipped with this entry. The checkpoint holds: a Rust-only integration test
+(`cenote-server/tests/spine.rs`) spawns the real binary, drives it over TCP — handshake,
+resize (with the old segment's unlink proven), the `SetCamera` lane, a genesis
+`Replace`, a live edit, a rejected edit surfacing through the header counter and
+`Ping` — and reads correct frames out of shm under the tear protocol, including a
+saturated `Rec.709` primary that fails if the 3×3 is ever dropped, plus EOF → exit 0 and
+wrong-token → nonzero. Implementation notes that go beyond the plan's text, recorded so
+they read as decisions rather than surprises:
+
+- **Empty scenes render.** `Scene::prep` (and update) previously rejected a description
+  with no instances; the server stands up its `Session` on exactly that (camera +
+  settings singletons only), and a live edit may delete the last instance — so the core
+  now preps zero instances: the empty TLAS and the instance tables pad one unread record
+  each (the existing lightless-scene pattern), every ray misses, and the frame is black.
+  Pinned by two GPU tests (`an_empty_scene_preps_and_renders_black`,
+  `deleting_the_last_instance_updates_cleanly`).
+- **Doubly-optional fields get an explicit wire spelling.** MessagePack cannot tell
+  `Some(None)` from `None` — serde flattens both to nil — so the wire mirrors
+  `Option<Option<T>>` as `Option<Reset<T>>` (`Reset::Clear` | `Reset::Set(v)`), and the
+  server's translation unfolds it. Caught at design time by the corpus requirement that
+  all three states round-trip distinctly; a bare mirror would have silently turned
+  "clear the normal map" into "leave it alone".
+- **The server owns the description's singletons.** A Hydra genesis carries no camera or
+  settings op (the active camera is host view state on the `SetCamera` lane), so a
+  `Replace` lacking them gets defaults injected; and because a camera-touching apply
+  re-lowers the description camera over the inputs lane, the server re-asserts the last
+  `SetCamera` after any camera-touching set.
+- **Convergence is the sample cap, for now.** `Session` doesn't expose its park state,
+  so the header's `converged` flag reports samples ≥ `CENOTE_SERVER_MAX_SAMPLES`
+  (default 4096); a finer surface is step 2's business, alongside the refresh loop.

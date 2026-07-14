@@ -1,0 +1,19 @@
+[package]
+name = "cenote-wire"
+description = "The render server's wire: explicit change-set mirror types, MessagePack framing, and the shared-memory framebuffer layout"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Deliberately *not* a dependent of the renderer: the wire is the
+# cross-language contract, and keeping it USD-free and GPU-free is what
+# lets the byte-exact drift guard run in CI with neither (D-100). serde +
+# the MessagePack codec are the whole dependency budget.
+[dependencies]
+rmp-serde = "1.3.1"
+serde = { version = "1.0.228", features = ["derive"] }
+
+[lints]
+workspace = true

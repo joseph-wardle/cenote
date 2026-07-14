@@ -132,8 +132,21 @@ impl Context {
         name: &str,
         instances: &[TlasInstance<'_>],
     ) -> Result<AccelerationStructure> {
-        let raw: Vec<vk::AccelerationStructureInstanceKHR> =
+        let mut raw: Vec<vk::AccelerationStructureInstanceKHR> =
             instances.iter().map(raw_instance).collect();
+        // Vulkan forbids empty buffers, so a zero-instance TLAS (an empty
+        // scene — every ray misses) stages one zeroed instance the build
+        // never reads: the primitive count below stays 0.
+        if raw.is_empty() {
+            raw.push(vk::AccelerationStructureInstanceKHR {
+                transform: vk::TransformMatrixKHR { matrix: [0.0; 12] },
+                instance_custom_index_and_mask: vk::Packed24_8::new(0, 0),
+                instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(0, 0),
+                acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
+                    device_handle: 0,
+                },
+            });
+        }
         // A plain-old-data FFI struct; viewing it as bytes for upload is sound.
         let bytes =
             unsafe { slice::from_raw_parts(raw.as_ptr().cast::<u8>(), size_of_val(&raw[..])) };

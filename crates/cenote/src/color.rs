@@ -22,6 +22,16 @@ pub fn acescg_from_rec709(rec709: Vec3) -> Vec3 {
     ACESCG_FROM_REC709 * rec709
 }
 
+/// The `ACEScg` → linear `Rec.709` matrix — the way *out*, for a consumer
+/// (the M4 render server) whose display path expects `Rec.709` primaries.
+/// Computed as the runtime inverse of the one authored constant, so a
+/// second hand-typed matrix never exists to drift; returned as the matrix
+/// (rather than converting one color) so a pixel loop hoists it.
+#[must_use]
+pub fn rec709_from_acescg() -> Mat3 {
+    ACESCG_FROM_REC709.inverse()
+}
+
 /// Luminance of an `ACEScg` color — the Y row of the AP1 RGB→XYZ matrix
 /// (ACES TB S-2014-004). The scalar "how bright" every power-proportional
 /// sampling decision (light selection, environment CDFs) weighs by.
@@ -40,6 +50,17 @@ mod tests {
     fn white_maps_to_white() {
         let white = acescg_from_rec709(Vec3::ONE);
         assert!(white.abs_diff_eq(Vec3::ONE, 1e-6), "{white}");
+    }
+
+    /// The inverse takes an authored color back to itself — the round trip
+    /// the render server's shm write depends on (`Rec.709` out for every
+    /// `ACEScg` frame), true by construction but pinned against a future
+    /// retyping of either side.
+    #[test]
+    fn the_inverse_round_trips() {
+        let authored = Vec3::new(0.25, 0.5, 0.75);
+        let back = rec709_from_acescg() * acescg_from_rec709(authored);
+        assert!(back.abs_diff_eq(authored, 1e-6), "{back}");
     }
 
     /// The primaries land on their published `ACEScg` coordinates (ACES TB

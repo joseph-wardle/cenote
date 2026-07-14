@@ -40,8 +40,10 @@ impl Scene {
     ///
     /// [`Error::Scene`](crate::Error) when this build can't render the
     /// description — not exactly one camera and settings, more than one
-    /// environment, no instances, or a referenced file (PLY, texture,
-    /// environment) that doesn't read or decode. Any other error is a GPU
+    /// environment, or a referenced file (PLY, texture, environment) that
+    /// doesn't read or decode. A description with no instances is *not* an
+    /// error: it renders black (the M4 render server starts on one, and a
+    /// live edit may delete the last instance). Any other error is a GPU
     /// fault from upload or acceleration-structure builds.
     #[expect(
         clippy::missing_panics_doc,
@@ -575,6 +577,101 @@ mod tests {
                 "{label}: the lamp should light the floor either way"
             );
         }
+    }
+
+    /// The M4 render server stands up its `Session` on an empty scene —
+    /// camera and settings only — so zero instances must prep, trace
+    /// (every ray misses the empty TLAS), and render black under the
+    /// default black sky rather than reject.
+    #[test]
+    fn an_empty_scene_preps_and_renders_black() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let mut description = SceneDescription::new();
+        description
+            .apply(&ChangeSet {
+                ops: vec![
+                    Op::Settings(SettingsPatch::new("main")),
+                    Op::Camera(CameraPatch::new("main")),
+                ],
+            })
+            .expect("valid data");
+        let scene = Scene::prep(&gpu, &mut description).expect("an empty scene preps");
+        let pixels = render(&gpu, &scene);
+        assert!(
+            pixels.chunks_exact(4).all(|texel| texel[..3] == [0.0; 3]),
+            "an empty scene under a black sky should render black"
+        );
+    }
+
+    /// …and a live edit may delete the last instance: the update lands and
+    /// the scene renders empty instead of wedging the session on a
+    /// rejection it can never edit its way out of.
+    #[test]
+    fn deleting_the_last_instance_updates_cleanly() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        // One emissive panel dead ahead of the default camera, so the
+        // populated frame is provably non-black before the deletion.
+        let mut description = SceneDescription::new();
+        description
+            .apply(&ChangeSet {
+                ops: vec![
+                    Op::Settings(SettingsPatch::new("main")),
+                    Op::Camera(CameraPatch::new("main")),
+                    Op::Mesh(MeshPatch {
+                        source: Some(MeshSource::Inline {
+                            positions: vec![
+                                [-1.0, -1.0, 0.0],
+                                [1.0, -1.0, 0.0],
+                                [1.0, 1.0, 0.0],
+                                [-1.0, 1.0, 0.0],
+                            ],
+                            normals: Some(vec![[0.0, 0.0, 1.0]; 4]),
+                            uvs: None,
+                            triangles: vec![[0, 1, 2], [0, 2, 3]],
+                        }),
+                        ..MeshPatch::new("panel")
+                    }),
+                    Op::Material(Box::new(MaterialPatch {
+                        emission_luminance: Some(10.0),
+                        ..MaterialPatch::new("lamp")
+                    })),
+                    Op::Instance(InstancePatch {
+                        mesh: Some("panel".into()),
+                        material: Some("lamp".into()),
+                        ..InstancePatch::new("thing")
+                    }),
+                ],
+            })
+            .expect("valid data");
+        let mut scene = Scene::prep(&gpu, &mut description).expect("prep");
+        let lit = render(&gpu, &scene);
+        assert!(
+            lit.chunks_exact(4).any(|texel| texel[0] > 1.0),
+            "the emissive panel should be visible before the deletion"
+        );
+
+        description
+            .apply(&ChangeSet {
+                ops: vec![
+                    Op::Remove(Kind::Instance, "thing".into()),
+                    Op::Remove(Kind::Mesh, "panel".into()),
+                    Op::Remove(Kind::Material, "lamp".into()),
+                ],
+            })
+            .expect("valid removal");
+        let dirty = description.take_dirty();
+        scene
+            .update(&gpu, &description, &dirty)
+            .expect("updating to an empty scene");
+        let empty = render(&gpu, &scene);
+        assert!(
+            empty.chunks_exact(4).all(|texel| texel[..3] == [0.0; 3]),
+            "the emptied scene should render black"
+        );
     }
 
     /// The untouched-on-error contract: an update rejected in the host

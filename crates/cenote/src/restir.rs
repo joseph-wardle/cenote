@@ -25,7 +25,7 @@ use crate::gpu::{Buffer, Context};
 use crate::lights::LightRecord;
 
 pub(crate) use identity::{EmissiveLight, LightIdentityRegistry};
-use identity::LightRemap;
+use identity::{LIGHT_ID_NONE, LightRemap};
 
 /// The DI reservoir's concrete sample — the host mirror of `DirectLightSample`
 /// in `shaders/reservoir_di.slang`. A light surface point in the re-evaluable
@@ -164,12 +164,18 @@ impl RestirResources {
             }),
             usage,
         )?;
-        // Both remap tables are non-empty for any non-empty scene: `instance_to_id`
-        // sizes to the instance count, `id_to_instance` to the reserved-plus-minted
-        // id block (at least the environment sentinel's slot).
+        // `instance_to_id` sizes to the instance count, so an empty scene pads
+        // it with one unreachable slot the same way; `id_to_instance` is never
+        // empty (the reserved id block holds at least the environment
+        // sentinel's slot).
+        let padded_id = [LIGHT_ID_NONE];
         let instance_to_id = gpu.upload_buffer(
             "restir.instance_to_id",
-            bytemuck::cast_slice(&remap.instance_to_id),
+            bytemuck::cast_slice(if remap.instance_to_id.is_empty() {
+                &padded_id
+            } else {
+                &remap.instance_to_id
+            }),
             usage,
         )?;
         let id_to_instance = gpu.upload_buffer(

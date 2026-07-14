@@ -14,14 +14,6 @@ here. An entry's D-reference points at the decision that created the deferral.
 
 ## Scene API & formats
 
-- **C ABI** *(revisit: M4)* — Today: pure-Rust change-set API. Production shape: a
-  small C ABI whose payload is *serialized change-sets*, MoonRay's RDLMessage
-  pattern (manifest + payload + sync id) — not per-attribute FFI setters. The M4
-  render server and Hydra delegate are the first real consumers. (D-052)
-- **Binary change-set wire format** *(revisit: M4, with the ABI)* — Today: RON text.
-  Production shape: the same serde value through a compact binary codec — a drop-in
-  because file = wire = the same value by construction. Adopt when delta traffic is
-  measured, not assumed, to be a bottleneck. (D-055)
 - **Bulk-data binary container** *(revisit: M5 geometry depth, or when load time
   hurts)* — Today: inline RON arrays or PLY-by-reference. Production shape: a
   memory-mappable companion payload (the role USDC/Alembic play). PLY references
@@ -31,10 +23,6 @@ here. An entry's D-reference points at the decision that created the deferral.
   attribute tables with per-attribute metadata. Only a third-party-extensible
   renderer needs this; if the charter's no-plugin stance ever changes, this is the
   first consequence. (D-053)
-- **Array instancer op** *(revisit: M4 Hydra instancers / M5 landscape-class
-  scenes)* — Today: N named instance objects. Production shape: a native op
-  carrying per-instance transform arrays, the form Hydra instancers deliver and
-  vegetation-scale scenes need. (D-073)
 
 ## Importer coverage
 
@@ -256,14 +244,126 @@ built to extend but that M3 consciously does not build.
   through the Hydra delegate supplies this wholesale)* — Today: material panel only.
   Building authoring UI ourselves duplicates what the M4 milestone gets for free.
   (D-064)
-- **Viewer scene replica → single source of truth** *(revisit: M4, with the Hydra
-  delegate)* — Today: the viewer keeps its own `SceneDescription` replica (`ui_desc`),
-  hand-mirrored to the render thread's copy on every edit, because the rendered
-  description moved onto the render thread and is unreadable. There is no confirmation
-  channel back, so a reload the render thread rejects at *residency* leaves the replica
-  ahead of what actually renders until the next good reload (D-083(8)). Production
-  shape: the scene graph is the single authority and the session reads a snapshot from
-  it — the Hydra delegate's model, where the render index owns the scene and the
-  delegate syncs deltas. The manual mirror is a temporary M2 device the M4 delegate
-  replaces wholesale; the fix is a scene-version the published frame carries, so the
-  replica advances only on acceptance. (D-064, D-082, D-083)
+
+## Hydra delegate & render server
+
+The M4 delegate (D-097…D-104, [m4-plan.md](m4-plan.md)) ships the smallest thing that
+renders a real USD stage live in usdview. Everything the interview consciously left out
+of that first delegate lands here.
+
+- **primId / instanceId AOVs — interactive selection** *(revisit: when click-to-select
+  in the usdview render viewport is wanted — a small, self-contained add)* — Today: the
+  delegate exposes beauty + first-hit depth; the render viewport carries no object
+  identity, so usdview cannot pick or highlight a rendered prim by click. Production
+  shape: `primId`/`instanceId` integer AOVs written from the first-hit `Hit` (the
+  geometry already carries the identity — it is the light-id's sibling), surfaced as
+  `HdAovTokens->primId`/`instanceId` render buffers Hydra maps to selection. Distinct
+  from the cryptomatte/object-ID compositing entry above (D-073): that is offline comp,
+  this is live viewport picking. One extra cost the zero-Rprim shape adds: the render
+  index's own primId→path table is populated at Rprim insertion, so with no Rprims
+  `GetRprimPathFromPrimId` returns nothing — the revival also builds the delegate's own
+  id→`SdfPath` table, plus the `primId` + `depth` buffers the pick-from-render-buffer
+  task reads. (D-101)
+- **GPU-shared framebuffer (dma-buf / external memory)** *(revisit: profiled
+  motion-to-photon shows the CPU readback dominating at the target viewport resolution —
+  4K interactive, or many-AOV interactive denoise)* — Today: CPU shared memory,
+  double-buffered async readback, beauty-only across the wire. Production shape: cenote
+  renders into exported external `VkDeviceMemory` (dma-buf fd on Linux, Win32 handle on
+  Windows) imported into the host's Hgi backend (HgiGL/HgiVulkan) via
+  `HdRenderBuffer::GetResource()` — zero PCIe crossing, zero CPU copy. Deliberately *not*
+  first: it re-couples the two processes at the GPU-memory + graphics-backend level,
+  undoing the clean byte-boundary that makes the split simple and portable, and it splits
+  into per-platform interop branches. Shares external-memory machinery with the OIDN
+  zero-copy and timeline-semaphore passes (D-063). (D-101)
+- **Native `HdRenderer` implementation** *(revisit: the `HdRenderer` API gains real
+  methods — the `HdLegacyRenderControlInterface` replacement lands — or a first in-tree
+  implementation appears)* — Today: cenote runs under the Hydra 2.0 engine path (26.03+:
+  `HdRendererPlugin::CreateRenderer` returns the adapter wrapping the delegate shell) —
+  an `HdRenderer` in the only form that exists, with scene consumption already fully
+  scene-index-native. The class itself is a verbatim stub ("TODO: Add API here to
+  replace HdLegacyRenderControlInterface"); going "pure" today means hand-implementing
+  ~25 pure virtuals of transitional task-execution machinery (AOV input, color
+  correction, present, Hgi interop) that the adapter provides for free and Pixar is
+  about to replace — nothing in the OpenUSD tree does it, hdPrman included. Production
+  shape: implement the real API when it exists; the migration touches only the thin
+  adapter ring, and the observer core, wire, and server never know. (D-098)
+- **Windows host (transport + shm)** *(revisit: the first Windows host — Houdini or
+  otherwise — materializes)* — Today: the control channel is loopback TCP + a spawn-time
+  token, single-source-path on Windows by construction; the one deliberately-POSIX piece
+  is the framebuffer's `shm_open`/`mmap` (~20 lines), whose Windows twin is named
+  `CreateFileMapping`/`MapViewOfFile` (~20 more). The wire, protocol, and shm layout
+  carry no platform assumptions — the port is those two dozen lines plus a CI lane.
+  (D-100)
+- **Automatic crash recovery / scene replay** *(revisit: the heavyweight-Houdini case,
+  where re-populating a large stage is not a cheap renderer-toggle)* — Today: the process
+  boundary gives crash *isolation* (the host survives a cenote crash); recovery is
+  *manual* — the user re-populates via a renderer toggle or stage reload, and the
+  delegate holds no scene state. Production shape: the delegate keeps a per-prim
+  op-shadow (the `Op`s it last emitted per `SdfPath`), detects the dead socket, respawns
+  `cenote-server`, and re-sends the accumulated genesis `ChangeSet` — the hdMoonray model
+  (verified against source: its delegate retains a full `SceneContext` and lazily
+  re-sends genesis on reconnect; Arras itself restarts nothing). The connection protocol
+  is already genesis-then-deltas shaped, so this is a pure
+  bolt-on with no wire change; it costs a second full copy of geometry in the delegate
+  process, which is why it waits. (D-099)
+- **Native analytic area lights** *(revisit: measured variance on sphere/disk-heavy
+  lookdev scenes — a core-renderer feature, surfaced by the M4 UsdLux mapping)* — Today:
+  area lights are emissive meshes (rect → 2 triangles, disk/sphere → tessellated emissive
+  geometry), sampled by the existing power-alias NEE with MIS — correct, unbiased,
+  ReSTIR-integrated, golden-covered. Production shape: parametric rect/disk/sphere/cylinder
+  primitives with unbiased solid-angle importance sampling (Ureña spherical-rectangle,
+  sphere-cone), a matching entry in the alias table, and — the real cost — a
+  ray-vs-analytic-light intersection path so BSDF-sampled rays still hit the light and MIS
+  stays symmetric (else glossy reflections of the light lose their strategy), plus the
+  ReSTIR reservoir learning the new light type. LTC-style analytic shading is *not* the
+  route: it is biased, and the preview=final thesis forbids it. Justified by variance
+  (sphere lights first), never by "UsdLux has a RectLight prim." (D-103)
+- **Subdivision refinement** *(revisit: subdiv-authored hero assets read visibly faceted
+  in the lookdev viewport)* — Today: USD meshes default to `subdivisionScheme =
+  catmullClark`, and the delegate triangulates the base cage via
+  `HdMeshUtil::ComputeTriangleIndices` — the accepted floor at usdview's default
+  complexity (refineLevel 0, where hdEmbree does the same; at higher refine levels
+  hdEmbree hands Embree true subdivision geometry). Production shape: OpenSubdiv
+  refinement of the cage at the display style's refineLevel, run delegate-side before the
+  `MeshPatch`, so the wire and the renderer stay subdivision-ignorant. (D-098)
+- **UsdLux fidelity extras — light textures, response multipliers, sun angle** *(revisit:
+  an asset visibly depends on one; textured softboxes are the common case)* — Today: the
+  M4 mapping carries `intensity·2^exposure·color`, `normalize`, `enableColorTemperature`,
+  one-sided rect/disk emission, and `treatAsPoint`; it drops `texture:file` on rect and
+  dome-adjacent area lights, dome `texture:format`s beyond `latlong`
+  (mirroredBall/angular/cube-cross), the per-lobe `diffuse`/`specular` response
+  multipliers (inexpressible for emissive geometry without shader support), the shaping
+  API (cone/focus/IES), and DistantLight's angular diameter (default 0.53°, collapsed to
+  a delta — sun-sized soft shadows lost). Production shape: rect-light textures ride the
+  existing `emissionTexture` path on the synthesized mesh; the sun angle becomes a
+  cone-sampled distant light; shaping and response multipliers wait on native analytic
+  lights (above). (D-103)
+- **`open_pbr_surface` / `standard_surface` node recognition** *(revisit: when the Hydra
+  demo should exercise the full closure — coat/fuzz/transmission — which UsdPreviewSurface
+  cannot express)* — Today: the material node switch handles UsdPreviewSurface only; a
+  MaterialX surface arrives and maps to the default surface. Production shape: one more
+  branch in the same switch reading the OpenPBR (or Standard Surface) root node's
+  parameters straight into `MaterialPatch` — a near-identity copy, since cenote's closure
+  *is* OpenPBR — reusing the existing texture-node handling and needing no MaterialX SDK.
+  One prerequisite beyond the branch: the delegate must advertise `mtlx` in
+  `GetMaterialRenderContexts()` to receive that terminal at all. Cheap and additive. (D-102)
+- **Full MaterialX graph evaluation** *(condition: a shader-graph / codegen backend — not
+  currently planned)* — Today: cenote is a fixed-closure renderer; it consumes known
+  surface root nodes (UsdPreviewSurface now, OpenPBR later) with direct-value or
+  simple-texture inputs. A MaterialX network whose inputs are driven by arbitrary
+  math/procedural nodes is structurally unevaluable — there is no shader graph to run it
+  through. Production shape: embed the MaterialX SDK and generate shader code per network
+  (the hdStorm/hdPrman path). Only a renderer that grows a shader-graph backend needs
+  this; like the runtime-attribute system (D-053), it is the first consequence if that
+  architectural stance ever changes. (D-102)
+- **Houdini / Solaris integration** *(revisit: a Houdini demo is wanted, or a pipeline-TD
+  / rendering-research role targets Solaris specifically)* — Today: the delegate is built
+  and validated against stock OpenUSD for usdview; the render server and transport are
+  kept Houdini-ready (no usdview-specific or stock-USD-only assumptions). Production
+  shape: the same delegate source built against the HDK's USD (its own TBB /
+  `_GLIBCXX_USE_CXX11_ABI` / Python — which may trail the 26.05 pin; the observer
+  mechanism holds back to 23.11, so the guards are schema-semantic — material-context
+  fallback, render-settings renames — not architectural), a `UsdRenderers.json` menu
+  entry, `cenote-server` packaged beside the plugin, and end-to-end validation inside a
+  licensed Houdini — a packaging-and-ABI milestone, not a rearchitecture, by
+  construction of the M4 boundary. (D-097)

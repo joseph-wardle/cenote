@@ -33,6 +33,15 @@ under defensive pairwise MIS, unbiased by construction so it converges to the
 very image the path tracer does and gets there faster where the lights are
 many ([below](#many-lights-resampled)).
 
+**M4 — a scene-index-native Hydra render delegate + out-of-process render
+server — is underway** ([docs/m4-plan.md](docs/m4-plan.md)): the transport
+spine is in place — `cenote-wire` (the explicit wire mirror of the change-set
+schema), `cenote-server` (loopback TCP around `render::Session`, pixels
+through a lock-free shared-memory framebuffer, converted to `Rec.709`
+server-side), and the byte-exact cross-language drift guard — proven by an
+integration test that drives the real binary over the wire and reads the
+frame out of shared memory.
+
 ![A 5×5 grid of terracotta spheres resting on a glossy gray floor — roughness increasing left to right, metalness back to front — under a blue sky](docs/demo.png)
 
 *The M1 demo: a material chart sweeping `OpenPBR` roughness (left to right)
@@ -197,7 +206,9 @@ cargo test --workspace   # on the GPU machine — includes the goldens
 | `crates/cenote/shaders/` | Slang GPU kernels — the heart of the renderer |
 | `crates/cenote-cli/` | Headless binary: batch renders, pbrt import |
 | `crates/cenote-pbrt/` | pbrt-v4 importer library — a client of the core's public scene API |
+| `crates/cenote-server/` | Out-of-process render server: loopback-TCP request/response around `render::Session`, shared-memory framebuffer (M4) |
 | `crates/cenote-viewer/` | Interactive viewer binary: live render in a window, orbit camera, progressive accumulation, stats/controls overlay, live-editable scene files |
+| `crates/cenote-wire/` | The render server's wire: explicit change-set mirror types, MessagePack framing, the shm layout — and the byte-exact cross-language drift guard |
 | `scenes/` | Hand-written example scene — the scene model in one readable `.ron` file |
 | `tests/scenes/` | The vendored CC0 pbrt corpus (see its README for provenance) and the showcase fetch script |
 | `docs/charter.md` | Project charter: vision, locked decisions, milestone roadmap |
@@ -206,6 +217,7 @@ cargo test --workspace   # on the GPU machine — includes the goldens
 | `docs/m1-plan.md` | The M1 implementation plan |
 | `docs/m2-plan.md` | The M2 implementation plan |
 | `docs/m3-plan.md` | The M3 implementation plan |
+| `docs/m4-plan.md` | The M4 implementation plan |
 | `docs/deferrals.md` | Living ledger of consciously deferred production features and their revival triggers |
 
 ## License

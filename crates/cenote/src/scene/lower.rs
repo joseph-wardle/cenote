@@ -106,9 +106,6 @@ pub(super) fn host_phase(
             description.environments().len()
         )));
     }
-    if description.instances().is_empty() {
-        return Err(scene_error("a scene needs at least one instance".into()));
-    }
 
     let changed_meshes = names(&dirty.changed, Kind::Mesh);
     let mut meshes = BTreeMap::new();
@@ -737,8 +734,12 @@ mod tests {
         assert!(error.to_string().contains("exactly one camera"), "{error}");
     }
 
+    /// The empty scene is renderable, not rejected: the M4 render server
+    /// stands up its session on camera + settings alone, and a live edit
+    /// may delete the last instance. The host phase lowers it to zero
+    /// instances, zero lights, and the black default sky.
     #[test]
-    fn a_scene_without_instances_is_rejected() {
+    fn a_scene_without_instances_lowers_empty() {
         let mut description = SceneDescription::new();
         description
             .apply(&ChangeSet {
@@ -748,8 +749,9 @@ mod tests {
                 ],
             })
             .expect("valid data");
-        let error = host_error(&description);
-        assert!(error.to_string().contains("instance"), "{error}");
+        let host = host(&description).expect("an empty scene lowers");
+        assert!(host.instances.is_empty());
+        assert_eq!(host.light_count(), 0);
     }
 
     #[test]

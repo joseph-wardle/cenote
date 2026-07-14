@@ -4,7 +4,9 @@ members = [
     "crates/cenote",
     "crates/cenote-cli",
     "crates/cenote-pbrt",
+    "crates/cenote-server",
     "crates/cenote-viewer",
+    "crates/cenote-wire",
 ]
 
 [workspace.package]

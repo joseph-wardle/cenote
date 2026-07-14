@@ -1,0 +1,24 @@
+[package]
+name = "cenote-server"
+description = "The out-of-process render server: a loopback-TCP request/response loop and a shared-memory framebuffer around render::Session"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The server is the one place the renderer and the wire are both in
+# scope — the exhaustive wire→Op translation lives here for that reason.
+# `libc` is for the framebuffer's `shm_open`/`mmap` twenty lines (D-101),
+# not an IPC framework; the control transport is std::net.
+[dependencies]
+anyhow = "1.0.103"
+cenote = { path = "../cenote" }
+cenote-wire = { path = "../cenote-wire" }
+env_logger = "0.11.11"
+glam = { version = "0.33.2" }
+libc = "0.2.177"
+log = "0.4.33"
+
+[lints]
+workspace = true

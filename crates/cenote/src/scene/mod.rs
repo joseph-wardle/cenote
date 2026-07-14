@@ -576,13 +576,33 @@ fn upload_instance_tables(
         })
         .collect();
     let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
-    let geometry = gpu.upload_buffer("scene.geometry", bytemuck::cast_slice(&records), usage)?;
+    // Vulkan forbids empty buffers, so an instanceless scene (nothing to
+    // hit — every ray misses the empty TLAS) uploads one zeroed record per
+    // table that the kernels can never reach.
+    let padded_record = [GeometryRecord::zeroed()];
+    let geometry = gpu.upload_buffer(
+        "scene.geometry",
+        bytemuck::cast_slice(if records.is_empty() {
+            &padded_record
+        } else {
+            &records
+        }),
+        usage,
+    )?;
     let materials: Vec<Material> = placements
         .iter()
         .map(|placement| placement.material)
         .collect();
-    let materials =
-        gpu.upload_buffer("scene.materials", bytemuck::cast_slice(&materials), usage)?;
+    let padded_material = [Material::zeroed()];
+    let materials = gpu.upload_buffer(
+        "scene.materials",
+        bytemuck::cast_slice(if materials.is_empty() {
+            &padded_material
+        } else {
+            &materials
+        }),
+        usage,
+    )?;
     // Vulkan forbids empty buffers, so a lightless scene uploads one
     // zeroed record the kernels never read (the table says count 0).
     let padded = [Zeroable::zeroed()];
