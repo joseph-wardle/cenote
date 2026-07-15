@@ -31,6 +31,14 @@
 //!   edit. Only device faults end the thread, surfacing via
 //!   [`Session::check`].
 //!
+//! Riding beside the lanes is the session **epoch** — a count of the
+//! picture-changing verbs accepted so far, stamped onto every published
+//! frame at the wave boundary that incorporated them. It lets a consumer at
+//! the far end of a throttled, double-buffered pipe tell "converged, and it
+//! includes everything I sent" from "converged, but an older picture"
+//! without reaching into the renderer (M4 step 2, D-113). See
+//! [`Lanes::epoch`] for the counting rules.
+//!
 //! Two frame buffers, not a triple-buffered mailbox: the render thread
 //! resolves only into a buffer no one else references (a strong-count of one
 //! means "in the pool alone"), and if both are busy it simply skips that
@@ -49,6 +57,7 @@
 //! than spin forever on a renderer that will post no more frames; the join in
 //! [`Session::drop`] is the backstop at shutdown.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -177,6 +186,16 @@ struct Lanes {
     /// a frame sees the freshest fault, and the log carries the history.
     edit_error: Mutex<Option<Error>>,
     published: Mutex<Option<Frame>>,
+    /// The session epoch (D-113): a count of the picture-changing verbs —
+    /// [`Session::apply`], [`Session::replace`], [`Session::set_camera`],
+    /// [`Session::resize`] — each bumping it *after* placing its payload.
+    /// The viewer toggles do not count: they restart accumulation anyway,
+    /// so their fresh samples already say "new picture". The render thread
+    /// reads it at each wave boundary before draining, and stamps the value
+    /// on every frame it then publishes: a drained edit is incorporated
+    /// whether it applied or was rejected, so a rejection can never wedge
+    /// a consumer waiting on its epoch.
+    epoch: AtomicU64,
 }
 
 /// One publish slot's buffers: the film's four resolved linear averages,
@@ -209,6 +228,9 @@ pub struct Frame {
     /// Wall-clock of the sample that preceded this publish — the render
     /// thread's own timing, for the viewer's stats panel.
     sample_time: Duration,
+    /// The session epoch at the wave boundary this frame's accumulation
+    /// last crossed — see [`Frame::epoch`].
+    epoch: u64,
 }
 
 impl Frame {
@@ -271,6 +293,16 @@ impl Frame {
     pub fn sample_time(&self) -> Duration {
         self.sample_time
     }
+
+    /// Everything enqueued while [`Session::epoch`] read at most this value
+    /// is incorporated in this picture — applied or rejected (D-113). A
+    /// consumer that reads the session epoch after its last verb can tell a
+    /// settled frame of the *edited* scene from a settled frame of the old
+    /// one: the first frame with `frame.epoch() >= that value` has it all.
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
 }
 
 /// Owns the render thread and the lanes across to it. Dropping it stops
@@ -326,6 +358,7 @@ impl Session {
             edits: Mutex::new(Vec::new()),
             edit_error: Mutex::new(None),
             published: Mutex::new(None),
+            epoch: AtomicU64::new(0),
         });
         let thread = {
             let lanes = Arc::clone(&lanes);
@@ -342,16 +375,20 @@ impl Session {
 
     /// Point the render at a new view — the viewer's orbit control calls this
     /// each time the camera moves. Bumps the generation so the render thread
-    /// restarts accumulation from the new pose.
+    /// restarts accumulation from the new pose, and the epoch so the frames
+    /// that show it are identifiable ([`Frame::epoch`]).
     ///
     /// # Panics
     ///
     /// If the render thread panicked while holding the input lock — a bug on
     /// that thread, surfaced here rather than silently ignored.
     pub fn set_camera(&self, camera: Camera) {
-        let mut inputs = self.lanes.inputs.lock().expect("inputs mutex poisoned");
-        inputs.camera = camera;
-        inputs.generation += 1;
+        {
+            let mut inputs = self.lanes.inputs.lock().expect("inputs mutex poisoned");
+            inputs.camera = camera;
+            inputs.generation += 1;
+        }
+        self.lanes.epoch.fetch_add(1, Ordering::Release);
     }
 
     /// Switch the primary-hit estimator — the viewer's `ReSTIR` toggle. The
@@ -418,7 +455,8 @@ impl Session {
     }
 
     /// Note a new render-target size; the render thread rebuilds its film to
-    /// match on the next sample.
+    /// match on the next sample. Bumps the epoch — even for a size the render
+    /// already has, so a consumer waiting on the verb's frame never wedges.
     ///
     /// # Panics
     ///
@@ -429,13 +467,16 @@ impl Session {
             .lock()
             .expect("inputs mutex poisoned")
             .size = (width, height);
+        self.lanes.epoch.fetch_add(1, Ordering::Release);
     }
 
     /// Queue a change-set to overlay onto the scene — the lookdev shape.
     /// Edits merge in arrival order and land at the next wave boundary:
     /// stop, apply, re-prep what the edit dirtied, restart accumulation.
     /// A rejected set leaves the scene untouched and surfaces through
-    /// [`Session::take_edit_error`].
+    /// [`Session::take_edit_error`]. Bumps the epoch after queueing, so the
+    /// frame that incorporates this edit — applied or rejected — is
+    /// identifiable ([`Frame::epoch`]).
     ///
     /// # Panics
     ///
@@ -446,13 +487,15 @@ impl Session {
             .lock()
             .expect("edits mutex poisoned")
             .push(SceneEdit::Apply(set));
+        self.lanes.epoch.fetch_add(1, Ordering::Release);
     }
 
     /// Queue a whole-scene replacement — the file-reload shape: `set`
     /// describes the entire scene from empty, and objects it no longer
     /// contains are removed, retiring their GPU residency. Unchanged
     /// objects re-prep nothing, so re-saving an untouched file is free.
-    /// Rejections behave as in [`Session::apply`].
+    /// Rejections behave as in [`Session::apply`], and the epoch bumps the
+    /// same way.
     ///
     /// # Panics
     ///
@@ -463,6 +506,7 @@ impl Session {
             .lock()
             .expect("edits mutex poisoned")
             .push(SceneEdit::Replace(set));
+        self.lanes.epoch.fetch_add(1, Ordering::Release);
     }
 
     /// Take the latest rejected edit, if one hasn't been taken yet. The
@@ -495,6 +539,18 @@ impl Session {
             .lock()
             .expect("published mutex poisoned")
             .take()
+    }
+
+    /// The session epoch (D-113): how many picture-changing verbs —
+    /// [`apply`](Self::apply), [`replace`](Self::replace),
+    /// [`set_camera`](Self::set_camera), [`resize`](Self::resize) — have been
+    /// accepted so far. Read it after a verb and hold onto it: the first
+    /// frame with [`Frame::epoch`] at or past it incorporates that verb and
+    /// everything before it, so "settled *and* current" is one comparison,
+    /// with no round-trip into the renderer.
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.lanes.epoch.load(Ordering::Acquire)
     }
 
     /// Surface a render-thread failure to the consumer. While the thread runs
@@ -569,6 +625,11 @@ fn join_render_thread(thread: JoinHandle<Result<()>>) -> Result<()> {
 /// latest inputs, folding queued edits in at wave boundaries and publishing
 /// a resolved average on the throttle. Returns when the running flag clears,
 /// or early on the first device fault.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one wave of the loop, in the order the waves run; splitting it \
+              would scatter the applied-state bookkeeping across helpers"
+)]
 fn render_loop(
     gpu: &Context,
     mut description: SceneDescription,
@@ -594,6 +655,9 @@ fn render_loop(
     // moves what counts as converged, not the beauty.
     let mut applied_noise_threshold: Option<f32> = None;
     let mut last_publish: Option<Instant> = None;
+    // The epoch stamped on the most recent successful publish, so a parked
+    // thread can see the counter move past its settled frame and republish.
+    let mut published_epoch = 0;
     // Wall-clock of the most recent sample, reported with each publish — kept so
     // the frame forced out when the render parks still carries a real timing.
     let mut last_sample_time = Duration::ZERO;
@@ -606,6 +670,11 @@ fn render_loop(
     let mut stale = Dirty::default();
 
     loop {
+        // The wave's epoch, read *before* the inputs snapshot and the edit
+        // drain. A verb bumps the counter only after placing its payload, so
+        // everything counted here is visible to this wave — the stamp can
+        // undercount a racing verb, never claim one it missed (D-113).
+        let epoch = lanes.epoch.load(Ordering::Acquire);
         let input = *lanes.inputs.lock().expect("inputs mutex poisoned");
         if !input.running {
             log::debug!("render thread stopping");
@@ -690,9 +759,19 @@ fn render_loop(
         if film.samples() == 0 {
             parked = false;
         }
-        // Parked: a settled render idles here without touching the GPU, until one
-        // of the resets above zeroes the film and clears the flag.
+        // Parked: a settled render idles here, until one of the resets above
+        // zeroes the film and clears the flag. One duty remains: a verb that
+        // restarts nothing — a visual no-op edit, a rejection, a same-size
+        // resize — still moved the epoch, and a consumer may be waiting on a
+        // frame that carries it, so the settled image goes out again under
+        // the fresh stamp (same picture, one resolve). Both slots busy just
+        // retries on the next nap.
         if parked {
+            if epoch > published_epoch
+                && publish(gpu, &renderer, film, frames, lanes, last_sample_time, epoch)?
+            {
+                published_epoch = epoch;
+            }
             std::thread::sleep(IDLE_NAP);
             continue;
         }
@@ -707,8 +786,9 @@ fn render_loop(
             // Force the settled image out once (past the throttle) so the
             // converged frame is definitely the latest, then park. If both slots
             // are busy the publish is retried on the next tick.
-            if publish(gpu, &renderer, film, frames, lanes, last_sample_time)? {
+            if publish(gpu, &renderer, film, frames, lanes, last_sample_time, epoch)? {
                 parked = true;
+                published_epoch = epoch;
             }
             std::thread::sleep(IDLE_NAP);
             continue;
@@ -723,17 +803,19 @@ fn render_loop(
         // If both are busy, skip: the next tick catches up, and the renderer
         // never waits on the consumer.
         if last_publish.is_none_or(|at| at.elapsed() >= publish_interval(film.samples()))
-            && publish(gpu, &renderer, film, frames, lanes, last_sample_time)?
+            && publish(gpu, &renderer, film, frames, lanes, last_sample_time, epoch)?
         {
             last_publish = Some(Instant::now());
+            published_epoch = epoch;
         }
     }
 }
 
 /// Resolve the film's current average into a free publish slot and post it for
-/// the consumer, returning whether a slot was free. Both slots busy means the
-/// consumer still holds the last two frames — the caller retries next tick and
-/// the renderer never blocks. Lifts the debug false-colour into the slot too
+/// the consumer — stamped with `epoch`, the wave boundary this accumulation
+/// last crossed (D-113) — returning whether a slot was free. Both slots busy
+/// means the consumer still holds the last two frames — the caller retries
+/// next tick and the renderer never blocks. Lifts the debug false-colour into the slot too
 /// when a [`DebugView`] is active (`accumulate` allocated the film's buffer then).
 fn publish(
     gpu: &Context,
@@ -742,6 +824,7 @@ fn publish(
     frames: &[Arc<FrameBuffers>; 2],
     lanes: &Lanes,
     sample_time: Duration,
+    epoch: u64,
 ) -> Result<bool> {
     let Some(free) = frames.iter().find(|frame| Arc::strong_count(frame) == 1) else {
         return Ok(false);
@@ -772,6 +855,7 @@ fn publish(
         height: film.height(),
         samples: film.samples(),
         sample_time,
+        epoch,
     };
     *lanes.published.lock().expect("published mutex poisoned") = Some(frame);
     Ok(true)
@@ -884,6 +968,8 @@ fn publish_buffers(gpu: &Context, width: u32, height: u32) -> Result<[Arc<FrameB
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
+
+    use glam::Vec3;
 
     use super::*;
     use crate::scene::changeset::{MaterialPatch, Op};
@@ -1074,6 +1160,148 @@ mod tests {
         }
     }
 
+    /// The picture-changing verbs each bump the session epoch once, and the
+    /// viewer toggles don't: a toggle restarts accumulation anyway, so its
+    /// fresh sample count already says "new picture" — only the verbs a
+    /// remote consumer acknowledges need the stamp (D-113).
+    #[test]
+    fn picture_changing_verbs_bump_the_epoch() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let gpu = Arc::new(gpu);
+        let session = demo_session(&gpu, 32);
+        assert_eq!(session.epoch(), 0);
+
+        session.set_camera(Camera {
+            position: Vec3::new(0.0, 1.0, 4.0),
+            look_at: Vec3::ZERO,
+            up: Vec3::Y,
+            vfov_degrees: 45.0,
+            lens: None,
+        });
+        assert_eq!(session.epoch(), 1);
+        // Even a resize to the size the render already has counts: a consumer
+        // waiting on the verb's frame must never wedge.
+        session.resize(32, 32);
+        assert_eq!(session.epoch(), 2);
+        session.apply(ChangeSet::default());
+        assert_eq!(session.epoch(), 3);
+        session.replace(ChangeSet::demo());
+        assert_eq!(session.epoch(), 4);
+
+        session.set_render_mode(RenderMode::Restir);
+        session.set_debug_view(DebugView::Off);
+        session.set_spatial_reuse(false);
+        session.set_temporal_reuse(false);
+        assert_eq!(session.epoch(), 4, "viewer toggles must not bump the epoch");
+    }
+
+    /// An applied edit's stamp reaches the published frame: accumulation
+    /// crosses a wave boundary that drained the edit, and every frame it
+    /// publishes from there carries the moved epoch (D-113).
+    #[test]
+    fn an_applied_edit_advances_the_frame_epoch() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let gpu = Arc::new(gpu);
+        let session = demo_session(&gpu, 64);
+        let first = wait_for_frame(&session);
+        assert_eq!(first.epoch(), 0, "no verbs yet, so no stamp");
+
+        session.apply(ChangeSet {
+            ops: vec![Op::Material(Box::new(MaterialPatch {
+                base_color: Some(Texturable::Constant([0.9, 0.1, 0.1])),
+                ..MaterialPatch::new("floor")
+            }))],
+        });
+        wait_for(&session, "a frame carrying the edit's epoch", |frame| {
+            frame.epoch() >= 1
+        });
+        assert!(session.take_edit_error().is_none());
+    }
+
+    /// The delivery guarantee behind the epoch: an edit that changes nothing
+    /// visible (the equality gate leaves no dirt, so nothing restarts and no
+    /// new picture is coming) still gets a frame carrying its stamp — the
+    /// parked thread republishes the settled image, where otherwise a
+    /// consumer waiting on that epoch would wait forever (D-113).
+    #[test]
+    fn a_noop_edit_republishes_the_parked_frame() {
+        const CAP: u32 = 8;
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let gpu = Arc::new(gpu);
+        let session = demo_session_with(
+            &gpu,
+            32,
+            AutoStop {
+                max_samples: CAP,
+                noise_threshold: None,
+            },
+        );
+        wait_for(&session, "the settled frame", |frame| frame.samples() == CAP);
+
+        // A real edit first: the scene changes, resettles at the cap, and the
+        // settled frame carries the edit's stamp.
+        let patch = ChangeSet {
+            ops: vec![Op::Material(Box::new(MaterialPatch {
+                base_color: Some(Texturable::Constant([0.9, 0.1, 0.1])),
+                ..MaterialPatch::new("floor")
+            }))],
+        };
+        session.apply(patch.clone());
+        wait_for(&session, "the edited scene settled", |frame| {
+            frame.samples() == CAP && frame.epoch() >= 1
+        });
+
+        // The identical patch again: a genuine visual no-op. Only the
+        // republish can carry the fresh stamp out — and it must arrive with
+        // the settled sample count, not a restarted accumulation.
+        session.apply(patch);
+        wait_for(&session, "the republished settled frame", |frame| {
+            frame.samples() == CAP && frame.epoch() >= 2
+        });
+        assert!(session.take_edit_error().is_none());
+    }
+
+    /// A rejected edit counts as incorporated: the drain moves the stamp past
+    /// it even though the scene is untouched, so a rejection can never wedge
+    /// a consumer waiting on its epoch — the settled image returns under the
+    /// fresh stamp and the fault rides the error lane as usual (D-113).
+    #[test]
+    fn a_rejected_edit_still_advances_the_frame_epoch() {
+        const CAP: u32 = 8;
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let gpu = Arc::new(gpu);
+        let session = demo_session_with(
+            &gpu,
+            32,
+            AutoStop {
+                max_samples: CAP,
+                noise_threshold: None,
+            },
+        );
+        wait_for(&session, "the settled frame", |frame| frame.samples() == CAP);
+
+        session.apply(ChangeSet {
+            ops: vec![Op::Remove(Kind::Material, "no-such-material".into())],
+        });
+        wait_for(&session, "the rejection's epoch on a settled frame", |frame| {
+            frame.samples() == CAP && frame.epoch() >= 1
+        });
+        // The rejection was posted at the same wave boundary, before the
+        // republish, so it is already waiting on the error lane.
+        let error = session
+            .take_edit_error()
+            .expect("the rejection surfaces alongside the republish");
+        assert!(error.to_string().contains("no-such-material"), "{error}");
+    }
+
     /// The publish gap widens with the sample count and clamps at both ends
     /// (M3 step 6c): every frame early, a few per second once converging.
     #[test]
@@ -1097,12 +1325,22 @@ mod tests {
     /// machine doesn't flake — the render thread posts its first frame within
     /// milliseconds on any real GPU.
     fn wait_for_frame(session: &Session) -> Frame {
+        wait_for(session, "a published frame", |_| true)
+    }
+
+    /// Poll `take_frame` until a frame satisfies `pred`, on the same generous
+    /// deadline as [`wait_for_frame`]; `what` names the wait in the timeout
+    /// message. Non-matching frames are consumed — each test states its full
+    /// condition rather than assuming an earlier wait left frames behind.
+    fn wait_for(session: &Session, what: &str, pred: impl Fn(&Frame) -> bool) -> Frame {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            if let Some(frame) = session.take_frame() {
+            if let Some(frame) = session.take_frame()
+                && pred(&frame)
+            {
                 return frame;
             }
-            assert!(Instant::now() < deadline, "no frame published in time");
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(2));
         }
     }
