@@ -209,6 +209,7 @@ cargo test --workspace   # on the GPU machine — includes the goldens
 | `crates/cenote-server/` | Out-of-process render server: loopback-TCP request/response around `render::Session`, shared-memory framebuffer (M4) |
 | `crates/cenote-viewer/` | Interactive viewer binary: live render in a window, orbit camera, progressive accumulation, stats/controls overlay, live-editable scene files |
 | `crates/cenote-wire/` | The render server's wire: explicit change-set mirror types, MessagePack framing, the shm layout — and the byte-exact cross-language drift guard |
+| `hydra/` | The C++ half of M4 — the wire mirror and the C++ side of the drift guard now, the `hdCenote` Hydra delegate plugin next (see its README) |
 | `scenes/` | Hand-written example scene — the scene model in one readable `.ron` file |
 | `tests/scenes/` | The vendored CC0 pbrt corpus (see its README for provenance) and the showcase fetch script |
 | `docs/charter.md` | Project charter: vision, locked decisions, milestone roadmap |

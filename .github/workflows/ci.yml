@@ -21,6 +21,7 @@ jobs:
     env:
       SLANG_VERSION: "2026.9.1"
       OIDN_RELEASE: "2.4.1"
+      CLANG_FORMAT_VERSION: "22.1.8"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -58,3 +59,21 @@ jobs:
         run: cargo clippy --workspace --all-targets --features cenote/denoise,cenote-cli/denoise,cenote-viewer/denoise -- -D warnings
       - name: Test (denoise feature, CPU device)
         run: cargo test -p cenote --features denoise denoise
+      # The C++ half of the wire drift guard: hydra/wire builds standalone —
+      # no USD, no GPU — and its corpus test byte-compares the mirror against
+      # the Rust goldens checked in under crates/cenote-wire. std::println
+      # needs GCC 14's libstdc++, one past the runner default; apt carries
+      # exactly one g++-14 per Ubuntu release, so the package name is the pin.
+      # clang-format output shifts between majors, and apt stops short of the
+      # local install's release, so the PyPI wheel pins the exact version.
+      - name: Install g++-14 (pinned)
+        run: sudo apt-get update && sudo apt-get install -y g++-14
+      - name: Install clang-format (pinned)
+        run: pipx install "clang-format==${CLANG_FORMAT_VERSION}"
+      - name: C++ format
+        run: find hydra \( -name '*.cpp' -o -name '*.hpp' \) -print0 | xargs -0r clang-format --dry-run -Werror
+      - name: Wire mirror (build + ctest)
+        run: |
+          cmake -S hydra/wire -B build/wire -DCMAKE_CXX_COMPILER=g++-14
+          cmake --build build/wire --parallel
+          ctest --test-dir build/wire --output-on-failure

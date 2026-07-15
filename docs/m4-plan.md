@@ -245,8 +245,114 @@ tests pass serially on the GPU machine; the C++ side compiles + its own lint; co
    mesh translation (points/topology/normals/st from the mesh and primvars schemas; base
    cage triangulated via `HdMeshUtil`; unbound meshes shade from `displayColor`) →
    `MeshPatch` + `InstancePatch`; genesis as `Replace`. *Checkpoint: an untextured mesh
-   renders in usdview under a real camera, through cenote — zero Rprims instantiated.*
-2. **Interactive progressive loop** — `HdRenderBuffer` (CPU, beauty + depth; `Map()`
+   renders lit in usdview under a real camera and a real distant light, through cenote —
+   zero Rprims instantiated. Lands as two commits, split at the USD boundary.* The
+   locked detail (a second structured interview, 2026-07-14; the genuinely new decisions
+   are D-105…D-109 in [decisions.md](decisions.md)):
+   - *Provenance & toolchain*: stock USD 26.05 built once from source (`build_usd.py`,
+     usdview on, extras off) into a read-only prefix; the exact invocation recorded in
+     `hydra/README.md`. The C++ baseline is **C++23**, extensions off,
+     `-Wall -Wextra -Werror`, under a two-part rule (D-105): portable core C++23 only —
+     no modules, no coroutines — and *inside the plugin `.so`* no library facilities
+     that demand new libstdc++ runtime symbols (`std::println`, `<stacktrace>`), because
+     a host like Houdini launches with its bundled older libstdc++ on
+     `LD_LIBRARY_PATH` and the dlopen would fail. `std::println` lives in the USD-free
+     tools; plugin logging is `TF_*` by convention anyway.
+   - *The wire, C++ half* (D-106): a **hand-rolled** minimal msgpack codec — a writer
+     plus a small response reader, zero dependencies — and **mirror structs** 1:1 with
+     `cenote-wire`'s types, keeping Rust's exact type and field names
+     (`std::optional` for `Option`, `std::variant` for the enums), one `encode()` per
+     type in Rust field-declaration order, designated-initializer construction
+     throughout (C++ requires declaration order there, so every construction site is a
+     small field-order check). Decode stays asymmetric and tiny: the client only ever
+     reads `Welcome`/`Ack`/`Resized`, hand-decoded, strict. Documented limit: C++ has
+     no exhaustive-destructuring trick, so the corpus's "every field `Some`" rule is
+     the only guard on a forgotten encode line — load-bearing on every wire change.
+   - *Drift guard & CI*: `hydra/wire/` is standalone-buildable (no USD anywhere; CI
+     configures only this leaf). The corpus exe builds the same 12 cases the Rust
+     corpus defines, encodes through the production `encode()` path, and asserts
+     **symmetric set equality plus byte equality** — an unmirrored Rust case fails, a
+     caseless C++ entry fails, and a mismatch prints the case, offset, and a hex window
+     at the first divergence; registered with ctest. CI gains a pinned `g++-14`
+     (C++23 `<print>` needs GCC 14's libstdc++, one past the runner default; apt
+     carries exactly one g++-14 per Ubuntu release, so the package name is the pin),
+     the wire configure/build/ctest, and `clang-format --dry-run -Werror` over
+     `hydra/` (pinned to the local install's exact release via the PyPI wheel).
+   - *CMake & discovery*: three targets — the static wire library, the corpus exe, and
+     `hdCenote` as a **single `MODULE` library** holding everything else (one `.so` is
+     the Hydra-plugin norm; the subdirectories stay source organization, never separate
+     shared libraries). `find_package(pxr REQUIRED CONFIG)` against the 26.05 prefix —
+     exactly the knob the step-6 HDK pivot swaps; nothing else is `find_package`'d.
+     Install to gitignored `hydra/dist/hdCenote/` with a `configure_file`'d
+     `plugInfo.json`; usdview finds it via `PXR_PLUGINPATH_NAME`.
+   - *Shell contract*: Rprims **none**; Sprims `camera` only, as stock `HdCamera`;
+     Bprims `renderBuffer` only — f32 RGBA color + f32 depth, exactly the shm planes,
+     so `Map()` is a copy with no conversion. `GetRenderParam` → null (zero Rprims
+     means nothing to thread), a plain resource registry, no render-settings
+     descriptors yet; capability flags stay at defaults until a step needs them. Naming
+     is two-dialect on purpose: the adapter ring follows USD plugin conventions, the
+     wire structs keep Rust's names so a C++ struct literal reads token-for-token like
+     the Rust one beside the goldens.
+   - *Spawn & lifecycle*: `posix_spawn` at delegate construction — never `fork()` from
+     a large threaded host. Binary lookup `$CENOTE_SERVER` → beside the plugin `.so` →
+     `PATH`, failure naming all three; the token crosses in the child environment,
+     never argv (`/proc/*/cmdline` is world-readable); the port line is read with a
+     ~30 s deadline (GPU init is the slow part, and step 0 made slowness legible by
+     creating the `Session` before the line prints). Any failure → degraded mode —
+     alive, rendering nothing, saying why via `TF_WARN` — isolation applying to birth,
+     not just death. Teardown: socket EOF (which *is* shutdown), `waitpid` grace, then
+     `SIGKILL`. The one deliberately-POSIX file, mirroring the server's `shm.rs`.
+   - *The step-1/2 line, redrawn* (D-107): step 1 carries a **skeletal-but-honest pixel
+     path** — `Allocate()` → `Resize` → remap (usdview allocates viewport-sized buffers
+     against the server's 1280×720 boot default, so this is required for *first*
+     pixels), tear-protocol `Map()` from day one, camera → `SetCamera` on change,
+     `IsConverged()` = false. Depth folds into step 1 too: usdview's task controller
+     requests color+depth by default and the shm depth plane already exists — one
+     memcpy. Step 2 keeps its identity as "interactive and unkillable": honest
+     convergence, the throttle, resize robustness, rejected-edit surfacing, dead-socket
+     degradation.
+   - *Observer*: notice-batching scene index + `HdsiPrimManagingSceneIndexObserver` + a
+     translator factory — mesh prims get a translator, unknown types a null handler
+     (how unknown stays non-fatal forever); the managing observer owns the per-prim
+     lifecycle (populate-on-attach, recursive subtree removal) so that bookkeeping is
+     deleted, not ported. Translators never send — they append to a pending
+     `ChangeSet`; `Update()` drains it: empty → no send, first flush → `Replace`
+     (genesis), every later flush → `Apply`. Stage-reload correctness falls out free: a
+     reload recreates the delegate, and `Replace` resets the scene.
+   - *Mesh translator*: `HdMeshUtil::ComputeTriangleIndices` honoring `orientation`,
+     base cage only. cenote's format is single-indexed (attributes per position), so
+     vertex-interpolated `normals`/`st` copy through and **faceVarying attributes are
+     dropped with a `TF_WARN`** naming the prim — the un-welding lands in step 3, where
+     textures make `st` matter. Absent normals → omitted, the server derives smooth.
+     Unbound meshes synthesize a `<primPath>/displayColor` companion `MaterialPatch`
+     (constant color used directly, vertex color approximated by its first element,
+     neutral default otherwise) — per-prim companions keep removal trivial. The
+     flattened world matrix goes straight into `Transform::Matrix`, never decomposed.
+     **Visibility correction** (D-109): invisible → the *instance is removed* (the mesh
+     payload stays server-side, so re-showing is a cheap re-add) — the plan's
+     "camera_visible from visibility" leaf was wrong on inspection, since cenote's
+     `camera_visible=false` is a primary-ray flag and mapping USD invisibility onto it
+     would leave ghost shadows.
+   - *The lighting hole, fixed* (D-108): step 1 as originally ordered renders a black
+     frame — lights were step 4, materials step 3, and the server boots black-sky
+     empty. The **distant light is pulled forward**: direction is the prim's world −Z,
+     radiance `intensity·2^exposure·color`, the default `angle` collapsed to the delta
+     per the locked floor — real step-4 code arriving early, not scaffolding. Step 4
+     becomes the *rest* of UsdLux.
+   - *Green gate & landing*: the Rust gate unchanged; plus the `-Werror` build, the
+     ctest corpus (local and CI), `.clang-format` enforced in CI, and a curated
+     `clang-tidy` (bugprone-\*, performance-\*, select readability — USD headers make
+     the full firehose unusable) in the local pre-push ritual, since tidy needs USD
+     headers CI doesn't have. Checkpoint artifact: `hydra/tests/stages/first-light.usda`
+     (a couple of cubes at different depths, one distant light, one camera) rendered by
+     a scriptable `usdrecord --renderer Cenote` smoke — success + non-black + the right
+     silhouette, the seed that grows into step 6's end-to-end FLIP golden. **Two
+     commits, split at the USD boundary**: first the USD-free half (skeleton, codec,
+     mirror, corpus, CI, formatting) — fully CI-provable, so the drift guard protects
+     `main` before the first line of USD-facing C++ exists — then everything USD, green
+     on the GPU machine.
+2. **Interactive progressive loop** — hardening the skeletal pixel path step 1 pulled
+   in (see its locked detail): `HdRenderBuffer` (CPU, beauty + depth; `Map()`
    reads the shm front buffer under the tear protocol); `HdRenderPass::_Execute` (camera
    + framing from `HdRenderPassState` → the `SetCamera` lane; AOV bindings);
    `IsConverged` honest on **both** the pass and the buffers (usdview checks both), read
@@ -263,7 +369,8 @@ tests pass serially on the GPU machine; the C++ side compiles + its own lint; co
    `UsdUVTexture`/`UsdPrimvarReader_*` → texture refs through the existing bindless
    path; bindings from the pre-resolved, inherited bindings schema. *Checkpoint:
    textured UsdPreviewSurface assets render matching their authored look.*
-4. **Lights & environment** — the light prims over the six UsdLux tokens, params read
+4. **Lights & environment** — the *rest* of UsdLux (the distant light moved to step 1,
+   D-108): the light prims over the six UsdLux tokens, params read
    lazily by name from the light container → delta / environment /
    synthesized emissive-mesh area lights; `intensity·2^exposure·color`, `normalize` (area
    division), `enableColorTemperature` (blackbody), `treatAsPoint`; rect/disk wound

@@ -9,4 +9,18 @@ if(PROJECT_IS_TOP_LEVEL)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
     set(CMAKE_CXX_EXTENSIONS OFF)
     add_compile_options(-Wall -Wextra -Werror)
+    enable_testing()
 endif()
+
+add_library(cenote-wire STATIC msgpack.cpp scene.cpp protocol.cpp)
+
+add_executable(msgpack-test msgpack_test.cpp)
+target_link_libraries(msgpack-test PRIVATE cenote-wire)
+add_test(NAME msgpack COMMAND msgpack-test)
+
+# The conformance runner reads the Rust crate's checked-in goldens — the
+# one place wire/ reaches outside its directory, and it is data, not USD.
+add_executable(corpus-test corpus_test.cpp)
+target_link_libraries(corpus-test PRIVATE cenote-wire)
+add_test(NAME corpus
+         COMMAND corpus-test "${CMAKE_CURRENT_SOURCE_DIR}/../../crates/cenote-wire/tests/golden")

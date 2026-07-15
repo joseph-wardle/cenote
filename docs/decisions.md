@@ -2532,3 +2532,120 @@ they read as decisions rather than surprises:
 - **Convergence is the sample cap, for now.** `Session` doesn't expose its park state,
   so the header's `converged` flag reports samples ≥ `CENOTE_SERVER_MAX_SAMPLES`
   (default 4096); a finer surface is step 2's business, alongside the refresh loop.
+
+## 2026-07-14 — M4 step 1 opens: the wire's C++ half, drift-guarded before any USD
+
+*Step 1's design tree was walked in a second structured interview — fourteen questions,
+each resolved before the next — and the full locked detail lives in
+[m4-plan.md](m4-plan.md)'s step-1 entry. Most of it is plan detail; five resolutions
+are genuinely new decisions, two of them amending the plan's own leaves on inspection,
+and those five are recorded here. Step 1 lands as two commits split at the USD
+boundary; this entry ships with the first — the USD-free half — so the cross-language
+drift guard is protecting `main` before the first line of USD-facing C++ exists.*
+
+### D-105: The C++ baseline is C++23, under a two-part portability rule
+Status: accepted. `CMAKE_CXX_STANDARD 23`, extensions off, `-Wall -Wextra -Werror`,
+everywhere in `hydra/`. The self-imposed rule is two-part: portable core C++23 only —
+no modules, no coroutines — and *inside the plugin `.so`* no library facilities that
+demand new libstdc++ runtime symbols (`std::println`, `<stacktrace>`). Those live
+freely in the USD-free tools (the corpus exe, tests); plugin logging is `TF_*` by
+convention anyway. If the step-6 HDK build ever objects to the flag, downgrading the
+plugin target alone is one line.
+
+*Why:* C++23's readability wins (`std::println`, `std::expected`) are real and cheap —
+the build-chain cost is a g++-14 pin in CI. The plugin-side ban exists because the
+delegate is a shared library dlopen'd into a host's process, and a host like Houdini
+launches with its bundled older libstdc++ on `LD_LIBRARY_PATH`: a plugin referencing
+GLIBCXX_3.4.32+ symbols fails at load, in someone else's process, with someone else's
+error message. The rule keeps the failure impossible rather than diagnosable.
+
+### D-106: The wire's C++ half is hand-rolled — a minimal msgpack codec and 1:1 mirror structs
+Status: accepted. No third-party msgpack library: `hydra/wire/` owns a minimal writer
+plus a small response reader covering exactly the encodings the wire uses, zero
+dependencies. On top of it, structs that mirror `cenote-wire`'s types 1:1 — Rust's
+exact type and field names, `std::optional` for `Option`, `std::variant` for the
+enums — with one `encode()` per type walking fields in Rust declaration order, and
+designated-initializer construction throughout (C++ requires declaration order there,
+so every construction site is a small field-order check). Decode stays asymmetric and
+tiny: the client only ever reads `Welcome`/`Ack`/`Resized`, hand-decoded, strict —
+unknown variant names, malformed frames, and trailing bytes are refused with an offset,
+never skipped.
+
+*Why hand-rolling is the conservative choice here:* the format subset is tiny and
+frozen, the 12 checked-in goldens are a byte-exact conformance suite either way (a
+library's output would still need pinning against them), and D-100/D-104 already treat
+every C++ dependency as host-ABI liability — MoonRay's own Arras wire is a bespoke
+in-tree encoder, not a framework. *Why mirror structs over a direct builder:* the
+structs are the artifact that makes the drift guard meaningful — the corpus exe encodes
+the same types the production observer will construct, so the guard exercises the real
+encode path, not a replica. One honest limit, documented in the module header: C++ has
+no exhaustive-destructuring trick, so a field added to a C++ struct but forgotten in
+its `encode()` is not a compile error the way it is server-side — the corpus's "every
+field `Some`" coverage rule is the only guard, which is why it is load-bearing on every
+wire change.
+
+### D-107: The step-1/2 line redrawn — step 1 carries a skeletal-but-honest pixel path, depth included
+Status: accepted; amends the plan's step ordering. The plan put the render buffer,
+render pass, resize, and convergence in step 2, yet step 1's checkpoint — "a mesh
+renders in usdview under a real camera" — is impossible with zero pixel path. The
+redraw: step 1 includes `Allocate()` → `Resize` → remap (usdview allocates
+viewport-sized buffers immediately, against the server's 1280×720 boot default — this
+is required for *first* pixels, not polish), the tear-protocol `Map()` from day one (a
+"temporary" tear-ignoring version is the kind of placeholder that outlives its excuse),
+camera → `SetCamera` on change, and `IsConverged()` = false (usdview just keeps
+repainting — correct-enough and zero code). Depth folds in too: usdview's task
+controller requests color+depth by default and the shm depth plane has existed since
+step 0, so mapping it is one memcpy. Step 2 keeps its identity — *interactive and
+unkillable*: honest convergence from the header, the throttle, resize robustness,
+rejected-edit surfacing, dead-socket degradation.
+
+### D-108: The distant light arrives in step 1
+Status: accepted; amends the plan's step ordering. Step 1 as ordered rendered a black
+frame: lights were step 4, materials step 3, the server boots black-sky empty, and
+even usdview's default camera light arrives as a scene-index light prim — exactly the
+translation step 1 lacked. The fix is the smallest honest one: pull the distant light
+forward — direction is the prim's world −Z, radiance `intensity·2^exposure·color`, the
+default 0.53° `angle` collapsed to the delta per the locked floor — real step-4 code
+arriving early rather than scaffolding. The alternatives were worse: an emissive
+checkpoint stage pulls material translation forward (a far bigger bite); a server-side
+debug light pollutes the server's contract with a fiction the delegate would have to
+undo; a black-frame checkpoint verified by depth alone guts the checkpoint's purpose.
+Step 4 is now the *rest* of UsdLux, and the checkpoint stage carries its light
+honestly.
+
+### D-109: Visibility means removal, not camera invisibility
+Status: accepted; corrects a plan leaf. The plan's leaf said "`camera_visible` from
+visibility," and it is wrong on inspection: cenote's `camera_visible=false` is a
+*primary-ray* flag — the object still shadows and reflects — while USD invisibility
+means *gone*. Mapping one onto the other would leave ghost shadows from hidden prims.
+Corrected: visibility=false **removes the instance** — the mesh payload stays
+server-side, so re-showing is a cheap instance re-add with no geometry resend —
+and `camera_visible` stays reserved for its true USD counterpart later.
+
+### What the first commit shipped (the USD-free half)
+Status: shipped with this entry. The `hydra/` skeleton (top-level CMake + a
+standalone-buildable `hydra/wire/`, `.clang-format` scoped to the tree), the codec, the
+mirror, the corpus conformance test, and the CI steps — every piece provable on a bare
+runner, no USD, no GPU. Implementation notes that go beyond the interview's text,
+recorded so they read as decisions rather than surprises:
+
+- **The doubly-optional and texturable fields keep their wire spellings as types.**
+  `Reset<T>` is `std::variant<Clear, Set<T>>` and `Texturable<T>` is
+  `std::variant<Constant<T>, TextureRef>`, so the three states of a patch's
+  `Option<Reset<T>>` stay distinct in C++ exactly as they do on the wire — the D-100
+  lesson (serde flattens `Some(None)` to nil) carried across the language.
+- **The corpus test runs both directions.** Beyond encode-vs-golden byte equality, the
+  four response goldens are decoded and re-encoded to byte identity, and three
+  strictness probes assert refusal: a request payload does not decode as a `Response`,
+  an unknown variant name is an error, and trailing bytes after a complete message are
+  an error. Twelve goldens, symmetric set equality, hex-window diagnostics at the first
+  divergence.
+- **CI pins by the mechanism each tool offers.** g++-14 by apt package name — Ubuntu
+  ships exactly one g++-14 per release, so the name *is* the pin (GCC 14 because
+  `std::println` needs its libstdc++, one past the runner default); clang-format by
+  exact version through the PyPI wheel (`pipx install clang-format==22.1.8`, matching
+  the local install — apt stops short of 22, and formatter output drifts across
+  majors). The format check `find`s all of `hydra/` so the USD half is covered the day
+  it lands. Every new step was verified in an `ubuntu:24.04` container before landing:
+  g++-14 compiled the mirror `-Werror`-clean, ctest passed, the pinned clang-format
+  reported the tree clean.
