@@ -1,0 +1,44 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Types": {
+                    "HdCenoteRendererPlugin": {
+                        "bases": ["HdRendererPlugin"],
+                        "displayName": "@HD_CENOTE_DISPLAY_NAME@",
+                        "priority": 99
+                    },
+                    "HdCenoteImplicitSurfaceSceneIndexPlugin": {
+                        "bases": ["HdSceneIndexPlugin"],
+                        "displayName": "Implicit surfaces become meshes for Cenote",
+                        "priority": 0,
+                        "loadWithRenderer": "@HD_CENOTE_DISPLAY_NAME@"
+                    },
+                    "HdCenoteExtComputationPrimvarPruningSceneIndexPlugin": {
+                        "bases": ["HdSceneIndexPlugin"],
+                        "displayName": "Computed primvars become plain primvars for Cenote",
+                        "priority": 0,
+                        "loadWithRenderer": "@HD_CENOTE_DISPLAY_NAME@"
+                    },
+                    "HdCenoteNodeIdentifierResolvingSceneIndexPlugin": {
+                        "bases": ["HdSceneIndexPlugin"],
+                        "displayName": "sourceAsset shaders resolve to node identifiers for Cenote",
+                        "priority": 0,
+                        "loadWithRenderer": "@HD_CENOTE_DISPLAY_NAME@"
+                    },
+                    "HdCenoteDependencyForwardingSceneIndexPlugin": {
+                        "bases": ["HdSceneIndexPlugin"],
+                        "displayName": "Declared dependencies forward dirtiness for Cenote",
+                        "priority": 0,
+                        "loadWithRenderer": "@HD_CENOTE_DISPLAY_NAME@"
+                    }
+                }
+            },
+            "LibraryPath": "@HD_CENOTE_LIBRARY_PATH@",
+            "Name": "hdCenote",
+            "ResourcePath": "resources",
+            "Root": "..",
+            "Type": "library"
+        }
+    ]
+}

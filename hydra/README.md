@@ -1,12 +1,14 @@
 # hydra/ — the C++ half of M4
 
-The Hydra 2 render delegate and everything around it that must be C++. Today the
-tree holds the USD-free half: `wire/`, a mirror of `cenote-wire`'s types over a
-hand-rolled MessagePack codec, held byte-exact against the Rust goldens by the
-`corpus` test. The `hdCenote` delegate plugin — bootstrap, shell, observer,
-translators, transport — lands in the following commit. The plan is
+The Hydra 2 render delegate and everything around it that must be C++. Three
+trees: `wire/`, a mirror of `cenote-wire`'s types over a hand-rolled
+MessagePack codec, held byte-exact against the Rust goldens by the `corpus`
+test; `transport/`, the client that spawns `cenote-server` and speaks to it —
+spawn, socket, and the shm framebuffer reader, the deliberately-POSIX corner
+of the tree; and `hdCenote/`, the scene-index-native render delegate plugin —
+the half that needs USD. The plan is
 [docs/m4-plan.md](../docs/m4-plan.md) (step 1 carries the locked detail);
-rationale lives in [docs/decisions.md](../docs/decisions.md) (D-097…D-109).
+rationale lives in [docs/decisions.md](../docs/decisions.md) (D-097…D-112).
 
 Baseline: C++23, extensions off, `-Wall -Wextra -Werror`. Two-part portability
 rule (D-105): portable core C++23 only, and inside the plugin `.so` no library
@@ -21,18 +23,45 @@ cmake --build build/wire --parallel
 ctest --test-dir build/wire --output-on-failure
 ```
 
-This is exactly what CI runs (with its pinned `g++-14`). The full tree —
-`cmake -S hydra -B build/hydra` — builds the same targets today and gains the
-`hdCenote` plugin once USD enters it, found via
-`find_package(pxr REQUIRED CONFIG)` with `CMAKE_PREFIX_PATH` (or `pxr_DIR`)
-pointing at the USD prefix below.
-
-Formatting is `.clang-format`-enforced, pinned to clang-format 22.1.8 (the same
-version CI installs from the PyPI wheel):
+This is exactly what CI runs (with its pinned `g++-14`). The full tree adds
+the `hdCenote` plugin and therefore needs USD — `find_package(pxr REQUIRED
+CONFIG)` finds it through `CMAKE_PREFIX_PATH` (or `pxr_DIR`) pointing at the
+prefix below:
 
 ```sh
-find hydra \( -name '*.cpp' -o -name '*.hpp' \) -print0 | xargs -0r clang-format --dry-run -Werror
+cmake -S hydra -B build/hydra -DCMAKE_PREFIX_PATH=~/opt/usd-26.05
+cmake --build build/hydra --parallel
+cmake --install build/hydra   # → hydra/dist/hdCenote/ (gitignored)
 ```
+
+## The pre-push ritual
+
+CI proves the wire half on a bare runner; everything that needs USD or a GPU
+is proven here instead, before every push. All four commands run from the
+repo root:
+
+```sh
+cmake --build build/hydra --parallel && cmake --install build/hydra && ctest --test-dir build/hydra --output-on-failure
+find hydra \( -name '*.cpp' -o -name '*.hpp' \) -print0 | xargs -0r clang-format --dry-run -Werror
+find hydra -name '*.cpp' -print0 | xargs -0 -P"$(nproc)" -n1 clang-tidy -p build/hydra --quiet
+python3 hydra/tests/usdrecord_smoke.py
+```
+
+Formatting and linting are pinned to the clang 22.1.8 PyPI wheels
+(`pip install --user clang-format==22.1.8 clang-tidy==22.1.8`). CI runs the
+same clang-format; clang-tidy stays a local ritual because it reads the USD
+build's compile database. Its checks are curated in [.clang-tidy](.clang-tidy)
+— bugprone + performance + selected readability, warnings as errors, each
+opt-out justified in place.
+
+The smoke renders [tests/stages/first-light.usda](tests/stages/first-light.usda)
+— two cubes at different depths under one distant light and a real camera —
+through `usdrecord --renderer Cenote` and asserts what a human would eyeball:
+success, a non-black frame, and the expected silhouette (the warm near cube
+left and larger, the cool far cube right and smaller, the background black).
+No pixel equality — that is step 6's FLIP golden. It needs the USD prefix on
+`PATH`/`PYTHONPATH` (below) and a built `cenote-server`
+(`target/{release,debug}`, or `$CENOTE_SERVER`).
 
 ## USD 26.05 — the pinned build (record)
 

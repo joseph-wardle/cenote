@@ -1,5 +1,9 @@
 /target
 
+# CMake build trees and the installed hdCenote plugin (hydra/README.md)
+/build/
+/hydra/dist/
+
 /*.exr
 
 # Texture-prep caches, written beside their source images

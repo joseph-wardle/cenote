@@ -1,0 +1,46 @@
+#usda 1.0
+(
+    """The step-1 checkpoint stage (and the seed of step 6's FLIP golden):
+    two cubes at different depths from a real camera, lit by one distant
+    light — every prim type the delegate translates so far, nothing it
+    does not. The near cube is warm and left of center, the far cube cool
+    and right, so a coarse silhouette check can tell them apart without
+    pixel equality (tests/usdrecord_smoke.py)."""
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "World"
+{
+    def Camera "Camera"
+    {
+        float focalLength = 35
+        double3 xformOp:translate = (0, -12, 0)
+        float3 xformOp:rotateXYZ = (90, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def DistantLight "Sun"
+    {
+        float inputs:intensity = 3
+        float3 xformOp:rotateXYZ = (45, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def Cube "Near"
+    {
+        double size = 2
+        color3f[] primvars:displayColor = [(0.8, 0.25, 0.15)]
+        double3 xformOp:translate = (-1.2, -3, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "Far"
+    {
+        double size = 2
+        color3f[] primvars:displayColor = [(0.15, 0.35, 0.8)]
+        double3 xformOp:translate = (1.5, 4, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}

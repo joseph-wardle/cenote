@@ -2649,3 +2649,50 @@ recorded so they read as decisions rather than surprises:
   it lands. Every new step was verified in an `ubuntu:24.04` container before landing:
   g++-14 compiled the mirror `-Werror`-clean, ctest passed, the pinned clang-format
   reported the tree clean.
+
+### D-110: Depth crosses the delegate in the projection's [0, 1], not in meters
+Status: accepted (2026-07-14); corrects a D-107 leaf. D-107 said the depth AOV is "one
+memcpy" of the shm plane, and the first real geometry proved that leaf wrong on
+inspection: the shm plane carries camera-plane z in meters with +inf where every sample
+missed, while Hydra's depth consumers assume the projection's [0, 1] — usdview's
+visualizer min/max-normalizes the buffer, so a single +inf background pixel flattens
+every real depth to black (the checkpoint cube vanished behind exactly this). The fix
+keeps both contracts honest: the server's plane stays linear meters (+inf is the truthful
+"no hit"), and the delegate remaps on the plane copy — only z is needed, so it is the
+projection's z/w rows and a divide per pixel, hdEmbree's conversion without the full
+point transform. Misses land exactly on the advertised 1.0 clear value. The render pass
+hands each bound buffer the frame's projection; a rejected alternative was baking [0, 1]
+into the shm contract, which would push a Hydra-ism into every non-Hydra client.
+
+### D-111: Two light Sprim types are advertised so the camera light exists at all
+Status: accepted (2026-07-14); an implementation note under D-108. D-108 counts on
+usdview's default camera light arriving as a scene-index distantLight prim, but
+HdxTaskController only injects its built-in lights when the delegate advertises Sprim
+support for domeLight AND a camera light type (simpleLight or distantLight) — an
+all-or-nothing gate, checked against the render index, that a scene-index-only delegate
+still has to pass. So the delegate advertises distantLight and domeLight and backs both
+with an inert HdLight subclass whose Sync does nothing: the render index gets the
+vocabulary it demands, while the actual translation keeps reading the same prims from
+the terminal scene index (zero Rprims stays true; the Sprims are decoys). The dome
+light stays untranslated until step 4 — enabling it in usdview simply does nothing —
+and simpleLight stays unadvertised so the task controller chooses the distantLight
+spelling, the one translator step 1 carries. The camera light rides the free camera:
+its transform is the view inverse, so every orbit re-patches the light's direction
+alongside SetCamera, which is the honest reading of "a light attached to the camera".
+
+### D-112: Honest convergence arrives with the smoke test, not with step 2
+Status: accepted (2026-07-14); pulls one D-107 leaf forward. D-107 parked
+`IsConverged()` at false — usdview just keeps repainting — and deferred the honest
+answer to step 2. The step-1 test slice broke that parking spot: `usdrecord` loops
+render-until-converged, so a never-converged delegate spins its recorder forever and
+the checkpoint cannot exist. The honest answer was already sitting in the shm header
+(`converged`, set when accumulation reaches `CENOTE_SERVER_MAX_SAMPLES`), so the
+delegate now reads it: false until a first publish, true when the header says settled,
+and true whenever the client is degraded — a dead server's picture will never improve,
+and a render-until-converged host must not hang on it. A render buffer whose segment
+trails its allocation is a resize still settling, and answers false. One recorded
+caveat: the flag refreshes only at publish, so a poll racing an edit can read one
+stale "converged" for at most a publish interval (~33 ms); usdview self-corrects on
+its next paint, and the smoke run never sees it because its resize hands it a freshly
+zeroed segment. The finer surface (per-edit scene epochs in the header) stays step 2's
+business, as D-107 said.

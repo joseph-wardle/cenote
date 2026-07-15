@@ -1,0 +1,184 @@
+#include "renderDelegate.hpp"
+
+#include "renderBuffer.hpp"
+#include "renderPass.hpp"
+
+#include "pxr/base/gf/vec4f.h"
+#include "pxr/base/tf/diagnostic.h"
+#include "pxr/imaging/hd/camera.h"
+#include "pxr/imaging/hd/light.h"
+#include "pxr/imaging/hd/resourceRegistry.h"
+#include "pxr/imaging/hd/tokens.h"
+
+PXR_NAMESPACE_OPEN_SCOPE
+
+// Zero Rprims by design (D-098): with no Rprim types advertised, the render
+// index never hydrates geometry, and the Rprim/instancer factories below stay
+// unreachable. The camera and the renderBuffer are the whole prim vocabulary —
+// plus two light types, advertised for HdxTaskController's benefit: its
+// built-in-light check demands domeLight AND a camera light type before it
+// injects usdview's default camera light, and without that light every frame
+// is black (D-108). The light sprims themselves are inert; the translators
+// read the same prims from the terminal scene index. The non-empty lists live
+// as function-local statics in their getters — a namespace-scope
+// TfTokenVector initializer allocates, and would throw where nothing catches.
+static const TfTokenVector kNoTypes;
+
+namespace {
+
+/// The inert backing for the advertised light types — nothing on this
+/// side ever reads it.
+class _NullLight final : public HdLight {
+public:
+    explicit _NullLight(SdfPath const& id) : HdLight(id) {}
+    void Sync(HdSceneDelegate* /*sceneDelegate*/, HdRenderParam* /*renderParam*/,
+              HdDirtyBits* dirtyBits) override {
+        *dirtyBits = Clean;
+    }
+    HdDirtyBits GetInitialDirtyBitsMask() const override { return AllDirty; }
+};
+
+} // namespace
+
+HdCenoteRenderDelegate::HdCenoteRenderDelegate()
+    : _resourceRegistry(std::make_shared<HdResourceRegistry>()) {}
+
+const TfTokenVector& HdCenoteRenderDelegate::GetSupportedRprimTypes() const { return kNoTypes; }
+
+const TfTokenVector& HdCenoteRenderDelegate::GetSupportedSprimTypes() const {
+    static const TfTokenVector kSprimTypes = {
+        HdPrimTypeTokens->camera, HdPrimTypeTokens->distantLight, HdPrimTypeTokens->domeLight};
+    return kSprimTypes;
+}
+
+const TfTokenVector& HdCenoteRenderDelegate::GetSupportedBprimTypes() const {
+    static const TfTokenVector kBprimTypes = {HdPrimTypeTokens->renderBuffer};
+    return kBprimTypes;
+}
+
+HdResourceRegistrySharedPtr HdCenoteRenderDelegate::GetResourceRegistry() const {
+    return _resourceRegistry;
+}
+
+HdRenderPassSharedPtr
+HdCenoteRenderDelegate::CreateRenderPass(HdRenderIndex* index,
+                                         HdRprimCollection const& collection) {
+    return std::make_shared<HdCenoteRenderPass>(index, collection, &_client);
+}
+
+HdInstancer* HdCenoteRenderDelegate::CreateInstancer(HdSceneDelegate* /*delegate*/,
+                                                     SdfPath const& /*id*/) {
+    return nullptr;
+}
+
+void HdCenoteRenderDelegate::DestroyInstancer(HdInstancer* /*instancer*/) {}
+
+HdRprim* HdCenoteRenderDelegate::CreateRprim(TfToken const& /*typeId*/,
+                                             SdfPath const& /*rprimId*/) {
+    return nullptr;
+}
+
+void HdCenoteRenderDelegate::DestroyRprim(HdRprim* /*rPrim*/) {}
+
+HdSprim* HdCenoteRenderDelegate::CreateSprim(TfToken const& typeId, SdfPath const& sprimId) {
+    if (typeId == HdPrimTypeTokens->camera) {
+        return new HdCamera(sprimId);
+    }
+    if (typeId == HdPrimTypeTokens->distantLight || typeId == HdPrimTypeTokens->domeLight) {
+        return new _NullLight(sprimId);
+    }
+    TF_CODING_ERROR("Unknown Sprim type %s", typeId.GetText());
+    return nullptr;
+}
+
+HdSprim* HdCenoteRenderDelegate::CreateFallbackSprim(TfToken const& typeId) {
+    if (typeId == HdPrimTypeTokens->camera) {
+        return new HdCamera(SdfPath::EmptyPath());
+    }
+    if (typeId == HdPrimTypeTokens->distantLight || typeId == HdPrimTypeTokens->domeLight) {
+        return new _NullLight(SdfPath::EmptyPath());
+    }
+    TF_CODING_ERROR("Unknown fallback Sprim type %s", typeId.GetText());
+    return nullptr;
+}
+
+void HdCenoteRenderDelegate::DestroySprim(HdSprim* sprim) { delete sprim; }
+
+HdBprim* HdCenoteRenderDelegate::CreateBprim(TfToken const& typeId, SdfPath const& bprimId) {
+    if (typeId == HdPrimTypeTokens->renderBuffer) {
+        return new HdCenoteRenderBuffer(bprimId, &_client);
+    }
+    TF_CODING_ERROR("Unknown Bprim type %s", typeId.GetText());
+    return nullptr;
+}
+
+HdBprim* HdCenoteRenderDelegate::CreateFallbackBprim(TfToken const& typeId) {
+    if (typeId == HdPrimTypeTokens->renderBuffer) {
+        return new HdCenoteRenderBuffer(SdfPath::EmptyPath(), &_client);
+    }
+    TF_CODING_ERROR("Unknown fallback Bprim type %s", typeId.GetText());
+    return nullptr;
+}
+
+void HdCenoteRenderDelegate::DestroyBprim(HdBprim* bprim) { delete bprim; }
+
+void HdCenoteRenderDelegate::CommitResources(HdChangeTracker* /*tracker*/) {}
+
+// The render index calls this once, right after it assembles the scene
+// index graph — the registered filter stack (sceneIndexPlugins.cpp)
+// included — and before the stage populates anything.
+void HdCenoteRenderDelegate::SetTerminalSceneIndex(
+    const HdSceneIndexBaseRefPtr& terminalSceneIndex) {
+    if (terminalSceneIndex && !_observer) {
+        _observer = std::make_unique<HdCenoteObserver>(terminalSceneIndex, &_pending);
+    }
+}
+
+// Hydra's serial per-frame hook, ahead of prim sync: flush the batched
+// notices through the translators, then put whatever they appended on
+// the wire. The first flush is genesis — a Replace, sent even when it
+// carries nothing, so the server's scene is *this* scene by declaration
+// and not by coincidence of both being empty. Every later flush is an
+// Apply, skipped when there is nothing to say. Both block only on the
+// local Ack — a receipt, not a render.
+void HdCenoteRenderDelegate::Update() {
+    if (!_observer) {
+        return;
+    }
+    _observer->Flush();
+    if (!_client.alive()) {
+        // Degraded: the edits have nowhere to go, and holding them
+        // would only grow a list no server will ever read.
+        _pending.ops.clear();
+        return;
+    }
+    if (!_sentGenesis) {
+        if (_client.replace(_pending)) {
+            _sentGenesis = true;
+            _pending.ops.clear();
+        }
+        return;
+    }
+    if (_pending.ops.empty()) {
+        return;
+    }
+    if (_client.apply(_pending)) {
+        _pending.ops.clear();
+    }
+}
+
+// The two channels the task controller asks about, in the formats the shm
+// framebuffer will carry: f32 RGBA color and f32 depth. Never multisampled —
+// the server hands back resolved pixels. Everything else gets the invalid
+// descriptor, which reads as "not offered".
+HdAovDescriptor HdCenoteRenderDelegate::GetDefaultAovDescriptor(TfToken const& name) const {
+    if (name == HdAovTokens->color) {
+        return HdAovDescriptor(HdFormatFloat32Vec4, false, VtValue(GfVec4f(0.0f)));
+    }
+    if (name == HdAovTokens->depth) {
+        return HdAovDescriptor(HdFormatFloat32, false, VtValue(1.0f));
+    }
+    return HdAovDescriptor();
+}
+
+PXR_NAMESPACE_CLOSE_SCOPE

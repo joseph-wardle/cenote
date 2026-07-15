@@ -1,0 +1,38 @@
+# Scoped to hydra/ like .clang-format; pinned to clang-tidy 22.1.8 (the
+# clang-format wheel's twin — `pip install --user clang-tidy==22.1.8`).
+# Runs over the full tree's compile database; the ritual command lives in
+# README.md. Warnings are errors so the ritual is a gate, and every check
+# family below is curated — additions welcome, silent removals not.
+#
+# The opt-outs:
+# - bugprone-easily-swappable-parameters: everything geometric here takes
+#   adjacent same-typed floats and dimensions; the signal drowns.
+# - bugprone-reserved-identifier: the delegate is written in USD's house
+#   style, and `_CapitalizedInternal` is that style's private-name
+#   convention (technically reserved, universally used across pxr).
+# - performance-enum-size: the wire enums mirror cenote-wire's Rust
+#   spellings and are never stored in bulk; shrinking them buys nothing.
+# - deprecated-declarations (via ExtraArgs — a compiler diagnostic, not a
+#   check): USD's TfType::Define probes std::is_pod_v, which libstdc++ 15
+#   deprecates, and clang surfaces the system-header diagnostic because
+#   the template instantiates from our registrations. USD's noise, not
+#   ours — real deprecations in our own code stay fatal in the -Werror
+#   compile.
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-reserved-identifier,
+  performance-*,
+  -performance-enum-size,
+  readability-const-return-type,
+  readability-container-size-empty,
+  readability-delete-null-pointer,
+  readability-duplicate-include,
+  readability-misleading-indentation,
+  readability-redundant-smartptr-get,
+  readability-redundant-string-cstr,
+  readability-static-definition-in-anonymous-namespace
+WarningsAsErrors: '*'
+HeaderFilterRegex: 'hydra/(hdCenote|transport|wire)/'
+ExtraArgs: ['-Wno-deprecated-declarations']

@@ -210,6 +210,9 @@ ChangeSet genesis() {
 
 } // namespace
 
+// A failed check reports by escaping: terminate prints the what() and the
+// exit is nonzero — that is the test contract, not an oversight.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 int main(int argc, char** argv) {
     if (argc != 2) {
         std::println(stderr, "usage: corpus-test <golden-dir>");

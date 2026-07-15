@@ -13,6 +13,9 @@ if(PROJECT_IS_TOP_LEVEL)
 endif()
 
 add_library(cenote-wire STATIC msgpack.cpp scene.cpp protocol.cpp)
+# The archive reaches the hdCenote MODULE through the transport library,
+# so its objects must be relocatable — in the standalone CI build too.
+set_target_properties(cenote-wire PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_executable(msgpack-test msgpack_test.cpp)
 target_link_libraries(msgpack-test PRIVATE cenote-wire)

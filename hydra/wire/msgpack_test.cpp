@@ -352,6 +352,9 @@ void framing() {
 
 } // namespace
 
+// A failed check reports by escaping: terminate prints the what() and the
+// exit is nonzero — that is the test contract, not an oversight.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 int main() {
     writer_unsigned_integers();
     writer_signed_integers();
