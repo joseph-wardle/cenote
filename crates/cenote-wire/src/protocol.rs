@@ -24,7 +24,7 @@ use crate::scene::ChangeSet;
 /// The protocol revision carried in `Hello`/`Welcome`. Bump on any change
 /// to the encoded shape of any type in this crate — and regenerate the
 /// golden corpus in the same commit.
-pub const PROTOCOL: u32 = 2;
+pub const PROTOCOL: u32 = 3;
 
 /// The most bytes one frame may claim, a plausibility guard so a garbage
 /// or hostile length prefix cannot ask the reader to allocate without
@@ -250,6 +250,7 @@ mod tests {
             Some(Reset::Set(TextureRef {
                 path: "/n.png".into(),
                 color_space: None,
+                channel: None,
             })),
         ];
         let mut encodings = Vec::new();

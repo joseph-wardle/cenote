@@ -417,6 +417,7 @@ mod tests {
                         base_color: Some(Texturable::Texture(TextureRef {
                             path: wood.to_owned(),
                             color_space: None,
+                            channel: None,
                         })),
                         ..MaterialPatch::new("floor")
                     }))],

@@ -162,10 +162,12 @@ mod tests {
                     base_color: Some(Texturable::Texture(TextureRef {
                         path: "wood.png".into(),
                         color_space: None,
+                        channel: None,
                     })),
                     geometry_normal: Some(Some(TextureRef {
                         path: "wood_n.png".into(),
                         color_space: None,
+                        channel: None,
                     })),
                     ..MaterialPatch::new("wood")
                 })),

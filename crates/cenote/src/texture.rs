@@ -14,7 +14,8 @@
 //!
 //! Formats by usage: color is BC7 (an sRGB view keeps the storage in
 //! source space and lets the hardware decode it), HDR float color is
-//! BC6H, scalar masks are BC4 on the red channel, and tangent-space
+//! BC6H, scalar masks are BC4 baked from their chosen source channel
+//! (red when unstated), and tangent-space
 //! normals are BC5 on x/y with z reconstructed in-shader. Color textures
 //! stay `Rec.709` on disk and in VRAM; the shader applies the working-
 //! space conversion after the hardware's sRGB decode.
@@ -48,7 +49,7 @@ pub(crate) enum Usage {
     /// RGB color (base color, emission): BC7. 8-bit sources default to
     /// sRGB storage with hardware decode; float sources are linear BC6H.
     Color,
-    /// A single scalar in the red channel (roughness, metalness,
+    /// A single scalar from one source channel (roughness, metalness,
     /// opacity): BC4, linear.
     Scalar,
     /// A tangent-space normal map: BC5 on x/y, always linear.
@@ -67,11 +68,50 @@ impl Usage {
     }
 }
 
+/// The source channel a scalar prep bakes. BC4 stores exactly one
+/// component, so the choice is prep-time identity rather than a runtime
+/// swizzle: a packed image (say occlusion/roughness/metalness) preps once
+/// per channel used. Only [`Usage::Scalar`] reads it — color and normal
+/// encodes take fixed channels, and their callers pass [`Channel::R`] so
+/// a stray selector can't fork their cache.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Channel {
+    R,
+    G,
+    B,
+    A,
+}
+
+impl Channel {
+    /// The channel's index into an RGBA texel.
+    fn index(self) -> usize {
+        match self {
+            Self::R => 0,
+            Self::G => 1,
+            Self::B => 2,
+            Self::A => 3,
+        }
+    }
+
+    /// The channel as it appears in the DDS cache path and content hash.
+    /// Red is the empty tag on purpose: it spells exactly what prep did
+    /// before channels existed, so every cache written then stays a hit
+    /// instead of becoming an orphan beside its source.
+    fn tag(self) -> &'static str {
+        match self {
+            Self::R => "",
+            Self::G => ".g",
+            Self::B => ".b",
+            Self::A => ".a",
+        }
+    }
+}
+
 /// What one scene-file texture reference asks of prep — and therefore the
 /// identity of a prepared texture: two materials sharing a source image
 /// *and* its interpretation share one bindless slot, while a color and a
-/// mask use of the same file are two.
-pub(crate) type Key = (std::path::PathBuf, Usage, Option<bool>);
+/// mask use of the same file are two (as are two channels of one mask).
+pub(crate) type Key = (std::path::PathBuf, Usage, Option<bool>, Channel);
 
 /// One texture, prepped and ready to upload: single-level BC blocks over
 /// block-padded rows (dimensions rounded up to multiples of 4 by edge
@@ -90,26 +130,33 @@ pub(crate) struct Prepared {
 /// Prep `path` for `usage`, through the DDS cache beside the source.
 /// `srgb` is the scene file's explicit color-space override; `None`
 /// derives it from the usage and the source's bit depth (8-bit color is
-/// sRGB, float color is linear, data is linear — pbrt's rule).
+/// sRGB, float color is linear, data is linear — pbrt's rule). `channel`
+/// is the scalar bake's source component; color and normal usages read
+/// fixed channels and take [`Channel::R`].
 ///
 /// # Errors
 ///
 /// [`Error::Scene`] when the file can't be read or doesn't decode — bad
 /// texture data must not end a live session. A cache that fails to
 /// *write* only warns: the render proceeds from memory.
-pub(crate) fn prepare(path: &Path, usage: Usage, srgb: Option<bool>) -> Result<Prepared> {
+pub(crate) fn prepare(
+    path: &Path,
+    usage: Usage,
+    srgb: Option<bool>,
+    channel: Channel,
+) -> Result<Prepared> {
     let bytes = fs::read(path).map_err(|error| {
         Error::Scene(format!(
             "texture \"{}\": can't read: {error}",
             path.display()
         ))
     })?;
-    let hash = cache_hash(&bytes, usage, srgb);
-    let cache = cache_path(path, usage, srgb);
+    let hash = cache_hash(&bytes, usage, srgb, channel);
+    let cache = cache_path(path, usage, srgb, channel);
     if let Some(prepared) = read_cache(&cache, hash) {
         return Ok(prepared);
     }
-    let prepared = encode(path, &bytes, usage, srgb, hash)?;
+    let prepared = encode(path, &bytes, usage, srgb, channel, hash)?;
     if let Err(error) = fs::write(&cache, dds::compose(&prepared, hash)) {
         log::warn!(
             "texture \"{}\": couldn't write its cache \"{}\": {error}",
@@ -121,24 +168,27 @@ pub(crate) fn prepare(path: &Path, usage: Usage, srgb: Option<bool>) -> Result<P
 }
 
 /// The cache lives next to its source, named by source name and usage —
-/// `wood.png` used as color caches as `wood.png.color.dds`. An explicit
-/// color-space override changes the prepared bytes, so it joins the name.
-fn cache_path(path: &Path, usage: Usage, srgb: Option<bool>) -> PathBuf {
+/// `wood.png` used as color caches as `wood.png.color.dds`, its green
+/// channel as a mask as `wood.png.scalar.g.dds`. An explicit color-space
+/// override changes the prepared bytes, so it joins the name.
+fn cache_path(path: &Path, usage: Usage, srgb: Option<bool>, channel: Channel) -> PathBuf {
     let space = match srgb {
         None => "",
         Some(true) => ".srgb",
         Some(false) => ".linear",
     };
     let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".{}{space}.dds", usage.tag()));
+    name.push(format!(".{}{}{space}.dds", usage.tag(), channel.tag()));
     path.with_file_name(name)
 }
 
 /// The cache-validity hash: source bytes plus everything that changes the
-/// prepared result.
-fn cache_hash(bytes: &[u8], usage: Usage, srgb: Option<bool>) -> u64 {
+/// prepared result. The channel folds in as its tag — empty for red, so
+/// pre-channel caches keep validating.
+fn cache_hash(bytes: &[u8], usage: Usage, srgb: Option<bool>, channel: Channel) -> u64 {
     let mut hash = fnv1a(0xcbf2_9ce4_8422_2325, bytes);
     hash = fnv1a(hash, usage.tag().as_bytes());
+    hash = fnv1a(hash, channel.tag().as_bytes());
     hash = fnv1a(
         hash,
         &[
@@ -223,6 +273,7 @@ fn encode(
     bytes: &[u8],
     usage: Usage,
     srgb: Option<bool>,
+    channel: Channel,
     hash: u64,
 ) -> Result<Prepared> {
     let source = decode(path, bytes)?;
@@ -235,7 +286,7 @@ fn encode(
     }
     let mut prepared = match usage {
         Usage::Color => encode_color(source, srgb),
-        Usage::Scalar => encode_scalar(source, srgb),
+        Usage::Scalar => encode_scalar(source, srgb, channel),
         Usage::Normal => encode_normal(source),
     };
     prepared.hash = hash;
@@ -306,11 +357,12 @@ fn encode_color(source: Source, srgb: Option<bool>) -> Prepared {
     }
 }
 
-/// Scalar masks: the red channel, BC4. Data defaults to linear; an
+/// Scalar masks: one source channel, BC4. Data defaults to linear; an
 /// explicit sRGB override linearizes at prep (BC4 has no sRGB view).
-fn encode_scalar(source: Source, srgb: Option<bool>) -> Prepared {
+fn encode_scalar(source: Source, srgb: Option<bool>, channel: Channel) -> Prepared {
     let srgb = srgb == Some(true);
-    let (mut red, width, height): (Vec<u8>, u32, u32) = match source {
+    let picked = channel.index();
+    let (mut mask, width, height): (Vec<u8>, u32, u32) = match source {
         Source::Bytes {
             rgba,
             width,
@@ -318,7 +370,7 @@ fn encode_scalar(source: Source, srgb: Option<bool>) -> Prepared {
         } => {
             let (rgba, width, height) = mip_cap_bytes(rgba, width, height, srgb, false);
             (
-                rgba.chunks_exact(4).map(|texel| texel[0]).collect(),
+                rgba.chunks_exact(4).map(|texel| texel[picked]).collect(),
                 width,
                 height,
             )
@@ -331,7 +383,7 @@ fn encode_scalar(source: Source, srgb: Option<bool>) -> Prepared {
             let (rgba, width, height) = mip_cap_floats(rgba, width, height, false);
             (
                 rgba.chunks_exact(4)
-                    .map(|texel| quantize(texel[0]))
+                    .map(|texel| quantize(texel[picked]))
                     .collect(),
                 width,
                 height,
@@ -339,11 +391,11 @@ fn encode_scalar(source: Source, srgb: Option<bool>) -> Prepared {
         }
     };
     if srgb {
-        for value in &mut red {
+        for value in &mut mask {
             *value = quantize(srgb_to_linear(f32::from(*value) / 255.0));
         }
     }
-    let (padded, pw, ph) = pad_to_blocks(&red, width, height, 1);
+    let (padded, pw, ph) = pad_to_blocks(&mask, width, height, 1);
     let surface = intel_tex_2::RSurface {
         data: &padded,
         width: pw,
@@ -807,7 +859,7 @@ mod tests {
             texel.copy_from_slice(&[value, 0, 0, 255]);
         }
         write_png(&path, 4, 4, &rgba);
-        let prepared = prepare(&path, Usage::Scalar, None).expect("prepare");
+        let prepared = prepare(&path, Usage::Scalar, None, Channel::R).expect("prepare");
         assert_eq!(prepared.format, vk::Format::BC4_UNORM_BLOCK);
         assert_eq!(prepared.data.len(), 8);
         let decoded = decode_bc4(&prepared.data);
@@ -821,6 +873,39 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// Each channel of one packed image bakes its own BC4 — four distinct
+    /// caches, each holding that channel's flat value exactly — and red
+    /// spells the cache name prep used before channels existed.
+    #[test]
+    fn scalar_channels_bake_and_cache_separately() {
+        let dir = scratch_dir("channels");
+        let path = dir.join("orm.png");
+        let texel = [10u8, 120, 200, 250];
+        let rgba: Vec<u8> = texel.iter().copied().cycle().take(4 * 4 * 4).collect();
+        write_png(&path, 4, 4, &rgba);
+        for (channel, expected) in [
+            (Channel::R, 10u8),
+            (Channel::G, 120),
+            (Channel::B, 200),
+            (Channel::A, 250),
+        ] {
+            let prepared = prepare(&path, Usage::Scalar, None, channel).expect("prepare");
+            assert_eq!(prepared.format, vk::Format::BC4_UNORM_BLOCK);
+            let decoded = decode_bc4(&prepared.data);
+            assert!(
+                decoded.iter().all(|&value| value == expected),
+                "channel {channel:?}: {decoded:?} vs flat {expected}"
+            );
+            assert!(cache_path(&path, Usage::Scalar, None, channel).exists());
+        }
+        assert_eq!(
+            cache_path(&path, Usage::Scalar, None, Channel::R),
+            dir.join("orm.png.scalar.dds"),
+            "red must keep the pre-channel cache name"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
     /// The cache lifecycle: a first prep writes the DDS, a second returns
     /// the identical bytes from it, corruption re-encodes over it, and a
     /// source edit invalidates it by hash.
@@ -830,36 +915,41 @@ mod tests {
         let path = dir.join("wood.png");
         write_png(&path, 8, 8, &vec![180u8; 8 * 8 * 4]);
 
-        let first = prepare(&path, Usage::Color, None).expect("prepare");
-        let cache = cache_path(&path, Usage::Color, None);
+        let first = prepare(&path, Usage::Color, None, Channel::R).expect("prepare");
+        let cache = cache_path(&path, Usage::Color, None, Channel::R);
         assert!(cache.exists(), "prep should write {}", cache.display());
         assert_eq!(first.format, vk::Format::BC7_SRGB_BLOCK);
 
-        let second = prepare(&path, Usage::Color, None).expect("prepare again");
+        let second = prepare(&path, Usage::Color, None, Channel::R).expect("prepare again");
         assert_eq!(first.data, second.data);
         assert_eq!((first.width, first.height), (second.width, second.height));
 
         // Corrupt the cache: parse fails, prep re-encodes and rewrites.
         fs::write(&cache, b"not a dds").expect("corrupt");
-        let repaired = prepare(&path, Usage::Color, None).expect("repair");
+        let repaired = prepare(&path, Usage::Color, None, Channel::R).expect("repair");
         assert_eq!(first.data, repaired.data);
         assert!(
             dds::parse(
                 &fs::read(&cache).expect("read"),
-                cache_hash(&fs::read(&path).expect("read"), Usage::Color, None)
+                cache_hash(
+                    &fs::read(&path).expect("read"),
+                    Usage::Color,
+                    None,
+                    Channel::R
+                )
             )
             .is_some()
         );
 
         // Edit the source: the stale hash reads as a miss.
         write_png(&path, 8, 8, &vec![20u8; 8 * 8 * 4]);
-        let edited = prepare(&path, Usage::Color, None).expect("re-encode");
+        let edited = prepare(&path, Usage::Color, None, Channel::R).expect("re-encode");
         assert_ne!(first.data, edited.data);
 
         // Distinct usages cache separately.
-        let scalar = prepare(&path, Usage::Scalar, None).expect("scalar");
+        let scalar = prepare(&path, Usage::Scalar, None, Channel::R).expect("scalar");
         assert_ne!(scalar.format, edited.format);
-        assert!(cache_path(&path, Usage::Scalar, None).exists());
+        assert!(cache_path(&path, Usage::Scalar, None, Channel::R).exists());
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -872,11 +962,13 @@ mod tests {
         let path = dir.join("c.png");
         write_png(&path, 4, 4, &[255u8; 4 * 4 * 4]);
         assert_eq!(
-            prepare(&path, Usage::Color, None).expect("srgb").format,
+            prepare(&path, Usage::Color, None, Channel::R)
+                .expect("srgb")
+                .format,
             vk::Format::BC7_SRGB_BLOCK
         );
         assert_eq!(
-            prepare(&path, Usage::Color, Some(false))
+            prepare(&path, Usage::Color, Some(false), Channel::R)
                 .expect("linear")
                 .format,
             vk::Format::BC7_UNORM_BLOCK
@@ -885,7 +977,9 @@ mod tests {
         let exr = dir.join("c.exr");
         crate::output::write_exr(&exr, 4, 4, &vec![1.5f32; 4 * 4 * 4]).expect("exr");
         assert_eq!(
-            prepare(&exr, Usage::Color, None).expect("hdr").format,
+            prepare(&exr, Usage::Color, None, Channel::R)
+                .expect("hdr")
+                .format,
             vk::Format::BC6H_UFLOAT_BLOCK
         );
         fs::remove_dir_all(&dir).ok();
@@ -894,12 +988,12 @@ mod tests {
     #[test]
     fn unreadable_and_undecodable_sources_are_scene_errors() {
         let dir = scratch_dir("errors");
-        let missing = prepare(&dir.join("nope.png"), Usage::Color, None);
+        let missing = prepare(&dir.join("nope.png"), Usage::Color, None, Channel::R);
         assert!(matches!(missing, Err(Error::Scene(_))));
 
         let garbage = dir.join("garbage.png");
         fs::write(&garbage, b"not an image").expect("write");
-        let undecodable = prepare(&garbage, Usage::Color, None);
+        let undecodable = prepare(&garbage, Usage::Color, None, Channel::R);
         assert!(matches!(undecodable, Err(Error::Scene(_))));
         fs::remove_dir_all(&dir).ok();
     }

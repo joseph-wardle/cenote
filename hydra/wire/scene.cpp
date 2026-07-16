@@ -41,10 +41,28 @@ void encode(Writer& writer, ColorSpace value) {
     }
 }
 
+void encode(Writer& writer, Channel value) {
+    switch (value) {
+    case Channel::R:
+        writer.str("R");
+        return;
+    case Channel::G:
+        writer.str("G");
+        return;
+    case Channel::B:
+        writer.str("B");
+        return;
+    case Channel::A:
+        writer.str("A");
+        return;
+    }
+}
+
 void encode(Writer& writer, const TextureRef& value) {
-    writer.array_header(2);
+    writer.array_header(3);
     encode(writer, value.path);
     encode(writer, value.color_space);
+    encode(writer, value.channel);
 }
 
 void encode(Writer& writer, const Transform& value) {

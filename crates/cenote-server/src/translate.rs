@@ -273,12 +273,22 @@ fn texturable<T>(value: wire::Texturable<T>) -> description::Texturable<T> {
 }
 
 fn texture_ref(reference: wire::TextureRef) -> description::TextureRef {
-    let wire::TextureRef { path, color_space } = reference;
+    let wire::TextureRef {
+        path,
+        color_space,
+        channel,
+    } = reference;
     description::TextureRef {
         path: PathBuf::from(path),
         color_space: color_space.map(|space| match space {
             wire::ColorSpace::Srgb => description::ColorSpace::Srgb,
             wire::ColorSpace::Linear => description::ColorSpace::Linear,
+        }),
+        channel: channel.map(|channel| match channel {
+            wire::Channel::R => description::Channel::R,
+            wire::Channel::G => description::Channel::G,
+            wire::Channel::B => description::Channel::B,
+            wire::Channel::A => description::Channel::A,
         }),
     }
 }
@@ -319,12 +329,14 @@ mod tests {
         let reference = wire::TextureRef {
             path: "/n.png".into(),
             color_space: Some(wire::ColorSpace::Linear),
+            channel: Some(wire::Channel::A),
         };
         assert_eq!(
             with(Some(wire::Reset::Set(reference))),
             Some(Some(description::TextureRef {
                 path: "/n.png".into(),
                 color_space: Some(description::ColorSpace::Linear),
+                channel: Some(description::Channel::A),
             }))
         );
     }

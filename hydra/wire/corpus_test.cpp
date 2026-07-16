@@ -133,13 +133,15 @@ ChangeSet genesis() {
         },
         MaterialPatch{
             .name = "m-set",
-            .base_color =
-                TextureRef{.path = "/textures/дерево.png", .color_space = ColorSpace::Srgb},
+            .base_color = TextureRef{.path = "/textures/дерево.png",
+                                     .color_space = ColorSpace::Srgb,
+                                     .channel = {}},
             .base_diffuse_roughness = 0.25f,
             .base_metalness = Constant{1.0f},
             .specular_weight = 0.9f,
-            .specular_roughness =
-                TextureRef{.path = "/textures/rough.png", .color_space = ColorSpace::Linear},
+            .specular_roughness = TextureRef{.path = "/textures/rough.png",
+                                             .color_space = ColorSpace::Linear,
+                                             .channel = Channel::G},
             .specular_ior = 1.45f,
             .transmission_weight = 0.5f,
             .transmission_color = std::array{0.9f, 0.95f, 1.0f},
@@ -154,9 +156,13 @@ ChangeSet genesis() {
             .fuzz_roughness = 0.6f,
             .emission_luminance = 1000.0f,
             .emission_color = Constant{std::array{1.0f, 0.5f, 0.25f}},
-            .geometry_opacity = TextureRef{.path = "/textures/mask.png", .color_space = {}},
+            .geometry_opacity =
+                TextureRef{.path = "/textures/mask.png", .color_space = {}, .channel = Channel::A},
             .geometry_thin_walled = true,
-            .geometry_normal = Set{TextureRef{.path = "/textures/normal.png", .color_space = {}}},
+            // A channel on a normal slot is inert server-side; the mirror
+            // is total, so its bytes are pinned regardless.
+            .geometry_normal = Set{TextureRef{
+                .path = "/textures/normal.png", .color_space = {}, .channel = Channel::B}},
         },
         MaterialPatch{
             .name = "m-clear",
@@ -165,6 +171,8 @@ ChangeSet genesis() {
         MaterialPatch{
             .name = "m-leave",
             .base_metalness = Constant{0.0f},
+            .specular_roughness =
+                TextureRef{.path = "/textures/orm.png", .color_space = {}, .channel = Channel::R},
             .geometry_opacity = Constant{1.0f},
         },
         LightPatch{

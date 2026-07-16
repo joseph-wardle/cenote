@@ -772,6 +772,7 @@ fn the_textured_furnace_closes() {
             base_color: Some(Texturable::Texture(TextureRef {
                 path: white,
                 color_space: None,
+                channel: None,
             })),
             specular_weight: Some(0.0),
             ..MaterialPatch::new("surface")
@@ -801,6 +802,7 @@ fn the_textured_furnace_closes() {
             specular_roughness: Some(Texturable::Texture(TextureRef {
                 path: gray,
                 color_space: None,
+                channel: None,
             })),
             ..MaterialPatch::new("surface")
         },
@@ -883,6 +885,7 @@ fn an_emission_map_pins_uv_orientation_and_the_idt() {
                     emission_color: Some(Texturable::Texture(TextureRef {
                         path: map,
                         color_space: None,
+                        channel: None,
                     })),
                     ..MaterialPatch::new("emit")
                 })),
@@ -945,6 +948,7 @@ fn normal_maps_tilt_shading_and_keep_energy() {
             geometry_normal: Some(Some(TextureRef {
                 path: flat,
                 color_space: None,
+                channel: None,
             })),
             ..MaterialPatch::new("surface")
         },
@@ -975,6 +979,7 @@ fn normal_maps_tilt_shading_and_keep_energy() {
                 geometry_normal: Some(Some(TextureRef {
                     path: map,
                     color_space: None,
+                    channel: None,
                 })),
                 ..MaterialPatch::new("surface")
             },
@@ -1052,6 +1057,7 @@ fn textured_opacity_is_per_sample_exact() {
             geometry_opacity: Some(Texturable::Texture(TextureRef {
                 path: checker,
                 color_space: None,
+                channel: None,
             })),
             ..MaterialPatch::new("surface")
         },

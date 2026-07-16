@@ -45,11 +45,22 @@ enum class ColorSpace {
     Linear,
 };
 
+/// One channel of a source image — mirror of `Channel`: the component a
+/// scalar slot samples.
+enum class Channel {
+    R,
+    G,
+    B,
+    A,
+};
+
 /// A reference to an image file — mirror of `TextureRef`. Send absolute
-/// paths; an empty `color_space` derives it from the slot.
+/// paths; an empty `color_space` derives it from the slot; an empty
+/// `channel` means red (color and normal slots ignore it).
 struct TextureRef {
     std::string path;
     std::optional<ColorSpace> color_space;
+    std::optional<Channel> channel;
 };
 
 /// `Reset`'s Clear alternative — the renderer's `Some(None)`, restoring
@@ -252,6 +263,7 @@ inline void encode(Writer& writer, const std::string& value) { writer.str(value)
 
 void encode(Writer& writer, Kind value);
 void encode(Writer& writer, ColorSpace value);
+void encode(Writer& writer, Channel value);
 void encode(Writer& writer, const TextureRef& value);
 void encode(Writer& writer, const Transform& value);
 void encode(Writer& writer, const MeshSource& value);

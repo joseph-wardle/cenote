@@ -101,6 +101,22 @@ pub struct TextureRef {
     pub path: String,
     /// Color-space override; `None` derives it from the slot.
     pub color_space: Option<ColorSpace>,
+    /// The source channel a scalar slot reads; `None` means red. Color
+    /// and normal slots ignore it.
+    pub channel: Option<Channel>,
+}
+
+/// One channel of a source image — mirror of `description::Channel`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Channel {
+    /// The red component (the default when unstated).
+    R,
+    /// The green component.
+    G,
+    /// The blue component.
+    B,
+    /// The alpha component.
+    A,
 }
 
 /// How an image's stored values map to linear light — mirror of

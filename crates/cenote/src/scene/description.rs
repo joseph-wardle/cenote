@@ -77,6 +77,25 @@ pub struct TextureRef {
     /// maps straight onto this).
     #[serde(default)]
     pub color_space: Option<ColorSpace>,
+    /// The source channel a scalar slot reads; `None` means red. This is
+    /// how one packed image serves several masks (roughness from green,
+    /// metalness from blue) and an RGBA color's alpha drives opacity.
+    /// Color and normal slots ignore it.
+    #[serde(default)]
+    pub channel: Option<Channel>,
+}
+
+/// One channel of a source image — which component a scalar slot samples.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Channel {
+    /// The red component (the default when unstated).
+    R,
+    /// The green component.
+    G,
+    /// The blue component.
+    B,
+    /// The alpha component.
+    A,
 }
 
 /// How an image's stored values map to linear light.
@@ -726,10 +745,12 @@ mod tests {
             base_color: Texturable::Texture(TextureRef {
                 path: "color.png".into(),
                 color_space: None,
+                channel: None,
             }),
             geometry_normal: Some(TextureRef {
                 path: "normal.png".into(),
                 color_space: None,
+                channel: None,
             }),
             ..Material::default()
         };
@@ -737,6 +758,7 @@ mod tests {
         material.geometry_opacity = Texturable::Texture(TextureRef {
             path: "mask.png".into(),
             color_space: None,
+            channel: Some(Channel::A),
         });
         assert_eq!(material.textures().count(), 3);
         assert_eq!(Material::default().textures().count(), 0);

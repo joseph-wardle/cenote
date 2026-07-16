@@ -1021,6 +1021,7 @@ mod tests {
                     base_color: Some(Texturable::Texture(TextureRef {
                         path: "wood.png".into(),
                         color_space: None,
+                        channel: None,
                     })),
                     ..MaterialPatch::new("wood")
                 })),
@@ -1047,7 +1048,8 @@ mod tests {
             material.base_color.as_ref().and_then(Texturable::texture),
             Some(&TextureRef {
                 path: "/scenes/wood.png".into(),
-                color_space: None
+                color_space: None,
+                channel: None,
             })
         );
     }

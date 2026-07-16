@@ -761,6 +761,7 @@ impl Mapper {
                 Texturable::Texture(TextureRef {
                     path: self.parser.resolve(file),
                     color_space: None,
+                    channel: None,
                 })
             }
             None => Texturable::Constant(self.light_color(directive, "L")?),
@@ -1152,6 +1153,7 @@ impl Mapper {
             patch.geometry_normal = Some(Some(TextureRef {
                 path: self.parser.resolve(file),
                 color_space: None,
+                channel: None,
             }));
         }
         Ok(patch)
@@ -1334,7 +1336,11 @@ impl Mapper {
                     scale,
                 } => {
                     self.warn_dropped_scale(scale, name, &param.location);
-                    Texturable::Texture(TextureRef { path, color_space })
+                    Texturable::Texture(TextureRef {
+                        path,
+                        color_space,
+                        channel: None,
+                    })
                 }
             },
             other => {
@@ -1373,7 +1379,11 @@ impl Mapper {
                     scale,
                 } => {
                     self.warn_dropped_scale(scale, name, &param.location);
-                    Texturable::Texture(TextureRef { path, color_space })
+                    Texturable::Texture(TextureRef {
+                        path,
+                        color_space,
+                        channel: None,
+                    })
                 }
             },
         }))

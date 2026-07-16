@@ -21,9 +21,10 @@
 //!
 //! Coverage, per the step-0 plan: every `Op` variant; every patch field
 //! `Some`; both `MeshSource` and both `Transform` spellings; both `Light`
-//! and both `Texturable` variants; the doubly-optional fields in all
-//! three states; a `Remove` of every `Kind`; an empty set; unicode in
-//! names, paths, and messages; and every `Request`/`Response` variant.
+//! and both `Texturable` variants; the texture channel absent and in all
+//! four spellings; the doubly-optional fields in all three states; a
+//! `Remove` of every `Kind`; an empty set; unicode in names, paths, and
+//! messages; and every `Request`/`Response` variant.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -31,9 +32,9 @@ use std::path::PathBuf;
 
 use cenote_wire::protocol::{Camera, FbDesc, PROTOCOL, Request, Response, decode, encode};
 use cenote_wire::scene::{
-    CameraPatch, ChangeSet, ColorSpace, EnvironmentPatch, InstancePatch, Kind, Light, LightPatch,
-    MaterialPatch, MeshPatch, MeshSource, Op, Reset, SettingsPatch, TextureRef, Texturable,
-    Transform,
+    CameraPatch, ChangeSet, Channel, ColorSpace, EnvironmentPatch, InstancePatch, Kind, Light,
+    LightPatch, MaterialPatch, MeshPatch, MeshSource, Op, Reset, SettingsPatch, TextureRef,
+    Texturable, Transform,
 };
 
 /// One pinned message — the corpus is heterogeneous, so each case carries
@@ -234,12 +235,15 @@ fn genesis() -> ChangeSet {
             }),
             // The material patch three times over: every field `Some`
             // with the normal map set, then the clear, then the
-            // leave-alone — the three states of the doubly-optional.
+            // leave-alone — the three states of the doubly-optional. The
+            // texture references between them cover the source channel
+            // absent and in all four spellings.
             Op::Material(Box::new(MaterialPatch {
                 name: "m-set".into(),
                 base_color: Some(Texturable::Texture(TextureRef {
                     path: "/textures/дерево.png".into(),
                     color_space: Some(ColorSpace::Srgb),
+                    channel: None,
                 })),
                 base_diffuse_roughness: Some(0.25),
                 base_metalness: Some(Texturable::Constant(1.0)),
@@ -247,6 +251,7 @@ fn genesis() -> ChangeSet {
                 specular_roughness: Some(Texturable::Texture(TextureRef {
                     path: "/textures/rough.png".into(),
                     color_space: Some(ColorSpace::Linear),
+                    channel: Some(Channel::G),
                 })),
                 specular_ior: Some(1.45),
                 transmission_weight: Some(0.5),
@@ -265,11 +270,15 @@ fn genesis() -> ChangeSet {
                 geometry_opacity: Some(Texturable::Texture(TextureRef {
                     path: "/textures/mask.png".into(),
                     color_space: None,
+                    channel: Some(Channel::A),
                 })),
                 geometry_thin_walled: Some(true),
+                // A channel on a normal slot is inert server-side; the
+                // mirror is total, so its bytes are pinned regardless.
                 geometry_normal: Some(Reset::Set(TextureRef {
                     path: "/textures/normal.png".into(),
                     color_space: None,
+                    channel: Some(Channel::B),
                 })),
             })),
             Op::Material(Box::new(MaterialPatch {
@@ -280,6 +289,11 @@ fn genesis() -> ChangeSet {
             Op::Material(Box::new(MaterialPatch {
                 name: "m-leave".into(),
                 base_metalness: Some(Texturable::Constant(0.0)),
+                specular_roughness: Some(Texturable::Texture(TextureRef {
+                    path: "/textures/orm.png".into(),
+                    color_space: None,
+                    channel: Some(Channel::R),
+                })),
                 geometry_opacity: Some(Texturable::Constant(1.0)),
                 ..MaterialPatch::default()
             })),

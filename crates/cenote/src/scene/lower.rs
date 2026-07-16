@@ -145,7 +145,7 @@ pub(super) fn host_phase(
     for (key, touched) in referenced {
         let resident = resident_textures.get(&key).copied();
         let prepared = if resident.is_none() || touched {
-            let prepared = texture::prepare(&key.0, key.1, key.2)?;
+            let prepared = texture::prepare(&key.0, key.1, key.2, key.3)?;
             (resident != Some(prepared.hash)).then_some(prepared)
         } else {
             None
@@ -416,7 +416,18 @@ fn texture_key(reference: &TextureRef, usage: texture::Usage) -> texture::Key {
             reference.color_space.map(|space| space == ColorSpace::Srgb)
         }
     };
-    (reference.path.clone(), usage, srgb)
+    let channel = match usage {
+        // Only the scalar bake reads a chosen channel; a stray selector
+        // on a color or normal slot must not fork the cache.
+        texture::Usage::Color | texture::Usage::Normal => texture::Channel::R,
+        texture::Usage::Scalar => match reference.channel {
+            None | Some(description::Channel::R) => texture::Channel::R,
+            Some(description::Channel::G) => texture::Channel::G,
+            Some(description::Channel::B) => texture::Channel::B,
+            Some(description::Channel::A) => texture::Channel::A,
+        },
+    };
+    (reference.path.clone(), usage, srgb, channel)
 }
 
 /// A material's textured slots paired with the texture usage each feeds,
@@ -807,6 +818,7 @@ mod tests {
                         // Exists (so apply accepts it) but is no image.
                         path: concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml").into(),
                         color_space: None,
+                        channel: None,
                     })),
                     ..MaterialPatch::new("gray")
                 }))],
@@ -954,6 +966,31 @@ mod tests {
         assert!(pinhole.lens.is_none());
     }
 
+    /// The channel forks a scalar key — two masks packed into one image
+    /// prep separately — and never a color or normal key, where a stray
+    /// selector is inert.
+    #[test]
+    fn texture_keys_fork_on_scalar_channels_only() {
+        let with_channel = |channel| TextureRef {
+            path: "/orm.png".into(),
+            color_space: None,
+            channel,
+        };
+        let scalar = |channel| texture_key(&with_channel(channel), texture::Usage::Scalar);
+        assert_ne!(
+            scalar(Some(description::Channel::G)),
+            scalar(Some(description::Channel::B))
+        );
+        // Absent and explicit red are the same prep.
+        assert_eq!(scalar(None), scalar(Some(description::Channel::R)));
+        for usage in [texture::Usage::Color, texture::Usage::Normal] {
+            assert_eq!(
+                texture_key(&with_channel(Some(description::Channel::A)), usage),
+                texture_key(&with_channel(None), usage),
+            );
+        }
+    }
+
     #[test]
     #[expect(
         clippy::float_cmp,
@@ -966,10 +1003,12 @@ mod tests {
             base_color: Texturable::Texture(TextureRef {
                 path: "/wood.png".into(),
                 color_space: None,
+                channel: None,
             }),
             geometry_normal: Some(TextureRef {
                 path: "/weave.png".into(),
                 color_space: None,
+                channel: None,
             }),
             coat_weight: 0.5,
             transmission_weight: 0.25,

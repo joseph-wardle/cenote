@@ -2190,6 +2190,7 @@ mod tests {
                         emission_color: Some(Texturable::Texture(TextureRef {
                             path: glow,
                             color_space: None,
+                            channel: None,
                         })),
                         ..MaterialPatch::new("lamp")
                     })),
@@ -2212,6 +2213,7 @@ mod tests {
                         geometry_opacity: Some(Texturable::Texture(TextureRef {
                             path: holes,
                             color_space: None,
+                            channel: None,
                         })),
                         ..MaterialPatch::new("card")
                     })),
