@@ -406,7 +406,77 @@ tests pass serially on the GPU machine; the C++ side compiles + its own lint; co
    `MaterialPatch`, the four documented exceptions handled as decided;
    `UsdUVTexture`/`UsdPrimvarReader_*` → texture refs through the existing bindless
    path; bindings from the pre-resolved, inherited bindings schema. *Checkpoint:
-   textured UsdPreviewSurface assets render matching their authored look.*
+   textured UsdPreviewSurface assets render matching their authored look.* The locked
+   detail (a fourth structured interview, 2026-07-14, closed by an adversarial review
+   pass that added the un-weld and the resolving filter — Q12; the genuinely new
+   decisions are D-115…D-117 in [decisions.md](decisions.md)):
+   - *The translator*: a third prim translator, `HdCenoteMaterialPrim`, beside mesh
+     and light — one wire material per material prim, named by its path, referenced
+     by instances (shared materials stay one object; edits touch one patch).
+     `HdMaterialSchema` → `GetMaterialNetwork` at the explicit empty token → the
+     `surface` terminal → the node switch; a foreign identifier (MaterialX, glslfx,
+     the deferred `open_pbr_surface`) or a missing terminal publishes the material
+     anyway wearing explicit OpenPBR defaults under one warning — instances binding
+     it stay valid, the material shows as the standard gray. `material` joins
+     `GetSupportedSprimTypes` backed by an inert Sprim; the binding purpose
+     (`preview`) and render contexts (universal) stay at their verified-correct
+     inherited defaults, with a comment recording that the defaults are load-bearing.
+   - *Patch policy*: total patch, always — every sync re-reads the whole network and
+     sets every mapped field explicitly, wire defaults where unauthored, so
+     de-authoring resets instead of stranding stale state; no identical-patch
+     suppression (materials behave like meshes under the D-113 epoch); any dirty
+     under the material locator triggers the full re-read at time 0.0, and the mesh's
+     dirty set gains the bindings locator, triggering only a one-field
+     `InstancePatch` re-resolve.
+   - *Bindings & lifecycle* (D-115): the mesh reads the all-purpose binding
+     (inheritance pre-flattened, purpose pre-collapsed by a Storm-identical
+     `{preview, allPurpose} → allPurpose` resolving scene index registered at start);
+     the `displayColor` companion is published unconditionally as the permanent
+     fallback; the instance wears the bound path only when the material registry has
+     it published on the wire — post-set atomic validation means a dangling reference
+     rejects the whole wave, so the registry keeps every wave valid by construction.
+     Material birth/death hooks walk the mesh registry symmetrically (repoint onto
+     the newborn; back to companions before the `Remove`, in one flush); the mesh
+     owns its repoint (`ResolveBinding()`). Materials flush ahead of other prims in
+     the notice batch so genesis never warns spuriously.
+   - *The wire growth* (D-116): `TextureRef` gains an optional source channel
+     (absent = red) so packed ORM and alpha-cutout assets read the authored channel —
+     scalar usage only, the channel in the cache identity, both mirrors + corpus
+     goldens in one commit, protocol 2 → 3.
+   - *The mapping* (D-117 carries the policy): diffuseColor→`base_color`,
+     metallic→`base_metalness`, roughness→`specular_roughness`, ior→`specular_ior`,
+     clearcoat pair→coat pair, opacity→`geometry_opacity` (constants binarized
+     delegate-side under `opacityThreshold`; textured opacity under a nonzero
+     threshold sent soft + one warning), emissiveColor→`emission_color` with
+     luminance 1.0 iff authored or connected, normal connection→texture ref.
+     `useSpecularWorkflow=1` collapses F0's luminance onto the ior (amending D-102's
+     unimplementable tint wording); `displacement`/`occlusion` warn only when
+     actually authored; both `opacityMode` spellings map to coverage silently.
+   - *Textures & readers*: resolved paths pre-checked (absolute, existing — mirroring
+     `validate_path` so no wave can be rejected); broken paths and UDIMs degrade to
+     the node's `fallback` constant; `sourceColorSpace` auto spelled as absence;
+     identity scale/bias and the canonical normal remap silent, foreign values
+     warned; wraps beyond repeat/useMetadata warn and render repeat; `st` readers
+     blessed, foreign varnames fall to the texture fallback, `UsdTransform2d` warned
+     and skipped through, direct reader connections use the reader's fallback.
+   - *The un-weld* (the review's finding, landed as its own commit): a faceVarying
+     primvar un-welds the mesh to per-corner vertices —
+     `HdMeshUtil::ComputeTriangulatedFaceVaryingPrimvar` against the same
+     triangulation, positions gathered through the triangle indices; no faceVarying
+     data keeps the welded copy and its memory win; no weld-by-value dedup.
+   - *Checkpoint*: `hydra/tests/stages/preview-surface.usda` + a committed RGBA
+     checker whose corner cells are transparent — a two-quad board, each face mapping
+     the full 0..1 st range faceVarying (the shared edge genuinely un-welds),
+     `diffuseColor ← rgb` and `opacity ← a` of the same texture (the channel proven
+     end to end, eyeball-visible as cutouts). The smoke renders both stages — the
+     ritual stays five commands — with orientation-agnostic assertions; pixel truth
+     stays step 6's FLIP golden. No new interactive leg: materials add no liveness
+     behavior the four legs don't cover. The channel's Rust tests pin per-channel
+     BC4 prep and cache identity; the regenerated corpus goldens are the drift guard
+     doing its job.
+   - *Landing*: three commits, each full-gate green — the channel below Hydra (both
+     wire halves together so the drift guard never goes red mid-history), the
+     un-weld, then materials + bindings + checkpoint + docs.
 4. **Lights & environment** — the *rest* of UsdLux (the distant light moved to step 1,
    D-108): the light prims over the six UsdLux tokens, params read
    lazily by name from the light container → delta / environment /

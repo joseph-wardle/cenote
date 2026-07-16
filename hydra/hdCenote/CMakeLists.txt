@@ -3,6 +3,7 @@
 # PXR_PLUGINPATH_NAME points at (see ../README.md).
 add_library(hdCenote MODULE
     lightPrim.cpp
+    materialPrim.cpp
     meshPrim.cpp
     observer.cpp
     renderBuffer.cpp

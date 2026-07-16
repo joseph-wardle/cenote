@@ -1,5 +1,7 @@
 #include "meshPrim.hpp"
 
+#include "materialPrim.hpp"
+
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -14,6 +16,8 @@
 #include "pxr/base/tf/staticTokens.h"
 #include "pxr/base/vt/types.h"
 #include "pxr/base/vt/value.h"
+#include "pxr/imaging/hd/materialBindingSchema.h"
+#include "pxr/imaging/hd/materialBindingsSchema.h"
 #include "pxr/imaging/hd/meshSchema.h"
 #include "pxr/imaging/hd/meshTopology.h"
 #include "pxr/imaging/hd/meshTopologySchema.h"
@@ -281,6 +285,17 @@ std::array<float, 3> _ReadDisplayColor(const HdSceneIndexPrim& prim) {
     return kNeutralColor;
 }
 
+/// The all-purpose binding target; empty when unbound. The flattening
+/// stack has already resolved binding inheritance and the registered
+/// resolving filter (sceneIndexPlugins.cpp) collapsed
+/// material:binding:preview onto the all-purpose slot, so this one
+/// read is the final word.
+SdfPath _ReadBinding(const HdSceneIndexPrim& prim) {
+    const HdPathDataSourceHandle path =
+        HdMaterialBindingsSchema::GetFromParent(prim.dataSource).GetMaterialBinding().GetPath();
+    return path ? path->GetTypedValue(0.0f) : SdfPath();
+}
+
 /// Resolved (flattened) visibility; absent means visible.
 bool _ReadVisibility(const HdSceneIndexPrim& prim) {
     const HdBoolDataSourceHandle visibility =
@@ -330,9 +345,10 @@ const HdDataSourceLocator& _DisplayColorLocator() {
 
 HdCenoteMeshPrim::HdCenoteMeshPrim(const SdfPath& path,
                                    const HdsiPrimManagingSceneIndexObserver* observer,
-                                   cenote::wire::ChangeSet* pending, std::shared_ptr<Registry> live)
+                                   cenote::wire::ChangeSet* pending, std::shared_ptr<Registry> live,
+                                   std::shared_ptr<const MaterialRegistry> materials)
     : _path(path), _name(path.GetString()), _material(path.GetString() + "/displayColor"),
-      _pending(pending), _live(std::move(live)) {
+      _pending(pending), _live(std::move(live)), _materials(std::move(materials)) {
     const auto [it, inserted] = _live->try_emplace(_path, this);
     if (!inserted) {
         // A resync: the previous translator still holds server objects.
@@ -341,6 +357,8 @@ HdCenoteMeshPrim::HdCenoteMeshPrim(const SdfPath& path,
         // runs after this constructor, goes quietly.
         _sent = it->second->_sent;
         _instanceLive = it->second->_instanceLive;
+        _binding = it->second->_binding;
+        _wearsBinding = it->second->_wearsBinding;
         it->second = this;
     }
     const HdSceneIndexPrim prim = observer->GetSceneIndex()->GetPrim(_path);
@@ -348,7 +366,9 @@ HdCenoteMeshPrim::HdCenoteMeshPrim(const SdfPath& path,
         _Withdraw();
         return;
     }
-    _Reconcile(prim, _Dirt{.geometry = true, .color = true, .xform = true, .visibility = true});
+    _Reconcile(
+        prim,
+        _Dirt{.geometry = true, .color = true, .xform = true, .visibility = true, .binding = true});
 }
 
 HdCenoteMeshPrim::~HdCenoteMeshPrim() {
@@ -374,6 +394,8 @@ void HdCenoteMeshPrim::_Dirty(const HdSceneIndexObserver::DirtiedPrimEntry& entr
             .color = entry.dirtyLocators.Intersects(_DisplayColorLocator()),
             .xform = entry.dirtyLocators.Intersects(HdXformSchema::GetDefaultLocator()),
             .visibility = entry.dirtyLocators.Intersects(HdVisibilitySchema::GetDefaultLocator()),
+            .binding =
+                entry.dirtyLocators.Intersects(HdMaterialBindingsSchema::GetDefaultLocator()),
         });
 }
 
@@ -405,13 +427,31 @@ void HdCenoteMeshPrim::_Reconcile(const HdSceneIndexPrim& prim, const _Dirt dirt
             .name = _material,
             .base_color = cenote::wire::Constant<std::array<float, 3>>{_ReadDisplayColor(prim)}});
     }
+    if (born || dirt.binding) {
+        // Materials flush ahead of meshes (the batching priorities in
+        // observer.cpp), so a target this sync cannot see is truly not
+        // there — absent from the stage or arriving in a later wave.
+        const SdfPath binding = _ReadBinding(prim);
+        if (binding != _binding) {
+            _binding = binding;
+            if (!_binding.IsEmpty() && !_Bindable()) {
+                TF_WARN("<%s> binds <%s>, which is not a material on the wire; wearing "
+                        "displayColor until it arrives",
+                        _path.GetText(), _binding.GetText());
+            }
+        }
+    }
     if (born || dirt.xform || dirt.visibility) {
         const bool visible = _ReadVisibility(prim);
         const std::optional<cenote::wire::Matrix> matrix = _ReadTransform(prim);
         const bool placed = visible && matrix.has_value();
         if (placed && !_instanceLive) {
+            _wearsBinding = _Bindable();
             _pending->ops.push_back(cenote::wire::InstancePatch{
-                .name = _name, .mesh = _name, .material = _material, .transform = *matrix});
+                .name = _name,
+                .mesh = _name,
+                .material = _wearsBinding ? _binding.GetString() : _material,
+                .transform = *matrix});
             _instanceLive = true;
         } else if (!placed && _instanceLive) {
             if (visible) {
@@ -427,6 +467,31 @@ void HdCenoteMeshPrim::_Reconcile(const HdSceneIndexPrim& prim, const _Dirt dirt
             TF_WARN("<%s> has a non-invertible transform; not placed", _path.GetText());
         }
     }
+    // Every reconcile ends by squaring the instance's wear with the
+    // registry — a binding edit repoints here, and everything else
+    // no-ops.
+    ResolveBinding();
+}
+
+void HdCenoteMeshPrim::ResolveBinding() {
+    if (!_instanceLive) {
+        return;
+    }
+    const bool bindable = _Bindable();
+    if (bindable == _wearsBinding) {
+        return;
+    }
+    _pending->ops.push_back(cenote::wire::InstancePatch{
+        .name = _name, .material = bindable ? _binding.GetString() : _material});
+    _wearsBinding = bindable;
+}
+
+bool HdCenoteMeshPrim::_Bindable() const {
+    if (_binding.IsEmpty()) {
+        return false;
+    }
+    const auto it = _materials->find(_binding);
+    return it != _materials->end() && it->second->Published();
 }
 
 void HdCenoteMeshPrim::_Withdraw() {

@@ -8,6 +8,12 @@
                         "displayName": "@HD_CENOTE_DISPLAY_NAME@",
                         "priority": 99
                     },
+                    "HdCenoteMaterialBindingResolvingSceneIndexPlugin": {
+                        "bases": ["HdSceneIndexPlugin"],
+                        "displayName": "Purpose-split material bindings collapse to all-purpose for Cenote",
+                        "priority": 0,
+                        "loadWithRenderer": "@HD_CENOTE_DISPLAY_NAME@"
+                    },
                     "HdCenoteImplicitSurfaceSceneIndexPlugin": {
                         "bases": ["HdSceneIndexPlugin"],
                         "displayName": "Implicit surfaces become meshes for Cenote",

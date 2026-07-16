@@ -1,23 +1,42 @@
 // The trimmed convenience filter stack, registered for the Cenote
 // renderer via HdSceneIndexPluginRegistry (each class also has a Types
 // entry in plugInfo.json.in — that metadata is what makes the registry
-// load us for the render index it is assembling). Four stock filters,
-// borrowed from the hdPrman/hdSt convenience stacks: implicit surfaces
-// become meshes, computed primvars (skinning) become plain primvars,
-// sourceAsset shaders resolve to node identifiers, and declared
-// dependencies forward dirtiness at the end of the chain.
+// load us for the render index it is assembling). Five stock filters,
+// borrowed from the hdPrman/hdSt convenience stacks: purpose-split
+// material bindings collapse onto the all-purpose slot, implicit
+// surfaces become meshes, computed primvars (skinning) become plain
+// primvars, sourceAsset shaders resolve to node identifiers, and
+// declared dependencies forward dirtiness at the end of the chain.
 #include "pxr/imaging/hd/dependencyForwardingSceneIndex.h"
+#include "pxr/imaging/hd/materialBindingsSchema.h"
 #include "pxr/imaging/hd/retainedDataSource.h"
 #include "pxr/imaging/hd/sceneIndexPlugin.h"
 #include "pxr/imaging/hd/sceneIndexPluginRegistry.h"
 #include "pxr/imaging/hd/tokens.h"
 #include "pxr/imaging/hdsi/extComputationPrimvarPruningSceneIndex.h"
 #include "pxr/imaging/hdsi/implicitSurfaceSceneIndex.h"
+#include "pxr/imaging/hdsi/materialBindingResolvingSceneIndex.h"
 #include "pxr/imaging/hdsi/nodeIdentifierResolvingSceneIndex.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
 TF_DEFINE_PRIVATE_TOKENS(_tokens, (glslfx));
+
+/// material:binding:preview bindings collapse onto the all-purpose slot
+/// — preview is where assets that split their bindings put the
+/// UsdPreviewSurface look, and the mesh translator reads only the
+/// all-purpose binding. Exactly Storm's block
+/// (hdSt/materialBindingResolvingSceneIndexPlugin.cpp).
+class HdCenoteMaterialBindingResolvingSceneIndexPlugin final : public HdSceneIndexPlugin {
+protected:
+    HdSceneIndexBaseRefPtr
+    _AppendSceneIndex(const HdSceneIndexBaseRefPtr& inputScene,
+                      const HdContainerDataSourceHandle& /*inputArgs*/) override {
+        return HdsiMaterialBindingResolvingSceneIndex::New(
+            inputScene, {HdTokens->preview, HdMaterialBindingsSchemaTokens->allPurpose},
+            HdMaterialBindingsSchemaTokens->allPurpose);
+    }
+};
 
 /// USD sphere/cube/cone/cylinder/capsule/plane prims become meshes for
 /// free — cenote's one geometry is the triangle mesh.
@@ -71,6 +90,7 @@ protected:
 };
 
 TF_REGISTRY_FUNCTION(TfType) {
+    HdSceneIndexPluginRegistry::Define<HdCenoteMaterialBindingResolvingSceneIndexPlugin>();
     HdSceneIndexPluginRegistry::Define<HdCenoteImplicitSurfaceSceneIndexPlugin>();
     HdSceneIndexPluginRegistry::Define<HdCenoteExtComputationPrimvarPruningSceneIndexPlugin>();
     HdSceneIndexPluginRegistry::Define<HdCenoteNodeIdentifierResolvingSceneIndexPlugin>();
@@ -83,6 +103,11 @@ TF_REGISTRY_FUNCTION(HdSceneIndexPlugin) {
     // the renderer plugin's displayName cannot drift apart.
     const std::string renderer = HD_CENOTE_DISPLAY_NAME;
     HdSceneIndexPluginRegistry& registry = HdSceneIndexPluginRegistry::GetInstance();
+    // Binding resolution takes Storm's exact placement: the start of
+    // phase 0, ahead of the content filters.
+    registry.RegisterSceneIndexForRenderer(
+        renderer, TfToken("HdCenoteMaterialBindingResolvingSceneIndexPlugin"), nullptr,
+        /*insertionPhase=*/0, HdSceneIndexPluginRegistry::InsertionOrderAtStart);
     // The three content filters share phase 0 in registration order;
     // dependency forwarding sits at hdPrman's customary arbitrary-large
     // phase so it lands after anything else that ever joins the chain.

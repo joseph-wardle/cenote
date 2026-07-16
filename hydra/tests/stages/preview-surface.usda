@@ -1,0 +1,78 @@
+#usda 1.0
+(
+    """The step-3 checkpoint stage: one textured UsdPreviewSurface asset,
+    face-on to the camera under one distant light. The board is two quads,
+    each mapping the full 0..1 st range with faceVarying interpolation —
+    the shared-edge points carry a different st per face, so the checker
+    appearing twice proves the un-weld, not the easy vertex-st path. The
+    checker (checker.png, RGBA) drives diffuseColor from rgb and opacity
+    from a: green/blue cells alternate and the texture's four corner cells
+    are transparent, so the color path, the alpha source channel, and the
+    authored tints are all separately visible to a coarse patch check
+    (tests/usdrecord_smoke.py). No pixel equality; that is step 6's FLIP
+    golden."""
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "World"
+{
+    def Mesh "Board" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/Looks/checker>
+        int[] faceVertexCounts = [4, 4]
+        int[] faceVertexIndices = [0, 1, 4, 5, 1, 2, 3, 4]
+        point3f[] points = [(-2, -1, 0), (0, -1, 0), (2, -1, 0), (2, 1, 0), (0, 1, 0), (-2, 1, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1), (0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "faceVarying"
+        )
+    }
+
+    def Scope "Looks"
+    {
+        def Material "checker"
+        {
+            token outputs:surface.connect = </World/Looks/checker/surface.outputs:surface>
+
+            def Shader "surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </World/Looks/checker/texture.outputs:rgb>
+                float inputs:opacity.connect = </World/Looks/checker/texture.outputs:a>
+                float inputs:roughness = 1.0
+                token outputs:surface
+            }
+
+            def Shader "texture"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./checker.png@
+                float2 inputs:st.connect = </World/Looks/checker/stReader.outputs:result>
+                float3 outputs:rgb
+                float outputs:a
+            }
+
+            def Shader "stReader"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                string inputs:varname = "st"
+                float2 outputs:result
+            }
+        }
+    }
+
+    def DistantLight "Sun"
+    {
+        float inputs:angle = 0
+        float inputs:intensity = 1
+    }
+
+    def Camera "Camera"
+    {
+        double3 xformOp:translate = (0, 0, 12)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}

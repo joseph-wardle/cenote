@@ -7,6 +7,7 @@
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/imaging/hd/camera.h"
 #include "pxr/imaging/hd/light.h"
+#include "pxr/imaging/hd/material.h"
 #include "pxr/imaging/hd/resourceRegistry.h"
 #include "pxr/imaging/hd/tokens.h"
 
@@ -18,10 +19,21 @@ PXR_NAMESPACE_OPEN_SCOPE
 // plus two light types, advertised for HdxTaskController's benefit: its
 // built-in-light check demands domeLight AND a camera light type before it
 // injects usdview's default camera light, and without that light every frame
-// is black (D-108). The light sprims themselves are inert; the translators
+// is black (D-108) — plus material, the honest contract for a delegate that
+// reads materials (it is also what gates population on any non-scene-index
+// path). The light and material sprims themselves are inert; the translators
 // read the same prims from the terminal scene index. The non-empty lists live
 // as function-local statics in their getters — a namespace-scope
 // TfTokenVector initializer allocates, and would throw where nothing catches.
+//
+// Two inherited defaults are load-bearing and deliberately not overridden
+// (restating them here would only invite drift): GetMaterialBindingPurpose()
+// returns `preview` — the purpose where assets that split their bindings put
+// the UsdPreviewSurface look, which the registered binding-resolving filter
+// (sceneIndexPlugins.cpp) collapses onto the all-purpose slot the mesh
+// translator reads — and GetMaterialRenderContexts() returns the universal
+// empty token, exactly the context the material translator asks each network
+// for (D-102).
 static const TfTokenVector kNoTypes;
 
 namespace {
@@ -38,6 +50,17 @@ public:
     HdDirtyBits GetInitialDirtyBitsMask() const override { return AllDirty; }
 };
 
+/// The inert backing for the advertised material type, likewise.
+class _NullMaterial final : public HdMaterial {
+public:
+    explicit _NullMaterial(SdfPath const& id) : HdMaterial(id) {}
+    void Sync(HdSceneDelegate* /*sceneDelegate*/, HdRenderParam* /*renderParam*/,
+              HdDirtyBits* dirtyBits) override {
+        *dirtyBits = Clean;
+    }
+    HdDirtyBits GetInitialDirtyBitsMask() const override { return AllDirty; }
+};
+
 } // namespace
 
 HdCenoteRenderDelegate::HdCenoteRenderDelegate()
@@ -47,7 +70,8 @@ const TfTokenVector& HdCenoteRenderDelegate::GetSupportedRprimTypes() const { re
 
 const TfTokenVector& HdCenoteRenderDelegate::GetSupportedSprimTypes() const {
     static const TfTokenVector kSprimTypes = {
-        HdPrimTypeTokens->camera, HdPrimTypeTokens->distantLight, HdPrimTypeTokens->domeLight};
+        HdPrimTypeTokens->camera, HdPrimTypeTokens->distantLight, HdPrimTypeTokens->domeLight,
+        HdPrimTypeTokens->material};
     return kSprimTypes;
 }
 
@@ -87,6 +111,9 @@ HdSprim* HdCenoteRenderDelegate::CreateSprim(TfToken const& typeId, SdfPath cons
     if (typeId == HdPrimTypeTokens->distantLight || typeId == HdPrimTypeTokens->domeLight) {
         return new _NullLight(sprimId);
     }
+    if (typeId == HdPrimTypeTokens->material) {
+        return new _NullMaterial(sprimId);
+    }
     TF_CODING_ERROR("Unknown Sprim type %s", typeId.GetText());
     return nullptr;
 }
@@ -97,6 +124,9 @@ HdSprim* HdCenoteRenderDelegate::CreateFallbackSprim(TfToken const& typeId) {
     }
     if (typeId == HdPrimTypeTokens->distantLight || typeId == HdPrimTypeTokens->domeLight) {
         return new _NullLight(SdfPath::EmptyPath());
+    }
+    if (typeId == HdPrimTypeTokens->material) {
+        return new _NullMaterial(SdfPath::EmptyPath());
     }
     TF_CODING_ERROR("Unknown fallback Sprim type %s", typeId.GetText());
     return nullptr;

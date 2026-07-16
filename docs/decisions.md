@@ -2738,3 +2738,87 @@ would duplicate what the pass state has already done. Framing beyond a plain
 full-frame viewport — a data window apart from the display window, or non-square
 pixels — gets a one-time `TF_WARN` and renders the full frame at the vfov the
 conformed projection implies.
+
+### D-115: Material bindings and lifecycle — the registry and the symmetric hooks
+Status: accepted (2026-07-14). Material prims get their own translator — the third,
+beside mesh and light — publishing one wire material named by the prim's path, so a
+shared material is one wire object referenced by many instances and a material edit
+touches one patch. Every mesh keeps publishing its unconditional `<path>/displayColor`
+companion as the permanent fallback. Binding resolution is registry-checked: the mesh
+reads the pre-resolved all-purpose `HdMaterialBindingsSchema` binding and points its
+instance at the bound path only when the material registry has it live on the wire
+(a `Published()` guard, since a translator can exist before its first sync); a
+dangling binding warns once naming mesh and target, and the instance wears the
+companion. The check is load-bearing, not polite: server validation is post-set and
+atomic, so an instance naming a missing material rejects the *whole wave* and takes
+unrelated same-wave edits with it — the registry keeps every wave valid by
+construction. Hydra generates no `materialBindings` dirty when a material prim itself
+appears or dies, so the lifecycle holes are closed by symmetric hooks through the
+registries: on material birth, walk the mesh registry and repoint every mesh whose
+resolved binding names this path (the late-arrival hole); on death, unpublish, walk
+the bound meshes back to their companions, *then* append the `Remove` — repoints and
+removal land in one flush, so post-set validation can never see a dangling reference.
+The mesh owns its repoint (`ResolveBinding()`, called by hooks and its own sync alike)
+so its cached wear never drifts from the wire; the material translator never
+fabricates patches for prims it doesn't own. Two supporting pieces: the notice-batching
+priority functor flushes materials ahead of everything else — amending the interview's
+one-bucket leaf, because a stage authoring geometry before its `Looks` scope would
+otherwise spuriously warn on every binding at genesis and create-then-repoint every
+instance — and a Storm-identical binding-purpose resolving scene index
+(`{preview, allPurpose} → allPurpose`, inserted at start) so stages that author
+`material:binding:preview` specifically still resolve. Rejected alternatives:
+mesh-side resolution (N copies of shared materials, and no clean path for
+material-prim invalidations to reach the meshes wearing them); never removing wire
+materials (leaks texture residency for the session); parking material removals until
+references drain (a deferred-op machine for a case the hooks handle in a dozen lines).
+
+### D-116: The texture channel crosses the wire
+Status: accepted (2026-07-14). `TextureRef` gains an optional source channel
+(`r`/`g`/`b`/`a`; absent = red, the prior behavior) — the step's one wire growth. The
+core's scalar textures are BC4, baked from a single source channel that was hardwired
+red; real UsdPreviewSurface assets feed `roughness`/`metallic` from a packed ORM's
+`outputs:g`/`outputs:b` and — the ubiquitous case — cutout `opacity` from the diffuse
+texture's `outputs:a`, so read-red is silently wrong for exactly the assets the step-3
+checkpoint names ("matching their authored look"). The ripple is contained and
+mechanical: prep bakes BC4 from the chosen channel and the channel joins the DDS cache
+tag and content hash — red deliberately spelled as the empty tag, so every cache
+written before channels existed stays a hit; only the scalar usage reads the selector,
+color and normal usages normalize it to red so a stray channel can never fork their
+caches; both wire mirrors and the corpus goldens regenerated in the same commit (the
+drift guard never goes red mid-history); the server's exhaustive destructuring picked
+the field up by compile error, as designed; protocol 2 → 3, shm layout untouched.
+Baked-channel BC4 was chosen over the runtime-swizzle school (sample RGBA, pick in
+shader): half a byte per texel instead of a full BC7 for one used channel, and the
+cache keyed honestly — a packed ORM preps the same PNG up to three times, a prep-time
+cost, not a runtime one.
+
+### D-117: Mapping fidelity — silent where native, one warning where lossy, never a rejected wave
+Status: accepted (2026-07-14); amends one D-102 exception. The material translator's
+whole degradation policy as one principle. **Silent** when the authored value is what
+the core does anyway: wrap `repeat`/`useMetadata`, identity `scale`/`bias`, the
+canonical normal-map `(2,…)/(−1,…)` remap (the BC5 path remaps natively),
+`sourceColorSpace` `auto` spelled as *absence* (the core's per-slot auto — 8-bit color
+reads sRGB, scalars and normals raw — is exactly `auto`'s spec semantics), an
+unconnected `st` input, and both `opacityMode` spellings onto coverage. **One warning
+naming the material and input** where fidelity is actually lost, rendering anyway:
+foreign wraps render repeat; `UsdTransform2d` is skipped through to its reader
+(placement drifts, the asset keeps its look); a reader with `varname ≠ "st"` degrades
+that texture to its `fallback` constant (the mesh never shipped those coordinates —
+sampling `st` anyway would be silently-wrong placement); readers connected directly to
+surface inputs use the *reader's* fallback (per-vertex data has no wire home, and a
+shared material can't resolve a per-mesh primvar); a constant non-default `normal` is
+ignored; `displacement`/`occlusion` warn only when actually authored or connected;
+textured opacity under a nonzero `opacityThreshold` is sent un-thresholded — soft
+coverage instead of hard cutout — while constant opacity binarizes delegate-side.
+**Never a rejected wave**: `validate_path` demands an absolute existing file and one
+failure rejects the whole wave atomically, so the delegate pre-checks every resolved
+path — broken paths and UDIMs degrade to the texture node's own `fallback` input as a
+constant — and a foreign surface identifier (or no surface terminal at all) publishes
+the wire material anyway wearing explicit OpenPBR defaults under one warning, keeping
+every instance that binds it valid. The amendment: D-102 said `useSpecularWorkflow=1`'s
+direct F0 "approximates through the specular tint," and that sentence is
+unimplementable as written — no specular color/tint field exists on the wire, the
+description, or the GPU material. Instead the F0's Rec.709 luminance collapses onto
+`specular_ior` via ior = (1+√F0)/(1−√F0), clamped to [1, 5], the hue dropped under the
+one warning — more honest than common practice, which silently ignores the flag
+entirely.

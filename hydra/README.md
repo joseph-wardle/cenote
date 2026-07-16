@@ -7,8 +7,8 @@ test; `transport/`, the client that spawns `cenote-server` and speaks to it —
 spawn, socket, and the shm framebuffer reader, the deliberately-POSIX corner
 of the tree; and `hdCenote/`, the scene-index-native render delegate plugin —
 the half that needs USD. The plan is
-[docs/m4-plan.md](../docs/m4-plan.md) (steps 1 and 2 carry their locked detail);
-rationale lives in [docs/decisions.md](../docs/decisions.md) (D-097…D-114).
+[docs/m4-plan.md](../docs/m4-plan.md) (steps 1 through 3 carry their locked detail);
+rationale lives in [docs/decisions.md](../docs/decisions.md) (D-097…D-117).
 
 Baseline: C++23, extensions off, `-Wall -Wextra -Werror`. Two-part portability
 rule (D-105): portable core C++23 only, and inside the plugin `.so` no library
@@ -60,8 +60,14 @@ The smoke renders [tests/stages/first-light.usda](tests/stages/first-light.usda)
 through `usdrecord --renderer Cenote` and asserts what a human would eyeball:
 success, a non-black frame, and the expected silhouette (the warm near cube
 left and larger, the cool far cube right and smaller, the background black).
-No pixel equality — that is step 6's FLIP golden. It needs the USD prefix on
-`PATH`/`PYTHONPATH` (below) and a built `cenote-server`
+It then renders
+[tests/stages/preview-surface.usda](tests/stages/preview-surface.usda) — a
+textured UsdPreviewSurface board whose two faces each map the full 0..1 st
+range with faceVarying interpolation — and asserts the green/blue checker
+alternates on both faces with the texture's transparent corner cells cut out:
+the texture path, the alpha source channel, and the faceVarying un-weld,
+eyeball-level. No pixel equality — that is step 6's FLIP golden. It needs the
+USD prefix on `PATH`/`PYTHONPATH` (below) and a built `cenote-server`
 (`target/{release,debug}`, or `$CENOTE_SERVER`).
 
 The interactive test drives the same stage through `testusdview` and asserts
