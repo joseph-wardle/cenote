@@ -69,12 +69,12 @@ bool HdCenoteRenderBuffer::IsMapped() const { return _mappers.load() != 0; }
 
 void HdCenoteRenderBuffer::Resolve() {}
 
-// Convergence, read live from the shm header (D-112): this buffer's picture
-// is final once the server's accumulation has settled. Degraded means the
-// zeroed pixels *are* the final picture — true, so a render-until-converged
-// host (usdrecord) never spins against a dead server. A segment that trails
-// the allocation is a resize still settling: frames are coming, not
-// converged.
+// Convergence for this buffer. Degraded means the zeroed pixels *are* the
+// final picture — true, so a render-until-converged host (usdrecord) never
+// spins against a dead server. A segment that trails the allocation is a
+// resize still settling: frames are coming, not converged. Past those
+// guards, the client's verdict (D-113): settled, at a frame that has
+// incorporated everything sent.
 bool HdCenoteRenderBuffer::IsConverged() const {
     const cenote::transport::View* view = _client->view();
     if (view == nullptr) {
@@ -83,7 +83,7 @@ bool HdCenoteRenderBuffer::IsConverged() const {
     if (view->width() != _width || view->height() != _height) {
         return false;
     }
-    return view->converged();
+    return _client->converged();
 }
 
 // Pull the newest frame out of the server's framebuffer — one plane copy

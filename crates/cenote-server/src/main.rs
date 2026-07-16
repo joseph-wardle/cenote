@@ -264,7 +264,10 @@ fn serve(stream: &mut TcpStream, state: &Mutex<Shared>, token: &str) -> anyhow::
                     .context("allocating the resized framebuffer")?;
                 shared.session.resize(width, height);
                 shared.doomed = Some(std::mem::replace(&mut shared.fb, fresh));
-                Response::Resized(shared.fb.desc())
+                Response::Resized {
+                    fb: shared.fb.desc(),
+                    epoch: shared.session.epoch(),
+                }
             }
             Request::Ping => ack(&mut shared),
         };
@@ -274,10 +277,15 @@ fn serve(stream: &mut TcpStream, state: &Mutex<Shared>, token: &str) -> anyhow::
 }
 
 /// The `Ack`, carrying every rejection accumulated since the last
-/// response — a receipt, not a validation (edits land at wave boundaries).
+/// response — a receipt, not a validation (edits land at wave boundaries)
+/// — and the session epoch after the request (D-113). The epoch is read
+/// *last*, after every session call the request caused (including the
+/// internal camera re-assert, which bumps harmlessly), so the first frame
+/// stamped at or past it provably incorporates this request.
 fn ack(shared: &mut Shared) -> Response {
     Response::Ack {
         rejected: std::mem::take(&mut shared.rejected),
+        epoch: shared.session.epoch(),
     }
 }
 
@@ -355,7 +363,7 @@ fn pump(state: &Mutex<Shared>, gpu: &cenote::gpu::Context, stop: &AtomicBool, so
             let converged = frame.samples() >= shared.max_samples;
             shared
                 .fb
-                .publish(&beauty, &depth, frame.samples(), converged);
+                .publish(&beauty, &depth, frame.samples(), converged, frame.epoch());
         }
     }
 }

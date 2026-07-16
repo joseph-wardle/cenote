@@ -112,14 +112,22 @@ fn call(stream: &mut TcpStream, request: &Request) -> Response {
     protocol::read_message(stream).expect("reading the response")
 }
 
-/// Poll the view until `accept` blesses an untorn snapshot.
+/// Poll the view until `accept` blesses an untorn snapshot. Every
+/// snapshot seen on the way is held to the header's honesty invariant:
+/// the converged flag is exactly "samples reached the cap", never a
+/// leftover from a previous convergence run.
 fn wait_for(view: &View, what: &str, accept: impl Fn(&Snapshot) -> bool) -> Snapshot {
     let deadline = Instant::now() + DEADLINE;
     loop {
-        if let Some(snapshot) = view.snapshot()
-            && accept(&snapshot)
-        {
-            return snapshot;
+        if let Some(snapshot) = view.snapshot() {
+            assert_eq!(
+                snapshot.converged,
+                snapshot.samples >= CAP,
+                "the converged flag must match the frame it rides"
+            );
+            if accept(&snapshot) {
+                return snapshot;
+            }
         }
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(10));
@@ -198,8 +206,11 @@ fn assert_primary(snapshot: &Snapshot, texel: usize, hot: usize, what: &str) {
 
 /// The whole spine, end to end, in the order a real delegate would drive
 /// it: handshake, resize, camera, genesis, convergence, a live edit, a
-/// rejected edit surfacing through the header counter and `Ping`, and
-/// EOF as shutdown.
+/// visual no-op, a rejected edit surfacing through the header counter
+/// and `Ping`, and EOF as shutdown. Threaded through it all, the epoch
+/// contract (D-113): every picture-changing reply carries the session
+/// epoch, the shm header's stamp reaches it — even when nothing restarts
+/// — and convergence is honest only under a stamp at or past the ack.
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -226,8 +237,13 @@ fn the_transport_spine_renders_over_the_wire() {
     View::open(&fb).expect("the initial segment maps");
 
     // Resize: a new segment, immediately mappable; the old one survives
-    // until the next request proves this reply was processed.
-    let Response::Resized(resized) = call(
+    // until the next request proves this reply was processed. The reply
+    // carries the post-request epoch — resize is a picture-changing verb
+    // (D-113), so the counter has moved off its starting zero.
+    let Response::Resized {
+        fb: resized,
+        epoch: resize_epoch,
+    } = call(
         &mut stream,
         &Request::Resize {
             width: 128,
@@ -238,30 +254,43 @@ fn the_transport_spine_renders_over_the_wire() {
     };
     assert_eq!((resized.width, resized.height), (128, 128));
     assert_ne!(resized.shm_name, fb.shm_name);
+    assert!(resize_epoch >= 1, "a resize must advance the epoch");
     let view = View::open(&resized).expect("the resized segment maps");
     View::open(&fb).expect("the old segment lives until the next request");
 
     // The camera lane, then genesis. After SetCamera (the request that
-    // proves Resized was processed) the old segment must be gone.
-    let Response::Ack { rejected } = call(&mut stream, &Request::SetCamera(quad_camera())) else {
+    // proves Resized was processed) the old segment must be gone. Every
+    // picture-changing request returns a strictly larger epoch.
+    let Response::Ack {
+        rejected,
+        epoch: camera_epoch,
+    } = call(&mut stream, &Request::SetCamera(quad_camera())) else {
         panic!("SetCamera must be answered by Ack");
     };
     assert!(rejected.is_empty(), "{rejected:?}");
-    let Response::Ack { .. } = call(&mut stream, &Request::Replace(genesis())) else {
+    assert!(camera_epoch > resize_epoch);
+    let Response::Ack {
+        epoch: genesis_epoch,
+        ..
+    } = call(&mut stream, &Request::Replace(genesis())) else {
         panic!("Replace must be answered by Ack");
     };
+    assert!(genesis_epoch > camera_epoch);
     assert!(
         View::open(&fb).is_err(),
         "the replaced segment must be unlinked after the next request"
     );
 
     // Accumulate to the cap: the converged flag flips, samples land on
-    // it exactly, and the frame counter is the tear protocol's monotonic
-    // clock.
+    // it exactly, the frame counter is the tear protocol's monotonic
+    // clock — and the header's epoch reaches the acked one, so the
+    // settled picture provably incorporates the genesis.
     let converged = wait_for(&view, "the capped frame", |snapshot| {
         assert!(snapshot.samples <= CAP, "overshot the cap");
-        snapshot.samples == CAP && view.converged()
+        snapshot.samples == CAP && snapshot.converged && snapshot.epoch >= genesis_epoch
     });
+    assert!(view.converged());
+    assert!(view.epoch() >= genesis_epoch);
 
     // The saturated primary, everywhere the quad is — which is the whole
     // frame: center and all four corners, red in Rec.709.
@@ -278,27 +307,59 @@ fn the_transport_spine_renders_over_the_wire() {
     // A live edit: the lamp turns green, accumulation restarts, and the
     // new color arrives — the stop → apply → re-prep → restart loop over
     // the wire. (An unconverted ACEScg green would leak 37% into red.)
-    let Response::Ack { .. } = call(
-        &mut stream,
-        &Request::Apply(wire::ChangeSet {
-            ops: vec![wire::Op::Material(Box::new(wire::MaterialPatch {
-                name: "lamp".into(),
-                emission_color: Some(wire::Texturable::Constant([0.0, 1.0, 0.0])),
-                ..wire::MaterialPatch::default()
-            }))],
-        }),
-    ) else {
+    // Convergence is claimed honestly again only under a stamp at or past
+    // the Ack's epoch: the red frame's stale flag can never pass for the
+    // green picture's.
+    let greening = wire::ChangeSet {
+        ops: vec![wire::Op::Material(Box::new(wire::MaterialPatch {
+            name: "lamp".into(),
+            emission_color: Some(wire::Texturable::Constant([0.0, 1.0, 0.0])),
+            ..wire::MaterialPatch::default()
+        }))],
+    };
+    let Response::Ack {
+        epoch: green_epoch, ..
+    } = call(&mut stream, &Request::Apply(greening.clone())) else {
         panic!("Apply must be answered by Ack");
     };
-    let green = wait_for(&view, "the green frame", |snapshot| {
-        snapshot.beauty[center * 4 + 1] > 0.1
+    assert!(green_epoch > genesis_epoch);
+    let green = wait_for(&view, "the settled green frame", |snapshot| {
+        snapshot.epoch >= green_epoch && snapshot.converged
     });
+    assert_eq!(green.samples, CAP);
     assert_primary(&green, center, 1, "center after the edit");
 
+    // The same patch again — a visual no-op: the equality gate dirties
+    // nothing, nothing restarts, yet the epoch still advances and the
+    // parked render thread republishes the settled image under the fresh
+    // stamp (D-113's delivery guarantee). Without the republish, honest
+    // convergence would wedge here.
+    let Response::Ack {
+        rejected,
+        epoch: noop_epoch,
+    } = call(&mut stream, &Request::Apply(greening)) else {
+        panic!("Apply must be answered by Ack");
+    };
+    assert!(rejected.is_empty(), "{rejected:?}");
+    assert!(noop_epoch > green_epoch);
+    assert!(view.converged(), "a no-op must not unsettle the picture");
+    let republished = wait_for(&view, "the republished settled frame", |snapshot| {
+        snapshot.epoch >= noop_epoch
+    });
+    assert!(republished.converged, "the republish carries the settled state");
+    assert_eq!(republished.samples, CAP);
+    assert_primary(&republished, center, 1, "center after the no-op");
+
     // A rejected edit: the Ack is a receipt, the rejection surfaces
-    // through the header's counter, and Ping collects the message.
+    // through the header's counter, and Ping collects the message. The
+    // epoch advances all the same — a rejected edit is *incorporated*
+    // (as nothing), so waiting on its stamp can never wedge — and the
+    // parked republish delivers it without a restart.
     let rejected_before = view.rejected_edits();
-    let Response::Ack { .. } = call(
+    let Response::Ack {
+        epoch: broken_epoch,
+        ..
+    } = call(
         &mut stream,
         &Request::Apply(wire::ChangeSet {
             ops: vec![wire::Op::Instance(wire::InstancePatch {
@@ -312,18 +373,28 @@ fn the_transport_spine_renders_over_the_wire() {
     ) else {
         panic!("Apply must be answered by Ack");
     };
+    assert!(broken_epoch > noop_epoch);
     let deadline = Instant::now() + DEADLINE;
     while view.rejected_edits() == rejected_before {
         assert!(Instant::now() < deadline, "the rejection never surfaced");
         std::thread::sleep(Duration::from_millis(10));
     }
-    let Response::Ack { rejected } = call(&mut stream, &Request::Ping) else {
+    let after_rejection = wait_for(&view, "the frame past the rejected edit", |snapshot| {
+        snapshot.epoch >= broken_epoch
+    });
+    assert!(after_rejection.converged);
+    assert_primary(&after_rejection, center, 1, "center after the rejection");
+    let Response::Ack {
+        rejected,
+        epoch: ping_epoch,
+    } = call(&mut stream, &Request::Ping) else {
         panic!("Ping must be answered by Ack");
     };
     assert!(
         rejected.iter().any(|message| message.contains("no-such-mesh")),
         "the rejection message must ride the next response: {rejected:?}"
     );
+    assert_eq!(ping_epoch, broken_epoch, "a Ping changes no picture");
 
     // EOF is shutdown: exit 0, and the segment's name unlinks with it.
     drop(stream);

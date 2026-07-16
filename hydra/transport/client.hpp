@@ -55,11 +55,16 @@ public:
     /// resize(); nothing taken from it survives one.
     [[nodiscard]] const View* view() const { return view_.get(); }
 
-    /// Whether the server's accumulation has settled (the shm header's
-    /// converged flag, D-112). True when degraded: the picture will
-    /// never improve, and a host looping render-until-converged
-    /// (usdrecord) must not spin forever against a dead server.
-    [[nodiscard]] bool converged() const { return view_ == nullptr || view_->converged(); }
+    /// Whether the server's accumulation has settled at a picture that
+    /// is also *current* (D-113): the shm header's converged flag counts
+    /// only once the front frame's epoch has reached the one the last
+    /// Ack or Resized carried — a settled stale picture is not
+    /// converged. True when degraded: the picture will never improve,
+    /// and a host looping render-until-converged (usdrecord) must not
+    /// spin forever against a dead server.
+    [[nodiscard]] bool converged() const {
+        return view_ == nullptr || (view_->epoch() >= last_acked_epoch_ && view_->converged());
+    }
 
     /// Brings the framebuffer to width×height: a no-op when it already
     /// matches, otherwise one Resize round-trip and a remap of the
@@ -82,6 +87,18 @@ public:
     /// The active camera down the SetCamera lane. Same contract as
     /// replace().
     bool set_camera(const wire::Camera& camera);
+
+    /// The between-requests health probe, for once per host frame.
+    /// Strict request/response (D-100) means the socket is silent
+    /// between calls, so anything readable outside one — bytes or a
+    /// hangup — is server death or a protocol violation: degrade, with
+    /// the one warning that names the recovery gesture (D-099).
+    void check_liveness();
+
+    /// Collects rejection messages an otherwise-idle client would never
+    /// see: when the header's rejected-edit counter moves off what was
+    /// last seen, one Ping fetches the strings riding its Ack (D-100).
+    void collect_rejections();
 
     /// One request out, one response back. Any transport failure — a
     /// short write, a dead socket, a frame that will not decode —
@@ -119,6 +136,12 @@ private:
     std::uint16_t port_ = 0;
     wire::FbDesc fb_{};
     std::unique_ptr<View> view_;
+    /// The epoch the last Ack or Resized carried — the bar the front
+    /// frame must reach before its converged flag is believed.
+    std::uint64_t last_acked_epoch_ = 0;
+    /// Where the rejected-edit counter stood when the strings were last
+    /// collected.
+    std::uint32_t seen_rejections_ = 0;
 };
 
 } // namespace cenote::transport

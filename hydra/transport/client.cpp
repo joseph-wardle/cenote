@@ -230,6 +230,7 @@ bool Client::resize(std::uint32_t width, std::uint32_t height) {
         return false;
     }
     fb_ = resized->fb;
+    last_acked_epoch_ = resized->epoch;
     // The old mapping goes first; the server keeps the segment it
     // replaced alive until our *next* request, so the new name is still
     // linked when map_framebuffer opens it.
@@ -253,6 +254,40 @@ bool Client::set_camera(const wire::Camera& camera) {
     return acked(wire::Request{wire::SetCamera{.camera = camera}}, "SetCamera");
 }
 
+void Client::check_liveness() {
+    if (socket_ == -1) {
+        return;
+    }
+    struct pollfd probe = {.fd = socket_, .events = POLLIN, .revents = 0};
+    if (::poll(&probe, 1, 0) <= 0) {
+        return; // A silent socket is the healthy steady state.
+    }
+    // Strict request/response (D-100): between calls the server never
+    // speaks, so a readable or hung-up socket is death or a protocol
+    // violation — degraded either way. Recovery is a fresh spawn
+    // (D-099): destroying and recreating the delegate replays the whole
+    // stage.
+    TF_WARN("cenote-server hung up outside a request; the picture is frozen — toggle the "
+            "renderer or reload the stage to spawn a fresh server");
+    shut_down();
+}
+
+void Client::collect_rejections() {
+    if (view_ == nullptr) {
+        return;
+    }
+    // Inequality, not order: the counter restarts at zero with each
+    // resize's fresh segment.
+    const std::uint32_t rejected = view_->rejected_edits();
+    if (rejected == seen_rejections_) {
+        return;
+    }
+    seen_rejections_ = rejected;
+    // acked() warns the strings riding the Ack — and refreshes the
+    // acked epoch for free.
+    acked(wire::Request{wire::Ping{}}, "Ping");
+}
+
 bool Client::acked(const wire::Request& request, const char* what) {
     const auto response = call(request);
     if (!response) {
@@ -264,6 +299,9 @@ bool Client::acked(const wire::Request& request, const char* what) {
         shut_down();
         return false;
     }
+    // The reply's epoch is the new bar for converged(): the front frame
+    // must reach it before a settled flag is believed again.
+    last_acked_epoch_ = ack->epoch;
     // A receipt, not a validation: the rejections riding it are from
     // earlier edits, surfaced here so they are never silently dropped.
     for (const std::string& message : ack->rejected) {
@@ -442,7 +480,8 @@ bool Client::connect_socket() {
     const int nodelay = 1;
     ::setsockopt(socket_, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof nodelay);
     // A reply slower than the response window means the server is gone
-    // or wedged; recv fails instead of freezing the host.
+    // or wedged; recv fails and the client degrades (D-099's isolation)
+    // instead of freezing the host.
     const struct timeval window = {.tv_sec = static_cast<time_t>(RESPONSE_TIMEOUT.count()),
                                    .tv_usec = 0};
     ::setsockopt(socket_, SOL_SOCKET, SO_RCVTIMEO, &window, sizeof window);

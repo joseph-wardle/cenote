@@ -275,21 +275,25 @@ int main(int argc, char** argv) {
                                              .width = 1280,
                                              .height = 720,
                                          }}},
-        {"response-ack-clean", Ack{.rejected = {}}},
+        {"response-ack-clean", Ack{.rejected = {}, .epoch = 7}},
         {"response-ack-rejected",
          Ack{.rejected =
                  {
                      "instance \"chair\" references a mesh \"seat\" that does not exist",
                      "environment \"ciel-d'été\" references \"/scènes/небо.exr\", which does "
                      "not exist",
-                 }}},
+                 },
+             // Past u32, deliberately: the epoch is a u64 on the wire,
+             // and this pins the width against the Rust corpus.
+             .epoch = 4'294'967'296}},
         {"response-resized", Resized{.fb =
                                          FbDesc{
                                              .shm_name = "/cenote-12345-2",
                                              .bytes = 4096 + 2 * (640ULL * 480 * 20),
                                              .width = 640,
                                              .height = 480,
-                                         }}},
+                                         },
+                                     .epoch = 9}},
     };
 
     // The symmetric set check: every file in the golden directory belongs

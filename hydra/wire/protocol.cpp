@@ -88,8 +88,8 @@ std::expected<Response, DecodeError> decode_ack(Reader& reader) {
     if (!fields) {
         return std::unexpected(fields.error());
     }
-    if (*fields != 1) {
-        return std::unexpected(mismatch(reader, "the one Ack field"));
+    if (*fields != 2) {
+        return std::unexpected(mismatch(reader, "the two Ack fields"));
     }
     const auto count = reader.array_header();
     if (!count) {
@@ -103,15 +103,30 @@ std::expected<Response, DecodeError> decode_ack(Reader& reader) {
         }
         rejected.emplace_back(*message);
     }
-    return Ack{.rejected = std::move(rejected)};
+    const auto epoch = reader.uint();
+    if (!epoch) {
+        return std::unexpected(epoch.error());
+    }
+    return Ack{.rejected = std::move(rejected), .epoch = *epoch};
 }
 
 std::expected<Response, DecodeError> decode_resized(Reader& reader) {
+    const auto fields = reader.array_header();
+    if (!fields) {
+        return std::unexpected(fields.error());
+    }
+    if (*fields != 2) {
+        return std::unexpected(mismatch(reader, "the two Resized fields"));
+    }
     auto fb = decode_fb_desc(reader);
     if (!fb) {
         return std::unexpected(fb.error());
     }
-    return Resized{.fb = std::move(*fb)};
+    const auto epoch = reader.uint();
+    if (!epoch) {
+        return std::unexpected(epoch.error());
+    }
+    return Resized{.fb = std::move(*fb), .epoch = *epoch};
 }
 
 } // namespace
@@ -181,12 +196,15 @@ void encode(Writer& writer, const Response& value) {
                    },
                    [&](const Ack& ack) {
                        writer.str("Ack");
-                       writer.array_header(1);
+                       writer.array_header(2);
                        encode(writer, ack.rejected);
+                       encode(writer, ack.epoch);
                    },
                    [&](const Resized& resized) {
                        writer.str("Resized");
+                       writer.array_header(2);
                        encode(writer, resized.fb);
+                       encode(writer, resized.epoch);
                    },
                },
                value);

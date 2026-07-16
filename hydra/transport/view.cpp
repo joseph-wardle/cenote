@@ -114,6 +114,22 @@ bool View::converged() const {
     return u32(wire::fb::header::CONVERGED, std::memory_order_relaxed) != 0;
 }
 
+std::uint64_t View::epoch() const {
+    // Gated on a real publish exactly like converged(), and for the same
+    // reason: the two are read as a pair, and both describe the front
+    // frame.
+    if (u64(wire::fb::header::FRAME_COUNTER, std::memory_order_acquire) == 0) {
+        return 0;
+    }
+    return u64(wire::fb::header::EPOCH, std::memory_order_relaxed);
+}
+
+std::uint32_t View::rejected_edits() const {
+    // A plain monotonic count that moves without a frame; reading it
+    // needs no protocol.
+    return u32(wire::fb::header::REJECTED_EDITS, std::memory_order_relaxed);
+}
+
 bool View::copy_plane(std::span<float> dst, bool beauty) const {
     const std::uint64_t bytes =
         beauty ? wire::fb::beauty_bytes(width_, height_) : wire::fb::depth_bytes(width_, height_);

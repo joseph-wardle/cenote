@@ -47,6 +47,17 @@ public:
     /// first publish.
     [[nodiscard]] bool converged() const;
 
+    /// The session epoch the front frame incorporates (D-113); 0 before
+    /// the first publish. Convergence is honest only when this has
+    /// reached the epoch the last picture-changing reply carried —
+    /// converged() alone can describe a stale picture.
+    [[nodiscard]] std::uint64_t epoch() const;
+
+    /// The header's monotonic rejected-edit count. Moves without a frame
+    /// — a client that sees it advance sends Ping to collect the
+    /// messages.
+    [[nodiscard]] std::uint32_t rejected_edits() const;
+
 private:
     View(std::uint8_t* base, std::size_t bytes, std::uint32_t width, std::uint32_t height)
         : base_(base), bytes_(bytes), width_(width), height_(height) {}

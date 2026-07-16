@@ -11,7 +11,7 @@
 //! - one 4 KiB **header page** — identification, dimensions, plane
 //!   offsets, and the continuous status a strict request/response socket
 //!   can't carry (`front_index`, `frame_counter`, `samples`, `converged`,
-//!   `rejected_edits`);
+//!   `rejected_edits`, `epoch`);
 //! - **two pixel buffers**, each a beauty plane (RGBA f32, row-major,
 //!   linear `Rec.709` — converted server-side, D-101) followed by a depth
 //!   plane (f32, camera-plane z at the first hit, +∞ where every sample
@@ -44,7 +44,7 @@ pub const MAGIC: u32 = u32::from_le_bytes(*b"CNFB");
 /// Bumped on any change to this module's layout. A reader finding a
 /// version it doesn't know must unmap and treat the server as
 /// incompatible, exactly like a `Hello`/`Welcome` protocol mismatch.
-pub const LAYOUT_VERSION: u32 = 1;
+pub const LAYOUT_VERSION: u32 = 2;
 
 /// The header's page — plane data starts here. One page keeps every
 /// atomic the two processes share away from pixel cachelines.
@@ -82,6 +82,11 @@ pub mod header {
     pub const BEAUTY_OFFSET_1: u64 = 56;
     /// Byte offset of buffer 1's depth plane, u64.
     pub const DEPTH_OFFSET_1: u64 = 64;
+    /// The session epoch the front frame incorporates, u64 (D-113) —
+    /// written with the frame it stamps, so a reader that pairs it with
+    /// `CONVERGED` can tell a settled *current* picture from a settled
+    /// stale one.
+    pub const EPOCH: u64 = 72;
 }
 
 /// Bytes of one beauty plane: RGBA f32 per pixel.
@@ -121,9 +126,10 @@ pub fn segment_bytes(width: u32, height: u32) -> u64 {
 // header page, and the u64 fields sit 8-aligned — the alignment the
 // atomics need.
 const _: () = {
-    assert!(header::DEPTH_OFFSET_1 + 8 <= HEADER_BYTES);
+    assert!(header::EPOCH + 8 <= HEADER_BYTES);
     assert!(header::FRAME_COUNTER.is_multiple_of(8));
     assert!(header::BEAUTY_OFFSET_0.is_multiple_of(8));
+    assert!(header::EPOCH.is_multiple_of(8));
 };
 
 #[cfg(test)]

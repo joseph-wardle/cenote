@@ -26,7 +26,7 @@ namespace cenote::wire {
 /// The protocol revision carried in Hello/Welcome — mirror of `PROTOCOL`.
 /// The Rust side bumps it on any change to any encoded shape; the two
 /// sides move in lockstep with the golden corpus.
-inline constexpr std::uint32_t PROTOCOL = 1;
+inline constexpr std::uint32_t PROTOCOL = 2;
 
 /// The most bytes one frame may claim — mirror of `MAX_MESSAGE_BYTES`,
 /// the transport's plausibility guard so a garbage or hostile length
@@ -105,15 +105,20 @@ struct Welcome {
 /// `Response`'s Ack alternative: answers Replace, Apply, SetCamera, and
 /// Ping. A receipt, not a validation — edits apply at the next wave
 /// boundary, and `rejected` carries every rejection message accumulated
-/// since the last response.
+/// since the last response. `epoch` is the session epoch after this
+/// request (D-113): the first shm frame whose header stamp reaches it
+/// incorporates everything sent so far, applied or rejected.
 struct Ack {
     std::vector<std::string> rejected;
+    std::uint64_t epoch;
 };
 
 /// `Response`'s Resized alternative: answers Resize — the new framebuffer
-/// segment, ready to map.
+/// segment, ready to map, and Ack's epoch on the one reply that is not
+/// an Ack.
 struct Resized {
     FbDesc fb;
+    std::uint64_t epoch;
 };
 
 /// The server's reply — mirror of `Response`.

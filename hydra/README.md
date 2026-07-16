@@ -7,8 +7,8 @@ test; `transport/`, the client that spawns `cenote-server` and speaks to it —
 spawn, socket, and the shm framebuffer reader, the deliberately-POSIX corner
 of the tree; and `hdCenote/`, the scene-index-native render delegate plugin —
 the half that needs USD. The plan is
-[docs/m4-plan.md](../docs/m4-plan.md) (step 1 carries the locked detail);
-rationale lives in [docs/decisions.md](../docs/decisions.md) (D-097…D-112).
+[docs/m4-plan.md](../docs/m4-plan.md) (steps 1 and 2 carry their locked detail);
+rationale lives in [docs/decisions.md](../docs/decisions.md) (D-097…D-114).
 
 Baseline: C++23, extensions off, `-Wall -Wextra -Werror`. Two-part portability
 rule (D-105): portable core C++23 only, and inside the plugin `.so` no library
@@ -37,7 +37,7 @@ cmake --install build/hydra   # → hydra/dist/hdCenote/ (gitignored)
 ## The pre-push ritual
 
 CI proves the wire half on a bare runner; everything that needs USD or a GPU
-is proven here instead, before every push. All four commands run from the
+is proven here instead, before every push. All five commands run from the
 repo root:
 
 ```sh
@@ -45,6 +45,7 @@ cmake --build build/hydra --parallel && cmake --install build/hydra && ctest --t
 find hydra \( -name '*.cpp' -o -name '*.hpp' \) -print0 | xargs -0r clang-format --dry-run -Werror
 find hydra -name '*.cpp' -print0 | xargs -0 -P"$(nproc)" -n1 clang-tidy -p build/hydra --quiet
 python3 hydra/tests/usdrecord_smoke.py
+python3 hydra/tests/interactive_test.py
 ```
 
 Formatting and linting are pinned to the clang 22.1.8 PyPI wheels
@@ -62,6 +63,15 @@ left and larger, the cool far cube right and smaller, the background black).
 No pixel equality — that is step 6's FLIP golden. It needs the USD prefix on
 `PATH`/`PYTHONPATH` (below) and a built `cenote-server`
 (`target/{release,debug}`, or `$CENOTE_SERVER`).
+
+The interactive test drives the same stage through `testusdview` and asserts
+the loop is honest and unkillable: a real edit drops `IsConverged` and
+reconverges with different pixels; a visually inert edit still drops and
+returns (the epoch republish, D-113, end to end — a wedged epoch times out
+right there); a SIGKILLed `cenote-server` leaves usdview alive, degraded, and
+warning about the recovery gesture; and the gesture itself — the renderer
+toggled away and back — spawns a fresh server and brings the silhouette home.
+It needs everything the smoke needs, plus a display.
 
 ## USD 26.05 — the pinned build (record)
 

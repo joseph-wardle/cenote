@@ -214,7 +214,9 @@ impl Segment {
     /// the counter (the release that lets a reader trust the pixels —
     /// [`cenote_wire::fb`]'s writer steps, verbatim). `beauty` is RGBA
     /// f32 — already linear `Rec.709`, the conversion is the caller's —
-    /// and `depth` crosses as the bytes the download produced.
+    /// and `depth` crosses as the bytes the download produced. `epoch` is
+    /// the frame's session-epoch stamp (D-113), stored with the status
+    /// fields so a reader sees it released by the same counter advance.
     ///
     /// # Panics
     ///
@@ -224,7 +226,7 @@ impl Segment {
         clippy::cast_ptr_alignment,
         reason = "plane offsets are the page plus multiples of 4 — f32-aligned by the layout"
     )]
-    pub fn publish(&mut self, beauty: &[f32], depth: &[u8], samples: u32, converged: bool) {
+    pub fn publish(&mut self, beauty: &[f32], depth: &[u8], samples: u32, converged: bool, epoch: u64) {
         assert_eq!(beauty.len() as u64 * 4, fb::beauty_bytes(self.width, self.height));
         assert_eq!(depth.len() as u64, fb::depth_bytes(self.width, self.height));
         let front = self.map.atomic_u32(header::FRONT_INDEX);
@@ -255,6 +257,9 @@ impl Segment {
         self.map
             .atomic_u32(header::CONVERGED)
             .store(u32::from(converged), Ordering::Relaxed);
+        self.map
+            .atomic_u64(header::EPOCH)
+            .store(epoch, Ordering::Relaxed);
         front.store(back, Ordering::Relaxed);
         // The release: everything above happens-before a reader's acquire
         // of the new count.
@@ -281,6 +286,12 @@ pub struct Snapshot {
     pub depth: Vec<f32>,
     /// Samples accumulated into this frame.
     pub samples: u32,
+    /// Whether accumulation had settled when this frame published.
+    pub converged: bool,
+    /// The session epoch this frame incorporates (D-113) — everything
+    /// acknowledged at or below this value is in the picture, applied or
+    /// rejected.
+    pub epoch: u64,
     /// The frame counter at the copy — monotonic across snapshots.
     pub counter: u64,
 }
@@ -350,6 +361,17 @@ impl View {
             .load(Ordering::Relaxed)
     }
 
+    /// The session epoch the front frame incorporates (D-113) — 0 before
+    /// the first publish. Paired with [`Self::converged`], this is the
+    /// honest convergence read: settled *and* current.
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        if self.frame_counter() == 0 {
+            return 0;
+        }
+        self.map.atomic_u64(header::EPOCH).load(Ordering::Relaxed)
+    }
+
     /// Copy the front frame out under the tear protocol. `None` when no
     /// frame has been published yet, or when the writer advanced the
     /// counter by more than one during the copy (the copy may be torn —
@@ -367,6 +389,8 @@ impl View {
         }
         let front = self.map.atomic_u32(header::FRONT_INDEX).load(Ordering::Relaxed);
         let samples = self.map.atomic_u32(header::SAMPLES).load(Ordering::Relaxed);
+        let converged = self.map.atomic_u32(header::CONVERGED).load(Ordering::Relaxed) != 0;
+        let epoch = self.map.atomic_u64(header::EPOCH).load(Ordering::Relaxed);
         let texels = self.width as usize * self.height as usize;
         let mut beauty = vec![0.0f32; texels * 4];
         let mut depth = vec![0.0f32; texels];
@@ -395,6 +419,8 @@ impl View {
             beauty,
             depth,
             samples,
+            converged,
+            epoch,
             counter: after,
         })
     }
@@ -420,22 +446,29 @@ mod tests {
         let beauty: Vec<f32> = (0..texels * 4).map(|i| i as f32).collect();
         let depth_values: Vec<f32> = (0..texels).map(|i| 0.5 + i as f32).collect();
         let depth_bytes: Vec<u8> = depth_values.iter().flat_map(|v| v.to_le_bytes()).collect();
-        segment.publish(&beauty, &depth_bytes, 7, false);
+        assert_eq!(view.epoch(), 0, "no epoch before the first publish");
+        segment.publish(&beauty, &depth_bytes, 7, false, 3);
 
         let first = view.snapshot().expect("first frame");
         assert_eq!(first.beauty, beauty);
         assert_eq!(first.depth, depth_values);
         assert_eq!(first.samples, 7);
         assert_eq!(first.counter, 1);
+        assert!(!first.converged);
+        assert_eq!(first.epoch, 3);
         assert!(!view.converged());
+        assert_eq!(view.epoch(), 3);
 
         let brighter: Vec<f32> = beauty.iter().map(|v| v + 100.0).collect();
-        segment.publish(&brighter, &depth_bytes, 8, true);
+        segment.publish(&brighter, &depth_bytes, 8, true, 4);
         let second = view.snapshot().expect("second frame");
         assert_eq!(second.beauty, brighter);
         assert_eq!(second.samples, 8);
         assert_eq!(second.counter, 2);
+        assert!(second.converged);
+        assert_eq!(second.epoch, 4);
         assert!(view.converged());
+        assert_eq!(view.epoch(), 4);
 
         assert_eq!(view.rejected_edits(), 0);
         segment.bump_rejected();

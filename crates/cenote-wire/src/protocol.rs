@@ -24,7 +24,7 @@ use crate::scene::ChangeSet;
 /// The protocol revision carried in `Hello`/`Welcome`. Bump on any change
 /// to the encoded shape of any type in this crate — and regenerate the
 /// golden corpus in the same commit.
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 
 /// The most bytes one frame may claim, a plausibility guard so a garbage
 /// or hostile length prefix cannot ask the reader to allocate without
@@ -131,9 +131,21 @@ pub enum Response {
     Ack {
         /// Rejection messages accumulated since the last response.
         rejected: Vec<String>,
+        /// The session epoch after this request was placed (D-113), read
+        /// server-side after every session call the request caused —
+        /// including internal ones like the camera re-assert. The first
+        /// shm frame whose header epoch reaches this value incorporates
+        /// everything sent so far, applied or rejected.
+        epoch: u64,
     },
     /// Answers `Resize`: the new framebuffer segment, ready to map.
-    Resized(FbDesc),
+    Resized {
+        /// The new framebuffer segment, ready to map.
+        fb: FbDesc,
+        /// The session epoch after the resize — [`Response::Ack::epoch`]'s
+        /// twin, on the one reply that is not an `Ack`.
+        epoch: u64,
+    },
 }
 
 /// Serialize one message to its wire payload (no length prefix) —

@@ -4,6 +4,7 @@
 
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/vec3d.h"
+#include "pxr/imaging/cameraUtil/framing.h"
 #include "pxr/imaging/hd/camera.h"
 #include "pxr/imaging/hd/renderIndex.h"
 #include "pxr/imaging/hd/renderPassState.h"
@@ -39,14 +40,21 @@ HdCenoteRenderPass::HdCenoteRenderPass(HdRenderIndex* index, HdRprimCollection c
                                        cenote::transport::Client* client)
     : HdRenderPass(index, collection), _client(client) {}
 
-// Convergence, read live from the shm header (D-112): the server's
-// accumulation settled at its sample cap, or the client is degraded and
-// the picture will never improve. The bound buffers answer the same
-// question with a resize guard on top.
+// Convergence, read live from the shm header and qualified by the epoch
+// (D-113): settled counts only once the front frame has incorporated
+// everything this client sent, so a stale picture never claims to be
+// final — or the client is degraded and the picture will never improve.
+// The bound buffers answer the same question with a resize guard on top.
 bool HdCenoteRenderPass::IsConverged() const { return _client->converged(); }
 
 void HdCenoteRenderPass::_Execute(HdRenderPassStateSharedPtr const& renderPassState,
                                   TfTokenVector const& /*renderTags*/) {
+    // The per-frame health checks: between requests the socket must be
+    // silent (anything else degrades, with the warning naming the
+    // recovery), and a moved rejected-edit counter means the server has
+    // messages waiting for a Ping.
+    _client->check_liveness();
+    _client->collect_rejections();
     // Mark the bound AOVs: exactly the buffers the viewer reads pull
     // pixels from the server's framebuffer in Map(). Each also learns the
     // frame's projection, which the depth remap reads (D-110).
@@ -65,20 +73,25 @@ void HdCenoteRenderPass::_Execute(HdRenderPassStateSharedPtr const& renderPassSt
             cenoteBuffer->SetProjection(projection);
         }
     }
-    _UpdateCamera(renderPassState);
+    _UpdateCamera(renderPassState, projection);
 }
 
-void HdCenoteRenderPass::_UpdateCamera(HdRenderPassStateSharedPtr const& renderPassState) {
+void HdCenoteRenderPass::_UpdateCamera(HdRenderPassStateSharedPtr const& renderPassState,
+                                       GfMatrix4d const& projection) {
     const HdCamera* camera = renderPassState->GetCamera();
     if (camera == nullptr) {
         return;
     }
-    // HdCamera pre-scales focal length and apertures to world units, so
-    // the field-of-view ratio below is unit-free. cenote's camera is a
-    // perspective one; framing and conform policy are step 2's business.
-    const float focal = camera->GetFocalLength();
-    const float aperture = camera->GetVerticalAperture();
-    if (camera->GetProjection() != HdCamera::Perspective || focal <= 0.0f || aperture <= 0.0f) {
+    // The vertical field of view comes from the *conformed* projection —
+    // the same matrix the depth remap reads (D-110) — so the frame the
+    // server renders and the depth read back from it share one camera
+    // (D-114). HdCamera still supplies what a projection cannot: the
+    // transform, the perspective check, and the lens (focus distance,
+    // fStop, focal length — the last only to turn f-number into an
+    // aperture radius).
+    const double yScale = projection[1][1];
+    if (camera->GetProjection() != HdCamera::Perspective || !std::isfinite(yScale) ||
+        yScale <= 0.0) {
         if (!_warnedNonPerspective) {
             _warnedNonPerspective = true;
             TF_WARN("only perspective cameras reach cenote-server; the view will not follow %s",
@@ -86,10 +99,22 @@ void HdCenoteRenderPass::_UpdateCamera(HdRenderPassStateSharedPtr const& renderP
         }
         return;
     }
+    // Framing beyond a plain full-frame viewport carries more than one
+    // field of view can say: cenote renders the full frame at whatever
+    // vfov the conformed projection implies. Say so once.
+    if (!_warnedExoticFraming) {
+        const CameraUtilFraming& framing = renderPassState->GetFraming();
+        if (framing.IsValid() && framing != CameraUtilFraming(framing.dataWindow)) {
+            _warnedExoticFraming = true;
+            TF_WARN("exotic framing (a data window apart from the display window, or non-square "
+                    "pixels); cenote renders the full frame");
+        }
+    }
     const GfMatrix4d& transform = camera->GetTransform();
     const GfVec3d position = transform.ExtractTranslation();
     const GfVec3d forward = transform.TransformDir(GfVec3d(0.0, 0.0, -1.0)).GetNormalized();
     const GfVec3d up = transform.TransformDir(GfVec3d(0.0, 1.0, 0.0)).GetNormalized();
+    const float focal = camera->GetFocalLength();
     const float focusDistance = camera->GetFocusDistance();
     const float fStop = camera->GetFStop();
     const bool focused = focusDistance > 0.0f;
@@ -99,12 +124,14 @@ void HdCenoteRenderPass::_UpdateCamera(HdRenderPassStateSharedPtr const& renderP
         // unless a focus distance makes it the focal plane.
         .look_at = _ToArray(position + forward * (focused ? focusDistance : 1.0f)),
         .up = _ToArray(up),
-        .vfov_degrees = static_cast<float>(2.0 * std::atan2(0.5 * aperture, double{focal}) * 180.0 /
-                                           std::numbers::pi),
+        // P[1][1] is 1/tan(vfov/2) for any conformed perspective
+        // projection, off-center included.
+        .vfov_degrees =
+            static_cast<float>(2.0 * std::atan(1.0 / yScale) * 180.0 / std::numbers::pi),
         .focus_distance = focused ? std::optional<float>(focusDistance) : std::nullopt,
         // f-number to lens radius, in the same world units as the focal
         // length; an fStop of 0 means "no lens" on both sides.
-        .aperture_radius = fStop > 0.0f ? focal / fStop / 2.0f : 0.0f,
+        .aperture_radius = fStop > 0.0f && focal > 0.0f ? focal / fStop / 2.0f : 0.0f,
     };
     if (_lastCamera && _Same(*_lastCamera, current)) {
         return;

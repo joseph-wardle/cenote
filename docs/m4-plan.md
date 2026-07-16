@@ -361,7 +361,44 @@ tests pass serially on the GPU machine; the C++ side compiles + its own lint; co
    header counter → `Ping`); dead-socket detection + graceful degradation.
    *Checkpoint: live progressive refinement, camera nav, and live edits in usdview; kill
    `cenote-server` mid-render and usdview survives, reports the disconnect, and recovers
-   on a renderer toggle.*
+   on a renderer toggle.* The locked detail (a third structured interview, 2026-07-14;
+   the genuinely new decisions are D-113 and D-114 in [decisions.md](decisions.md)):
+   - *Scope*: smaller than the sentence above suggests — D-107/D-112 pulled the pixel
+     path, resize, and the first cut of honest convergence into step 1, and the refresh
+     throttle has been the server pump's ~33 ms cadence since step 0. What remained is
+     making the loop *honest and unkillable*: the per-edit epoch, the framing contract,
+     dead-server detection, idle rejected-edit surfacing, and the committed checkpoint.
+     `noise_threshold` stays unplumbed; every recorded deferral stays deferred.
+   - *The epoch* (D-113): session-owned truth — an atomic counter bumped by exactly the
+     four wire verbs; the render thread stamps each published frame with what it has
+     incorporated (rejected edits included, so they cannot wedge convergence); a parked
+     republish closes the visually-inert-edit case, turning the stamp into a delivery
+     guarantee. `Ack`/`Resized` and the shm header carry it; the client's `converged()`
+     becomes "the front frame's epoch has reached the last acked *and* the header says
+     settled" — retiring the ≤~33 ms stale-flag caveat D-112 recorded, and giving the
+     viewer a correct edit-vs-converged story as a side effect.
+   - *Framing* (D-114): vfov read off the *conformed* `GetProjectionMatrix()` — the
+     same matrix the depth remap already reads (D-110), so the whole camera contract
+     shares one projection; exotic framing (a data window apart from the display
+     window, non-square pixels) warns once and renders full-frame.
+   - *Liveness*: a zero-timeout socket `poll()` per `_Execute` — strict
+     request/response makes anything readable outside a call a death signal — plus a
+     ~30 s receive timeout so a wedged-alive server degrades instead of hanging the
+     host; one warning naming the D-099 recovery gesture. No new ledger entry: a
+     consequence of D-099/D-100.
+   - *Rejections*: the header's rejected-edit counter compared each `_Execute`; when it
+     moves, one `Ping` — the existing acked path surfaces the strings and refreshes the
+     epoch for free.
+   - *Checkpoint, committed twice*: the epoch contract lands in the server integration
+     test, and `hydra/tests/interactive_test.py` — edit honesty (a real edit drops
+     convergence and returns with changed pixels; a visual no-op still drops and
+     returns, the republish end to end), kill-survive (SIGKILL mid-render: the app
+     survives, degraded reads converged, the warning posts), toggle-recover (the
+     warning's own gesture: renderer away and back, a fresh server, the silhouette
+     restored) — joins the pre-push ritual as its fifth command.
+   - *Landing*: two commits split at the core/wire seam — the Rust-only session epoch
+     first, then wire + server + delegate + test + docs together, green on the GPU
+     machine.
 3. **Materials & textures** — the material prim's network schema read as data sources
    (nodes / parameters / `inputConnections` / terminals; the universal empty-token
    render context read explicitly) → the UsdPreviewSurface node switch →

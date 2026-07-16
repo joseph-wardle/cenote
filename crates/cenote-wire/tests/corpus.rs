@@ -72,6 +72,10 @@ impl Case {
 /// The corpus: names are the golden file stems, values the pinned
 /// messages. Adding a wire field means extending a case here (or adding
 /// one) and regenerating — the encoder change alone fails the test.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the corpus is deliberately exhaustive — one literal per covered shape"
+)]
 fn corpus() -> Vec<(&'static str, Case)> {
     vec![
         (
@@ -147,7 +151,10 @@ fn corpus() -> Vec<(&'static str, Case)> {
         ),
         (
             "response-ack-clean",
-            Case::Response(Response::Ack { rejected: vec![] }),
+            Case::Response(Response::Ack {
+                rejected: vec![],
+                epoch: 7,
+            }),
         ),
         (
             "response-ack-rejected",
@@ -158,16 +165,22 @@ fn corpus() -> Vec<(&'static str, Case)> {
                      exist"
                         .into(),
                 ],
+                // Past u32, deliberately: the epoch is a u64 on the wire,
+                // and this pins the width for the C++ mirror.
+                epoch: 4_294_967_296,
             }),
         ),
         (
             "response-resized",
-            Case::Response(Response::Resized(FbDesc {
-                shm_name: "/cenote-12345-2".into(),
-                bytes: 4096 + 2 * (640 * 480 * 20),
-                width: 640,
-                height: 480,
-            })),
+            Case::Response(Response::Resized {
+                fb: FbDesc {
+                    shm_name: "/cenote-12345-2".into(),
+                    bytes: 4096 + 2 * (640 * 480 * 20),
+                    width: 640,
+                    height: 480,
+                },
+                epoch: 9,
+            }),
         ),
     ]
 }

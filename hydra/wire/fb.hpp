@@ -22,7 +22,7 @@ inline constexpr std::uint32_t MAGIC = std::uint32_t{'C'} | std::uint32_t{'N'} <
 /// Bumped on any change to the layout. A reader finding a version it
 /// does not know must unmap and treat the server as incompatible,
 /// exactly like a Hello/Welcome protocol mismatch.
-inline constexpr std::uint32_t LAYOUT_VERSION = 1;
+inline constexpr std::uint32_t LAYOUT_VERSION = 2;
 
 /// The header's page — plane data starts here.
 inline constexpr std::uint64_t HEADER_BYTES = 4096;
@@ -58,6 +58,11 @@ inline constexpr std::uint64_t DEPTH_OFFSET_0 = 48;
 inline constexpr std::uint64_t BEAUTY_OFFSET_1 = 56;
 /// Byte offset of buffer 1's depth plane, u64.
 inline constexpr std::uint64_t DEPTH_OFFSET_1 = 64;
+/// The session epoch the front frame incorporates, u64 (D-113) —
+/// written with the frame it stamps, so a reader that pairs it with
+/// CONVERGED can tell a settled *current* picture from a settled stale
+/// one.
+inline constexpr std::uint64_t EPOCH = 72;
 } // namespace header
 
 /// Bytes of one beauty plane: RGBA f32 per pixel, row-major, linear
@@ -94,8 +99,9 @@ constexpr std::uint64_t segment_bytes(std::uint32_t width, std::uint32_t height)
 // fb.rs's compile-time layout guarantees, verbatim: every header field
 // fits inside the header page, and the u64 fields sit 8-aligned — the
 // alignment the atomics need.
-static_assert(header::DEPTH_OFFSET_1 + 8 <= HEADER_BYTES);
+static_assert(header::EPOCH + 8 <= HEADER_BYTES);
 static_assert(header::FRAME_COUNTER % 8 == 0);
 static_assert(header::BEAUTY_OFFSET_0 % 8 == 0);
+static_assert(header::EPOCH % 8 == 0);
 
 } // namespace cenote::wire::fb

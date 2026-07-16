@@ -2696,3 +2696,45 @@ stale "converged" for at most a publish interval (~33 ms); usdview self-corrects
 its next paint, and the smoke run never sees it because its resize hands it a freshly
 zeroed segment. The finer surface (per-edit scene epochs in the header) stays step 2's
 business, as D-107 said.
+
+### D-113: The session epoch — converged means settled *and* current
+Status: accepted (2026-07-14); supersedes the ≤~33 ms stale-flag caveat D-112 recorded.
+The shm header's `converged` flag says "accumulation settled"; it never said "at a
+picture that includes your edit," and D-112 recorded the resulting lie as a caveat: a
+poll racing an edit could read one stale converged. Step 2 retires it with a
+session-owned epoch. An atomic counter in the session's shared lanes is bumped by
+exactly the four wire verbs — `apply`, `replace`, `set_camera`, `resize` — *after*
+each places its payload; viewer toggles restart accumulation anyway and do not bump.
+At each wave boundary the render thread reads the counter *before* draining edits and
+snapshotting inputs, and stamps every frame it subsequently publishes with that value:
+"everything enqueued up to E is incorporated in this picture." A drained edit counts
+as incorporated whether it applied or was rejected — rejection must not wedge
+convergence. The one delivery hole is plugged deliberately: a visually inert edit
+while parked (the equality gate means no restart, so no new publish) still republishes
+the current buffers under the fresh stamp, so the epoch always arrives. On the wire,
+`Ack` and `Resized` carry the server's post-request epoch (`Welcome` stays unchanged:
+both sides start at 0, and the genesis `Replace` resynchronizes), and the shm header
+carries the front frame's stamp — a protocol and layout version bump each. The client
+remembers the largest epoch any `Ack` or `Resized` carried, and its `converged()`
+becomes: degraded, or the front frame's epoch has reached that bar *and* the header
+says settled. A settled stale picture no longer claims to be final, which is also the
+viewer's edit-vs-converged story arriving as a side effect — usdview keeps painting
+until the picture with the edit in it has settled, not merely until any picture has.
+
+### D-114: The camera's vfov reads the conformed projection, not raw HdCamera
+Status: accepted (2026-07-14); completes the symmetry D-110 started. The render pass
+was decomposing HdCamera's apertures into a vertical field of view while the depth
+remap read the pass state's *conformed* `GetProjectionMatrix()` — two camera stories
+per frame, free to drift apart the moment a framing policy conforms the projection.
+Now one matrix rules both: `P[1][1]` is `1/tan(vfov/2)` for any conformed perspective
+projection, off-center included, so the pass reads `vfov = 2·atan(1/P[1][1])` and the
+frame the server renders and the depth read back from it share one camera. HdCamera
+still supplies what a projection cannot: the transform, the perspective check, and the
+lens (focus distance, fStop, and focal length — the last only to turn the f-number
+into an aperture radius). Rejected alternatives: consuming `CameraUtilFraming` in
+full, because data windows and crop regions say more than one field of view can
+express and cenote renders the full frame; and hand-rolling the conform math, which
+would duplicate what the pass state has already done. Framing beyond a plain
+full-frame viewport — a data window apart from the display window, or non-square
+pixels — gets a one-time `TF_WARN` and renders the full frame at the vfov the
+conformed projection implies.
