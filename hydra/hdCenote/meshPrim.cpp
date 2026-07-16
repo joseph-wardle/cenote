@@ -21,6 +21,7 @@
 #include "pxr/imaging/hd/primvarSchema.h"
 #include "pxr/imaging/hd/primvarsSchema.h"
 #include "pxr/imaging/hd/tokens.h"
+#include "pxr/imaging/hd/types.h"
 #include "pxr/imaging/hd/visibilitySchema.h"
 #include "pxr/imaging/hd/xformSchema.h"
 #include "pxr/imaging/pxOsd/tokens.h"
@@ -69,26 +70,31 @@ bool _Invertible(const cenote::wire::Matrix& matrix) {
     return true;
 }
 
-/// A vertex-interpolated primvar, or the reasons there is none:
-/// faceVarying warns and drops — cenote's format is single-indexed, and
-/// the un-welding lands in step 3 where textures make st matter — a
-/// count mismatch warns and drops, and anything else (absent, uniform,
-/// constant, an unexpected type) quietly reads as absent.
+/// A primvar's values and their domain: per corner of the triangulation
+/// (an un-welded faceVarying read, three per triangle) or per point.
+template <typename Array> struct _Primvar {
+    Array values;
+    bool perCorner;
+};
+
+/// A primvar the wire can carry, or the reasons there is none: a count
+/// mismatch warns and drops, and anything else (absent, uniform,
+/// constant, an unexpected type) quietly reads as absent. faceVarying
+/// values come back per corner, re-fanned by HdMeshUtil in the same
+/// order ComputeTriangleIndices walked, so index i lands on triangle
+/// i/3's corner i%3; vertex and varying values pass through per point.
 template <typename Array>
-std::optional<Array> _VertexPrimvar(const SdfPath& path, const HdPrimvarsSchema& primvars,
-                                    const TfToken& name, const size_t pointCount) {
+std::optional<_Primvar<Array>> _ReadPrimvar(const SdfPath& path, const HdPrimvarsSchema& primvars,
+                                            const TfToken& name, const size_t pointCount,
+                                            const size_t cornerCount, const HdMeshUtil& util) {
     const HdPrimvarSchema primvar = primvars.GetPrimvar(name);
     const HdSampledDataSourceHandle value = primvar.GetPrimvarValue();
     if (!value) {
         return std::nullopt;
     }
     const TfToken interpolation = _TokenOr(primvar.GetInterpolation(), TfToken());
-    if (interpolation == HdPrimvarSchemaTokens->faceVarying) {
-        TF_WARN("<%s> has a faceVarying %s primvar; dropped (un-welding lands with textures)",
-                path.GetText(), name.GetText());
-        return std::nullopt;
-    }
-    if (interpolation != HdPrimvarSchemaTokens->vertex &&
+    const bool faceVarying = interpolation == HdPrimvarSchemaTokens->faceVarying;
+    if (!faceVarying && interpolation != HdPrimvarSchemaTokens->vertex &&
         interpolation != HdPrimvarSchemaTokens->varying) {
         return std::nullopt;
     }
@@ -97,12 +103,30 @@ std::optional<Array> _VertexPrimvar(const SdfPath& path, const HdPrimvarsSchema&
         return std::nullopt;
     }
     Array array = sampled.UncheckedGet<Array>();
-    if (array.size() != pointCount) {
-        TF_WARN("<%s> has %zu %s for %zu points; dropped", path.GetText(), array.size(),
-                name.GetText(), pointCount);
+    const size_t expected = faceVarying ? cornerCount : pointCount;
+    if (array.size() != expected) {
+        TF_WARN("<%s> has %zu %s for %zu %s; dropped", path.GetText(), array.size(), name.GetText(),
+                expected, faceVarying ? "corners" : "points");
         return std::nullopt;
     }
-    return array;
+    if (!faceVarying) {
+        return _Primvar<Array>{std::move(array), false};
+    }
+    VtValue triangulated;
+    const HdMeshComputationResult result = util.ComputeTriangulatedFaceVaryingPrimvar(
+        HdGetValueData(sampled), static_cast<int>(array.size()), HdGetValueTupleType(sampled).type,
+        &triangulated);
+    if (result == HdMeshComputationResult::Error) {
+        TF_WARN("<%s>: triangulating the faceVarying %s primvar failed; dropped", path.GetText(),
+                name.GetText());
+        return std::nullopt;
+    }
+    if (result == HdMeshComputationResult::Success) {
+        array = triangulated.UncheckedGet<Array>();
+    }
+    // Unchanged: the cage is already all triangles, right-handed, with
+    // nothing skipped, so the authored corners sit in fan order as-is.
+    return _Primvar<Array>{std::move(array), true};
 }
 
 /// points — always vertex, the one primvar geometry cannot do without.
@@ -122,9 +146,13 @@ VtVec3fArray _Points(const SdfPath& path, const HdPrimvarsSchema& primvars) {
 
 /// The wire payload: the base cage fan-triangulated by HdMeshUtil,
 /// which honors orientation (leftHanded fans come out reversed), so the
-/// triples land counter-clockwise-outward as Inline requires. Nullopt
-/// is "nothing the server would accept" — an empty mesh is legal USD,
-/// but validation rejects a Mesh without geometry.
+/// triples land counter-clockwise-outward as Inline requires. cenote's
+/// format is single-indexed — attributes live per position — so a
+/// welded mesh copies straight through, and any faceVarying primvar
+/// un-welds the mesh to three vertices per triangle so every per-corner
+/// value has a position to sit on. Nullopt is "nothing the server would
+/// accept" — an empty mesh is legal USD, but validation rejects a Mesh
+/// without geometry.
 std::optional<cenote::wire::Inline> _ReadGeometry(const SdfPath& path,
                                                   const HdSceneIndexPrim& prim) {
     const HdMeshSchema mesh = HdMeshSchema::GetFromParent(prim.dataSource);
@@ -154,7 +182,47 @@ std::optional<cenote::wire::Inline> _ReadGeometry(const SdfPath& path,
     if (triangles.empty()) {
         return std::nullopt;
     }
+    const auto normals = _ReadPrimvar<VtVec3fArray>(path, primvars, HdTokens->normals,
+                                                    points.size(), indices.size(), util);
+    const auto st = _ReadPrimvar<VtVec2fArray>(path, primvars, _tokens->st, points.size(),
+                                               indices.size(), util);
     cenote::wire::Inline source;
+    if ((normals && normals->perCorner) || (st && st->perCorner)) {
+        // The un-weld: positions gather through the triangle indices,
+        // per-corner values copy straight across, and per-point values
+        // gather alongside the positions. Only meshes that carry
+        // faceVarying data pay the duplication.
+        source.positions.reserve(3 * triangles.size());
+        source.triangles.reserve(triangles.size());
+        if (normals) {
+            source.normals.emplace();
+            source.normals->reserve(3 * triangles.size());
+        }
+        if (st) {
+            source.uvs.emplace();
+            source.uvs->reserve(3 * triangles.size());
+        }
+        for (size_t t = 0; t < triangles.size(); ++t) {
+            const GfVec3i& triangle = triangles[t];
+            const auto base = static_cast<std::uint32_t>(3 * t);
+            source.triangles.push_back({base, base + 1, base + 2});
+            for (int k = 0; k < 3; ++k) {
+                const GfVec3f& position = points[triangle[k]];
+                source.positions.push_back({position[0], position[1], position[2]});
+                if (normals) {
+                    const GfVec3f& normal = normals->perCorner ? normals->values[base + k]
+                                                               : normals->values[triangle[k]];
+                    source.normals->push_back({normal[0], normal[1], normal[2]});
+                }
+                if (st) {
+                    const GfVec2f& uv =
+                        st->perCorner ? st->values[base + k] : st->values[triangle[k]];
+                    source.uvs->push_back({uv[0], uv[1]});
+                }
+            }
+        }
+        return source;
+    }
     source.positions.reserve(points.size());
     for (const GfVec3f& point : points) {
         source.positions.push_back({point[0], point[1], point[2]});
@@ -165,18 +233,17 @@ std::optional<cenote::wire::Inline> _ReadGeometry(const SdfPath& path,
                                     static_cast<std::uint32_t>(triangle[1]),
                                     static_cast<std::uint32_t>(triangle[2])});
     }
-    if (const auto normals =
-            _VertexPrimvar<VtVec3fArray>(path, primvars, HdTokens->normals, points.size())) {
+    if (normals) {
         source.normals.emplace();
-        source.normals->reserve(normals->size());
-        for (const GfVec3f& normal : *normals) {
+        source.normals->reserve(normals->values.size());
+        for (const GfVec3f& normal : normals->values) {
             source.normals->push_back({normal[0], normal[1], normal[2]});
         }
     }
-    if (const auto st = _VertexPrimvar<VtVec2fArray>(path, primvars, _tokens->st, points.size())) {
+    if (st) {
         source.uvs.emplace();
-        source.uvs->reserve(st->size());
-        for (const GfVec2f& uv : *st) {
+        source.uvs->reserve(st->values.size());
+        for (const GfVec2f& uv : st->values) {
             source.uvs->push_back({uv[0], uv[1]});
         }
     }
@@ -184,9 +251,9 @@ std::optional<cenote::wire::Inline> _ReadGeometry(const SdfPath& path,
 }
 
 /// What the companion material wears: a constant displayColor is used
-/// directly, a vertex one is approximated by its first element (honest
-/// per-vertex color needs the step-3 material work), anything else is
-/// the neutral default.
+/// directly, a vertex one is approximated by its first element — the
+/// wire carries no per-vertex color, so the approximation is the
+/// contract, not a stopgap — and anything else is the neutral default.
 std::array<float, 3> _ReadDisplayColor(const HdSceneIndexPrim& prim) {
     const HdPrimvarSchema primvar =
         HdPrimvarsSchema::GetFromParent(prim.dataSource).GetPrimvar(HdTokens->displayColor);

@@ -321,9 +321,10 @@ tests pass serially on the GPU machine; the C++ side compiles + its own lint; co
      reload recreates the delegate, and `Replace` resets the scene.
    - *Mesh translator*: `HdMeshUtil::ComputeTriangleIndices` honoring `orientation`,
      base cage only. cenote's format is single-indexed (attributes per position), so
-     vertex-interpolated `normals`/`st` copy through and **faceVarying attributes are
-     dropped with a `TF_WARN`** naming the prim — the un-welding lands in step 3, where
-     textures make `st` matter. Absent normals → omitted, the server derives smooth.
+     vertex-interpolated `normals`/`st` copy through and **faceVarying attributes
+     un-weld the mesh to per-corner vertices** — landed in step 3, where textures make
+     `st` matter; meshes without faceVarying data keep the welded copy and its memory
+     win. Absent normals → omitted, the server derives smooth.
      Unbound meshes synthesize a `<primPath>/displayColor` companion `MaterialPatch`
      (constant color used directly, vertex color approximated by its first element,
      neutral default otherwise) — per-prim companions keep removal trivial. The
