@@ -110,7 +110,7 @@ impl Scene {
             &mut identity,
             &host.triangle_lights,
             &host.delta_lights,
-            host.instances.len() as u32,
+            &light_names(&host.instances),
             tinted_power,
         )?;
         description.take_dirty();
@@ -221,7 +221,7 @@ impl Scene {
             &mut self.identity,
             &host.triangle_lights,
             &host.delta_lights,
-            host.instances.len() as u32,
+            &light_names(&host.instances),
             env_power,
         )?;
         if let Some(camera) = host.camera {
@@ -263,6 +263,12 @@ fn upload_textures(
         textures.insert(key.clone(), texture);
     }
     Ok(textures)
+}
+
+/// The light-identity name per TLAS custom index — each spec's `name#i`,
+/// in flattened order, for the registry reconcile.
+fn light_names(instances: &[InstanceSpec]) -> Vec<String> {
+    instances.iter().map(|spec| spec.name.clone()).collect()
 }
 
 /// Resolve instance specs against the resident mesh map. The lookup can't
@@ -360,11 +366,11 @@ mod tests {
                 "transform",
                 ChangeSet {
                     ops: vec![Op::Instance(InstancePatch {
-                        transform: Some(super::super::description::Transform::Trs {
+                        transforms: Some(vec![super::super::description::Transform::Trs {
                             translate: [0.0, 1.5, 0.0],
                             rotate_degrees: [0.0; 3],
                             scale: [0.75; 3],
-                        }),
+                        }]),
                         ..InstancePatch::new("chart_r2c2")
                     })],
                 },
@@ -581,11 +587,11 @@ mod tests {
                         Op::Instance(InstancePatch {
                             mesh: Some("plane".into()),
                             material: Some("gray".into()),
-                            transform: Some(super::super::description::Transform::Trs {
+                            transforms: Some(vec![super::super::description::Transform::Trs {
                                 translate: [0.0; 3],
                                 rotate_degrees: [0.0; 3],
                                 scale: [8.0, 1.0, 8.0],
-                            }),
+                            }]),
                             ..InstancePatch::new("floor")
                         }),
                         Op::Material(Box::new(MaterialPatch {
@@ -598,11 +604,11 @@ mod tests {
                             mesh: Some("plane".into()),
                             material: Some("lamp".into()),
                             // Stood upright, facing the camera.
-                            transform: Some(super::super::description::Transform::Trs {
+                            transforms: Some(vec![super::super::description::Transform::Trs {
                                 translate: [0.0, 1.0, -1.0],
                                 rotate_degrees: [90.0, 0.0, 0.0],
                                 scale: [0.5, 1.0, 0.5],
-                            }),
+                            }]),
                             camera_visible: Some(visible),
                             ..InstancePatch::new("lamp")
                         }),

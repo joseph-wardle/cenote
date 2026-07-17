@@ -20,7 +20,8 @@
 //! ```
 //!
 //! Coverage, per the step-0 plan: every `Op` variant; every patch field
-//! `Some`; both `MeshSource` and both `Transform` spellings; both `Light`
+//! `Some`; both `MeshSource` and both `Transform` spellings; the instance
+//! transforms array empty, single, and multi-element; both `Light`
 //! and both `Texturable` variants; the texture channel absent and in all
 //! four spellings; the doubly-optional fields in all three states (the
 //! material's normal map, the camera's focus, the environment's image);
@@ -216,23 +217,41 @@ fn genesis() -> ChangeSet {
                 name: "thing".into(),
                 mesh: Some("tri".into()),
                 material: Some("m-set".into()),
-                transform: Some(Transform::Trs {
+                transforms: Some(vec![Transform::Trs {
                     translate: [1.0, 2.0, 3.0],
                     rotate_degrees: [0.0, 90.0, 0.0],
                     scale: [2.0, 2.0, 2.0],
-                }),
+                }]),
                 camera_visible: Some(false),
             }),
+            // A multi-element transforms array, both spellings in one —
+            // the array-instancer form the field's Vec exists for.
             Op::Instance(InstancePatch {
                 name: "matrix-thing".into(),
                 mesh: Some("статуя".into()),
                 material: Some("m-clear".into()),
-                transform: Some(Transform::Matrix([
-                    [1.0, 0.0, 0.0, 4.0],
-                    [0.0, 1.0, 0.0, 5.0],
-                    [0.0, 0.0, 1.0, 6.0],
-                ])),
+                transforms: Some(vec![
+                    Transform::Matrix([
+                        [1.0, 0.0, 0.0, 4.0],
+                        [0.0, 1.0, 0.0, 5.0],
+                        [0.0, 0.0, 1.0, 6.0],
+                    ]),
+                    Transform::Trs {
+                        translate: [-4.0, 0.0, 4.0],
+                        rotate_degrees: [0.0, 0.0, 45.0],
+                        scale: [1.0, 1.0, 1.0],
+                    },
+                ]),
                 camera_visible: Some(true),
+            }),
+            // The empty array is legal and distinct from an absent field:
+            // resident, places nothing (a fully-masked instancer).
+            Op::Instance(InstancePatch {
+                name: "masked".into(),
+                mesh: Some("tri".into()),
+                material: Some("m-leave".into()),
+                transforms: Some(vec![]),
+                camera_visible: None,
             }),
             // The material patch three times over: every field `Some`
             // with the normal map set, then the clear, then the

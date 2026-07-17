@@ -75,9 +75,14 @@ impl HostScene {
     }
 }
 
-/// One instance lowered from the description, resolved against the
-/// resident mesh map at assembly time.
+/// One *placement* lowered from the description — element `i` of an
+/// instance's transforms array, so one description instance with N
+/// placements lowers to N specs, and the flattened position is the TLAS
+/// custom index everywhere downstream.
 pub(super) struct InstanceSpec {
+    /// The element's light-identity name, `name#i` — per placement, so an
+    /// emissive copy's reservoir history is its own.
+    pub(super) name: String,
     pub(super) mesh: String,
     pub(super) transform: Mat4,
     pub(super) material: Material,
@@ -297,8 +302,10 @@ fn lower_delta_lights(description: &SceneDescription) -> Vec<DeltaLight> {
         .collect()
 }
 
-/// Lower every instance into its placement spec, unpacking each emissive
-/// one into its per-triangle lights.
+/// Lower every instance into its placement specs — one per element of its
+/// transforms array, flattened in name order so the enumerate position is
+/// the TLAS custom index — unpacking each emissive element into its
+/// per-triangle lights.
 fn lower_instances(
     description: &SceneDescription,
     materials: &BTreeMap<&str, Material>,
@@ -306,30 +313,40 @@ fn lower_instances(
 ) -> Result<(Vec<InstanceSpec>, Vec<TriangleLight>)> {
     let mut instances = Vec::with_capacity(description.instances().len());
     let mut triangle_lights = Vec::new();
-    for (index, instance) in description.instances().values().enumerate() {
-        // Apply validated the references and the transform, so lookups
-        // can't miss and the inverse the records need exists.
+    for (name, instance) in description.instances() {
+        // Apply validated the references and every transform, so lookups
+        // can't miss and the inverses the records need exist.
         let material = materials[instance.material.as_str()];
-        let transform = instance.transform.to_mat4();
-        if luminance(material.emission) > 0.0 {
-            let (positions, triangles) = emissive_geometry(
+        // The geometry fetch is per instance, not per element: N emissive
+        // placements share one resolve and pay only the N×T light records.
+        let geometry = if luminance(material.emission) > 0.0 && !instance.transforms.is_empty() {
+            Some(emissive_geometry(
                 resolved.get(&instance.mesh),
                 &description.meshes()[&instance.mesh],
-            )?;
-            triangle_lights.extend(emissive_triangles(
-                &positions,
-                &triangles,
+            )?)
+        } else {
+            None
+        };
+        for (element, transform) in instance.transforms.iter().enumerate() {
+            let index = instances.len() as u32;
+            let transform = transform.to_mat4();
+            if let Some((positions, triangles)) = &geometry {
+                triangle_lights.extend(emissive_triangles(
+                    positions,
+                    triangles,
+                    transform,
+                    material.emission,
+                    index,
+                ));
+            }
+            instances.push(InstanceSpec {
+                name: format!("{name}#{element}"),
+                mesh: instance.mesh.clone(),
                 transform,
-                material.emission,
-                index as u32,
-            ));
+                material,
+                camera_visible: instance.camera_visible,
+            });
         }
-        instances.push(InstanceSpec {
-            mesh: instance.mesh.clone(),
-            transform,
-            material,
-            camera_visible: instance.camera_visible,
-        });
     }
     Ok((instances, triangle_lights))
 }
@@ -857,6 +874,68 @@ mod tests {
         let error = host_error(&description);
         assert!(error.to_string().contains("PLY"), "{error}");
         assert!(error.to_string().contains("tri"), "{error}");
+    }
+
+    /// One description instance with N placements lowers to N specs — the
+    /// flattened position is the TLAS custom index — and an emissive one
+    /// unpacks into per-element lights under per-element identity names.
+    #[test]
+    fn transforms_arrays_flatten_into_per_element_specs_and_lights() {
+        let mut description = triangle_description();
+        description
+            .apply(&ChangeSet {
+                ops: vec![
+                    Op::Material(Box::new(MaterialPatch {
+                        emission_luminance: Some(5.0),
+                        ..MaterialPatch::new("gray")
+                    })),
+                    Op::Instance(InstancePatch {
+                        transforms: Some(vec![
+                            description::Transform::Trs {
+                                translate: [1.0, 0.0, 0.0],
+                                rotate_degrees: [0.0; 3],
+                                scale: [1.0; 3],
+                            },
+                            description::Transform::Trs {
+                                translate: [-1.0, 0.0, 0.0],
+                                rotate_degrees: [0.0; 3],
+                                scale: [1.0; 3],
+                            },
+                        ]),
+                        ..InstancePatch::new("thing")
+                    }),
+                ],
+            })
+            .expect("valid data");
+        let host = host(&description).expect("an instanced emitter lowers");
+        assert_eq!(host.instances.len(), 2);
+        assert_eq!(host.instances[0].name, "thing#0");
+        assert_eq!(host.instances[1].name, "thing#1");
+        // One triangle × two placements: a light record each, tied to its
+        // own flattened index, its corners under its own placement.
+        assert_eq!(host.triangle_lights.len(), 2);
+        assert_eq!(host.triangle_lights[0].instance, 0);
+        assert_eq!(host.triangle_lights[1].instance, 1);
+        assert!((host.triangle_lights[0].corners[0].x - 1.0).abs() < 1e-6);
+        assert!((host.triangle_lights[1].corners[0].x + 1.0).abs() < 1e-6);
+    }
+
+    /// The empty placements array is resident but places nothing: no
+    /// specs, no lights, no error.
+    #[test]
+    fn an_empty_transforms_array_lowers_to_nothing() {
+        let mut description = triangle_description();
+        description
+            .apply(&ChangeSet {
+                ops: vec![Op::Instance(InstancePatch {
+                    transforms: Some(vec![]),
+                    ..InstancePatch::new("thing")
+                })],
+            })
+            .expect("the empty array is legal");
+        let host = host(&description).expect("a placement-less instance lowers");
+        assert!(host.instances.is_empty());
+        assert_eq!(host.light_count(), 0);
     }
 
     /// Any emissive mesh is a light — one record per triangle, in

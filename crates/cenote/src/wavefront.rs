@@ -2167,7 +2167,7 @@ mod tests {
                     Op::Instance(InstancePatch {
                         mesh: Some("plane".into()),
                         material: Some("floor".into()),
-                        transform: Some(plane([4.0, 1.0, 4.0], [0.0; 3])),
+                        transforms: Some(vec![plane([4.0, 1.0, 4.0], [0.0; 3])]),
                         ..InstancePatch::new("floor")
                     }),
                     Op::Material(Box::new(MaterialPatch {
@@ -2179,7 +2179,7 @@ mod tests {
                     Op::Instance(InstancePatch {
                         mesh: Some("sphere".into()),
                         material: Some("shell".into()),
-                        transform: Some(plane([1.0; 3], [0.0, 1.0, 0.0])),
+                        transforms: Some(vec![plane([1.0; 3], [0.0, 1.0, 0.0])]),
                         ..InstancePatch::new("shell")
                     }),
                     // The textured emitter overhead...
@@ -2199,11 +2199,11 @@ mod tests {
                         material: Some("lamp".into()),
                         // Rolled 180° so its one face looks down at the floor:
                         // the plane winds normal-up, and emission is one-sided.
-                        transform: Some(Transform::Trs {
+                        transforms: Some(vec![Transform::Trs {
                             translate: [0.0, 3.0, 0.0],
                             rotate_degrees: [180.0, 0.0, 0.0],
                             scale: [0.7; 3],
-                        }),
+                        }]),
                         ..InstancePatch::new("lamp")
                     }),
                     // ...and the perforated card between it and the floor.
@@ -2220,7 +2220,7 @@ mod tests {
                     Op::Instance(InstancePatch {
                         mesh: Some("plane".into()),
                         material: Some("card".into()),
-                        transform: Some(plane([1.2, 1.0, 1.2], [0.0, 2.0, 0.0])),
+                        transforms: Some(vec![plane([1.2, 1.0, 1.2], [0.0, 2.0, 0.0])]),
                         ..InstancePatch::new("card")
                     }),
                 ],

@@ -674,7 +674,7 @@ impl Mapper {
             self.ops.push(Op::Instance(InstancePatch {
                 mesh: Some(mesh.clone()),
                 material: Some(material),
-                transform: Some(matrix_transform(self.conjugation * self.state.ctm)),
+                transforms: Some(vec![matrix_transform(self.conjugation * self.state.ctm)]),
                 ..InstancePatch::new(mesh)
             }));
         }
@@ -993,9 +993,9 @@ impl Mapper {
             instances.push(Op::Instance(InstancePatch {
                 mesh: Some(shape.mesh.clone()),
                 material: Some(shape.material.clone()),
-                transform: Some(matrix_transform(
+                transforms: Some(vec![matrix_transform(
                     self.conjugation * self.state.ctm * shape.ctm,
-                )),
+                )]),
                 ..InstancePatch::new(instance)
             }));
         }
@@ -1759,7 +1759,7 @@ mod tests {
             // pbrt's +z view direction lands on cenote's −z.
             assert!((look_at - position).abs_diff_eq(-Vec3::Z, 1e-6));
 
-            let transform = instances(set)[0].transform.clone().expect("set");
+            let transform = instances(set)[0].transforms.clone().expect("set")[0].clone();
             let object = transform.to_mat4().transform_point3(Vec3::ZERO);
             // In pbrt, right = up × dir = +x: the object shows on the
             // right of the image. cenote's right = forward × up must
@@ -1792,7 +1792,7 @@ Translate 1 0 0
             let position = Vec3::from(camera.position.expect("set"));
             let look_at = Vec3::from(camera.look_at.expect("set"));
             let up = Vec3::from(camera.up.expect("set"));
-            let transform = instances(set)[0].transform.clone().expect("set");
+            let transform = instances(set)[0].transforms.clone().expect("set")[0].clone();
             let object = transform.to_mat4().transform_point3(Vec3::ZERO);
             // pbrt renders camera-space +x = world +x on screen right;
             // the object at world +1 must land on cenote's right too.
@@ -1913,9 +1913,9 @@ Translate 1 0 0
             assert_eq!(placed.len(), 2);
             let origin = |index: usize| {
                 placed[index]
-                    .transform
+                    .transforms
                     .clone()
-                    .expect("set")
+                    .expect("set")[0]
                     .to_mat4()
                     .transform_point3(Vec3::ZERO)
             };

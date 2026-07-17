@@ -71,7 +71,7 @@ private:
     struct _Dirt {
         bool geometry;   //< topology or points/normals/st → MeshPatch.source
         bool color;      //< displayColor → companion MaterialPatch.base_color
-        bool xform;      //< flattened matrix → InstancePatch.transform
+        bool xform;      //< flattened matrix → InstancePatch.transforms
         bool visibility; //< visible ⟺ the instance exists (D-109)
         bool binding;    //< resolved materialBindings → InstancePatch.material
     };

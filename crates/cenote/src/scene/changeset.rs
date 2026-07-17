@@ -133,8 +133,9 @@ pub struct InstancePatch {
     pub mesh: Option<String>,
     /// Material reference, by name.
     pub material: Option<String>,
-    /// Object-to-world placement.
-    pub transform: Option<Transform>,
+    /// Object-to-world placements, one per copy; the whole array
+    /// replaces (`[]` legal — resident, places nothing).
+    pub transforms: Option<Vec<Transform>>,
     /// Whether camera rays see it.
     pub camera_visible: Option<bool>,
 }
@@ -440,7 +441,7 @@ fn apply_op(objects: &mut Objects, dirty: &mut Dirty, op: &Op) -> Result<()> {
             merge!(mesh, patch; source);
         }),
         Op::Instance(patch) => upsert(&mut objects.instances, &name, |instance| {
-            merge!(instance, patch; mesh, material, transform, camera_visible);
+            merge!(instance, patch; mesh, material, transforms, camera_visible);
         }),
         Op::Material(patch) => upsert(&mut objects.materials, &name, |material| {
             merge!(material, patch;
@@ -602,11 +603,15 @@ fn validate_mesh(name: &str, mesh: &Mesh) -> Result<()> {
 fn validate_instance(objects: &Objects, name: &str, instance: &Instance) -> Result<()> {
     validate_reference(&objects.meshes, "mesh", name, &instance.mesh)?;
     validate_reference(&objects.materials, "material", name, &instance.material)?;
-    let matrix = instance.transform.to_mat4();
-    if !(matrix.is_finite() && matrix.inverse().is_finite()) {
-        return Err(scene_error(format!(
-            "instance \"{name}\" has a non-invertible transform"
-        )));
+    // Element by element — an empty array is a valid instance that places
+    // nothing, so there is nothing to check.
+    for (element, transform) in instance.transforms.iter().enumerate() {
+        let matrix = transform.to_mat4();
+        if !(matrix.is_finite() && matrix.inverse().is_finite()) {
+            return Err(scene_error(format!(
+                "instance \"{name}\" has a non-invertible transform (element {element})"
+            )));
+        }
     }
     Ok(())
 }
@@ -1046,6 +1051,8 @@ mod tests {
         assert!(error.to_string().contains("at least 1"), "{error}");
     }
 
+    /// Validation is per element: a valid placement doesn't shield a
+    /// singular one, and the error names the offender by index.
     #[test]
     fn singular_transforms_are_rejected() {
         let mut description = SceneDescription::new();
@@ -1053,13 +1060,57 @@ mod tests {
         let Op::Instance(instance) = &mut set.ops[0] else {
             panic!("triangle_scene changed shape");
         };
-        instance.transform = Some(Transform::Trs {
-            translate: [0.0; 3],
-            rotate_degrees: [0.0; 3],
-            scale: [1.0, 0.0, 1.0],
-        });
+        instance.transforms = Some(vec![
+            Transform::default(),
+            Transform::Trs {
+                translate: [0.0; 3],
+                rotate_degrees: [0.0; 3],
+                scale: [1.0, 0.0, 1.0],
+            },
+        ]);
         let error = description.apply(&set).unwrap_err();
         assert!(error.to_string().contains("non-invertible"), "{error}");
+        assert!(error.to_string().contains("element 1"), "{error}");
+    }
+
+    /// The placements array replaces wholesale — a later patch's array
+    /// wins entirely — and the empty array is legal: the instance stays
+    /// resident (references still validate) while placing nothing.
+    #[test]
+    fn transforms_replace_wholesale_and_empty_is_legal() {
+        let mut description = SceneDescription::new();
+        let mut set = triangle_scene();
+        let Op::Instance(instance) = &mut set.ops[0] else {
+            panic!("triangle_scene changed shape");
+        };
+        instance.transforms = Some(vec![
+            Transform::default(),
+            Transform::Trs {
+                translate: [2.0, 0.0, 0.0],
+                rotate_degrees: [0.0; 3],
+                scale: [1.0; 3],
+            },
+        ]);
+        description.apply(&set).expect("two placements are valid");
+        assert_eq!(description.instances()["thing"].transforms.len(), 2);
+
+        description
+            .apply(&ChangeSet {
+                ops: vec![Op::Instance(InstancePatch {
+                    transforms: Some(vec![]),
+                    ..InstancePatch::new("thing")
+                })],
+            })
+            .expect("the empty array is legal");
+        assert!(description.instances()["thing"].transforms.is_empty());
+        // …and a dangling reference is still an error on the resident,
+        // placement-less instance.
+        let error = description
+            .apply(&ChangeSet {
+                ops: vec![Op::Remove(Kind::Material, "gray".into())],
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("\"gray\""), "{error}");
     }
 
     #[test]

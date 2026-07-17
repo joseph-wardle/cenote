@@ -1,5 +1,5 @@
 (
-    version: 1,
+    version: 2,
     ops: [
         Settings((
             name: "main",
@@ -2649,11 +2649,13 @@
             name: "floor",
             mesh: Some("plane"),
             material: Some("floor"),
-            transform: Some(Trs(
-                translate: (0.0, 0.0, 0.0),
-                rotate_degrees: (0.0, 0.0, 0.0),
-                scale: (12.0, 12.0, 12.0),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.0, 0.0, 0.0),
+                    rotate_degrees: (0.0, 0.0, 0.0),
+                    scale: (12.0, 12.0, 12.0),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -2685,11 +2687,13 @@
             name: "occluder_r0c0",
             mesh: Some("sphere"),
             material: Some("occluder_r0c0"),
-            transform: Some(Trs(
-                translate: (-3.0, 0.9, -3.0),
-                rotate_degrees: (0.0, 0.0, 0.0),
-                scale: (0.9, 0.9, 0.9),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.0, 0.9, -3.0),
+                    rotate_degrees: (0.0, 0.0, 0.0),
+                    scale: (0.9, 0.9, 0.9),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -2721,11 +2725,13 @@
             name: "occluder_r0c1",
             mesh: Some("sphere"),
             material: Some("occluder_r0c1"),
-            transform: Some(Trs(
-                translate: (0.0, 0.6, -3.0),
-                rotate_degrees: (0.0, 0.0, 0.0),
-                scale: (0.6, 0.6, 0.6),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.0, 0.6, -3.0),
+                    rotate_degrees: (0.0, 0.0, 0.0),
+                    scale: (0.6, 0.6, 0.6),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -2757,11 +2763,13 @@
             name: "occluder_r0c2",
             mesh: Some("sphere"),
             material: Some("occluder_r0c2"),
-            transform: Some(Trs(
-                translate: (3.0, 0.9, -3.0),
-                rotate_degrees: (0.0, 0.0, 0.0),
-                scale: (0.9, 0.9, 0.9),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.0, 0.9, -3.0),
+                    rotate_degrees: (0.0, 0.0, 0.0),
+                    scale: (0.9, 0.9, 0.9),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -2793,11 +2801,13 @@
             name: "occluder_r1c0",
             mesh: Some("sphere"),
             material: Some("occluder_r1c0"),
-            transform: Some(Trs(
-                translate: (-3.0, 0.6, 0.0),
-                rotate_degrees: (0.0, 0.0, 0.0),
-                scale: (0.6, 0.6, 0.6),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.0, 0.6, 0.0),
+                    rotate_degrees: (0.0, 0.0, 0.0),
+                    scale: (0.6, 0.6, 0.6),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -2829,11 +2839,13 @@
             name: "occluder_r1c1",
             mesh: Some("sphere"),
             material: Some("occluder_r1c1"),
-            transform: Some(Trs(
-                translate: (0.0, 0.9, 0.0),
-                rotate_degrees: (0.0, 0.0, 0.0),
-                scale: (0.9, 0.9, 0.9),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.0, 0.9, 0.0),
+                    rotate_degrees: (0.0, 0.0, 0.0),
+                    scale: (0.9, 0.9, 0.9),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -2865,11 +2877,13 @@
             name: "occluder_r1c2",
             mesh: Some("sphere"),
             material: Some("occluder_r1c2"),
-            transform: Some(Trs(
-                translate: (3.0, 0.6, 0.0),
-                rotate_degrees: (0.0, 0.0, 0.0),
-                scale: (0.6, 0.6, 0.6),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.0, 0.6, 0.0),
+                    rotate_degrees: (0.0, 0.0, 0.0),
+                    scale: (0.6, 0.6, 0.6),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -2901,11 +2915,13 @@
             name: "occluder_r2c0",
             mesh: Some("sphere"),
             material: Some("occluder_r2c0"),
-            transform: Some(Trs(
-                translate: (-3.0, 0.9, 3.0),
-                rotate_degrees: (0.0, 0.0, 0.0),
-                scale: (0.9, 0.9, 0.9),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.0, 0.9, 3.0),
+                    rotate_degrees: (0.0, 0.0, 0.0),
+                    scale: (0.9, 0.9, 0.9),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -2937,11 +2953,13 @@
             name: "occluder_r2c1",
             mesh: Some("sphere"),
             material: Some("occluder_r2c1"),
-            transform: Some(Trs(
-                translate: (0.0, 0.6, 3.0),
-                rotate_degrees: (0.0, 0.0, 0.0),
-                scale: (0.6, 0.6, 0.6),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.0, 0.6, 3.0),
+                    rotate_degrees: (0.0, 0.0, 0.0),
+                    scale: (0.6, 0.6, 0.6),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -2973,11 +2991,13 @@
             name: "occluder_r2c2",
             mesh: Some("sphere"),
             material: Some("occluder_r2c2"),
-            transform: Some(Trs(
-                translate: (3.0, 0.9, 3.0),
-                rotate_degrees: (0.0, 0.0, 0.0),
-                scale: (0.9, 0.9, 0.9),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.0, 0.9, 3.0),
+                    rotate_degrees: (0.0, 0.0, 0.0),
+                    scale: (0.9, 0.9, 0.9),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3009,11 +3029,13 @@
             name: "light_r0c0",
             mesh: Some("plane"),
             material: Some("light_r0c0"),
-            transform: Some(Trs(
-                translate: (-4.5, 6.0, -4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-4.5, 6.0, -4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3045,11 +3067,13 @@
             name: "light_r0c1",
             mesh: Some("plane"),
             material: Some("light_r0c1"),
-            transform: Some(Trs(
-                translate: (-3.9, 6.0, -4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.9, 6.0, -4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3081,11 +3105,13 @@
             name: "light_r0c2",
             mesh: Some("plane"),
             material: Some("light_r0c2"),
-            transform: Some(Trs(
-                translate: (-3.3000002, 6.0, -4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.3000002, 6.0, -4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3117,11 +3143,13 @@
             name: "light_r0c3",
             mesh: Some("plane"),
             material: Some("light_r0c3"),
-            transform: Some(Trs(
-                translate: (-2.7, 6.0, -4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.7, 6.0, -4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3153,11 +3181,13 @@
             name: "light_r0c4",
             mesh: Some("plane"),
             material: Some("light_r0c4"),
-            transform: Some(Trs(
-                translate: (-2.1, 6.0, -4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.1, 6.0, -4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3189,11 +3219,13 @@
             name: "light_r0c5",
             mesh: Some("plane"),
             material: Some("light_r0c5"),
-            transform: Some(Trs(
-                translate: (-1.4999999, 6.0, -4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-1.4999999, 6.0, -4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3225,11 +3257,13 @@
             name: "light_r0c6",
             mesh: Some("plane"),
             material: Some("light_r0c6"),
-            transform: Some(Trs(
-                translate: (-0.9, 6.0, -4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.9, 6.0, -4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3261,11 +3295,13 @@
             name: "light_r0c7",
             mesh: Some("plane"),
             material: Some("light_r0c7"),
-            transform: Some(Trs(
-                translate: (-0.29999998, 6.0, -4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.29999998, 6.0, -4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3297,11 +3333,13 @@
             name: "light_r0c8",
             mesh: Some("plane"),
             material: Some("light_r0c8"),
-            transform: Some(Trs(
-                translate: (0.30000025, 6.0, -4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.30000025, 6.0, -4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3333,11 +3371,13 @@
             name: "light_r0c9",
             mesh: Some("plane"),
             material: Some("light_r0c9"),
-            transform: Some(Trs(
-                translate: (0.9000002, 6.0, -4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.9000002, 6.0, -4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3369,11 +3409,13 @@
             name: "light_r0c10",
             mesh: Some("plane"),
             material: Some("light_r0c10"),
-            transform: Some(Trs(
-                translate: (1.5000002, 6.0, -4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (1.5000002, 6.0, -4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3405,11 +3447,13 @@
             name: "light_r0c11",
             mesh: Some("plane"),
             material: Some("light_r0c11"),
-            transform: Some(Trs(
-                translate: (2.1000001, 6.0, -4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.1000001, 6.0, -4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3441,11 +3485,13 @@
             name: "light_r0c12",
             mesh: Some("plane"),
             material: Some("light_r0c12"),
-            transform: Some(Trs(
-                translate: (2.7, 6.0, -4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.7, 6.0, -4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3477,11 +3523,13 @@
             name: "light_r0c13",
             mesh: Some("plane"),
             material: Some("light_r0c13"),
-            transform: Some(Trs(
-                translate: (3.3000002, 6.0, -4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.3000002, 6.0, -4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3513,11 +3561,13 @@
             name: "light_r0c14",
             mesh: Some("plane"),
             material: Some("light_r0c14"),
-            transform: Some(Trs(
-                translate: (3.9, 6.0, -4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.9, 6.0, -4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3549,11 +3599,13 @@
             name: "light_r0c15",
             mesh: Some("plane"),
             material: Some("light_r0c15"),
-            transform: Some(Trs(
-                translate: (4.5, 6.0, -4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (4.5, 6.0, -4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3585,11 +3637,13 @@
             name: "light_r1c0",
             mesh: Some("plane"),
             material: Some("light_r1c0"),
-            transform: Some(Trs(
-                translate: (-4.5, 6.0, -3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-4.5, 6.0, -3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3621,11 +3675,13 @@
             name: "light_r1c1",
             mesh: Some("plane"),
             material: Some("light_r1c1"),
-            transform: Some(Trs(
-                translate: (-3.9, 6.0, -3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.9, 6.0, -3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3657,11 +3713,13 @@
             name: "light_r1c2",
             mesh: Some("plane"),
             material: Some("light_r1c2"),
-            transform: Some(Trs(
-                translate: (-3.3000002, 6.0, -3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.3000002, 6.0, -3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3693,11 +3751,13 @@
             name: "light_r1c3",
             mesh: Some("plane"),
             material: Some("light_r1c3"),
-            transform: Some(Trs(
-                translate: (-2.7, 6.0, -3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.7, 6.0, -3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3729,11 +3789,13 @@
             name: "light_r1c4",
             mesh: Some("plane"),
             material: Some("light_r1c4"),
-            transform: Some(Trs(
-                translate: (-2.1, 6.0, -3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.1, 6.0, -3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3765,11 +3827,13 @@
             name: "light_r1c5",
             mesh: Some("plane"),
             material: Some("light_r1c5"),
-            transform: Some(Trs(
-                translate: (-1.4999999, 6.0, -3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-1.4999999, 6.0, -3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3801,11 +3865,13 @@
             name: "light_r1c6",
             mesh: Some("plane"),
             material: Some("light_r1c6"),
-            transform: Some(Trs(
-                translate: (-0.9, 6.0, -3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.9, 6.0, -3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3837,11 +3903,13 @@
             name: "light_r1c7",
             mesh: Some("plane"),
             material: Some("light_r1c7"),
-            transform: Some(Trs(
-                translate: (-0.29999998, 6.0, -3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.29999998, 6.0, -3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3873,11 +3941,13 @@
             name: "light_r1c8",
             mesh: Some("plane"),
             material: Some("light_r1c8"),
-            transform: Some(Trs(
-                translate: (0.30000025, 6.0, -3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.30000025, 6.0, -3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3909,11 +3979,13 @@
             name: "light_r1c9",
             mesh: Some("plane"),
             material: Some("light_r1c9"),
-            transform: Some(Trs(
-                translate: (0.9000002, 6.0, -3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.9000002, 6.0, -3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3945,11 +4017,13 @@
             name: "light_r1c10",
             mesh: Some("plane"),
             material: Some("light_r1c10"),
-            transform: Some(Trs(
-                translate: (1.5000002, 6.0, -3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (1.5000002, 6.0, -3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -3981,11 +4055,13 @@
             name: "light_r1c11",
             mesh: Some("plane"),
             material: Some("light_r1c11"),
-            transform: Some(Trs(
-                translate: (2.1000001, 6.0, -3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.1000001, 6.0, -3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4017,11 +4093,13 @@
             name: "light_r1c12",
             mesh: Some("plane"),
             material: Some("light_r1c12"),
-            transform: Some(Trs(
-                translate: (2.7, 6.0, -3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.7, 6.0, -3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4053,11 +4131,13 @@
             name: "light_r1c13",
             mesh: Some("plane"),
             material: Some("light_r1c13"),
-            transform: Some(Trs(
-                translate: (3.3000002, 6.0, -3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.3000002, 6.0, -3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4089,11 +4169,13 @@
             name: "light_r1c14",
             mesh: Some("plane"),
             material: Some("light_r1c14"),
-            transform: Some(Trs(
-                translate: (3.9, 6.0, -3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.9, 6.0, -3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4125,11 +4207,13 @@
             name: "light_r1c15",
             mesh: Some("plane"),
             material: Some("light_r1c15"),
-            transform: Some(Trs(
-                translate: (4.5, 6.0, -3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (4.5, 6.0, -3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4161,11 +4245,13 @@
             name: "light_r2c0",
             mesh: Some("plane"),
             material: Some("light_r2c0"),
-            transform: Some(Trs(
-                translate: (-4.5, 6.0, -3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-4.5, 6.0, -3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4197,11 +4283,13 @@
             name: "light_r2c1",
             mesh: Some("plane"),
             material: Some("light_r2c1"),
-            transform: Some(Trs(
-                translate: (-3.9, 6.0, -3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.9, 6.0, -3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4233,11 +4321,13 @@
             name: "light_r2c2",
             mesh: Some("plane"),
             material: Some("light_r2c2"),
-            transform: Some(Trs(
-                translate: (-3.3000002, 6.0, -3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.3000002, 6.0, -3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4269,11 +4359,13 @@
             name: "light_r2c3",
             mesh: Some("plane"),
             material: Some("light_r2c3"),
-            transform: Some(Trs(
-                translate: (-2.7, 6.0, -3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.7, 6.0, -3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4305,11 +4397,13 @@
             name: "light_r2c4",
             mesh: Some("plane"),
             material: Some("light_r2c4"),
-            transform: Some(Trs(
-                translate: (-2.1, 6.0, -3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.1, 6.0, -3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4341,11 +4435,13 @@
             name: "light_r2c5",
             mesh: Some("plane"),
             material: Some("light_r2c5"),
-            transform: Some(Trs(
-                translate: (-1.4999999, 6.0, -3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-1.4999999, 6.0, -3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4377,11 +4473,13 @@
             name: "light_r2c6",
             mesh: Some("plane"),
             material: Some("light_r2c6"),
-            transform: Some(Trs(
-                translate: (-0.9, 6.0, -3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.9, 6.0, -3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4413,11 +4511,13 @@
             name: "light_r2c7",
             mesh: Some("plane"),
             material: Some("light_r2c7"),
-            transform: Some(Trs(
-                translate: (-0.29999998, 6.0, -3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.29999998, 6.0, -3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4449,11 +4549,13 @@
             name: "light_r2c8",
             mesh: Some("plane"),
             material: Some("light_r2c8"),
-            transform: Some(Trs(
-                translate: (0.30000025, 6.0, -3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.30000025, 6.0, -3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4485,11 +4587,13 @@
             name: "light_r2c9",
             mesh: Some("plane"),
             material: Some("light_r2c9"),
-            transform: Some(Trs(
-                translate: (0.9000002, 6.0, -3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.9000002, 6.0, -3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4521,11 +4625,13 @@
             name: "light_r2c10",
             mesh: Some("plane"),
             material: Some("light_r2c10"),
-            transform: Some(Trs(
-                translate: (1.5000002, 6.0, -3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (1.5000002, 6.0, -3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4557,11 +4663,13 @@
             name: "light_r2c11",
             mesh: Some("plane"),
             material: Some("light_r2c11"),
-            transform: Some(Trs(
-                translate: (2.1000001, 6.0, -3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.1000001, 6.0, -3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4593,11 +4701,13 @@
             name: "light_r2c12",
             mesh: Some("plane"),
             material: Some("light_r2c12"),
-            transform: Some(Trs(
-                translate: (2.7, 6.0, -3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.7, 6.0, -3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4629,11 +4739,13 @@
             name: "light_r2c13",
             mesh: Some("plane"),
             material: Some("light_r2c13"),
-            transform: Some(Trs(
-                translate: (3.3000002, 6.0, -3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.3000002, 6.0, -3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4665,11 +4777,13 @@
             name: "light_r2c14",
             mesh: Some("plane"),
             material: Some("light_r2c14"),
-            transform: Some(Trs(
-                translate: (3.9, 6.0, -3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.9, 6.0, -3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4701,11 +4815,13 @@
             name: "light_r2c15",
             mesh: Some("plane"),
             material: Some("light_r2c15"),
-            transform: Some(Trs(
-                translate: (4.5, 6.0, -3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (4.5, 6.0, -3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4737,11 +4853,13 @@
             name: "light_r3c0",
             mesh: Some("plane"),
             material: Some("light_r3c0"),
-            transform: Some(Trs(
-                translate: (-4.5, 6.0, -2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-4.5, 6.0, -2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4773,11 +4891,13 @@
             name: "light_r3c1",
             mesh: Some("plane"),
             material: Some("light_r3c1"),
-            transform: Some(Trs(
-                translate: (-3.9, 6.0, -2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.9, 6.0, -2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4809,11 +4929,13 @@
             name: "light_r3c2",
             mesh: Some("plane"),
             material: Some("light_r3c2"),
-            transform: Some(Trs(
-                translate: (-3.3000002, 6.0, -2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.3000002, 6.0, -2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4845,11 +4967,13 @@
             name: "light_r3c3",
             mesh: Some("plane"),
             material: Some("light_r3c3"),
-            transform: Some(Trs(
-                translate: (-2.7, 6.0, -2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.7, 6.0, -2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4881,11 +5005,13 @@
             name: "light_r3c4",
             mesh: Some("plane"),
             material: Some("light_r3c4"),
-            transform: Some(Trs(
-                translate: (-2.1, 6.0, -2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.1, 6.0, -2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4917,11 +5043,13 @@
             name: "light_r3c5",
             mesh: Some("plane"),
             material: Some("light_r3c5"),
-            transform: Some(Trs(
-                translate: (-1.4999999, 6.0, -2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-1.4999999, 6.0, -2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4953,11 +5081,13 @@
             name: "light_r3c6",
             mesh: Some("plane"),
             material: Some("light_r3c6"),
-            transform: Some(Trs(
-                translate: (-0.9, 6.0, -2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.9, 6.0, -2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -4989,11 +5119,13 @@
             name: "light_r3c7",
             mesh: Some("plane"),
             material: Some("light_r3c7"),
-            transform: Some(Trs(
-                translate: (-0.29999998, 6.0, -2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.29999998, 6.0, -2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5025,11 +5157,13 @@
             name: "light_r3c8",
             mesh: Some("plane"),
             material: Some("light_r3c8"),
-            transform: Some(Trs(
-                translate: (0.30000025, 6.0, -2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.30000025, 6.0, -2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5061,11 +5195,13 @@
             name: "light_r3c9",
             mesh: Some("plane"),
             material: Some("light_r3c9"),
-            transform: Some(Trs(
-                translate: (0.9000002, 6.0, -2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.9000002, 6.0, -2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5097,11 +5233,13 @@
             name: "light_r3c10",
             mesh: Some("plane"),
             material: Some("light_r3c10"),
-            transform: Some(Trs(
-                translate: (1.5000002, 6.0, -2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (1.5000002, 6.0, -2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5133,11 +5271,13 @@
             name: "light_r3c11",
             mesh: Some("plane"),
             material: Some("light_r3c11"),
-            transform: Some(Trs(
-                translate: (2.1000001, 6.0, -2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.1000001, 6.0, -2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5169,11 +5309,13 @@
             name: "light_r3c12",
             mesh: Some("plane"),
             material: Some("light_r3c12"),
-            transform: Some(Trs(
-                translate: (2.7, 6.0, -2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.7, 6.0, -2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5205,11 +5347,13 @@
             name: "light_r3c13",
             mesh: Some("plane"),
             material: Some("light_r3c13"),
-            transform: Some(Trs(
-                translate: (3.3000002, 6.0, -2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.3000002, 6.0, -2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5241,11 +5385,13 @@
             name: "light_r3c14",
             mesh: Some("plane"),
             material: Some("light_r3c14"),
-            transform: Some(Trs(
-                translate: (3.9, 6.0, -2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.9, 6.0, -2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5277,11 +5423,13 @@
             name: "light_r3c15",
             mesh: Some("plane"),
             material: Some("light_r3c15"),
-            transform: Some(Trs(
-                translate: (4.5, 6.0, -2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (4.5, 6.0, -2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5313,11 +5461,13 @@
             name: "light_r4c0",
             mesh: Some("plane"),
             material: Some("light_r4c0"),
-            transform: Some(Trs(
-                translate: (-4.5, 6.0, -2.1),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-4.5, 6.0, -2.1),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5349,11 +5499,13 @@
             name: "light_r4c1",
             mesh: Some("plane"),
             material: Some("light_r4c1"),
-            transform: Some(Trs(
-                translate: (-3.9, 6.0, -2.1),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.9, 6.0, -2.1),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5385,11 +5537,13 @@
             name: "light_r4c2",
             mesh: Some("plane"),
             material: Some("light_r4c2"),
-            transform: Some(Trs(
-                translate: (-3.3000002, 6.0, -2.1),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.3000002, 6.0, -2.1),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5421,11 +5575,13 @@
             name: "light_r4c3",
             mesh: Some("plane"),
             material: Some("light_r4c3"),
-            transform: Some(Trs(
-                translate: (-2.7, 6.0, -2.1),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.7, 6.0, -2.1),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5457,11 +5613,13 @@
             name: "light_r4c4",
             mesh: Some("plane"),
             material: Some("light_r4c4"),
-            transform: Some(Trs(
-                translate: (-2.1, 6.0, -2.1),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.1, 6.0, -2.1),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5493,11 +5651,13 @@
             name: "light_r4c5",
             mesh: Some("plane"),
             material: Some("light_r4c5"),
-            transform: Some(Trs(
-                translate: (-1.4999999, 6.0, -2.1),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-1.4999999, 6.0, -2.1),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5529,11 +5689,13 @@
             name: "light_r4c6",
             mesh: Some("plane"),
             material: Some("light_r4c6"),
-            transform: Some(Trs(
-                translate: (-0.9, 6.0, -2.1),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.9, 6.0, -2.1),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5565,11 +5727,13 @@
             name: "light_r4c7",
             mesh: Some("plane"),
             material: Some("light_r4c7"),
-            transform: Some(Trs(
-                translate: (-0.29999998, 6.0, -2.1),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.29999998, 6.0, -2.1),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5601,11 +5765,13 @@
             name: "light_r4c8",
             mesh: Some("plane"),
             material: Some("light_r4c8"),
-            transform: Some(Trs(
-                translate: (0.30000025, 6.0, -2.1),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.30000025, 6.0, -2.1),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5637,11 +5803,13 @@
             name: "light_r4c9",
             mesh: Some("plane"),
             material: Some("light_r4c9"),
-            transform: Some(Trs(
-                translate: (0.9000002, 6.0, -2.1),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.9000002, 6.0, -2.1),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5673,11 +5841,13 @@
             name: "light_r4c10",
             mesh: Some("plane"),
             material: Some("light_r4c10"),
-            transform: Some(Trs(
-                translate: (1.5000002, 6.0, -2.1),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (1.5000002, 6.0, -2.1),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5709,11 +5879,13 @@
             name: "light_r4c11",
             mesh: Some("plane"),
             material: Some("light_r4c11"),
-            transform: Some(Trs(
-                translate: (2.1000001, 6.0, -2.1),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.1000001, 6.0, -2.1),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5745,11 +5917,13 @@
             name: "light_r4c12",
             mesh: Some("plane"),
             material: Some("light_r4c12"),
-            transform: Some(Trs(
-                translate: (2.7, 6.0, -2.1),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.7, 6.0, -2.1),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5781,11 +5955,13 @@
             name: "light_r4c13",
             mesh: Some("plane"),
             material: Some("light_r4c13"),
-            transform: Some(Trs(
-                translate: (3.3000002, 6.0, -2.1),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.3000002, 6.0, -2.1),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5817,11 +5993,13 @@
             name: "light_r4c14",
             mesh: Some("plane"),
             material: Some("light_r4c14"),
-            transform: Some(Trs(
-                translate: (3.9, 6.0, -2.1),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.9, 6.0, -2.1),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5853,11 +6031,13 @@
             name: "light_r4c15",
             mesh: Some("plane"),
             material: Some("light_r4c15"),
-            transform: Some(Trs(
-                translate: (4.5, 6.0, -2.1),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (4.5, 6.0, -2.1),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5889,11 +6069,13 @@
             name: "light_r5c0",
             mesh: Some("plane"),
             material: Some("light_r5c0"),
-            transform: Some(Trs(
-                translate: (-4.5, 6.0, -1.4999999),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-4.5, 6.0, -1.4999999),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5925,11 +6107,13 @@
             name: "light_r5c1",
             mesh: Some("plane"),
             material: Some("light_r5c1"),
-            transform: Some(Trs(
-                translate: (-3.9, 6.0, -1.4999999),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.9, 6.0, -1.4999999),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5961,11 +6145,13 @@
             name: "light_r5c2",
             mesh: Some("plane"),
             material: Some("light_r5c2"),
-            transform: Some(Trs(
-                translate: (-3.3000002, 6.0, -1.4999999),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.3000002, 6.0, -1.4999999),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -5997,11 +6183,13 @@
             name: "light_r5c3",
             mesh: Some("plane"),
             material: Some("light_r5c3"),
-            transform: Some(Trs(
-                translate: (-2.7, 6.0, -1.4999999),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.7, 6.0, -1.4999999),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6033,11 +6221,13 @@
             name: "light_r5c4",
             mesh: Some("plane"),
             material: Some("light_r5c4"),
-            transform: Some(Trs(
-                translate: (-2.1, 6.0, -1.4999999),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.1, 6.0, -1.4999999),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6069,11 +6259,13 @@
             name: "light_r5c5",
             mesh: Some("plane"),
             material: Some("light_r5c5"),
-            transform: Some(Trs(
-                translate: (-1.4999999, 6.0, -1.4999999),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-1.4999999, 6.0, -1.4999999),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6105,11 +6297,13 @@
             name: "light_r5c6",
             mesh: Some("plane"),
             material: Some("light_r5c6"),
-            transform: Some(Trs(
-                translate: (-0.9, 6.0, -1.4999999),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.9, 6.0, -1.4999999),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6141,11 +6335,13 @@
             name: "light_r5c7",
             mesh: Some("plane"),
             material: Some("light_r5c7"),
-            transform: Some(Trs(
-                translate: (-0.29999998, 6.0, -1.4999999),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.29999998, 6.0, -1.4999999),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6177,11 +6373,13 @@
             name: "light_r5c8",
             mesh: Some("plane"),
             material: Some("light_r5c8"),
-            transform: Some(Trs(
-                translate: (0.30000025, 6.0, -1.4999999),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.30000025, 6.0, -1.4999999),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6213,11 +6411,13 @@
             name: "light_r5c9",
             mesh: Some("plane"),
             material: Some("light_r5c9"),
-            transform: Some(Trs(
-                translate: (0.9000002, 6.0, -1.4999999),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.9000002, 6.0, -1.4999999),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6249,11 +6449,13 @@
             name: "light_r5c10",
             mesh: Some("plane"),
             material: Some("light_r5c10"),
-            transform: Some(Trs(
-                translate: (1.5000002, 6.0, -1.4999999),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (1.5000002, 6.0, -1.4999999),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6285,11 +6487,13 @@
             name: "light_r5c11",
             mesh: Some("plane"),
             material: Some("light_r5c11"),
-            transform: Some(Trs(
-                translate: (2.1000001, 6.0, -1.4999999),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.1000001, 6.0, -1.4999999),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6321,11 +6525,13 @@
             name: "light_r5c12",
             mesh: Some("plane"),
             material: Some("light_r5c12"),
-            transform: Some(Trs(
-                translate: (2.7, 6.0, -1.4999999),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.7, 6.0, -1.4999999),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6357,11 +6563,13 @@
             name: "light_r5c13",
             mesh: Some("plane"),
             material: Some("light_r5c13"),
-            transform: Some(Trs(
-                translate: (3.3000002, 6.0, -1.4999999),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.3000002, 6.0, -1.4999999),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6393,11 +6601,13 @@
             name: "light_r5c14",
             mesh: Some("plane"),
             material: Some("light_r5c14"),
-            transform: Some(Trs(
-                translate: (3.9, 6.0, -1.4999999),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.9, 6.0, -1.4999999),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6429,11 +6639,13 @@
             name: "light_r5c15",
             mesh: Some("plane"),
             material: Some("light_r5c15"),
-            transform: Some(Trs(
-                translate: (4.5, 6.0, -1.4999999),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (4.5, 6.0, -1.4999999),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6465,11 +6677,13 @@
             name: "light_r6c0",
             mesh: Some("plane"),
             material: Some("light_r6c0"),
-            transform: Some(Trs(
-                translate: (-4.5, 6.0, -0.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-4.5, 6.0, -0.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6501,11 +6715,13 @@
             name: "light_r6c1",
             mesh: Some("plane"),
             material: Some("light_r6c1"),
-            transform: Some(Trs(
-                translate: (-3.9, 6.0, -0.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.9, 6.0, -0.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6537,11 +6753,13 @@
             name: "light_r6c2",
             mesh: Some("plane"),
             material: Some("light_r6c2"),
-            transform: Some(Trs(
-                translate: (-3.3000002, 6.0, -0.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.3000002, 6.0, -0.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6573,11 +6791,13 @@
             name: "light_r6c3",
             mesh: Some("plane"),
             material: Some("light_r6c3"),
-            transform: Some(Trs(
-                translate: (-2.7, 6.0, -0.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.7, 6.0, -0.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6609,11 +6829,13 @@
             name: "light_r6c4",
             mesh: Some("plane"),
             material: Some("light_r6c4"),
-            transform: Some(Trs(
-                translate: (-2.1, 6.0, -0.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.1, 6.0, -0.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6645,11 +6867,13 @@
             name: "light_r6c5",
             mesh: Some("plane"),
             material: Some("light_r6c5"),
-            transform: Some(Trs(
-                translate: (-1.4999999, 6.0, -0.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-1.4999999, 6.0, -0.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6681,11 +6905,13 @@
             name: "light_r6c6",
             mesh: Some("plane"),
             material: Some("light_r6c6"),
-            transform: Some(Trs(
-                translate: (-0.9, 6.0, -0.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.9, 6.0, -0.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6717,11 +6943,13 @@
             name: "light_r6c7",
             mesh: Some("plane"),
             material: Some("light_r6c7"),
-            transform: Some(Trs(
-                translate: (-0.29999998, 6.0, -0.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.29999998, 6.0, -0.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6753,11 +6981,13 @@
             name: "light_r6c8",
             mesh: Some("plane"),
             material: Some("light_r6c8"),
-            transform: Some(Trs(
-                translate: (0.30000025, 6.0, -0.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.30000025, 6.0, -0.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6789,11 +7019,13 @@
             name: "light_r6c9",
             mesh: Some("plane"),
             material: Some("light_r6c9"),
-            transform: Some(Trs(
-                translate: (0.9000002, 6.0, -0.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.9000002, 6.0, -0.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6825,11 +7057,13 @@
             name: "light_r6c10",
             mesh: Some("plane"),
             material: Some("light_r6c10"),
-            transform: Some(Trs(
-                translate: (1.5000002, 6.0, -0.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (1.5000002, 6.0, -0.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6861,11 +7095,13 @@
             name: "light_r6c11",
             mesh: Some("plane"),
             material: Some("light_r6c11"),
-            transform: Some(Trs(
-                translate: (2.1000001, 6.0, -0.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.1000001, 6.0, -0.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6897,11 +7133,13 @@
             name: "light_r6c12",
             mesh: Some("plane"),
             material: Some("light_r6c12"),
-            transform: Some(Trs(
-                translate: (2.7, 6.0, -0.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.7, 6.0, -0.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6933,11 +7171,13 @@
             name: "light_r6c13",
             mesh: Some("plane"),
             material: Some("light_r6c13"),
-            transform: Some(Trs(
-                translate: (3.3000002, 6.0, -0.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.3000002, 6.0, -0.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -6969,11 +7209,13 @@
             name: "light_r6c14",
             mesh: Some("plane"),
             material: Some("light_r6c14"),
-            transform: Some(Trs(
-                translate: (3.9, 6.0, -0.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.9, 6.0, -0.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7005,11 +7247,13 @@
             name: "light_r6c15",
             mesh: Some("plane"),
             material: Some("light_r6c15"),
-            transform: Some(Trs(
-                translate: (4.5, 6.0, -0.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (4.5, 6.0, -0.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7041,11 +7285,13 @@
             name: "light_r7c0",
             mesh: Some("plane"),
             material: Some("light_r7c0"),
-            transform: Some(Trs(
-                translate: (-4.5, 6.0, -0.29999998),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-4.5, 6.0, -0.29999998),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7077,11 +7323,13 @@
             name: "light_r7c1",
             mesh: Some("plane"),
             material: Some("light_r7c1"),
-            transform: Some(Trs(
-                translate: (-3.9, 6.0, -0.29999998),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.9, 6.0, -0.29999998),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7113,11 +7361,13 @@
             name: "light_r7c2",
             mesh: Some("plane"),
             material: Some("light_r7c2"),
-            transform: Some(Trs(
-                translate: (-3.3000002, 6.0, -0.29999998),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.3000002, 6.0, -0.29999998),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7149,11 +7399,13 @@
             name: "light_r7c3",
             mesh: Some("plane"),
             material: Some("light_r7c3"),
-            transform: Some(Trs(
-                translate: (-2.7, 6.0, -0.29999998),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.7, 6.0, -0.29999998),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7185,11 +7437,13 @@
             name: "light_r7c4",
             mesh: Some("plane"),
             material: Some("light_r7c4"),
-            transform: Some(Trs(
-                translate: (-2.1, 6.0, -0.29999998),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.1, 6.0, -0.29999998),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7221,11 +7475,13 @@
             name: "light_r7c5",
             mesh: Some("plane"),
             material: Some("light_r7c5"),
-            transform: Some(Trs(
-                translate: (-1.4999999, 6.0, -0.29999998),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-1.4999999, 6.0, -0.29999998),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7257,11 +7513,13 @@
             name: "light_r7c6",
             mesh: Some("plane"),
             material: Some("light_r7c6"),
-            transform: Some(Trs(
-                translate: (-0.9, 6.0, -0.29999998),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.9, 6.0, -0.29999998),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7293,11 +7551,13 @@
             name: "light_r7c7",
             mesh: Some("plane"),
             material: Some("light_r7c7"),
-            transform: Some(Trs(
-                translate: (-0.29999998, 6.0, -0.29999998),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.29999998, 6.0, -0.29999998),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7329,11 +7589,13 @@
             name: "light_r7c8",
             mesh: Some("plane"),
             material: Some("light_r7c8"),
-            transform: Some(Trs(
-                translate: (0.30000025, 6.0, -0.29999998),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.30000025, 6.0, -0.29999998),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7365,11 +7627,13 @@
             name: "light_r7c9",
             mesh: Some("plane"),
             material: Some("light_r7c9"),
-            transform: Some(Trs(
-                translate: (0.9000002, 6.0, -0.29999998),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.9000002, 6.0, -0.29999998),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7401,11 +7665,13 @@
             name: "light_r7c10",
             mesh: Some("plane"),
             material: Some("light_r7c10"),
-            transform: Some(Trs(
-                translate: (1.5000002, 6.0, -0.29999998),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (1.5000002, 6.0, -0.29999998),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7437,11 +7703,13 @@
             name: "light_r7c11",
             mesh: Some("plane"),
             material: Some("light_r7c11"),
-            transform: Some(Trs(
-                translate: (2.1000001, 6.0, -0.29999998),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.1000001, 6.0, -0.29999998),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7473,11 +7741,13 @@
             name: "light_r7c12",
             mesh: Some("plane"),
             material: Some("light_r7c12"),
-            transform: Some(Trs(
-                translate: (2.7, 6.0, -0.29999998),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.7, 6.0, -0.29999998),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7509,11 +7779,13 @@
             name: "light_r7c13",
             mesh: Some("plane"),
             material: Some("light_r7c13"),
-            transform: Some(Trs(
-                translate: (3.3000002, 6.0, -0.29999998),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.3000002, 6.0, -0.29999998),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7545,11 +7817,13 @@
             name: "light_r7c14",
             mesh: Some("plane"),
             material: Some("light_r7c14"),
-            transform: Some(Trs(
-                translate: (3.9, 6.0, -0.29999998),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.9, 6.0, -0.29999998),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7581,11 +7855,13 @@
             name: "light_r7c15",
             mesh: Some("plane"),
             material: Some("light_r7c15"),
-            transform: Some(Trs(
-                translate: (4.5, 6.0, -0.29999998),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (4.5, 6.0, -0.29999998),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7617,11 +7893,13 @@
             name: "light_r8c0",
             mesh: Some("plane"),
             material: Some("light_r8c0"),
-            transform: Some(Trs(
-                translate: (-4.5, 6.0, 0.30000025),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-4.5, 6.0, 0.30000025),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7653,11 +7931,13 @@
             name: "light_r8c1",
             mesh: Some("plane"),
             material: Some("light_r8c1"),
-            transform: Some(Trs(
-                translate: (-3.9, 6.0, 0.30000025),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.9, 6.0, 0.30000025),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7689,11 +7969,13 @@
             name: "light_r8c2",
             mesh: Some("plane"),
             material: Some("light_r8c2"),
-            transform: Some(Trs(
-                translate: (-3.3000002, 6.0, 0.30000025),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.3000002, 6.0, 0.30000025),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7725,11 +8007,13 @@
             name: "light_r8c3",
             mesh: Some("plane"),
             material: Some("light_r8c3"),
-            transform: Some(Trs(
-                translate: (-2.7, 6.0, 0.30000025),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.7, 6.0, 0.30000025),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7761,11 +8045,13 @@
             name: "light_r8c4",
             mesh: Some("plane"),
             material: Some("light_r8c4"),
-            transform: Some(Trs(
-                translate: (-2.1, 6.0, 0.30000025),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.1, 6.0, 0.30000025),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7797,11 +8083,13 @@
             name: "light_r8c5",
             mesh: Some("plane"),
             material: Some("light_r8c5"),
-            transform: Some(Trs(
-                translate: (-1.4999999, 6.0, 0.30000025),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-1.4999999, 6.0, 0.30000025),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7833,11 +8121,13 @@
             name: "light_r8c6",
             mesh: Some("plane"),
             material: Some("light_r8c6"),
-            transform: Some(Trs(
-                translate: (-0.9, 6.0, 0.30000025),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.9, 6.0, 0.30000025),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7869,11 +8159,13 @@
             name: "light_r8c7",
             mesh: Some("plane"),
             material: Some("light_r8c7"),
-            transform: Some(Trs(
-                translate: (-0.29999998, 6.0, 0.30000025),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.29999998, 6.0, 0.30000025),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7905,11 +8197,13 @@
             name: "light_r8c8",
             mesh: Some("plane"),
             material: Some("light_r8c8"),
-            transform: Some(Trs(
-                translate: (0.30000025, 6.0, 0.30000025),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.30000025, 6.0, 0.30000025),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7941,11 +8235,13 @@
             name: "light_r8c9",
             mesh: Some("plane"),
             material: Some("light_r8c9"),
-            transform: Some(Trs(
-                translate: (0.9000002, 6.0, 0.30000025),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.9000002, 6.0, 0.30000025),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -7977,11 +8273,13 @@
             name: "light_r8c10",
             mesh: Some("plane"),
             material: Some("light_r8c10"),
-            transform: Some(Trs(
-                translate: (1.5000002, 6.0, 0.30000025),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (1.5000002, 6.0, 0.30000025),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8013,11 +8311,13 @@
             name: "light_r8c11",
             mesh: Some("plane"),
             material: Some("light_r8c11"),
-            transform: Some(Trs(
-                translate: (2.1000001, 6.0, 0.30000025),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.1000001, 6.0, 0.30000025),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8049,11 +8349,13 @@
             name: "light_r8c12",
             mesh: Some("plane"),
             material: Some("light_r8c12"),
-            transform: Some(Trs(
-                translate: (2.7, 6.0, 0.30000025),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.7, 6.0, 0.30000025),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8085,11 +8387,13 @@
             name: "light_r8c13",
             mesh: Some("plane"),
             material: Some("light_r8c13"),
-            transform: Some(Trs(
-                translate: (3.3000002, 6.0, 0.30000025),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.3000002, 6.0, 0.30000025),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8121,11 +8425,13 @@
             name: "light_r8c14",
             mesh: Some("plane"),
             material: Some("light_r8c14"),
-            transform: Some(Trs(
-                translate: (3.9, 6.0, 0.30000025),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.9, 6.0, 0.30000025),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8157,11 +8463,13 @@
             name: "light_r8c15",
             mesh: Some("plane"),
             material: Some("light_r8c15"),
-            transform: Some(Trs(
-                translate: (4.5, 6.0, 0.30000025),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (4.5, 6.0, 0.30000025),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8193,11 +8501,13 @@
             name: "light_r9c0",
             mesh: Some("plane"),
             material: Some("light_r9c0"),
-            transform: Some(Trs(
-                translate: (-4.5, 6.0, 0.9000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-4.5, 6.0, 0.9000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8229,11 +8539,13 @@
             name: "light_r9c1",
             mesh: Some("plane"),
             material: Some("light_r9c1"),
-            transform: Some(Trs(
-                translate: (-3.9, 6.0, 0.9000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.9, 6.0, 0.9000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8265,11 +8577,13 @@
             name: "light_r9c2",
             mesh: Some("plane"),
             material: Some("light_r9c2"),
-            transform: Some(Trs(
-                translate: (-3.3000002, 6.0, 0.9000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.3000002, 6.0, 0.9000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8301,11 +8615,13 @@
             name: "light_r9c3",
             mesh: Some("plane"),
             material: Some("light_r9c3"),
-            transform: Some(Trs(
-                translate: (-2.7, 6.0, 0.9000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.7, 6.0, 0.9000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8337,11 +8653,13 @@
             name: "light_r9c4",
             mesh: Some("plane"),
             material: Some("light_r9c4"),
-            transform: Some(Trs(
-                translate: (-2.1, 6.0, 0.9000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.1, 6.0, 0.9000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8373,11 +8691,13 @@
             name: "light_r9c5",
             mesh: Some("plane"),
             material: Some("light_r9c5"),
-            transform: Some(Trs(
-                translate: (-1.4999999, 6.0, 0.9000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-1.4999999, 6.0, 0.9000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8409,11 +8729,13 @@
             name: "light_r9c6",
             mesh: Some("plane"),
             material: Some("light_r9c6"),
-            transform: Some(Trs(
-                translate: (-0.9, 6.0, 0.9000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.9, 6.0, 0.9000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8445,11 +8767,13 @@
             name: "light_r9c7",
             mesh: Some("plane"),
             material: Some("light_r9c7"),
-            transform: Some(Trs(
-                translate: (-0.29999998, 6.0, 0.9000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.29999998, 6.0, 0.9000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8481,11 +8805,13 @@
             name: "light_r9c8",
             mesh: Some("plane"),
             material: Some("light_r9c8"),
-            transform: Some(Trs(
-                translate: (0.30000025, 6.0, 0.9000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.30000025, 6.0, 0.9000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8517,11 +8843,13 @@
             name: "light_r9c9",
             mesh: Some("plane"),
             material: Some("light_r9c9"),
-            transform: Some(Trs(
-                translate: (0.9000002, 6.0, 0.9000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.9000002, 6.0, 0.9000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8553,11 +8881,13 @@
             name: "light_r9c10",
             mesh: Some("plane"),
             material: Some("light_r9c10"),
-            transform: Some(Trs(
-                translate: (1.5000002, 6.0, 0.9000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (1.5000002, 6.0, 0.9000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8589,11 +8919,13 @@
             name: "light_r9c11",
             mesh: Some("plane"),
             material: Some("light_r9c11"),
-            transform: Some(Trs(
-                translate: (2.1000001, 6.0, 0.9000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.1000001, 6.0, 0.9000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8625,11 +8957,13 @@
             name: "light_r9c12",
             mesh: Some("plane"),
             material: Some("light_r9c12"),
-            transform: Some(Trs(
-                translate: (2.7, 6.0, 0.9000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.7, 6.0, 0.9000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8661,11 +8995,13 @@
             name: "light_r9c13",
             mesh: Some("plane"),
             material: Some("light_r9c13"),
-            transform: Some(Trs(
-                translate: (3.3000002, 6.0, 0.9000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.3000002, 6.0, 0.9000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8697,11 +9033,13 @@
             name: "light_r9c14",
             mesh: Some("plane"),
             material: Some("light_r9c14"),
-            transform: Some(Trs(
-                translate: (3.9, 6.0, 0.9000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.9, 6.0, 0.9000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8733,11 +9071,13 @@
             name: "light_r9c15",
             mesh: Some("plane"),
             material: Some("light_r9c15"),
-            transform: Some(Trs(
-                translate: (4.5, 6.0, 0.9000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (4.5, 6.0, 0.9000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8769,11 +9109,13 @@
             name: "light_r10c0",
             mesh: Some("plane"),
             material: Some("light_r10c0"),
-            transform: Some(Trs(
-                translate: (-4.5, 6.0, 1.5000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-4.5, 6.0, 1.5000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8805,11 +9147,13 @@
             name: "light_r10c1",
             mesh: Some("plane"),
             material: Some("light_r10c1"),
-            transform: Some(Trs(
-                translate: (-3.9, 6.0, 1.5000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.9, 6.0, 1.5000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8841,11 +9185,13 @@
             name: "light_r10c2",
             mesh: Some("plane"),
             material: Some("light_r10c2"),
-            transform: Some(Trs(
-                translate: (-3.3000002, 6.0, 1.5000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.3000002, 6.0, 1.5000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8877,11 +9223,13 @@
             name: "light_r10c3",
             mesh: Some("plane"),
             material: Some("light_r10c3"),
-            transform: Some(Trs(
-                translate: (-2.7, 6.0, 1.5000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.7, 6.0, 1.5000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8913,11 +9261,13 @@
             name: "light_r10c4",
             mesh: Some("plane"),
             material: Some("light_r10c4"),
-            transform: Some(Trs(
-                translate: (-2.1, 6.0, 1.5000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.1, 6.0, 1.5000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8949,11 +9299,13 @@
             name: "light_r10c5",
             mesh: Some("plane"),
             material: Some("light_r10c5"),
-            transform: Some(Trs(
-                translate: (-1.4999999, 6.0, 1.5000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-1.4999999, 6.0, 1.5000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -8985,11 +9337,13 @@
             name: "light_r10c6",
             mesh: Some("plane"),
             material: Some("light_r10c6"),
-            transform: Some(Trs(
-                translate: (-0.9, 6.0, 1.5000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.9, 6.0, 1.5000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9021,11 +9375,13 @@
             name: "light_r10c7",
             mesh: Some("plane"),
             material: Some("light_r10c7"),
-            transform: Some(Trs(
-                translate: (-0.29999998, 6.0, 1.5000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.29999998, 6.0, 1.5000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9057,11 +9413,13 @@
             name: "light_r10c8",
             mesh: Some("plane"),
             material: Some("light_r10c8"),
-            transform: Some(Trs(
-                translate: (0.30000025, 6.0, 1.5000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.30000025, 6.0, 1.5000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9093,11 +9451,13 @@
             name: "light_r10c9",
             mesh: Some("plane"),
             material: Some("light_r10c9"),
-            transform: Some(Trs(
-                translate: (0.9000002, 6.0, 1.5000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.9000002, 6.0, 1.5000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9129,11 +9489,13 @@
             name: "light_r10c10",
             mesh: Some("plane"),
             material: Some("light_r10c10"),
-            transform: Some(Trs(
-                translate: (1.5000002, 6.0, 1.5000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (1.5000002, 6.0, 1.5000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9165,11 +9527,13 @@
             name: "light_r10c11",
             mesh: Some("plane"),
             material: Some("light_r10c11"),
-            transform: Some(Trs(
-                translate: (2.1000001, 6.0, 1.5000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.1000001, 6.0, 1.5000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9201,11 +9565,13 @@
             name: "light_r10c12",
             mesh: Some("plane"),
             material: Some("light_r10c12"),
-            transform: Some(Trs(
-                translate: (2.7, 6.0, 1.5000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.7, 6.0, 1.5000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9237,11 +9603,13 @@
             name: "light_r10c13",
             mesh: Some("plane"),
             material: Some("light_r10c13"),
-            transform: Some(Trs(
-                translate: (3.3000002, 6.0, 1.5000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.3000002, 6.0, 1.5000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9273,11 +9641,13 @@
             name: "light_r10c14",
             mesh: Some("plane"),
             material: Some("light_r10c14"),
-            transform: Some(Trs(
-                translate: (3.9, 6.0, 1.5000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.9, 6.0, 1.5000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9309,11 +9679,13 @@
             name: "light_r10c15",
             mesh: Some("plane"),
             material: Some("light_r10c15"),
-            transform: Some(Trs(
-                translate: (4.5, 6.0, 1.5000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (4.5, 6.0, 1.5000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9345,11 +9717,13 @@
             name: "light_r11c0",
             mesh: Some("plane"),
             material: Some("light_r11c0"),
-            transform: Some(Trs(
-                translate: (-4.5, 6.0, 2.1000001),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-4.5, 6.0, 2.1000001),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9381,11 +9755,13 @@
             name: "light_r11c1",
             mesh: Some("plane"),
             material: Some("light_r11c1"),
-            transform: Some(Trs(
-                translate: (-3.9, 6.0, 2.1000001),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.9, 6.0, 2.1000001),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9417,11 +9793,13 @@
             name: "light_r11c2",
             mesh: Some("plane"),
             material: Some("light_r11c2"),
-            transform: Some(Trs(
-                translate: (-3.3000002, 6.0, 2.1000001),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.3000002, 6.0, 2.1000001),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9453,11 +9831,13 @@
             name: "light_r11c3",
             mesh: Some("plane"),
             material: Some("light_r11c3"),
-            transform: Some(Trs(
-                translate: (-2.7, 6.0, 2.1000001),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.7, 6.0, 2.1000001),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9489,11 +9869,13 @@
             name: "light_r11c4",
             mesh: Some("plane"),
             material: Some("light_r11c4"),
-            transform: Some(Trs(
-                translate: (-2.1, 6.0, 2.1000001),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.1, 6.0, 2.1000001),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9525,11 +9907,13 @@
             name: "light_r11c5",
             mesh: Some("plane"),
             material: Some("light_r11c5"),
-            transform: Some(Trs(
-                translate: (-1.4999999, 6.0, 2.1000001),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-1.4999999, 6.0, 2.1000001),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9561,11 +9945,13 @@
             name: "light_r11c6",
             mesh: Some("plane"),
             material: Some("light_r11c6"),
-            transform: Some(Trs(
-                translate: (-0.9, 6.0, 2.1000001),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.9, 6.0, 2.1000001),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9597,11 +9983,13 @@
             name: "light_r11c7",
             mesh: Some("plane"),
             material: Some("light_r11c7"),
-            transform: Some(Trs(
-                translate: (-0.29999998, 6.0, 2.1000001),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.29999998, 6.0, 2.1000001),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9633,11 +10021,13 @@
             name: "light_r11c8",
             mesh: Some("plane"),
             material: Some("light_r11c8"),
-            transform: Some(Trs(
-                translate: (0.30000025, 6.0, 2.1000001),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.30000025, 6.0, 2.1000001),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9669,11 +10059,13 @@
             name: "light_r11c9",
             mesh: Some("plane"),
             material: Some("light_r11c9"),
-            transform: Some(Trs(
-                translate: (0.9000002, 6.0, 2.1000001),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.9000002, 6.0, 2.1000001),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9705,11 +10097,13 @@
             name: "light_r11c10",
             mesh: Some("plane"),
             material: Some("light_r11c10"),
-            transform: Some(Trs(
-                translate: (1.5000002, 6.0, 2.1000001),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (1.5000002, 6.0, 2.1000001),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9741,11 +10135,13 @@
             name: "light_r11c11",
             mesh: Some("plane"),
             material: Some("light_r11c11"),
-            transform: Some(Trs(
-                translate: (2.1000001, 6.0, 2.1000001),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.1000001, 6.0, 2.1000001),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9777,11 +10173,13 @@
             name: "light_r11c12",
             mesh: Some("plane"),
             material: Some("light_r11c12"),
-            transform: Some(Trs(
-                translate: (2.7, 6.0, 2.1000001),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.7, 6.0, 2.1000001),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9813,11 +10211,13 @@
             name: "light_r11c13",
             mesh: Some("plane"),
             material: Some("light_r11c13"),
-            transform: Some(Trs(
-                translate: (3.3000002, 6.0, 2.1000001),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.3000002, 6.0, 2.1000001),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9849,11 +10249,13 @@
             name: "light_r11c14",
             mesh: Some("plane"),
             material: Some("light_r11c14"),
-            transform: Some(Trs(
-                translate: (3.9, 6.0, 2.1000001),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.9, 6.0, 2.1000001),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9885,11 +10287,13 @@
             name: "light_r11c15",
             mesh: Some("plane"),
             material: Some("light_r11c15"),
-            transform: Some(Trs(
-                translate: (4.5, 6.0, 2.1000001),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (4.5, 6.0, 2.1000001),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9921,11 +10325,13 @@
             name: "light_r12c0",
             mesh: Some("plane"),
             material: Some("light_r12c0"),
-            transform: Some(Trs(
-                translate: (-4.5, 6.0, 2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-4.5, 6.0, 2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9957,11 +10363,13 @@
             name: "light_r12c1",
             mesh: Some("plane"),
             material: Some("light_r12c1"),
-            transform: Some(Trs(
-                translate: (-3.9, 6.0, 2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.9, 6.0, 2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -9993,11 +10401,13 @@
             name: "light_r12c2",
             mesh: Some("plane"),
             material: Some("light_r12c2"),
-            transform: Some(Trs(
-                translate: (-3.3000002, 6.0, 2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.3000002, 6.0, 2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10029,11 +10439,13 @@
             name: "light_r12c3",
             mesh: Some("plane"),
             material: Some("light_r12c3"),
-            transform: Some(Trs(
-                translate: (-2.7, 6.0, 2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.7, 6.0, 2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10065,11 +10477,13 @@
             name: "light_r12c4",
             mesh: Some("plane"),
             material: Some("light_r12c4"),
-            transform: Some(Trs(
-                translate: (-2.1, 6.0, 2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.1, 6.0, 2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10101,11 +10515,13 @@
             name: "light_r12c5",
             mesh: Some("plane"),
             material: Some("light_r12c5"),
-            transform: Some(Trs(
-                translate: (-1.4999999, 6.0, 2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-1.4999999, 6.0, 2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10137,11 +10553,13 @@
             name: "light_r12c6",
             mesh: Some("plane"),
             material: Some("light_r12c6"),
-            transform: Some(Trs(
-                translate: (-0.9, 6.0, 2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.9, 6.0, 2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10173,11 +10591,13 @@
             name: "light_r12c7",
             mesh: Some("plane"),
             material: Some("light_r12c7"),
-            transform: Some(Trs(
-                translate: (-0.29999998, 6.0, 2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.29999998, 6.0, 2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10209,11 +10629,13 @@
             name: "light_r12c8",
             mesh: Some("plane"),
             material: Some("light_r12c8"),
-            transform: Some(Trs(
-                translate: (0.30000025, 6.0, 2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.30000025, 6.0, 2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10245,11 +10667,13 @@
             name: "light_r12c9",
             mesh: Some("plane"),
             material: Some("light_r12c9"),
-            transform: Some(Trs(
-                translate: (0.9000002, 6.0, 2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.9000002, 6.0, 2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10281,11 +10705,13 @@
             name: "light_r12c10",
             mesh: Some("plane"),
             material: Some("light_r12c10"),
-            transform: Some(Trs(
-                translate: (1.5000002, 6.0, 2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (1.5000002, 6.0, 2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10317,11 +10743,13 @@
             name: "light_r12c11",
             mesh: Some("plane"),
             material: Some("light_r12c11"),
-            transform: Some(Trs(
-                translate: (2.1000001, 6.0, 2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.1000001, 6.0, 2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10353,11 +10781,13 @@
             name: "light_r12c12",
             mesh: Some("plane"),
             material: Some("light_r12c12"),
-            transform: Some(Trs(
-                translate: (2.7, 6.0, 2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.7, 6.0, 2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10389,11 +10819,13 @@
             name: "light_r12c13",
             mesh: Some("plane"),
             material: Some("light_r12c13"),
-            transform: Some(Trs(
-                translate: (3.3000002, 6.0, 2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.3000002, 6.0, 2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10425,11 +10857,13 @@
             name: "light_r12c14",
             mesh: Some("plane"),
             material: Some("light_r12c14"),
-            transform: Some(Trs(
-                translate: (3.9, 6.0, 2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.9, 6.0, 2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10461,11 +10895,13 @@
             name: "light_r12c15",
             mesh: Some("plane"),
             material: Some("light_r12c15"),
-            transform: Some(Trs(
-                translate: (4.5, 6.0, 2.7),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (4.5, 6.0, 2.7),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10497,11 +10933,13 @@
             name: "light_r13c0",
             mesh: Some("plane"),
             material: Some("light_r13c0"),
-            transform: Some(Trs(
-                translate: (-4.5, 6.0, 3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-4.5, 6.0, 3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10533,11 +10971,13 @@
             name: "light_r13c1",
             mesh: Some("plane"),
             material: Some("light_r13c1"),
-            transform: Some(Trs(
-                translate: (-3.9, 6.0, 3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.9, 6.0, 3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10569,11 +11009,13 @@
             name: "light_r13c2",
             mesh: Some("plane"),
             material: Some("light_r13c2"),
-            transform: Some(Trs(
-                translate: (-3.3000002, 6.0, 3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.3000002, 6.0, 3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10605,11 +11047,13 @@
             name: "light_r13c3",
             mesh: Some("plane"),
             material: Some("light_r13c3"),
-            transform: Some(Trs(
-                translate: (-2.7, 6.0, 3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.7, 6.0, 3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10641,11 +11085,13 @@
             name: "light_r13c4",
             mesh: Some("plane"),
             material: Some("light_r13c4"),
-            transform: Some(Trs(
-                translate: (-2.1, 6.0, 3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.1, 6.0, 3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10677,11 +11123,13 @@
             name: "light_r13c5",
             mesh: Some("plane"),
             material: Some("light_r13c5"),
-            transform: Some(Trs(
-                translate: (-1.4999999, 6.0, 3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-1.4999999, 6.0, 3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10713,11 +11161,13 @@
             name: "light_r13c6",
             mesh: Some("plane"),
             material: Some("light_r13c6"),
-            transform: Some(Trs(
-                translate: (-0.9, 6.0, 3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.9, 6.0, 3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10749,11 +11199,13 @@
             name: "light_r13c7",
             mesh: Some("plane"),
             material: Some("light_r13c7"),
-            transform: Some(Trs(
-                translate: (-0.29999998, 6.0, 3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.29999998, 6.0, 3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10785,11 +11237,13 @@
             name: "light_r13c8",
             mesh: Some("plane"),
             material: Some("light_r13c8"),
-            transform: Some(Trs(
-                translate: (0.30000025, 6.0, 3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.30000025, 6.0, 3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10821,11 +11275,13 @@
             name: "light_r13c9",
             mesh: Some("plane"),
             material: Some("light_r13c9"),
-            transform: Some(Trs(
-                translate: (0.9000002, 6.0, 3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.9000002, 6.0, 3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10857,11 +11313,13 @@
             name: "light_r13c10",
             mesh: Some("plane"),
             material: Some("light_r13c10"),
-            transform: Some(Trs(
-                translate: (1.5000002, 6.0, 3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (1.5000002, 6.0, 3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10893,11 +11351,13 @@
             name: "light_r13c11",
             mesh: Some("plane"),
             material: Some("light_r13c11"),
-            transform: Some(Trs(
-                translate: (2.1000001, 6.0, 3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.1000001, 6.0, 3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10929,11 +11389,13 @@
             name: "light_r13c12",
             mesh: Some("plane"),
             material: Some("light_r13c12"),
-            transform: Some(Trs(
-                translate: (2.7, 6.0, 3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.7, 6.0, 3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -10965,11 +11427,13 @@
             name: "light_r13c13",
             mesh: Some("plane"),
             material: Some("light_r13c13"),
-            transform: Some(Trs(
-                translate: (3.3000002, 6.0, 3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.3000002, 6.0, 3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11001,11 +11465,13 @@
             name: "light_r13c14",
             mesh: Some("plane"),
             material: Some("light_r13c14"),
-            transform: Some(Trs(
-                translate: (3.9, 6.0, 3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.9, 6.0, 3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11037,11 +11503,13 @@
             name: "light_r13c15",
             mesh: Some("plane"),
             material: Some("light_r13c15"),
-            transform: Some(Trs(
-                translate: (4.5, 6.0, 3.3000002),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (4.5, 6.0, 3.3000002),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11073,11 +11541,13 @@
             name: "light_r14c0",
             mesh: Some("plane"),
             material: Some("light_r14c0"),
-            transform: Some(Trs(
-                translate: (-4.5, 6.0, 3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-4.5, 6.0, 3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11109,11 +11579,13 @@
             name: "light_r14c1",
             mesh: Some("plane"),
             material: Some("light_r14c1"),
-            transform: Some(Trs(
-                translate: (-3.9, 6.0, 3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.9, 6.0, 3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11145,11 +11617,13 @@
             name: "light_r14c2",
             mesh: Some("plane"),
             material: Some("light_r14c2"),
-            transform: Some(Trs(
-                translate: (-3.3000002, 6.0, 3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.3000002, 6.0, 3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11181,11 +11655,13 @@
             name: "light_r14c3",
             mesh: Some("plane"),
             material: Some("light_r14c3"),
-            transform: Some(Trs(
-                translate: (-2.7, 6.0, 3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.7, 6.0, 3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11217,11 +11693,13 @@
             name: "light_r14c4",
             mesh: Some("plane"),
             material: Some("light_r14c4"),
-            transform: Some(Trs(
-                translate: (-2.1, 6.0, 3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.1, 6.0, 3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11253,11 +11731,13 @@
             name: "light_r14c5",
             mesh: Some("plane"),
             material: Some("light_r14c5"),
-            transform: Some(Trs(
-                translate: (-1.4999999, 6.0, 3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-1.4999999, 6.0, 3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11289,11 +11769,13 @@
             name: "light_r14c6",
             mesh: Some("plane"),
             material: Some("light_r14c6"),
-            transform: Some(Trs(
-                translate: (-0.9, 6.0, 3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.9, 6.0, 3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11325,11 +11807,13 @@
             name: "light_r14c7",
             mesh: Some("plane"),
             material: Some("light_r14c7"),
-            transform: Some(Trs(
-                translate: (-0.29999998, 6.0, 3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.29999998, 6.0, 3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11361,11 +11845,13 @@
             name: "light_r14c8",
             mesh: Some("plane"),
             material: Some("light_r14c8"),
-            transform: Some(Trs(
-                translate: (0.30000025, 6.0, 3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.30000025, 6.0, 3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11397,11 +11883,13 @@
             name: "light_r14c9",
             mesh: Some("plane"),
             material: Some("light_r14c9"),
-            transform: Some(Trs(
-                translate: (0.9000002, 6.0, 3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.9000002, 6.0, 3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11433,11 +11921,13 @@
             name: "light_r14c10",
             mesh: Some("plane"),
             material: Some("light_r14c10"),
-            transform: Some(Trs(
-                translate: (1.5000002, 6.0, 3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (1.5000002, 6.0, 3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11469,11 +11959,13 @@
             name: "light_r14c11",
             mesh: Some("plane"),
             material: Some("light_r14c11"),
-            transform: Some(Trs(
-                translate: (2.1000001, 6.0, 3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.1000001, 6.0, 3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11505,11 +11997,13 @@
             name: "light_r14c12",
             mesh: Some("plane"),
             material: Some("light_r14c12"),
-            transform: Some(Trs(
-                translate: (2.7, 6.0, 3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.7, 6.0, 3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11541,11 +12035,13 @@
             name: "light_r14c13",
             mesh: Some("plane"),
             material: Some("light_r14c13"),
-            transform: Some(Trs(
-                translate: (3.3000002, 6.0, 3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.3000002, 6.0, 3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11577,11 +12073,13 @@
             name: "light_r14c14",
             mesh: Some("plane"),
             material: Some("light_r14c14"),
-            transform: Some(Trs(
-                translate: (3.9, 6.0, 3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.9, 6.0, 3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11613,11 +12111,13 @@
             name: "light_r14c15",
             mesh: Some("plane"),
             material: Some("light_r14c15"),
-            transform: Some(Trs(
-                translate: (4.5, 6.0, 3.9),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (4.5, 6.0, 3.9),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11649,11 +12149,13 @@
             name: "light_r15c0",
             mesh: Some("plane"),
             material: Some("light_r15c0"),
-            transform: Some(Trs(
-                translate: (-4.5, 6.0, 4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-4.5, 6.0, 4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11685,11 +12187,13 @@
             name: "light_r15c1",
             mesh: Some("plane"),
             material: Some("light_r15c1"),
-            transform: Some(Trs(
-                translate: (-3.9, 6.0, 4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.9, 6.0, 4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11721,11 +12225,13 @@
             name: "light_r15c2",
             mesh: Some("plane"),
             material: Some("light_r15c2"),
-            transform: Some(Trs(
-                translate: (-3.3000002, 6.0, 4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-3.3000002, 6.0, 4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11757,11 +12263,13 @@
             name: "light_r15c3",
             mesh: Some("plane"),
             material: Some("light_r15c3"),
-            transform: Some(Trs(
-                translate: (-2.7, 6.0, 4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.7, 6.0, 4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11793,11 +12301,13 @@
             name: "light_r15c4",
             mesh: Some("plane"),
             material: Some("light_r15c4"),
-            transform: Some(Trs(
-                translate: (-2.1, 6.0, 4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-2.1, 6.0, 4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11829,11 +12339,13 @@
             name: "light_r15c5",
             mesh: Some("plane"),
             material: Some("light_r15c5"),
-            transform: Some(Trs(
-                translate: (-1.4999999, 6.0, 4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-1.4999999, 6.0, 4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11865,11 +12377,13 @@
             name: "light_r15c6",
             mesh: Some("plane"),
             material: Some("light_r15c6"),
-            transform: Some(Trs(
-                translate: (-0.9, 6.0, 4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.9, 6.0, 4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11901,11 +12415,13 @@
             name: "light_r15c7",
             mesh: Some("plane"),
             material: Some("light_r15c7"),
-            transform: Some(Trs(
-                translate: (-0.29999998, 6.0, 4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (-0.29999998, 6.0, 4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11937,11 +12453,13 @@
             name: "light_r15c8",
             mesh: Some("plane"),
             material: Some("light_r15c8"),
-            transform: Some(Trs(
-                translate: (0.30000025, 6.0, 4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.30000025, 6.0, 4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -11973,11 +12491,13 @@
             name: "light_r15c9",
             mesh: Some("plane"),
             material: Some("light_r15c9"),
-            transform: Some(Trs(
-                translate: (0.9000002, 6.0, 4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (0.9000002, 6.0, 4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -12009,11 +12529,13 @@
             name: "light_r15c10",
             mesh: Some("plane"),
             material: Some("light_r15c10"),
-            transform: Some(Trs(
-                translate: (1.5000002, 6.0, 4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (1.5000002, 6.0, 4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -12045,11 +12567,13 @@
             name: "light_r15c11",
             mesh: Some("plane"),
             material: Some("light_r15c11"),
-            transform: Some(Trs(
-                translate: (2.1000001, 6.0, 4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.1000001, 6.0, 4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -12081,11 +12605,13 @@
             name: "light_r15c12",
             mesh: Some("plane"),
             material: Some("light_r15c12"),
-            transform: Some(Trs(
-                translate: (2.7, 6.0, 4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (2.7, 6.0, 4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -12117,11 +12643,13 @@
             name: "light_r15c13",
             mesh: Some("plane"),
             material: Some("light_r15c13"),
-            transform: Some(Trs(
-                translate: (3.3000002, 6.0, 4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.3000002, 6.0, 4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -12153,11 +12681,13 @@
             name: "light_r15c14",
             mesh: Some("plane"),
             material: Some("light_r15c14"),
-            transform: Some(Trs(
-                translate: (3.9, 6.0, 4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (3.9, 6.0, 4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
         Material((
@@ -12189,11 +12719,13 @@
             name: "light_r15c15",
             mesh: Some("plane"),
             material: Some("light_r15c15"),
-            transform: Some(Trs(
-                translate: (4.5, 6.0, 4.5),
-                rotate_degrees: (180.0, 0.0, 0.0),
-                scale: (0.18, 0.18, 0.18),
-            )),
+            transforms: Some([
+                Trs(
+                    translate: (4.5, 6.0, 4.5),
+                    rotate_degrees: (180.0, 0.0, 0.0),
+                    scale: (0.18, 0.18, 0.18),
+                ),
+            ]),
             camera_visible: None,
         )),
     ],

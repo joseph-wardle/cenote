@@ -451,7 +451,7 @@ void HdCenoteMeshPrim::_Reconcile(const HdSceneIndexPrim& prim, const _Dirt dirt
                 .name = _name,
                 .mesh = _name,
                 .material = _wearsBinding ? _binding.GetString() : _material,
-                .transform = *matrix});
+                .transforms = std::vector<cenote::wire::Transform>{*matrix}});
             _instanceLive = true;
         } else if (!placed && _instanceLive) {
             if (visible) {
@@ -461,8 +461,8 @@ void HdCenoteMeshPrim::_Reconcile(const HdSceneIndexPrim& prim, const _Dirt dirt
                 cenote::wire::Remove{.kind = cenote::wire::Kind::Instance, .name = _name});
             _instanceLive = false;
         } else if (placed && dirt.xform) {
-            _pending->ops.push_back(
-                cenote::wire::InstancePatch{.name = _name, .transform = *matrix});
+            _pending->ops.push_back(cenote::wire::InstancePatch{
+                .name = _name, .transforms = std::vector<cenote::wire::Transform>{*matrix}});
         } else if (born && visible && !matrix) {
             TF_WARN("<%s> has a non-invertible transform; not placed", _path.GetText());
         }

@@ -527,11 +527,12 @@ void HdCenoteLightPrim::_Reconcile(const HdSceneIndexPrim& prim, const _Dirt dir
     _pending->ops.push_back(cenote::wire::MeshPatch{
         .name = _name, .source = cenote::wire::MeshSource{std::move(source)}});
     _pending->ops.push_back(std::move(material));
-    _pending->ops.push_back(cenote::wire::InstancePatch{.name = _name,
-                                                        .mesh = _name,
-                                                        .material = _name,
-                                                        .transform = *matrix,
-                                                        .camera_visible = false});
+    _pending->ops.push_back(
+        cenote::wire::InstancePatch{.name = _name,
+                                    .mesh = _name,
+                                    .material = _name,
+                                    .transforms = std::vector<cenote::wire::Transform>{*matrix},
+                                    .camera_visible = false});
     _sent = _Spelling::Area;
 }
 

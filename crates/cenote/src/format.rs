@@ -27,7 +27,7 @@ use crate::scene::changeset::{ChangeSet, Op};
 /// The scene-file format generation this build reads and writes. Bumped
 /// only for incompatible schema changes; compatible growth (a new optional
 /// field with a default) is not a bump.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 /// The file schema: the version, then the ops. Split into owned/borrowed
 /// twins so writing never clones a mesh payload.
@@ -199,14 +199,14 @@ mod tests {
     fn the_version_field_leads_the_file() {
         let text = to_ron(&ChangeSet::default()).expect("serializes");
         let body = text.trim_start_matches(['(', '\n', ' ']);
-        assert!(body.starts_with("version: 1"), "{text}");
+        assert!(body.starts_with("version: 2"), "{text}");
     }
 
     #[test]
     fn a_newer_version_is_refused_by_number() {
         let error = from_ron("(version: 999, ops: [])").unwrap_err();
         assert!(error.to_string().contains("999"), "{error}");
-        assert!(error.to_string().contains("reads 1"), "{error}");
+        assert!(error.to_string().contains("reads 2"), "{error}");
     }
 
     #[test]
@@ -218,10 +218,10 @@ mod tests {
     #[test]
     fn unknown_fields_are_refused_not_skipped() {
         // A typo at the file level…
-        assert!(from_ron("(version: 1, ops: [], extra: 5)").is_err());
+        assert!(from_ron("(version: 2, ops: [], extra: 5)").is_err());
         // …and inside a patch: `base_colour` must not silently no-op.
         let error = from_ron(
-            "(version: 1, ops: [Material((name: \"m\", base_colour: Constant((1.0, 0.0, 0.0))))])",
+            "(version: 2, ops: [Material((name: \"m\", base_colour: Constant((1.0, 0.0, 0.0))))])",
         )
         .unwrap_err();
         assert!(error.to_string().contains("base_colour"), "{error}");
@@ -234,7 +234,7 @@ mod tests {
         let scene = dir.join("scene.ron");
         std::fs::write(
             &scene,
-            "(version: 1, ops: [Mesh((name: \"m\", source: Some(Ply(path: \"geo/mesh.ply\"))))])",
+            "(version: 2, ops: [Mesh((name: \"m\", source: Some(Ply(path: \"geo/mesh.ply\"))))])",
         )
         .expect("write scene");
         let set = load(&scene).expect("loads");
@@ -256,7 +256,7 @@ mod tests {
         // The shape a stranger would write after reading one example —
         // sparse patches, defaults everywhere else.
         let text = r#"(
-            version: 1,
+            version: 2,
             ops: [
                 Settings((name: "main", spp: Some(16))),
                 Camera((name: "main", position: Some((0.0, 1.0, 4.0)))),

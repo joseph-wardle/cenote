@@ -16,7 +16,7 @@
 // vertical fov in degrees. Relative paths resolve against this file's
 // own directory, never the working directory.
 (
-    version: 1,
+    version: 2,
     ops: [
         Settings((name: "main")),
         Camera((
@@ -70,7 +70,7 @@
             name: "floor",
             mesh: Some("plane"),
             material: Some("floor"),
-            transform: Some(Trs(scale: (8.0, 1.0, 8.0))),
+            transforms: Some([Trs(scale: (8.0, 1.0, 8.0))]),
         )),
 
         // A standing terracotta panel, facing the camera — glazed: the
@@ -90,11 +90,11 @@
             name: "panel_back",
             mesh: Some("plane"),
             material: Some("terracotta"),
-            transform: Some(Trs(
+            transforms: Some([Trs(
                 translate: (0.0, 1.2, -1.5),
                 rotate_degrees: (90.0, 0.0, 0.0),
                 scale: (1.2, 1.0, 1.2),
-            )),
+            )]),
         )),
 
         // A leaning chrome panel — a metal reads base_color as F0, its
@@ -109,10 +109,10 @@
             name: "panel_left",
             mesh: Some("plane"),
             material: Some("chrome"),
-            transform: Some(Trs(
+            transforms: Some([Trs(
                 translate: (-2.0, 1.0, 0.0),
                 rotate_degrees: (90.0, -35.0, 0.0),
-            )),
+            )]),
         )),
 
         // The warm lamp overhead. An emissive material makes its instance
@@ -133,11 +133,11 @@
             material: Some("lamp"),
             // Rolled 180° so its one emitting face looks down: emitters are
             // one-sided, and the plane mesh winds normal-up.
-            transform: Some(Trs(
+            transforms: Some([Trs(
                 translate: (1.5, 3.5, 1.0),
                 rotate_degrees: (180.0, 0.0, 0.0),
                 scale: (0.5, 1.0, 0.5),
-            )),
+            )]),
         )),
     ],
 )

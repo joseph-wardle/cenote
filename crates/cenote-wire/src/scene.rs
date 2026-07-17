@@ -207,8 +207,9 @@ pub struct InstancePatch {
     pub mesh: Option<String>,
     /// Material reference, by name.
     pub material: Option<String>,
-    /// Object-to-world placement.
-    pub transform: Option<Transform>,
+    /// Object-to-world placements, one per copy; the whole array
+    /// replaces (`[]` legal — resident, places nothing).
+    pub transforms: Option<Vec<Transform>>,
     /// Whether camera rays see it.
     pub camera_visible: Option<bool>,
 }

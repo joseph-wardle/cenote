@@ -152,12 +152,14 @@ struct MeshPatch {
     std::optional<MeshSource> source{};
 };
 
-/// Mirror of `InstancePatch`.
+/// Mirror of `InstancePatch`. `transforms` is the placements array —
+/// one element per copy, the whole array replaces, and empty is legal
+/// (resident, places nothing).
 struct InstancePatch {
     std::string name;
     std::optional<std::string> mesh{};
     std::optional<std::string> material{};
-    std::optional<Transform> transform{};
+    std::optional<std::vector<Transform>> transforms{};
     std::optional<bool> camera_visible{};
 };
 

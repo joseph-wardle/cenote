@@ -133,7 +133,7 @@ void encode(Writer& writer, const InstancePatch& value) {
     encode(writer, value.name);
     encode(writer, value.mesh);
     encode(writer, value.material);
-    encode(writer, value.transform);
+    encode(writer, value.transforms);
     encode(writer, value.camera_visible);
 }
 

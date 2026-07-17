@@ -114,22 +114,37 @@ ChangeSet genesis() {
             .name = "thing",
             .mesh = "tri",
             .material = "m-set",
-            .transform =
-                Trs{
-                    .translate = {1.0f, 2.0f, 3.0f},
-                    .rotate_degrees = {0.0f, 90.0f, 0.0f},
-                    .scale = {2.0f, 2.0f, 2.0f},
-                },
+            .transforms = std::vector<Transform>{Trs{
+                .translate = {1.0f, 2.0f, 3.0f},
+                .rotate_degrees = {0.0f, 90.0f, 0.0f},
+                .scale = {2.0f, 2.0f, 2.0f},
+            }},
             .camera_visible = false,
         },
+        // A multi-element transforms array, both spellings in one — the
+        // array-instancer form the field's vector exists for.
         InstancePatch{
             .name = "matrix-thing",
             .mesh = "статуя",
             .material = "m-clear",
-            .transform = Matrix{.rows = {{{1.0f, 0.0f, 0.0f, 4.0f},
-                                          {0.0f, 1.0f, 0.0f, 5.0f},
-                                          {0.0f, 0.0f, 1.0f, 6.0f}}}},
+            .transforms = std::vector<Transform>{Matrix{.rows = {{{1.0f, 0.0f, 0.0f, 4.0f},
+                                                                  {0.0f, 1.0f, 0.0f, 5.0f},
+                                                                  {0.0f, 0.0f, 1.0f, 6.0f}}}},
+                                                 Trs{
+                                                     .translate = {-4.0f, 0.0f, 4.0f},
+                                                     .rotate_degrees = {0.0f, 0.0f, 45.0f},
+                                                     .scale = {1.0f, 1.0f, 1.0f},
+                                                 }},
             .camera_visible = true,
+        },
+        // The empty array is legal and distinct from an absent field:
+        // resident, places nothing (a fully-masked instancer).
+        InstancePatch{
+            .name = "masked",
+            .mesh = "tri",
+            .material = "m-leave",
+            .transforms = std::vector<Transform>{},
+            .camera_visible = {},
         },
         MaterialPatch{
             .name = "m-set",

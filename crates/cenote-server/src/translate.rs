@@ -73,14 +73,15 @@ fn op(op: wire::Op) -> core::Op {
                 name,
                 mesh,
                 material,
-                transform,
+                transforms,
                 camera_visible,
             } = patch;
             core::Op::Instance(core::InstancePatch {
                 name,
                 mesh,
                 material,
-                transform: transform.map(self::transform),
+                transforms: transforms
+                    .map(|list| list.into_iter().map(self::transform).collect()),
                 camera_visible,
             })
         }
@@ -371,11 +372,11 @@ mod tests {
                     name: "thing".into(),
                     mesh: Some("tri".into()),
                     material: Some("gray".into()),
-                    transform: Some(wire::Transform::Trs {
+                    transforms: Some(vec![wire::Transform::Trs {
                         translate: [0.0; 3],
                         rotate_degrees: [0.0; 3],
                         scale: [1.0; 3],
-                    }),
+                    }]),
                     camera_visible: Some(true),
                 }),
                 wire::Op::Remove(wire::Kind::Material, "gray".into()),

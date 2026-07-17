@@ -93,11 +93,11 @@ impl ChangeSet {
             Op::Instance(InstancePatch {
                 mesh: Some("plane".into()),
                 material: Some("floor".into()),
-                transform: Some(Transform::Trs {
+                transforms: Some(vec![Transform::Trs {
                     translate: [0.0; 3],
                     rotate_degrees: [0.0; 3],
                     scale: [12.0; 3],
-                }),
+                }]),
                 ..InstancePatch::new("floor")
             }),
         ];
@@ -117,11 +117,11 @@ impl ChangeSet {
                 ops.push(Op::Instance(InstancePatch {
                     mesh: Some("sphere".into()),
                     material: Some(name.clone()),
-                    transform: Some(Transform::Trs {
+                    transforms: Some(vec![Transform::Trs {
                         translate: [3.0 * (column as f32 - 1.0), radius, 3.0 * (row as f32 - 1.0)],
                         rotate_degrees: [0.0; 3],
                         scale: [radius; 3],
-                    }),
+                    }]),
                     ..InstancePatch::new(name)
                 }));
             }
@@ -150,11 +150,11 @@ impl ChangeSet {
                 ops.push(Op::Instance(InstancePatch {
                     mesh: Some("plane".into()),
                     material: Some(name.clone()),
-                    transform: Some(Transform::Trs {
+                    transforms: Some(vec![Transform::Trs {
                         translate: [span * (u - 0.5), height, span * (v - 0.5)],
                         rotate_degrees: [180.0, 0.0, 0.0],
                         scale: [0.18; 3],
-                    }),
+                    }]),
                     ..InstancePatch::new(name)
                 }));
             }

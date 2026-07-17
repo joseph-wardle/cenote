@@ -112,11 +112,11 @@ impl ChangeSet {
             Op::Instance(InstancePatch {
                 mesh: Some("plane".into()),
                 material: Some("floor".into()),
-                transform: Some(Transform::Trs {
+                transforms: Some(vec![Transform::Trs {
                     translate: [0.0; 3],
                     rotate_degrees: [0.0; 3],
                     scale: [12.0; 3],
-                }),
+                }]),
                 ..InstancePatch::new("floor")
             }),
             // The key light: a pure emitter (black base, no specular
@@ -133,11 +133,11 @@ impl ChangeSet {
             Op::Instance(InstancePatch {
                 mesh: Some("plane".into()),
                 material: Some("key".into()),
-                transform: Some(Transform::Trs {
+                transforms: Some(vec![Transform::Trs {
                     translate: [-3.5, 5.4, 1.0],
                     rotate_degrees: [180.0, 0.0, 0.0],
                     scale: [0.75; 3],
-                }),
+                }]),
                 ..InstancePatch::new("key")
             }),
         ];
@@ -158,11 +158,11 @@ impl ChangeSet {
                 ops.push(Op::Instance(InstancePatch {
                     mesh: Some("sphere".into()),
                     material: Some(name.clone()),
-                    transform: Some(Transform::Trs {
+                    transforms: Some(vec![Transform::Trs {
                         translate: [1.2 * (column as f32 - 2.0), 0.5, 1.2 * (row as f32 - 2.0)],
                         rotate_degrees: [0.0; 3],
                         scale: [0.5; 3],
-                    }),
+                    }]),
                     ..InstancePatch::new(name)
                 }));
             }

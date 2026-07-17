@@ -226,8 +226,8 @@ impl Default for MeshSource {
     }
 }
 
-/// One thing standing in the scene: a mesh placed by a transform, wearing
-/// a material — both referenced by name.
+/// One thing standing in the scene: a mesh placed zero or more times,
+/// wearing a material — both referenced by name.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Instance {
     /// Name of the [`Mesh`] this instance places. Every instance must
@@ -236,8 +236,12 @@ pub struct Instance {
     pub mesh: String,
     /// Name of the [`Material`] on its surface (same rule as `mesh`).
     pub material: String,
-    /// Object-to-world placement.
-    pub transform: Transform,
+    /// Object-to-world placements, one per copy — the array-instancer
+    /// shape (D-073): every element places the same mesh in the same
+    /// material. Empty is legal and places nothing; the instance stays
+    /// resident, ready for its next placements (a host's fully-masked
+    /// instancer needs no remove/re-create round trip).
+    pub transforms: Vec<Transform>,
     /// Whether camera rays see this instance. `false` is the classic
     /// invisible-emitter trick: the light still illuminates, but never
     /// appears in frame. Bounce rays always see everything — the full
@@ -246,11 +250,13 @@ pub struct Instance {
 }
 
 impl Default for Instance {
+    /// One identity placement — an instance never told where to stand
+    /// stands once at the origin, as it always has.
     fn default() -> Self {
         Self {
             mesh: String::new(),
             material: String::new(),
-            transform: Transform::default(),
+            transforms: vec![Transform::default()],
             camera_visible: true,
         }
     }

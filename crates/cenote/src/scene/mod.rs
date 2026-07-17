@@ -358,14 +358,10 @@ impl Scene {
             light_count,
         )?;
         let mut identity = LightIdentityRegistry::new();
-        let restir = build_restir(
-            gpu,
-            &mut identity,
-            &triangle_lights,
-            &[],
-            placements.len() as u32,
-            power,
-        )?;
+        // The procedural path has no source names; the object index is the
+        // identity, as it always was.
+        let names: Vec<String> = (0..placements.len()).map(|index| index.to_string()).collect();
+        let restir = build_restir(gpu, &mut identity, &triangle_lights, &[], &names, power)?;
 
         Ok(Self {
             tlas,
@@ -653,41 +649,43 @@ fn upload_instance_tables(
 }
 
 /// The emissive instances of a build, as the identity registry sees them: one
-/// entry per instance that owns a light record. Named by instance index today —
-/// enough for the single-frame stamp (`restir_candidates`) / resolve
-/// (`restir_resolve`) round-trip step 3 exercises. The source-name keying that
-/// lets a reservoir's history survive a scene edit lands with temporal reuse (M3
-/// step 5), where that carried history first exists to protect.
-fn emissive_lights(triangle_lights: &[TriangleLight]) -> Vec<EmissiveLight> {
+/// entry per instance that owns a light record, named by `names[instance]` —
+/// prep's per-element `name#i`, so each placement of an instanced emitter
+/// carries its own identity (the procedural path names by index). The
+/// fingerprint is the name itself; a mesh-content marker that would retire a
+/// reservoir's triangle reference on a geometry edit remains deferred.
+fn emissive_lights(triangle_lights: &[TriangleLight], names: &[String]) -> Vec<EmissiveLight> {
     let mut instances: Vec<u32> = triangle_lights.iter().map(|light| light.instance).collect();
     instances.sort_unstable();
     instances.dedup();
     instances
         .into_iter()
         .map(|instance| EmissiveLight {
-            name: instance.to_string(),
-            fingerprint: instance.to_string(),
+            name: names[instance as usize].clone(),
+            fingerprint: names[instance as usize].clone(),
             instance,
         })
         .collect()
 }
 
 /// Build the reservoir path's resident scene slice for one build: reconcile the
-/// identity registry against this build's emissive instances, then upload the
-/// triangle-only candidate table, the delta-only table (the exact additive term
-/// `restir_resolve` adds outside the reservoir, D-088), its remap, and the
-/// environment coin-flip probability weighed over the triangles *alone* (the
-/// reservoir excludes delta lights, so its selection is not diluted by their
-/// power the way the combined [`SceneTable::env_select_prob`] is).
+/// identity registry against this build's emissive instances (`names` is the
+/// identity name per TLAS custom index, so its length is the instance count),
+/// then upload the triangle-only candidate table, the delta-only table (the
+/// exact additive term `restir_resolve` adds outside the reservoir, D-088), its
+/// remap, and the environment coin-flip probability weighed over the triangles
+/// *alone* (the reservoir excludes delta lights, so its selection is not
+/// diluted by their power the way the combined [`SceneTable::env_select_prob`]
+/// is).
 fn build_restir(
     gpu: &Context,
     identity: &mut LightIdentityRegistry,
     triangle_lights: &[TriangleLight],
     delta_lights: &[DeltaLight],
-    instance_count: u32,
+    names: &[String],
     env_power: f64,
 ) -> Result<RestirResources> {
-    let remap = identity.reconcile(&emissive_lights(triangle_lights), instance_count);
+    let remap = identity.reconcile(&emissive_lights(triangle_lights, names), names.len() as u32);
     let candidate_table = crate::lights::candidate_table(triangle_lights);
     let delta_table = crate::lights::delta_table(delta_lights);
     let env_select_prob =
