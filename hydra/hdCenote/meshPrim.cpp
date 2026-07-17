@@ -1,5 +1,6 @@
 #include "meshPrim.hpp"
 
+#include "instancerPrim.hpp"
 #include "materialPrim.hpp"
 
 #include <array>
@@ -7,6 +8,7 @@
 #include <cstdint>
 #include <optional>
 #include <utility>
+#include <vector>
 
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/vec2f.h"
@@ -16,6 +18,7 @@
 #include "pxr/base/tf/staticTokens.h"
 #include "pxr/base/vt/types.h"
 #include "pxr/base/vt/value.h"
+#include "pxr/imaging/hd/instancedBySchema.h"
 #include "pxr/imaging/hd/materialBindingSchema.h"
 #include "pxr/imaging/hd/materialBindingsSchema.h"
 #include "pxr/imaging/hd/meshSchema.h"
@@ -303,16 +306,24 @@ bool _ReadVisibility(const HdSceneIndexPrim& prim) {
     return visibility ? visibility->GetTypedValue(0.0f) : true;
 }
 
-/// The flattened world matrix, straight into Transform::Matrix — never
-/// decomposed. Gf composes against row vectors, the wire against column
-/// vectors, so the rows are the transpose's. Nullopt means the server
-/// would reject the placement (see _Invertible).
-std::optional<cenote::wire::Matrix> _ReadTransform(const HdSceneIndexPrim& prim) {
-    GfMatrix4d world(1.0);
+/// The prim's flattened transform; identity when unauthored. For an
+/// un-instanced mesh this is the world matrix; for a prim inside a point-
+/// instancer prototype it is prototype-root relative (the prototype root
+/// carries resetXformStack, so the instancer's placement is never folded
+/// in here — that is ComputePlacements's job).
+GfMatrix4d _WorldMatrix(const HdSceneIndexPrim& prim) {
     if (const HdMatrixDataSourceHandle matrix =
             HdXformSchema::GetFromParent(prim.dataSource).GetMatrix()) {
-        world = matrix->GetTypedValue(0.0f);
+        return matrix->GetTypedValue(0.0f);
     }
+    return GfMatrix4d(1.0);
+}
+
+/// A world matrix as Transform::Matrix — never decomposed. Gf composes
+/// against row vectors, the wire against column vectors, so the rows are
+/// the transpose's. Nullopt means the server would reject the placement
+/// (see _Invertible).
+std::optional<cenote::wire::Matrix> _WireTransform(const GfMatrix4d& world) {
     cenote::wire::Matrix transform;
     for (int row = 0; row < 3; ++row) {
         for (int column = 0; column < 4; ++column) {
@@ -341,14 +352,26 @@ const HdDataSourceLocator& _DisplayColorLocator() {
     return locator;
 }
 
+/// Everything that reshapes the placements array: the flattened transform,
+/// visibility, and instancedBy (the set of instancers that copy this mesh,
+/// which turns a lone placement into an array and back).
+const HdDataSourceLocatorSet& _PlacementLocators() {
+    static const HdDataSourceLocatorSet locators{HdXformSchema::GetDefaultLocator(),
+                                                 HdVisibilitySchema::GetDefaultLocator(),
+                                                 HdInstancedBySchema::GetDefaultLocator()};
+    return locators;
+}
+
 } // namespace
 
 HdCenoteMeshPrim::HdCenoteMeshPrim(const SdfPath& path,
                                    const HdsiPrimManagingSceneIndexObserver* observer,
                                    cenote::wire::ChangeSet* pending, std::shared_ptr<Registry> live,
-                                   std::shared_ptr<const MaterialRegistry> materials)
+                                   std::shared_ptr<const MaterialRegistry> materials,
+                                   std::shared_ptr<const InstancerRegistry> instancers)
     : _path(path), _name(path.GetString()), _material(path.GetString() + "/displayColor"),
-      _pending(pending), _live(std::move(live)), _materials(std::move(materials)) {
+      _pending(pending), _live(std::move(live)), _materials(std::move(materials)),
+      _instancers(std::move(instancers)) {
     const auto [it, inserted] = _live->try_emplace(_path, this);
     if (!inserted) {
         // A resync: the previous translator still holds server objects.
@@ -359,6 +382,7 @@ HdCenoteMeshPrim::HdCenoteMeshPrim(const SdfPath& path,
         _instanceLive = it->second->_instanceLive;
         _binding = it->second->_binding;
         _wearsBinding = it->second->_wearsBinding;
+        _warnedElement = it->second->_warnedElement;
         it->second = this;
     }
     const HdSceneIndexPrim prim = observer->GetSceneIndex()->GetPrim(_path);
@@ -366,9 +390,7 @@ HdCenoteMeshPrim::HdCenoteMeshPrim(const SdfPath& path,
         _Withdraw();
         return;
     }
-    _Reconcile(
-        prim,
-        _Dirt{.geometry = true, .color = true, .xform = true, .visibility = true, .binding = true});
+    _Reconcile(prim, _Dirt{.geometry = true, .color = true, .placement = true, .binding = true});
 }
 
 HdCenoteMeshPrim::~HdCenoteMeshPrim() {
@@ -387,16 +409,13 @@ void HdCenoteMeshPrim::_Dirty(const HdSceneIndexObserver::DirtiedPrimEntry& entr
     if (!prim.dataSource) {
         return;
     }
-    _Reconcile(
-        prim,
-        _Dirt{
-            .geometry = entry.dirtyLocators.Intersects(_GeometryLocators()),
-            .color = entry.dirtyLocators.Intersects(_DisplayColorLocator()),
-            .xform = entry.dirtyLocators.Intersects(HdXformSchema::GetDefaultLocator()),
-            .visibility = entry.dirtyLocators.Intersects(HdVisibilitySchema::GetDefaultLocator()),
-            .binding =
-                entry.dirtyLocators.Intersects(HdMaterialBindingsSchema::GetDefaultLocator()),
-        });
+    _Reconcile(prim, _Dirt{
+                         .geometry = entry.dirtyLocators.Intersects(_GeometryLocators()),
+                         .color = entry.dirtyLocators.Intersects(_DisplayColorLocator()),
+                         .placement = entry.dirtyLocators.Intersects(_PlacementLocators()),
+                         .binding = entry.dirtyLocators.Intersects(
+                             HdMaterialBindingsSchema::GetDefaultLocator()),
+                     });
 }
 
 void HdCenoteMeshPrim::_Reconcile(const HdSceneIndexPrim& prim, const _Dirt dirt) {
@@ -441,36 +460,115 @@ void HdCenoteMeshPrim::_Reconcile(const HdSceneIndexPrim& prim, const _Dirt dirt
             }
         }
     }
-    if (born || dirt.xform || dirt.visibility) {
-        const bool visible = _ReadVisibility(prim);
-        const std::optional<cenote::wire::Matrix> matrix = _ReadTransform(prim);
-        const bool placed = visible && matrix.has_value();
-        if (placed && !_instanceLive) {
-            _wearsBinding = _Bindable();
-            _pending->ops.push_back(cenote::wire::InstancePatch{
-                .name = _name,
-                .mesh = _name,
-                .material = _wearsBinding ? _binding.GetString() : _material,
-                .transforms = std::vector<cenote::wire::Transform>{*matrix}});
-            _instanceLive = true;
-        } else if (!placed && _instanceLive) {
-            if (visible) {
-                TF_WARN("<%s> has a non-invertible transform; instance removed", _path.GetText());
-            }
-            _pending->ops.push_back(
-                cenote::wire::Remove{.kind = cenote::wire::Kind::Instance, .name = _name});
-            _instanceLive = false;
-        } else if (placed && dirt.xform) {
-            _pending->ops.push_back(cenote::wire::InstancePatch{
-                .name = _name, .transforms = std::vector<cenote::wire::Transform>{*matrix}});
-        } else if (born && visible && !matrix) {
-            TF_WARN("<%s> has a non-invertible transform; not placed", _path.GetText());
-        }
+    if (born || dirt.placement) {
+        // Refresh the cached placement inputs, then place from them. A
+        // later instancer poke replaces the placements from these same
+        // inputs without touching the scene index.
+        _visible = _ReadVisibility(prim);
+        _protoXform = _WorldMatrix(prim);
+        _instancedBy = _ReadInstancedBy(prim);
+        _Place();
     }
     // Every reconcile ends by squaring the instance's wear with the
     // registry — a binding edit repoints here, and everything else
     // no-ops.
     ResolveBinding();
+}
+
+void HdCenoteMeshPrim::RecomposeInstancing() {
+    if (_instancedBy.empty() || !_sent) {
+        // A mesh no instancer copies ignores instancer pokes, and a mesh
+        // whose geometry has not reached the wire has no instance to
+        // place. The cached inputs are still current — only the instancer
+        // moved — so _Place re-reads nothing.
+        return;
+    }
+    _Place();
+}
+
+void HdCenoteMeshPrim::_Place() {
+    std::optional<std::vector<cenote::wire::Transform>> placements = _ComposePlacements();
+    if (!placements) {
+        _WithdrawInstance();
+        return;
+    }
+    if (!_instanceLive) {
+        _wearsBinding = _Bindable();
+        _pending->ops.push_back(cenote::wire::InstancePatch{
+            .name = _name,
+            .mesh = _name,
+            .material = _wearsBinding ? _binding.GetString() : _material,
+            .transforms = std::move(placements)});
+        _instanceLive = true;
+    } else {
+        // The whole array replaces (D-073); the mesh and the binding
+        // stay put.
+        _pending->ops.push_back(
+            cenote::wire::InstancePatch{.name = _name, .transforms = std::move(placements)});
+    }
+}
+
+std::optional<std::vector<cenote::wire::Transform>> HdCenoteMeshPrim::_ComposePlacements() {
+    if (!_visible) {
+        return std::nullopt;
+    }
+    if (_instancedBy.empty()) {
+        // Un-instanced: the mesh stands once at its own transform.
+        const std::optional<cenote::wire::Matrix> matrix = _WireTransform(_protoXform);
+        if (!matrix) {
+            TF_WARN("<%s> has a non-invertible transform; instance %s", _path.GetText(),
+                    _instanceLive ? "removed" : "not placed");
+            return std::nullopt;
+        }
+        return std::vector<cenote::wire::Transform>{*matrix};
+    }
+    // Instanced: concatenate the placements every instancer contributes,
+    // each composed as (this prim's own transform) · (the instancer chain).
+    std::vector<cenote::wire::Transform> placements;
+    for (const _Instancer& instancer : _instancedBy) {
+        const auto it = _instancers->find(instancer.path);
+        if (it == _instancers->end()) {
+            // The instancer is not on the registry yet; park until its
+            // birth pokes this mesh. An empty placement would say the
+            // opposite — resident, placed nowhere — so honesty is nullopt.
+            return std::nullopt;
+        }
+        for (const GfMatrix4d& chain : it->second->ComputePlacements(instancer.prototypeRoot)) {
+            if (const std::optional<cenote::wire::Matrix> matrix =
+                    _WireTransform(_protoXform * chain)) {
+                placements.push_back(*matrix);
+            } else if (!_warnedElement) {
+                _warnedElement = true;
+                TF_WARN("<%s> composes a non-invertible instance placement; the copies it would "
+                        "make are dropped",
+                        _path.GetText());
+            }
+        }
+    }
+    return placements;
+}
+
+std::vector<HdCenoteMeshPrim::_Instancer>
+HdCenoteMeshPrim::_ReadInstancedBy(const HdSceneIndexPrim& prim) const {
+    const HdInstancedBySchema schema = HdInstancedBySchema::GetFromParent(prim.dataSource);
+    const HdPathArrayDataSourceHandle pathsSource = schema.GetPaths();
+    if (!pathsSource) {
+        return {};
+    }
+    const VtArray<SdfPath> paths = pathsSource->GetTypedValue(0.0f);
+    VtArray<SdfPath> roots;
+    if (const HdPathArrayDataSourceHandle rootsSource = schema.GetPrototypeRoots()) {
+        roots = rootsSource->GetTypedValue(0.0f);
+    }
+    std::vector<_Instancer> instancers;
+    instancers.reserve(paths.size());
+    for (size_t i = 0; i < paths.size(); ++i) {
+        // prototypeRoots runs parallel to paths; a missing entry leaves the
+        // root empty, and ComputePlacements then matches no prototype —
+        // placing nothing, the honest reading of malformed instancedBy.
+        instancers.push_back({paths[i], i < roots.size() ? roots[i] : SdfPath()});
+    }
+    return instancers;
 }
 
 void HdCenoteMeshPrim::ResolveBinding() {
@@ -494,12 +592,16 @@ bool HdCenoteMeshPrim::_Bindable() const {
     return it != _materials->end() && it->second->Published();
 }
 
-void HdCenoteMeshPrim::_Withdraw() {
+void HdCenoteMeshPrim::_WithdrawInstance() {
     if (_instanceLive) {
         _pending->ops.push_back(
             cenote::wire::Remove{.kind = cenote::wire::Kind::Instance, .name = _name});
         _instanceLive = false;
     }
+}
+
+void HdCenoteMeshPrim::_Withdraw() {
+    _WithdrawInstance();
     if (_sent) {
         _pending->ops.push_back(
             cenote::wire::Remove{.kind = cenote::wire::Kind::Mesh, .name = _name});

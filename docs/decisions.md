@@ -2917,3 +2917,53 @@ ignored — an artistic split cenote's one transport does not carry — under D-
 warn-where-lossy policy, which this step extends without a new entry: silent where the
 authored value is what the renderer does anyway, one warning naming the prim where
 fidelity is actually lost, never a rejected wave.
+
+### D-121: Instancing is arithmetic, not an object — the mesh carries the copies
+Status: accepted (2026-07-17); realizes the array-instancer deferral (D-073). cenote
+has no instancer: an instance is a mesh reference, a material, and a placements array —
+the array the wire grew for it below Hydra, `InstancePatch.transforms` widened from a
+single transform to a `Vec`, empty legal, each element its own stable light identity
+`name#i` so a copy's reservoir history is its own, protocol 4 → 5, scene-file version 2,
+goldens regenerated both directions. So a Hydra instancer translates to **nothing on the
+wire** — a new translator, `HdCenoteInstancerPrim`, the only one of the five that
+publishes no patch. It answers one question instead, `ComputePlacements(prototypeRoot)`:
+the world-space matrices a prototype's prims should be copied to. A mesh inside a
+prototype reads its own `instancedBy`, asks each named instancer, and authors the
+concatenated array as its `InstancePatch.transforms`; an un-instanced mesh sends its one
+placement as a length-1 array, unchanged.
+
+**Composition is hdEmbree's, matrix for matrix**: per instance,
+`matrix · S · R · T · instancerXform` in Gf's row-vector convention, reading both the
+disaggregated `hydra:instanceTranslations/Rotations/Scales` primvars *and* the aggregated
+`hydra:instanceTransforms` matrix form native instancing emits — any channel the
+instancer omits, or an index past its end, is the identity for that component, so a bare
+PointInstancer and a twice-referenced native instance walk the same arithmetic. The mask
+(`inactiveIds` metadata, `invisibleIds` attribute) is not re-derived:
+`HdInstancerTopologySchema::ComputeInstanceIndicesForProto` folds it in and returns the
+surviving indices in order — a fully-masked prototype yields an empty array, resident and
+placing nothing, which is exactly why the wire made empty legal rather than forcing a
+remove/re-create round trip. **Nesting is the cartesian product** the `instancedBy`
+parent chain implies: a mesh or a native instancer inside another instancer's prototype
+composes through every level, child transform innermost, several parents concatenating —
+`ComputePlacements` recurses up the chain, so a native instance scattered by a
+PointInstancer folds two instancer levels at once with no special case.
+
+**The poke, borrowed from materials** (D-115): an instancer edit dirties the instancer
+prim but never the prototype prims it moves (their flattened transform is
+prototype-root-relative and never sees the instancer), so the translator has no patch of
+its own to dirty — birth, edit, and death all walk the mesh registry and every instanced
+mesh recomposes from scratch. Broad on purpose: recomposing every instanced mesh on any
+instancer change is what makes a nested edit correct without tracking who nests whom, and
+the placements are a pure function of the whole prim, so any dirt at all pokes — no
+per-locator surgery. Removal is RAII with nothing to withdraw server-side; the destructor
+only pokes, unless a resync already handed the path to a successor. **What it drops**:
+per-instance shading primvars — a color, a width authored at `instance` interpolation —
+have no home when an instance is only a placement wearing a shared material, so they warn
+once, named, and are dropped; the velocity family (`velocities`, `accelerations`,
+`angularVelocities`) is dropped in silence, motion blur being deferred whole. Rejected
+alternatives: a wire instancer object (a second scene-graph concept for what the renderer
+already expresses as N placements — the estimator's TLAS is flat regardless, so the
+object would only be un-flattened again server-side); mesh-side re-derivation of the mask
+(a second copy of `ComputeInstanceIndicesForProto` drifting from usdImaging's); and
+decomposing the aggregated native-instance matrix back into TRS (lossy, and the
+composition consumes the matrix directly anyway).

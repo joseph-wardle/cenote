@@ -538,7 +538,43 @@ tests pass serially on the GPU machine; the C++ side compiles + its own lint; co
    `hydra:instanceTranslations/Rotations/Scales` primvars *and* the aggregated
    `hydra:instanceTransforms` matrix form (native instancing emits the latter);
    prototype-root-relative transforms composed with the instancer's world transform.
-   *Checkpoint: a point-instanced stage renders.*
+   *Checkpoint: a point-instanced stage renders.* The locked detail (a sixth structured
+   interview, 2026-07-17; the genuinely new decision is D-121 in [decisions.md](decisions.md)):
+   - *The shape* (D-121): the instancer is arithmetic, not a wire object — cenote has no
+     instancer, an instance is a mesh + material + placements array, so
+     `HdCenoteInstancerPrim` (the fifth translator, and the only one that publishes no
+     patch) answers `ComputePlacements(prototypeRoot)` instead. A mesh inside a prototype
+     reads its own `instancedBy`, asks each named instancer, and authors the concatenated
+     array; an un-instanced mesh sends its one placement as a length-1 array, unchanged.
+   - *The wire growth first* (its own commit below Hydra, drift guard regenerated both
+     directions): `InstancePatch.transforms` widens single → array, empty legal (resident,
+     places nothing — so a fully-masked instancer upstream needs no remove/re-create), each
+     placement carrying its own stable light identity `name#i` so a copy's reservoir history
+     is its own; protocol 4 → 5, scene-file version 2, the committed scenes moved forward.
+   - *Composition*: hdEmbree's exact order — `matrix · S · R · T · instancerXform` (Gf
+     row-vector) — reading the disaggregated `hydra:instance{Translations,Rotations,Scales}`
+     primvars and the aggregated `hydra:instanceTransforms` matrix (native instancing)
+     alike, any omitted channel the identity; the mask (`inactiveIds`/`invisibleIds`) via
+     `ComputeInstanceIndicesForProto`, not re-derived; nesting the cartesian product the
+     `instancedBy` parent chain implies, child transform innermost.
+   - *The poke* (borrowed from materials, D-115): an instancer edit dirties the instancer,
+     never the prototype prims it moves, so birth / edit / death walk the mesh registry and
+     every instanced mesh recomposes wholesale — broad on purpose, the placements being a
+     pure function of the whole prim. Removal is RAII with nothing server-side to withdraw.
+   - *What it drops*: per-instance shading primvars warn once and are dropped (no home when
+     an instance is a placement wearing a shared material); the velocity family is dropped
+     in silence, motion blur deferred whole (appendix).
+   - *Checkpoint*: `hydra/tests/stages/instanced-stage.usda` — a PointInstancer with
+     authored quath orientations, per-instance scales, and one instance killed through
+     `inactiveIds`; a native-instanceable asset referenced twice (the matrix form); a native
+     instance nested inside a PointInstancer prototype (recursion); a camera and a dome
+     reusing `sky.hdr` so no copy's absence can read as anything but sky. Smoke stage four
+     buckets pixels by hue and by left/centre/right only — three instancing hues each in two
+     mirror copies, the masked brick's centre empty, the dome behind all —
+     flip/mirror-agnostic like stages one–three; pixel truth stays step 6's FLIP golden.
+   - *Landing*: two commits — the wire growth below Hydra first (drift guard never red
+     mid-history), then everything USD-side (the instancer translator, the mesh
+     composition, the stage, the smoke, docs) together, full gate green on the GPU machine.
 6. **Houdini-ready hardening + validation** — the build parameterized for stock-vs-HDK
    USD, *compiled against the HDK* to prove the pivot (the HDK's USD may trail the 26.05
    pin — the observer mechanism holds back to 23.11, so the guards are schema-semantic,
@@ -648,6 +684,9 @@ it.
 - **Per-ray-type visibility** — one new ray-mask bit would honor the per-lobe
   `diffuse`/`specular` split, a never-occluding area light (D-119's accepted
   divergence), and a camera-visibility attribute alike.
+- **Instanced lights** — a UsdLux light inside a PointInstancer prototype: the
+  instancer's poke (D-121) reaches the mesh translators only, so a light's delta or its
+  synthesized area triple is placed once by its own transform, not copied per instance.
 - **Light filters and dome portals.**
 - **MeshLightAPI** — the renderer is already native (any emissive mesh); the gap is
   Hydra-side translation only.
@@ -667,7 +706,8 @@ it.
 - **Subdivision beyond the base cage** — refinement past
   `HdMeshUtil::ComputeTriangleIndices` at refineLevel 0.
 - **Motion blur and camera shutter** — transform and deformation sampling at more than
-  time 0.0.
+  time 0.0, including the instancer velocity family (`velocities`/`accelerations`/
+  `angularVelocities`) D-121 drops in silence.
 - **AOVs beyond beauty + depth** — primId/selection already carries its trigger in
   deferrals.md.
 - **Curves, points, and volumes** — mesh is the only Rprim schema translated.

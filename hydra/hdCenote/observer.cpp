@@ -4,6 +4,7 @@
 #include "pxr/imaging/hd/tokens.h"
 
 #include "domePrim.hpp"
+#include "instancerPrim.hpp"
 #include "lightPrim.hpp"
 #include "materialPrim.hpp"
 #include "meshPrim.hpp"
@@ -12,20 +13,24 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 namespace {
 
-/// The batching index orders each flush by this priority: materials
-/// first, everything else after. Not for the server's sake — it merges
-/// a whole ChangeSet and validates the result, so forward references
-/// within one flush are already legal — but for the mesh translator's:
-/// it resolves its binding against the material registry at sync, so
-/// with materials ahead a newborn instance wears its bound material
-/// from its first op and the dangling-binding warning only fires for
-/// targets that truly are not in the wave. (Removals flush before
-/// everything regardless of priority; the death hook covers those.)
+/// The batching index orders each flush by this priority: materials and
+/// instancers first, everything else after. Not for the server's sake —
+/// it merges a whole ChangeSet and validates the result, so forward
+/// references within one flush are already legal — but for the mesh
+/// translator's: it reads both registries at sync. With materials ahead a
+/// newborn instance wears its bound material from its first op; with
+/// instancers ahead an instanced mesh composes its placements from a
+/// registry already populated, so the common case needs no poke. (Cross-
+/// flush arrivals still do: the material and instancer birth hooks poke.
+/// Removals flush before everything regardless of priority; the death
+/// hooks cover those.)
 class _PriorityFunctor final
     : public HdsiPrimTypeNoticeBatchingSceneIndex::PrimTypePriorityFunctor {
 public:
     size_t GetPriorityForPrimType(const TfToken& primType) const override {
-        return primType == HdPrimTypeTokens->material ? 0 : 1;
+        return primType == HdPrimTypeTokens->material || primType == HdPrimTypeTokens->instancer
+                   ? 0
+                   : 1;
     }
     size_t GetNumPriorities() const override { return 2; }
 };
@@ -34,26 +39,32 @@ public:
 /// does not know gets null, which the observer simply never tracks: how
 /// unknown stays non-fatal forever. Mesh prims (implicits included,
 /// already converted by the registered filter stack) get the mesh
-/// translator; five of the six UsdLux types the wire can spell —
-/// distant (usdview's camera light among them, per D-108), rect, disk,
-/// sphere, cylinder — get the light translator; domes get their own,
-/// which arbitrates the one environment slot among themselves (usdview's
-/// dome-toggle dome contends like any other); materials get the material
-/// translator.
+/// translator; instancers get the instancer translator, which puts
+/// nothing on the wire and only feeds the meshes their placements; five
+/// of the six UsdLux types the wire can spell — distant (usdview's camera
+/// light among them, per D-108), rect, disk, sphere, cylinder — get the
+/// light translator; domes get their own, which arbitrates the one
+/// environment slot among themselves (usdview's dome-toggle dome contends
+/// like any other); materials get the material translator.
 class _PrimFactory final : public HdsiPrimManagingSceneIndexObserver::PrimFactoryBase {
 public:
     explicit _PrimFactory(cenote::wire::ChangeSet* pending)
         : _pending(pending), _meshes(std::make_shared<HdCenoteMeshPrim::Registry>()),
           _lights(std::make_shared<HdCenoteLightPrim::Registry>()),
           _domes(std::make_shared<HdCenoteDomePrim::Registry>()),
-          _materials(std::make_shared<HdCenoteMaterialPrim::Registry>()) {}
+          _materials(std::make_shared<HdCenoteMaterialPrim::Registry>()),
+          _instancers(std::make_shared<HdCenoteInstancerPrim::Registry>()) {}
 
     HdsiPrimManagingSceneIndexObserver::PrimBaseHandle
     CreatePrim(const HdSceneIndexObserver::AddedPrimEntry& entry,
                const HdsiPrimManagingSceneIndexObserver* observer) override {
         if (entry.primType == HdPrimTypeTokens->mesh) {
             return std::make_shared<HdCenoteMeshPrim>(entry.primPath, observer, _pending, _meshes,
-                                                      _materials);
+                                                      _materials, _instancers);
+        }
+        if (entry.primType == HdPrimTypeTokens->instancer) {
+            return std::make_shared<HdCenoteInstancerPrim>(entry.primPath, observer, _instancers,
+                                                           _meshes);
         }
         if (entry.primType == HdPrimTypeTokens->distantLight ||
             entry.primType == HdPrimTypeTokens->rectLight ||
@@ -81,6 +92,7 @@ private:
     std::shared_ptr<HdCenoteLightPrim::Registry> _lights;
     std::shared_ptr<HdCenoteDomePrim::Registry> _domes;
     std::shared_ptr<HdCenoteMaterialPrim::Registry> _materials;
+    std::shared_ptr<HdCenoteInstancerPrim::Registry> _instancers;
 };
 
 } // namespace

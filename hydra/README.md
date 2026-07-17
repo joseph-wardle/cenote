@@ -7,8 +7,8 @@ test; `transport/`, the client that spawns `cenote-server` and speaks to it —
 spawn, socket, and the shm framebuffer reader, the deliberately-POSIX corner
 of the tree; and `hdCenote/`, the scene-index-native render delegate plugin —
 the half that needs USD. The plan is
-[docs/m4-plan.md](../docs/m4-plan.md) (steps 1 through 4 carry their locked detail);
-rationale lives in [docs/decisions.md](../docs/decisions.md) (D-097…D-120).
+[docs/m4-plan.md](../docs/m4-plan.md) (steps 1 through 5 carry their locked detail);
+rationale lives in [docs/decisions.md](../docs/decisions.md) (D-097…D-121).
 
 Baseline: C++23, extensions off, `-Wall -Wextra -Werror`. Two-part portability
 rule (D-105): portable core C++23 only, and inside the plugin `.so` no library
@@ -74,8 +74,15 @@ and asserts the dome fills the background (blue sky above the horizon, its
 warm ground glow below it), the warm and cool pools land on opposite sides of
 the ground, and no pixel in the frame is dark: with sky behind everything,
 the only route to darkness is a light's stand-in geometry turning
-camera-visible and showing its black absorber. No pixel equality — that is
-step 6's FLIP golden. It needs the
+camera-visible and showing its black absorber. Last it renders
+[tests/stages/instanced-stage.usda](tests/stages/instanced-stage.usda) — the step-5
+checkpoint: a PointInstancer of orange bricks with authored orientations and scales,
+its middle instance killed through `inactiveIds`; two green native-instance widgets
+(the aggregated matrix form); two magenta gems, each a native instance nested inside a
+PointInstancer prototype (recursion); all under a dome sky — and asserts each of the
+three instancing hues stands as two mirror copies, the killed brick's centre reads as
+sky, and no corner is dark. Buckets by colour and left/centre/right only, so a flipped
+or mirrored render still passes; pixel equality stays step 6's FLIP golden. It needs the
 USD prefix on `PATH`/`PYTHONPATH` (below) and a built `cenote-server`
 (`target/{release,debug}`, or `$CENOTE_SERVER`).
 

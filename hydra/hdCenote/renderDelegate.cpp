@@ -6,6 +6,7 @@
 #include "pxr/base/gf/vec4f.h"
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/imaging/hd/camera.h"
+#include "pxr/imaging/hd/instancer.h"
 #include "pxr/imaging/hd/light.h"
 #include "pxr/imaging/hd/material.h"
 #include "pxr/imaging/hd/resourceRegistry.h"
@@ -14,8 +15,10 @@
 PXR_NAMESPACE_OPEN_SCOPE
 
 // Zero Rprims by design (D-098): with no Rprim types advertised, the render
-// index never hydrates geometry, and the Rprim/instancer factories below stay
-// unreachable. The camera and the renderBuffer are the whole prim vocabulary —
+// index never hydrates geometry, and the Rprim factory below stays
+// unreachable. (The instancer factory does not: the scene-index bridge
+// inserts instancer prims regardless, so CreateInstancer returns an inert
+// one — see there.) The camera and the renderBuffer are the whole prim vocabulary —
 // plus the light types the translators read, advertised because advertising
 // gates population: distant and dome also satisfy HdxTaskController's
 // built-in-light check, which demands domeLight AND a camera light type before
@@ -101,12 +104,18 @@ HdCenoteRenderDelegate::CreateRenderPass(HdRenderIndex* index,
     return std::make_shared<HdCenoteRenderPass>(index, collection, &_client);
 }
 
-HdInstancer* HdCenoteRenderDelegate::CreateInstancer(HdSceneDelegate* /*delegate*/,
-                                                     SdfPath const& /*id*/) {
-    return nullptr;
+// The scene-index-to-render-index bridge inserts an instancer prim into
+// the render index whether or not any Rprim it instances is hydrated, then
+// dirties it — and the change tracker verifies the instancer it dirties
+// was inserted. So an inert base HdInstancer is returned to keep that
+// bookkeeping consistent (its no-op Sync is never asked for anything); the
+// real placement arithmetic lives in the scene-index translator
+// (instancerPrim.cpp), off this path entirely.
+HdInstancer* HdCenoteRenderDelegate::CreateInstancer(HdSceneDelegate* delegate, SdfPath const& id) {
+    return new HdInstancer(delegate, id);
 }
 
-void HdCenoteRenderDelegate::DestroyInstancer(HdInstancer* /*instancer*/) {}
+void HdCenoteRenderDelegate::DestroyInstancer(HdInstancer* instancer) { delete instancer; }
 
 HdRprim* HdCenoteRenderDelegate::CreateRprim(TfToken const& /*typeId*/,
                                              SdfPath const& /*rprimId*/) {

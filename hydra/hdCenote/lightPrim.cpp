@@ -19,6 +19,7 @@
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/tf/staticTokens.h"
 #include "pxr/base/vt/value.h"
+#include "pxr/imaging/hd/instancedBySchema.h"
 #include "pxr/imaging/hd/light.h"
 #include "pxr/imaging/hd/lightSchema.h"
 #include "pxr/imaging/hd/tokens.h"
@@ -103,6 +104,16 @@ bool _ReadVisibility(const HdSceneIndexPrim& prim) {
     const HdBoolDataSourceHandle visibility =
         HdVisibilitySchema::GetFromParent(prim.dataSource).GetVisibility();
     return visibility ? visibility->GetTypedValue(0.0f) : true;
+}
+
+/// Whether an instancer copies this light. cenote has no instanced-light
+/// path — an instance is a mesh placement, and the delta and area lights
+/// are neither — so an instanced light is parked rather than placed once
+/// at a misleading spot.
+bool _Instanced(const HdSceneIndexPrim& prim) {
+    const HdPathArrayDataSourceHandle paths =
+        HdInstancedBySchema::GetFromParent(prim.dataSource).GetPaths();
+    return paths && !paths->GetTypedValue(0.0f).empty();
 }
 
 /// The flattened world matrix; identity when unauthored.
@@ -374,7 +385,8 @@ double _WorldArea(const cenote::wire::Inline& source, const GfMatrix4d& world) {
 /// transform — one lane, total resend (see _Dirt).
 const HdDataSourceLocatorSet& _LightLocators() {
     static const HdDataSourceLocatorSet locators{HdLightSchema::GetDefaultLocator(),
-                                                 HdXformSchema::GetDefaultLocator()};
+                                                 HdXformSchema::GetDefaultLocator(),
+                                                 HdInstancedBySchema::GetDefaultLocator()};
     return locators;
 }
 
@@ -431,6 +443,19 @@ void HdCenoteLightPrim::_Dirty(const HdSceneIndexObserver::DirtiedPrimEntry& ent
 void HdCenoteLightPrim::_Reconcile(const HdSceneIndexPrim& prim, const _Dirt dirt,
                                    const bool born) {
     if (!born && !dirt.light && !dirt.visibility) {
+        return;
+    }
+    if (_Instanced(prim)) {
+        // An instancer copies this light. cenote cannot place a light per
+        // copy, so it parks the whole light rather than draw one at the
+        // prototype's own transform — an honest absence over a wrong
+        // placement.
+        if (!_warned.instanced) {
+            _warned.instanced = true;
+            TF_WARN("<%s> is instanced, which cenote cannot place per copy; the light is parked",
+                    _path.GetText());
+        }
+        _Withdraw();
         return;
     }
     if (!_ReadVisibility(prim)) {

@@ -72,10 +72,11 @@ private:
     /// warning: with every edit re-reading everything, an unlatched
     /// warning would fire on every drag of an unrelated handle.
     struct _Warned {
-        bool diffuse = false;  //< diffuse ≠ 1 ignored
-        bool specular = false; //< specular ≠ 1 ignored
-        bool texture = false;  //< texture:file dropped (unreadable or non-LDR)
-        bool tint = false;     //< chromatic tint folded to luminance over a texture
+        bool diffuse = false;   //< diffuse ≠ 1 ignored
+        bool specular = false;  //< specular ≠ 1 ignored
+        bool texture = false;   //< texture:file dropped (unreadable or non-LDR)
+        bool tint = false;      //< chromatic tint folded to luminance over a texture
+        bool instanced = false; //< an instancer copies this light; parked
     };
 
     void _Dirty(const HdSceneIndexObserver::DirtiedPrimEntry& entry,

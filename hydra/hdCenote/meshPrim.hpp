@@ -14,8 +14,12 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
+#include "pxr/base/gf/matrix4d.h"
 #include "pxr/imaging/hd/sceneIndex.h"
 #include "pxr/imaging/hdsi/primManagingSceneIndexObserver.h"
 #include "pxr/pxr.h"
@@ -26,6 +30,7 @@
 PXR_NAMESPACE_OPEN_SCOPE
 
 class HdCenoteMaterialPrim;
+class HdCenoteInstancerPrim;
 
 class HdCenoteMeshPrim final : public HdsiPrimManagingSceneIndexObserver::PrimBase {
 public:
@@ -45,13 +50,21 @@ public:
     /// static_asserts that the two spellings stay the same type.
     using MaterialRegistry = std::map<SdfPath, HdCenoteMaterialPrim*>;
 
+    /// The instancer translators' registry — HdCenoteInstancerPrim::
+    /// Registry, spelled out here for the same reason (the instancer
+    /// header includes this one, to poke meshes); its .cpp static_asserts
+    /// that the two spellings stay the same type. An instanced mesh looks
+    /// its instancers up here to compose its placements.
+    using InstancerRegistry = std::map<SdfPath, HdCenoteInstancerPrim*>;
+
     /// Reads the prim at `path` from the observer's scene index and
-    /// appends its adds to `pending`. `pending`, `live`, and
-    /// `materials` all outlive every translator — the delegate and the
+    /// appends its adds to `pending`. `pending`, `live`, `materials`, and
+    /// `instancers` all outlive every translator — the delegate and the
     /// factory own them.
     HdCenoteMeshPrim(const SdfPath& path, const HdsiPrimManagingSceneIndexObserver* observer,
                      cenote::wire::ChangeSet* pending, std::shared_ptr<Registry> live,
-                     std::shared_ptr<const MaterialRegistry> materials);
+                     std::shared_ptr<const MaterialRegistry> materials,
+                     std::shared_ptr<const InstancerRegistry> instancers);
 
     /// RAII removal: Op::Remove for everything this translator still
     /// holds server-side — unless a resync already handed the path to
@@ -65,15 +78,29 @@ public:
     /// binding dirt for either, D-115), and every reconcile ends here.
     void ResolveBinding();
 
+    /// Recomposes the placements array from the cached inputs (its own
+    /// transform and instancedBy) against the current instancer state, and
+    /// resends the instance. An instancer translator calls this when it
+    /// changes — Hydra dirties the instancer, not the prototype prims it
+    /// moves — so a poke is the only signal an instanced mesh gets. A mesh
+    /// that no instancer instances returns at once.
+    void RecomposeInstancing();
+
 private:
     /// Which server objects a change touches, from the dirty locators —
     /// the wire patch fields follow 1:1.
     struct _Dirt {
-        bool geometry;   //< topology or points/normals/st → MeshPatch.source
-        bool color;      //< displayColor → companion MaterialPatch.base_color
-        bool xform;      //< flattened matrix → InstancePatch.transforms
-        bool visibility; //< visible ⟺ the instance exists (D-109)
-        bool binding;    //< resolved materialBindings → InstancePatch.material
+        bool geometry;  //< topology or points/normals/st → MeshPatch.source
+        bool color;     //< displayColor → companion MaterialPatch.base_color
+        bool placement; //< transform, visibility, or instancedBy → the placements array
+        bool binding;   //< resolved materialBindings → InstancePatch.material
+    };
+
+    /// One instancer that instances this mesh: the instancer's path and
+    /// the prototype root it copies this mesh under (from instancedBy).
+    struct _Instancer {
+        SdfPath path;
+        SdfPath prototypeRoot;
     };
 
     void _Dirty(const HdSceneIndexObserver::DirtiedPrimEntry& entry,
@@ -83,11 +110,32 @@ private:
     /// only what `dirt` marks. The one subtlety is validity: a ChangeSet
     /// is atomic server-side, so an op the server would reject (an empty
     /// mesh, a non-invertible placement) must never be emitted — the
-    /// object is withdrawn or the instance suppressed instead.
+    /// object is withdrawn or the placement dropped instead.
     void _Reconcile(const HdSceneIndexPrim& prim, _Dirt dirt);
+
+    /// (Re)places the instance from the cached placement inputs, shared by
+    /// the reconcile that refreshes those inputs and the instancer poke
+    /// that leaves them be: composes the placements, then creates,
+    /// replaces, or withdraws the instance to match.
+    void _Place();
+
+    /// The per-copy placements this mesh should stand at, or nullopt to
+    /// withdraw the instance (invisible, a degenerate lone transform, or
+    /// an instancer not yet on the registry — honest absence). An empty
+    /// vector is legal and distinct: resident, placed nowhere (fully
+    /// masked). Degenerate elements of an instanced array drop under a
+    /// one-shot warning; the atomic flush must never carry one.
+    std::optional<std::vector<cenote::wire::Transform>> _ComposePlacements();
+
+    /// The instancers that copy this mesh, paired with the prototype root
+    /// each copies it under; empty when the mesh stands on its own.
+    std::vector<_Instancer> _ReadInstancedBy(const HdSceneIndexPrim& prim) const;
 
     /// Removes everything currently on the server, in reference order.
     void _Withdraw();
+
+    /// Removes just the instance, leaving the mesh and companion up.
+    void _WithdrawInstance();
 
     /// True when the bound material is live on the wire right now —
     /// registered and published, so an instance may reference it.
@@ -101,6 +149,7 @@ private:
     cenote::wire::ChangeSet* const _pending;
     const std::shared_ptr<Registry> _live;
     const std::shared_ptr<const MaterialRegistry> _materials;
+    const std::shared_ptr<const InstancerRegistry> _instancers;
 
     // The ledger: what exists server-side right now.
     bool _sent = false;         //< the Mesh and companion Material are up
@@ -111,6 +160,17 @@ private:
     /// Whether the instance wears _binding rather than the companion;
     /// meaningful only while _instanceLive.
     bool _wearsBinding = false;
+
+    // The cached placement inputs, refreshed on every placement dirt and
+    // reused verbatim when an instancer poke recomposes: the instancer
+    // moved, not this prim, so re-reading the scene index would only
+    // recover what is already here.
+    bool _visible = true;        //< resolved visibility
+    GfMatrix4d _protoXform{1.0}; //< own transform (prototype-root relative when instanced)
+    std::vector<_Instancer>
+        _instancedBy{}; //< the instancers that copy this mesh; empty = un-instanced
+    /// One-shot latch: a degenerate placement element has been named.
+    bool _warnedElement = false;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

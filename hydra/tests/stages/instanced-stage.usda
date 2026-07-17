@@ -1,0 +1,142 @@
+#usda 1.0
+(
+    """The step-5 checkpoint stage: every instancing path the delegate now
+    composes, each drawn in its own hue so a coarse patch check can tell
+    them apart (tests/usdrecord_smoke.py). Orange Bricks are a
+    PointInstancer with authored quath orientations and per-instance
+    scales, its middle instance killed through the list-edited inactiveIds
+    metadatum — so the row's centre is a gap the sky shows through. Green
+    Widgets are one native-instanceable prototype referenced twice, the
+    aggregated hydra:instanceTransforms matrix form. Magenta Gems are a
+    native-instanceable prototype nested inside a PointInstancer prototype,
+    so each scattered cell carries a native instance the composer must
+    fold through two instancer levels at once (recursion). A distant sun
+    lights the camera-facing faces at full saturation and a DomeLight wraps
+    the whole frame in sky.hdr — the same generated sky the lit stage uses —
+    so every escaped ray lands on sky and nothing renders black; the only
+    dark a copy's absence can leave is the sky itself. Copies sit at
+    mirror-symmetric X and the three hues stack in Z, so the smoke reads
+    them by colour and left/right, never by handedness — no pixel equality;
+    that stays step 6's FLIP golden. Authored against a Storm side-by-side."""
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+# The native-instancing prototypes: abstract classes, so they are drawn
+# only through the instances that reference them, never in place. Each
+# instanceable reference below shares one of these, which is what turns
+# repeated references into the aggregated matrix instancer.
+class Xform "_Widget"
+{
+    def Cube "Body"
+    {
+        double size = 1.4
+        color3f[] primvars:displayColor = [(0.15, 0.8, 0.2)]
+    }
+}
+
+class Xform "_Gem"
+{
+    def Cube "Body"
+    {
+        double size = 1.4
+        color3f[] primvars:displayColor = [(0.85, 0.12, 0.8)]
+    }
+}
+
+def Xform "World"
+{
+    def Camera "Camera"
+    {
+        float focalLength = 35
+        double3 xformOp:translate = (0, -22, 3)
+        float3 xformOp:rotateXYZ = (90, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def DistantLight "Sun"
+    {
+        float inputs:intensity = 3
+        bool inputs:normalize = 1
+        float3 xformOp:rotateXYZ = (45, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def DomeLight_1 "Sky"
+    {
+        asset inputs:texture:file = @./sky.hdr@
+    }
+
+    # (a) A PointInstancer scattering one orange cube to three points, with
+    # a distinct quath orientation and scale per instance — and its middle
+    # instance (index 1) struck out through the inactiveIds metadatum, so
+    # the composer must drop it from the mask. The survivors sit at x = ±4.5
+    # (the right one turned 45° about Z and grown 1.5×); the centre is bare.
+    def PointInstancer "Bricks" (
+        inactiveIds = [1]
+    )
+    {
+        point3f[] positions = [(-4.5, 0, 0.8), (0, 0, 0.8), (4.5, 0, 0.8)]
+        quath[] orientations = [(1, 0, 0, 0), (1, 0, 0, 0), (0.9238795, 0, 0, 0.3826834)]
+        float3[] scales = [(1, 1, 1), (1, 1, 1), (1.5, 1.5, 1.5)]
+        int[] protoIndices = [0, 0, 0]
+        rel prototypes = [</World/Bricks/Protos/Brick>]
+
+        def Scope "Protos"
+        {
+            def Cube "Brick"
+            {
+                double size = 1.4
+                color3f[] primvars:displayColor = [(0.9, 0.35, 0.1)]
+            }
+        }
+    }
+
+    # (b) Native instancing: the one _Widget prototype referenced twice, so
+    # usdImaging hands the composer a two-row hydra:instanceTransforms matrix
+    # instead of the translate/rotate/scale primvars above. Two green copies
+    # at x = ±4.5, up near the top of the frame.
+    def Xform "WidgetLeft" (
+        instanceable = true
+        prepend references = </_Widget>
+    )
+    {
+        double3 xformOp:translate = (-4.5, 0, 5.8)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Xform "WidgetRight" (
+        instanceable = true
+        prepend references = </_Widget>
+    )
+    {
+        double3 xformOp:translate = (4.5, 0, 5.8)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # (c) Recursion: a PointInstancer whose prototype cell carries a
+    # native-instanceable Gem. Each of the two scattered cells copies the
+    # Gem, so the Gem mesh is instanced by its own native instancer, which
+    # is in turn instanced by this PointInstancer — two levels the composer
+    # must flatten together. Two magenta copies at x = ±2.4, mid-frame.
+    def PointInstancer "Nest"
+    {
+        point3f[] positions = [(-2.4, 0, 3.0), (2.4, 0, 3.0)]
+        int[] protoIndices = [0, 0]
+        rel prototypes = [</World/Nest/Protos/Cell>]
+
+        def Scope "Protos"
+        {
+            def Xform "Cell"
+            {
+                def Xform "Gem" (
+                    instanceable = true
+                    prepend references = </_Gem>
+                )
+                {
+                }
+            }
+        }
+    }
+}

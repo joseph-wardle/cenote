@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The usdrecord smoke check: renders stages/first-light.usda,
-stages/preview-surface.usda, and stages/lit-stage.usda through the
-Cenote renderer and asserts what a human would eyeball. For first-light:
+stages/preview-surface.usda, stages/lit-stage.usda, and
+stages/instanced-stage.usda through the Cenote renderer and asserts what
+a human would eyeball. For first-light:
 the run succeeds, the frame is not black, and the silhouette is the
 expected one (the warm near cube left of center and larger, the cool
 far cube right and smaller, the background black). For preview-surface:
@@ -13,8 +14,17 @@ lit-stage: the dome fills the background (sky above the horizon, its
 warm ground glow below it), the warm rect and cool sphere pool on
 opposite sides of the ground, and no pixel in the frame is dark — with
 sky behind everything, the only way to darkness is a light's stand-in
-geometry turning camera-visible and showing its black absorber. No
-pixel equality; that is step 6's FLIP golden.
+geometry turning camera-visible and showing its black absorber. For
+instanced-stage: the three instancing paths each wear a distinct hue —
+orange a PointInstancer row whose middle instance is killed through the
+inactiveIds metadatum, green a native-instanceable prototype referenced
+twice (the aggregated matrix form), magenta a native instance nested
+inside a PointInstancer prototype (two instancer levels composed at
+once) — so each shows up as two mirror copies found by colour alone, the
+killed brick's centre reads as empty sky, and the dome stands behind the
+whole frame. Read by hue and left/right, never by handedness, so the
+render is free to flip or mirror. No pixel equality; that is step 6's
+FLIP golden.
 
 Run from anywhere with the USD prefix on PATH/PYTHONPATH (README.md's
 environment) and the plugin installed to hydra/dist/. The server binary
@@ -299,6 +309,69 @@ def analyze_lit_stage(out_path):
     )
 
 
+def analyze_instanced_stage(out_path):
+    image = load(out_path)
+    width, height = image.width(), image.height()
+    stride = image.bytesPerLine()
+    pixels = image.constBits()
+
+    # Every instancing path wears its own hue, so a copy is found by colour,
+    # never by where it sits — the render stays free to flip or mirror.
+    # Orange is the PointInstancer row (translate/rotate/scale primvars, its
+    # middle instance struck out via inactiveIds); green the native-
+    # instanceable prototype referenced twice (the matrix form); magenta the
+    # native instance nested inside a PointInstancer prototype. The bounds
+    # are wide enough to clear the dome's warm horizon band and blue sky,
+    # which no cube hue comes near.
+    def hue(r, g, b):
+        if r >= 220 and 140 <= g <= 230 and b <= 180 and r - b >= 60 and r - g >= 30:
+            return "orange"
+        if r >= 180 and b >= 180 and g <= 160:
+            return "magenta"
+        if g >= 180 and g - r >= 60 and g - b >= 60:
+            return "green"
+        return None
+
+    # Three columns per hue: left, right, and a central band the killed
+    # brick's ghost would fall in — copies sit at x = ±4.5 and ±2.4, so the
+    # band stays clear of every survivor.
+    counts = {"orange": [0, 0, 0], "green": [0, 0, 0], "magenta": [0, 0, 0]}
+    for y in range(height):
+        row = pixels[y * stride : y * stride + width * 3]
+        for x in range(width):
+            found = hue(row[x * 3], row[x * 3 + 1], row[x * 3 + 2])
+            if found:
+                fx = x / width
+                counts[found][0 if fx < 0.42 else 2 if fx > 0.58 else 1] += 1
+
+    # The dome stands behind everything, so no corner may be black — else the
+    # sky is not reaching the frame, and "empty" below would read the same as
+    # a hole the renderer left.
+    for cx, cy in ((4, 4), (width - 5, 4), (4, height - 5), (width - 5, height - 5)):
+        pixel = image.pixelColor(cx, cy)
+        if max(pixel.red(), pixel.green(), pixel.blue()) <= DARK:
+            fail(f"corner ({cx}, {cy}) is black — the dome sky is not reaching the background")
+
+    # A copy smaller than this is noise, not a cube; the central band should
+    # hold no cube at all, so allow it only a few stray anti-aliased pixels.
+    floor_px = 200
+    for name in ("orange", "green", "magenta"):
+        left, _, right = counts[name]
+        if left < floor_px or right < floor_px:
+            fail(f"{name} should stand as two mirror copies, but reads left={left} "
+                 f"right={right} — a copy is missing")
+    if counts["orange"][1] > floor_px // 4:
+        fail(f"the killed middle brick still shows: {counts['orange'][1]} orange px in the "
+             f"central band that inactiveIds should have left as sky")
+
+    print(
+        f"usdrecord smoke: OK — {width}x{height}, three instancing hues each in two mirror "
+        f"copies (orange left/right {counts['orange'][0]}/{counts['orange'][2]}, "
+        f"green {counts['green'][0]}/{counts['green'][2]}, magenta {counts['magenta'][0]}/"
+        f"{counts['magenta'][2]}), the masked brick's centre empty, dome behind all"
+    )
+
+
 def main():
     directory = Path(tempfile.mkdtemp(prefix="cenote-usdrecord-"))
     try:
@@ -306,6 +379,7 @@ def main():
             (STAGES / "first-light.usda", analyze_first_light),
             (STAGES / "preview-surface.usda", analyze_preview_surface),
             (STAGES / "lit-stage.usda", analyze_lit_stage),
+            (STAGES / "instanced-stage.usda", analyze_instanced_stage),
         ):
             out_path = directory / f"{stage.stem}.png"
             record(stage, out_path)
