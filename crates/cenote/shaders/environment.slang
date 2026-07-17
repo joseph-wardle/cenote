@@ -13,10 +13,16 @@
 //
 // Directions map to the image with +Y up: v = θ/π from the zenith, u wraps
 // the azimuth with the image's horizontal center facing −Z (the way the
-// crate's cameras conventionally look). Poles are the equirect singularity:
-// a direction with sin θ = 0 has no well-defined pdf, so both entry points
-// report zero there and callers treat the sample as carrying nothing —
-// next-event skips it, and an escaped ray's MIS weight becomes 1.
+// crate's cameras conventionally look). Those conventions hold in the
+// environment's own space; the scene table carries the linear part of an
+// authored placement (and its inverse), and every entry point rotates
+// through it — sampling draws in environment space and turns out, lookups
+// turn in. The table also carries a tint, folded over every radiance read;
+// the pdf tables stay untinted (scaling radiance moves no probability
+// mass). Poles are the equirect singularity: a direction with sin θ = 0
+// has no well-defined pdf, so both entry points report zero there and
+// callers treat the sample as carrying nothing — next-event skips it, and
+// an escaped ray's MIS weight becomes 1.
 
 // The environment texture, next to the TLAS in the one descriptor set.
 [vk::binding(1, 0)]
@@ -66,17 +72,38 @@ CdfSlot sampleCdf(float* cdf, uint count, float u) {
 // `selectProb` is scene prep's power-proportional probability that
 // next-event estimation samples the environment rather than a quad light.
 public struct Environment {
+    float4 envToWorld[3];  // rows: the linear part of the authored placement
+    float4 worldToEnv[3];  // rows of its inverse — world directions in
+    float3 tint;           // ACEScg multiplier over the image's radiance
+    public float selectProb;
     float* marginalCdf;    // height + 1 entries: CDF over rows
     float* conditionalCdf; // height runs of width + 1: per-row CDF
     float* pdfs;           // height × width: joint density over (u, v)
     uint width;
     uint height;
-    public float selectProb;
-    uint pad;
 
-    float2 uvFromDirection(float3 d) {
-        let u = 0.5 + atan2(d.x, -d.z) / (2.0 * PI);
-        let v = acos(clamp(d.y, -1.0, 1.0)) / PI;
+    // A world direction in environment space, where the image's mapping
+    // conventions hold. Normalized, so a scaled or sheared placement still
+    // yields a lookup direction (Storm's dome behavior). Under such a
+    // non-orthogonal linear part the pdfs below are approximate — but
+    // `sample`, `connect`, and `pdf` all pass through here, so the drawn
+    // and evaluated densities stay mutually consistent.
+    float3 envFromWorld(float3 d) {
+        return normalize(float3(dot(worldToEnv[0].xyz, d),
+                                dot(worldToEnv[1].xyz, d),
+                                dot(worldToEnv[2].xyz, d)));
+    }
+
+    // An environment-space direction placed into the world.
+    float3 worldFromEnv(float3 d) {
+        return normalize(float3(dot(envToWorld[0].xyz, d),
+                                dot(envToWorld[1].xyz, d),
+                                dot(envToWorld[2].xyz, d)));
+    }
+
+    float2 uvFromDirection(float3 env) {
+        let u = 0.5 + atan2(env.x, -env.z) / (2.0 * PI);
+        let v = acos(clamp(env.y, -1.0, 1.0)) / PI;
         return float2(u, v);
     }
 
@@ -87,9 +114,10 @@ public struct Environment {
         return float3(sinTheta * sin(phi), cos(theta), -sinTheta * cos(phi));
     }
 
-    // The radiance arriving from direction `d` — what an escaped ray sees.
+    // The radiance arriving from world direction `d` — what an escaped ray
+    // sees.
     public float3 radiance(float3 d) {
-        return environmentTexture.SampleLevel(uvFromDirection(d), 0.0).xyz;
+        return tint * environmentTexture.SampleLevel(uvFromDirection(envFromWorld(d)), 0.0).xyz;
     }
 
     // Draw a direction ∝ the sampling tables. The returned pdf is this
@@ -100,8 +128,8 @@ public struct Environment {
         let uv = float2(col.position, row.position);
         let sinTheta = sin(PI * uv.y);
         EnvironmentSample s;
-        s.direction = directionFromUv(uv);
-        s.radiance = environmentTexture.SampleLevel(uv, 0.0).xyz;
+        s.direction = worldFromEnv(directionFromUv(uv));
+        s.radiance = tint * environmentTexture.SampleLevel(uv, 0.0).xyz;
         s.pdf = sinTheta > 0.0
               ? pdfs[row.index * width + col.index] / (2.0 * PI * PI * sinTheta)
               : 0.0;
@@ -122,28 +150,32 @@ public struct Environment {
         let col = min(uint(uv.x * float(width)), width - 1);
         let row = min(uint(uv.y * float(height)), height - 1);
         EnvironmentSample s;
-        s.direction = directionFromUv(uv);
-        s.radiance = environmentTexture.SampleLevel(uv, 0.0).xyz;
+        s.direction = worldFromEnv(directionFromUv(uv));
+        s.radiance = tint * environmentTexture.SampleLevel(uv, 0.0).xyz;
         s.pdf = sinTheta > 0.0 ? pdfs[row * width + col] / (2.0 * PI * PI * sinTheta) : 0.0;
         s.uv = uv;
         return s;
     }
 
-    // The image point a direction maps to — the inverse of the `directionFromUv`
-    // `sample`/`connect` build directions with, so a BSDF-sampled ray escaping
-    // to the sky can be stored as an env candidate and reconnected exactly.
+    // The image point a world direction maps to — the inverse of the
+    // `worldFromEnv(directionFromUv(...))` that `sample`/`connect` build
+    // directions with, so a BSDF-sampled ray escaping to the sky can be
+    // stored as an env candidate and reconnected exactly.
     public float2 locate(float3 d) {
-        return uvFromDirection(d);
+        return uvFromDirection(envFromWorld(d));
     }
 
-    // The solid-angle pdf `sample` would report for direction `d` — the
-    // MIS competitor for a BSDF-sampled ray that escaped to the sky.
+    // The solid-angle pdf `sample` would report for world direction `d` —
+    // the MIS competitor for a BSDF-sampled ray that escaped to the sky.
+    // The equirect area factor reads off the environment-space direction:
+    // that is the space the image (and its tables) live in.
     public float pdf(float3 d) {
-        let sinTheta = sqrt(max(0.0, 1.0 - d.y * d.y));
+        let env = envFromWorld(d);
+        let sinTheta = sqrt(max(0.0, 1.0 - env.y * env.y));
         if (sinTheta <= 0.0) {
             return 0.0;
         }
-        let uv = uvFromDirection(d);
+        let uv = uvFromDirection(env);
         let col = min(uint(uv.x * float(width)), width - 1);
         let row = min(uint(uv.y * float(height)), height - 1);
         return pdfs[row * width + col] / (2.0 * PI * PI * sinTheta);

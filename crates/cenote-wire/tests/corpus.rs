@@ -22,8 +22,9 @@
 //! Coverage, per the step-0 plan: every `Op` variant; every patch field
 //! `Some`; both `MeshSource` and both `Transform` spellings; both `Light`
 //! and both `Texturable` variants; the texture channel absent and in all
-//! four spellings; the doubly-optional fields in all three states; a
-//! `Remove` of every `Kind`; an empty set; unicode in names, paths, and
+//! four spellings; the doubly-optional fields in all three states (the
+//! material's normal map, the camera's focus, the environment's image);
+//! a `Remove` of every `Kind`; an empty set; unicode in names, paths, and
 //! messages; and every `Request`/`Response` variant.
 
 use std::collections::BTreeSet;
@@ -332,9 +333,28 @@ fn genesis() -> ChangeSet {
                 vfov_degrees: Some(30.0),
                 ..CameraPatch::default()
             }),
+            // The environment patch three times over, like the material:
+            // the image set, cleared (back to the constant white sky),
+            // and left alone — the path's three doubly-optional states.
             Op::Environment(EnvironmentPatch {
                 name: "ciel-d'été".into(),
-                path: Some("/scènes/небо.exr".into()),
+                path: Some(Reset::Set("/scènes/небо.exr".into())),
+                tint: Some([1.0, 0.9, 0.8]),
+                transform: Some(Transform::Trs {
+                    translate: [0.0; 3],
+                    rotate_degrees: [0.0, 45.0, 0.0],
+                    scale: [1.0; 3],
+                }),
+            }),
+            Op::Environment(EnvironmentPatch {
+                name: "env-clear".into(),
+                path: Some(Reset::Clear),
+                ..EnvironmentPatch::default()
+            }),
+            Op::Environment(EnvironmentPatch {
+                name: "env-leave".into(),
+                tint: Some([0.5, 0.5, 0.5]),
+                ..EnvironmentPatch::default()
             }),
             Op::Settings(SettingsPatch {
                 name: "main".into(),

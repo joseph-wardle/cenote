@@ -236,8 +236,14 @@ pub struct CameraPatch {
 pub struct EnvironmentPatch {
     /// Target name.
     pub name: String,
-    /// The equirect radiance EXR.
-    pub path: Option<PathBuf>,
+    /// The equirect radiance image (`.exr` or `.hdr`). Doubly optional:
+    /// `None` leaves the image alone, `Some(None)` clears it back to the
+    /// constant white sky.
+    pub path: Option<Option<PathBuf>>,
+    /// Linear `Rec.709` multiplier over the sky's radiance.
+    pub tint: Option<[f32; 3]>,
+    /// Environment-to-world placement (the linear part turns the sky).
+    pub transform: Option<Transform>,
 }
 
 /// Patch for [`Settings`].
@@ -330,7 +336,7 @@ impl ChangeSet {
                     }
                 }
                 Op::Environment(patch) => {
-                    if let Some(path) = &mut patch.path {
+                    if let Some(Some(path)) = &mut patch.path {
                         visit(path);
                     }
                 }
@@ -458,7 +464,7 @@ fn apply_op(objects: &mut Objects, dirty: &mut Dirty, op: &Op) -> Result<()> {
             );
         }),
         Op::Environment(patch) => upsert(&mut objects.environments, &name, |environment| {
-            merge!(environment, patch; path);
+            merge!(environment, patch; path, tint, transform);
         }),
         Op::Settings(patch) => upsert(&mut objects.settings, &name, |settings| {
             merge!(settings, patch; resolution, spp, max_bounces, seed);
@@ -534,7 +540,17 @@ fn validate(objects: &Objects) -> Result<()> {
         validate_camera(name, camera)?;
     }
     for (name, environment) in &objects.environments {
-        validate_path(&format!("environment \"{name}\""), &environment.path)?;
+        if let Some(path) = &environment.path {
+            validate_path(&format!("environment \"{name}\""), path)?;
+        }
+        // Sampling maps world directions through the inverse — the same
+        // invertibility instances need for their records.
+        let matrix = environment.transform.to_mat4();
+        if !(matrix.is_finite() && matrix.inverse().is_finite()) {
+            return Err(scene_error(format!(
+                "environment \"{name}\" has a non-invertible transform"
+            )));
+        }
     }
     for (name, settings) in &objects.settings {
         validate_settings(name, settings)?;
@@ -918,12 +934,55 @@ mod tests {
         assert!(error.to_string().contains("out of bounds"), "{error}");
     }
 
+    /// The environment's own validation: a placement whose linear part
+    /// can't invert is rejected (sampling maps directions back through the
+    /// inverse), and the doubly-optional path clears back to the constant
+    /// sky rather than sticking.
+    #[test]
+    fn environment_transforms_must_invert_and_paths_clear() {
+        let mut description = SceneDescription::new();
+        let squashed = ChangeSet {
+            ops: vec![Op::Environment(EnvironmentPatch {
+                transform: Some(Transform::Trs {
+                    translate: [0.0; 3],
+                    rotate_degrees: [0.0; 3],
+                    scale: [1.0, 0.0, 1.0],
+                }),
+                ..EnvironmentPatch::new("sky")
+            })],
+        };
+        let error = description.apply(&squashed).unwrap_err();
+        assert!(error.to_string().contains("non-invertible"), "{error}");
+
+        description
+            .apply(&ChangeSet {
+                ops: vec![Op::Environment(EnvironmentPatch {
+                    path: Some(Some(existing_file())),
+                    ..EnvironmentPatch::new("sky")
+                })],
+            })
+            .expect("a set image applies");
+        assert_eq!(
+            description.environments()["sky"].path,
+            Some(existing_file())
+        );
+        description
+            .apply(&ChangeSet {
+                ops: vec![Op::Environment(EnvironmentPatch {
+                    path: Some(None),
+                    ..EnvironmentPatch::new("sky")
+                })],
+            })
+            .expect("the clear applies");
+        assert_eq!(description.environments()["sky"].path, None);
+    }
+
     #[test]
     fn referenced_files_must_exist_and_be_absolute() {
         let mut description = SceneDescription::new();
         let relative = ChangeSet {
             ops: vec![Op::Environment(EnvironmentPatch {
-                path: Some("sky.exr".into()),
+                path: Some(Some("sky.exr".into())),
                 ..EnvironmentPatch::new("sky")
             })],
         };
@@ -932,7 +991,7 @@ mod tests {
 
         let missing = ChangeSet {
             ops: vec![Op::Environment(EnvironmentPatch {
-                path: Some("/no/such/sky.exr".into()),
+                path: Some(Some("/no/such/sky.exr".into())),
                 ..EnvironmentPatch::new("sky")
             })],
         };
@@ -1014,7 +1073,7 @@ mod tests {
                     ..MeshPatch::new("m")
                 }),
                 Op::Environment(EnvironmentPatch {
-                    path: Some("/already/absolute.exr".into()),
+                    path: Some(Some("/already/absolute.exr".into())),
                     ..EnvironmentPatch::new("sky")
                 }),
                 Op::Material(Box::new(MaterialPatch {
@@ -1040,7 +1099,7 @@ mod tests {
         let Op::Environment(environment) = &set.ops[1] else {
             unreachable!()
         };
-        assert_eq!(environment.path, Some("/already/absolute.exr".into()));
+        assert_eq!(environment.path, Some(Some("/already/absolute.exr".into())));
         let Op::Material(material) = &set.ops[2] else {
             unreachable!()
         };
@@ -1065,7 +1124,7 @@ mod tests {
                     ..MeshPatch::new("m")
                 }),
                 Op::Environment(EnvironmentPatch {
-                    path: Some("/elsewhere/sky.exr".into()),
+                    path: Some(Some("/elsewhere/sky.exr".into())),
                     ..EnvironmentPatch::new("sky")
                 }),
             ],
@@ -1085,7 +1144,7 @@ mod tests {
         let Op::Environment(environment) = &set.ops[1] else {
             unreachable!()
         };
-        assert_eq!(environment.path, Some("/elsewhere/sky.exr".into()));
+        assert_eq!(environment.path, Some(Some("/elsewhere/sky.exr".into())));
 
         // Round trip: rebasing against the same directory restores it.
         set.rebase_paths(Path::new("/scenes"));

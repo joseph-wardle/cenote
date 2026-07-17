@@ -200,9 +200,27 @@ ChangeSet genesis() {
             .name = "cam-leave",
             .vfov_degrees = 30.0f,
         },
+        // The environment patch three times over, like the material: the
+        // image set, cleared (back to the constant white sky), and left
+        // alone — the path's three doubly-optional states.
         EnvironmentPatch{
             .name = "ciel-d'été",
-            .path = "/scènes/небо.exr",
+            .path = Set{std::string{"/scènes/небо.exr"}},
+            .tint = std::array{1.0f, 0.9f, 0.8f},
+            .transform =
+                Trs{
+                    .translate = {0.0f, 0.0f, 0.0f},
+                    .rotate_degrees = {0.0f, 45.0f, 0.0f},
+                    .scale = {1.0f, 1.0f, 1.0f},
+                },
+        },
+        EnvironmentPatch{
+            .name = "env-clear",
+            .path = Clear{},
+        },
+        EnvironmentPatch{
+            .name = "env-leave",
+            .tint = std::array{0.5f, 0.5f, 0.5f},
         },
         SettingsPatch{
             .name = "main",

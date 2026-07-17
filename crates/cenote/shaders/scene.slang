@@ -46,7 +46,9 @@ public struct SceneTable {
     public float* bsdfTables; // layout in `tables.rs` ↔ openpbr.slang TABLE_*
     public Environment env;
     public uint lightCount;
-    uint pad;
+    uint pad0;
+    uint pad1;
+    uint pad2;
 };
 
 // The coverage of one traversal crossing: the instance's opacity constant

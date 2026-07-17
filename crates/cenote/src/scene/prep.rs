@@ -51,7 +51,7 @@ impl Scene {
                   its environment and camera — not reachable panics"
     )]
     pub fn prep(gpu: &Context, description: &mut SceneDescription) -> Result<Self> {
-        let host = host_phase(description, &all_dirty(description), true, &BTreeMap::new())?;
+        let host = host_phase(description, &all_dirty(description), true, &BTreeMap::new(), None)?;
         let mut meshes = BTreeMap::new();
         for (name, mesh) in &host.meshes {
             meshes.insert(
@@ -64,10 +64,14 @@ impl Scene {
             .values()
             .map(|texture| texture.image.descriptor())
             .collect();
-        let environment = host
+        let spec = host
             .environment
             .as_ref()
             .expect("a fresh build always carries its environment");
+        let environment = spec
+            .image
+            .as_ref()
+            .expect("a fresh build has nothing resident to keep");
         let GpuEnvironment {
             image,
             marginal,
@@ -90,11 +94,14 @@ impl Scene {
             pdfs,
         )?;
         let env_size = (environment.width(), environment.height());
+        let tinted_power = power * f64::from(crate::color::luminance(spec.tint));
         let table = upload_scene_table(
             gpu,
             &resident,
             env_size,
-            select_probability(power, host.light_power()),
+            (spec.to_world, spec.from_world),
+            spec.tint,
+            select_probability(tinted_power, host.light_power()),
             host.light_count(),
         )?;
         let mut identity = LightIdentityRegistry::new();
@@ -104,7 +111,7 @@ impl Scene {
             &host.triangle_lights,
             &host.delta_lights,
             host.instances.len() as u32,
-            power,
+            tinted_power,
         )?;
         description.take_dirty();
         Ok(Self {
@@ -118,6 +125,10 @@ impl Scene {
             camera: host.camera.expect("a fresh build always adopts its camera"),
             env_size,
             env_power: power,
+            env_source: spec.source.clone(),
+            env_tint: spec.tint,
+            env_to_world: spec.to_world,
+            env_from_world: spec.from_world,
             identity,
             restir,
         })
@@ -144,7 +155,13 @@ impl Scene {
             .iter()
             .map(|(key, texture)| (key.clone(), texture.hash))
             .collect();
-        let host = host_phase(description, dirty, false, &resident_hashes)?;
+        let host = host_phase(
+            description,
+            dirty,
+            false,
+            &resident_hashes,
+            self.env_source.as_deref(),
+        )?;
         // Only device faults from here on — the untouched-on-Scene-error
         // contract holds because everything fallible already ran.
         for name in &host.removed_meshes {
@@ -158,14 +175,23 @@ impl Scene {
         }
         self.textures = upload_textures(gpu, std::mem::take(&mut self.textures), &host.textures)?;
         self.rebuild_texture_descriptors();
-        if let Some(environment) = &host.environment {
-            let env = upload_environment(gpu, environment)?;
-            self.environment = env.image;
-            self.resident.env_marginal = env.marginal;
-            self.resident.env_conditional = env.conditional;
-            self.resident.env_pdfs = env.pdfs;
-            self.env_size = (environment.width(), environment.height());
-            self.env_power = env.power;
+        if let Some(spec) = &host.environment {
+            // The image re-uploads only when the source changed; the tint
+            // and placement always re-land — they live in the scene table,
+            // which rebuilds below regardless.
+            if let Some(environment) = &spec.image {
+                let env = upload_environment(gpu, environment)?;
+                self.environment = env.image;
+                self.resident.env_marginal = env.marginal;
+                self.resident.env_conditional = env.conditional;
+                self.resident.env_pdfs = env.pdfs;
+                self.env_size = (environment.width(), environment.height());
+                self.env_power = env.power;
+            }
+            self.env_source.clone_from(&spec.source);
+            self.env_tint = spec.tint;
+            self.env_to_world = spec.to_world;
+            self.env_from_world = spec.from_world;
         }
         let placements = placements(&self.meshes, &host.instances);
         if host.tlas_dirty {
@@ -177,11 +203,14 @@ impl Scene {
         self.resident.geometry = geometry;
         self.resident.materials = materials;
         self.resident.lights = lights;
+        let env_power = self.tinted_env_power();
         self.table = upload_scene_table(
             gpu,
             &self.resident,
             self.env_size,
-            select_probability(self.env_power, host.light_power()),
+            (self.env_to_world, self.env_from_world),
+            self.env_tint,
+            select_probability(env_power, host.light_power()),
             host.light_count(),
         )?;
         // The reservoir path's slice rides the same light-edit rebuild: the
@@ -193,7 +222,7 @@ impl Scene {
             &host.triangle_lights,
             &host.delta_lights,
             host.instances.len() as u32,
-            self.env_power,
+            env_power,
         )?;
         if let Some(camera) = host.camera {
             self.camera = camera;
@@ -296,7 +325,8 @@ mod tests {
     /// Every re-prep path, one edit each — the walk
     /// [`incremental_updates_match_a_fresh_build`] takes: material-only
     /// (buffer upload), emission (light tables), transform (TLAS),
-    /// topology (BLAS), removal (retired residency), environment swap, a
+    /// topology (BLAS), removal (retired residency), environment swap —
+    /// then its tint and placement, which ride the keep-resident path — a
     /// camera move, a delta light, a camera-visibility flip (TLAS masks),
     /// a closure edit with fractional opacity (materials plus the TLAS
     /// opacity flags), a texture reference (the bindless table gains a
@@ -361,7 +391,32 @@ mod tests {
                 "environment",
                 ChangeSet {
                     ops: vec![Op::Environment(EnvironmentPatch {
-                        path: Some(sky.to_owned()),
+                        path: Some(Some(sky.to_owned())),
+                        ..EnvironmentPatch::new("sky")
+                    })],
+                },
+            ),
+            (
+                // A tint edit rides the keep-resident path: same source,
+                // new scene-table constants — the incremental build must
+                // still land the exact fresh-build frame.
+                "environment tint",
+                ChangeSet {
+                    ops: vec![Op::Environment(EnvironmentPatch {
+                        tint: Some([0.9, 0.6, 0.3]),
+                        ..EnvironmentPatch::new("sky")
+                    })],
+                },
+            ),
+            (
+                "environment placement",
+                ChangeSet {
+                    ops: vec![Op::Environment(EnvironmentPatch {
+                        transform: Some(super::super::description::Transform::Trs {
+                            translate: [0.0; 3],
+                            rotate_degrees: [0.0, 120.0, 0.0],
+                            scale: [1.0; 3],
+                        }),
                         ..EnvironmentPatch::new("sky")
                     })],
                 },

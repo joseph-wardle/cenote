@@ -284,8 +284,14 @@ pub struct CameraPatch {
 pub struct EnvironmentPatch {
     /// Target name.
     pub name: String,
-    /// The equirect radiance EXR, absolute.
-    pub path: Option<String>,
+    /// The equirect radiance image (`.exr` or `.hdr`), absolute. Doubly
+    /// optional in the renderer: absent leaves the image alone,
+    /// [`Reset::Clear`] restores the constant white sky.
+    pub path: Option<Reset<String>>,
+    /// Linear `Rec.709` multiplier over the sky's radiance.
+    pub tint: Option<[f32; 3]>,
+    /// Environment-to-world placement (the linear part turns the sky).
+    pub transform: Option<Transform>,
 }
 
 /// Mirror of `changeset::SettingsPatch`.

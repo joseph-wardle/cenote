@@ -208,10 +208,14 @@ struct CameraPatch {
     std::optional<float> aperture_radius{};
 };
 
-/// Mirror of `EnvironmentPatch`.
+/// Mirror of `EnvironmentPatch`. The path is doubly optional like the
+/// material's normal map: absent leaves the image alone, `Clear` restores
+/// the constant white sky.
 struct EnvironmentPatch {
     std::string name;
-    std::optional<std::string> path{};
+    std::optional<Reset<std::string>> path{};
+    std::optional<std::array<float, 3>> tint{};
+    std::optional<Transform> transform{};
 };
 
 /// Mirror of `SettingsPatch`.

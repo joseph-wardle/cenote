@@ -924,7 +924,7 @@ impl Mapper {
             crate::env::write_constant(color.map(|channel| channel * factor), &out)?;
         }
         self.ops.push(Op::Environment(EnvironmentPatch {
-            path: Some(out),
+            path: Some(Some(out)),
             ..EnvironmentPatch::new("sky")
         }));
         self.environment_emitted = true;
@@ -1890,7 +1890,7 @@ Translate 1 0 0
                 .ops
                 .iter()
                 .find_map(|op| match op {
-                    Op::Environment(patch) => patch.path.as_ref(),
+                    Op::Environment(patch) => patch.path.as_ref()?.as_ref(),
                     _ => None,
                 })
                 .expect("an environment op");

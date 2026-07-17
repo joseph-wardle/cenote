@@ -33,11 +33,13 @@ mod shapes;
 pub use shapes::{ground_plane, icosphere};
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec2, Vec3};
 
+use crate::color::luminance;
 use crate::environment::Environment;
 use crate::error::{Error, Result};
 use crate::gpu::{AccelerationStructure, Buffer, Context, SampledImage, TlasInstance};
@@ -146,17 +148,23 @@ struct SceneTable {
     /// kernels share, which keeps their push constants inside Vulkan's
     /// guaranteed 128 bytes.
     bsdf_tables: vk::DeviceAddress,
+    /// Rows of the environment's placement (linear part only — the sky is
+    /// all directions) — `envToWorld` on the Slang side.
+    env_to_world: [[f32; 4]; 3],
+    /// Rows of its inverse: world directions into environment space.
+    env_from_world: [[f32; 4]; 3],
+    /// `ACEScg` multiplier the kernel folds over the image's radiance.
+    env_tint: [f32; 3],
+    /// p(next-event estimation samples the environment rather than the
+    /// light list) — `selectProb` on the Slang side.
+    env_select_prob: f32,
     env_marginal: vk::DeviceAddress,
     env_conditional: vk::DeviceAddress,
     env_pdfs: vk::DeviceAddress,
     env_width: u32,
     env_height: u32,
-    /// p(next-event estimation samples the environment rather than the
-    /// light list) — `selectProb` on the Slang side.
-    env_select_prob: f32,
-    _pad0: u32,
     light_count: u32,
-    _pad1: u32,
+    _pad0: [u32; 3],
 }
 
 /// The scene, resident on the GPU and ready to trace against.
@@ -186,12 +194,22 @@ pub struct Scene {
     /// changes; every wave binds it next to the TLAS.
     descriptors: Vec<vk::DescriptorImageInfo>,
     camera: Camera,
-    /// The environment's dimensions and emitted power, retained so a
-    /// light edit can rebuild the scene table (its selection probability
-    /// weighs the light list against the environment) without reloading
-    /// the image.
+    /// The environment's dimensions and emitted power (untinted), retained
+    /// so a light edit can rebuild the scene table (its selection
+    /// probability weighs the light list against the environment) without
+    /// reloading the image.
     env_size: (u32, u32),
     env_power: f64,
+    /// The image file the resident environment decoded from (`None` for a
+    /// constant sky) — the identity that lets a tint or placement edit
+    /// keep the decode and the upload.
+    env_source: Option<PathBuf>,
+    /// The environment's `ACEScg` tint and placement (linear part and
+    /// inverse) — scene-table constants, retained beside `env_power` for
+    /// the same table rebuilds.
+    env_tint: Vec3,
+    env_to_world: Mat4,
+    env_from_world: Mat4,
     /// The stable light-identity registry (M3): persists across edits so a
     /// reservoir's stored light id stays meaningful while the GPU light index
     /// churns. Reconciled every build; rebuilds the [`restir`](Self::restir)
@@ -328,10 +346,14 @@ impl Scene {
         )?;
         let env_size = (environment.width(), environment.height());
         let light_count = triangle_lights.len() as u32;
+        // The procedural path takes its environment as-is: white tint,
+        // identity placement.
         let table = upload_scene_table(
             gpu,
             &resident,
             env_size,
+            (Mat4::IDENTITY, Mat4::IDENTITY),
+            Vec3::ONE,
             select_probability(power, crate::lights::total_power(&triangle_lights, &[])),
             light_count,
         )?;
@@ -360,6 +382,10 @@ impl Scene {
             camera,
             env_size,
             env_power: power,
+            env_source: None,
+            env_tint: Vec3::ONE,
+            env_to_world: Mat4::IDENTITY,
+            env_from_world: Mat4::IDENTITY,
             identity,
             restir,
         })
@@ -369,6 +395,14 @@ impl Scene {
     #[must_use]
     pub fn tlas(&self) -> &AccelerationStructure {
         &self.tlas
+    }
+
+    /// The environment's emitted power as the selection heuristic weighs
+    /// it: the image's luminance integral scaled by the tint's luminance.
+    /// Exact for a neutral tint; a chromatic one lands within the
+    /// heuristic's tolerance (the MIS weights stay exact regardless).
+    fn tinted_env_power(&self) -> f64 {
+        self.env_power * f64::from(luminance(self.env_tint))
     }
 
     /// The scene table: the one buffer of addresses kernels reach all
@@ -663,11 +697,14 @@ fn build_restir(
 
 /// Upload the [`SceneTable`] — the one buffer of addresses every kernel
 /// reaches scene data through, rebuilt whenever anything it points at
-/// moved.
+/// moved. `env_placement` is the environment-to-world linear part and its
+/// inverse; `env_tint` the `ACEScg` multiplier over the image's radiance.
 fn upload_scene_table(
     gpu: &Context,
     resident: &ResidentBuffers,
     env_size: (u32, u32),
+    env_placement: (Mat4, Mat4),
+    env_tint: Vec3,
     env_select_prob: f32,
     light_count: u32,
 ) -> Result<Buffer> {
@@ -676,15 +713,17 @@ fn upload_scene_table(
         materials: resident.materials.device_address(),
         lights: resident.lights.device_address(),
         bsdf_tables: resident.bsdf_tables.device_address(),
+        env_to_world: transform_rows(env_placement.0),
+        env_from_world: transform_rows(env_placement.1),
+        env_tint: env_tint.to_array(),
+        env_select_prob,
         env_marginal: resident.env_marginal.device_address(),
         env_conditional: resident.env_conditional.device_address(),
         env_pdfs: resident.env_pdfs.device_address(),
         env_width: env_size.0,
         env_height: env_size.1,
-        env_select_prob,
-        _pad0: 0,
         light_count,
-        _pad1: 0,
+        _pad0: [0; 3],
     };
     let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
     gpu.upload_buffer("scene.table", bytemuck::bytes_of(&table), usage)

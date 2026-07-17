@@ -34,7 +34,8 @@ use crate::error::Result;
 /// straight up (+Y), the bottom row straight down, and the horizontal
 /// center of the image faces −Z — the direction the crate's cameras
 /// conventionally look, so an HDRI's centered subject lands behind the
-/// scene.
+/// scene. A scene may tint or turn the whole sky at sampling; that rides
+/// the scene table (`scene/mod.rs`), never this image or its tables.
 pub struct Environment {
     width: u32,
     height: u32,
@@ -89,12 +90,33 @@ impl Environment {
     /// [`crate::Error::Image`] if `bytes` don't decode as an EXR.
     pub fn from_equirect_exr(bytes: &[u8]) -> Result<Self> {
         let (width, height, mut texels) = crate::output::read_exr_bytes(bytes)?;
-        for texel in texels.chunks_exact_mut(4) {
-            let rgb = Vec3::new(texel[0], texel[1], texel[2]);
-            let rgb = if rgb.is_finite() { rgb } else { Vec3::ZERO };
-            let acescg = acescg_from_rec709(rgb).max(Vec3::ZERO);
-            texel.copy_from_slice(&[acescg.x, acescg.y, acescg.z, 1.0]);
+        convert_to_acescg(&mut texels);
+        Ok(Self {
+            width,
+            height,
+            texels,
+            tables: OnceLock::new(),
+        })
+    }
+
+    /// Load an equirect Radiance HDR (`.hdr`) — the same IDT and
+    /// sanitization as [`Environment::from_equirect_exr`]. RGBE's shared
+    /// exponent can't encode a NaN, but negatives arrive all the same
+    /// once the gamut conversion runs, so the paths share one sanitizer.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Scene`] if `bytes` don't decode as Radiance HDR.
+    pub fn from_equirect_hdr(bytes: &[u8]) -> Result<Self> {
+        let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Hdr)
+            .map_err(|error| crate::Error::Scene(format!("not a Radiance HDR image: {error}")))?
+            .into_rgb32f();
+        let (width, height) = image.dimensions();
+        let mut texels = Vec::with_capacity(width as usize * height as usize * 4);
+        for pixel in image.pixels() {
+            texels.extend_from_slice(&[pixel.0[0], pixel.0[1], pixel.0[2], 1.0]);
         }
+        convert_to_acescg(&mut texels);
         Ok(Self {
             width,
             height,
@@ -218,6 +240,17 @@ impl Environment {
     }
 }
 
+/// Linear `Rec.709` RGBA texels to sanitized `ACEScg`, in place: negatives
+/// clamp to zero, non-finite texels drop to black, alpha pins to 1.
+fn convert_to_acescg(texels: &mut [f32]) {
+    for texel in texels.chunks_exact_mut(4) {
+        let rgb = Vec3::new(texel[0], texel[1], texel[2]);
+        let rgb = if rgb.is_finite() { rgb } else { Vec3::ZERO };
+        let acescg = acescg_from_rec709(rgb).max(Vec3::ZERO);
+        texel.copy_from_slice(&[acescg.x, acescg.y, acescg.z, 1.0]);
+    }
+}
+
 /// The finished sampling tables, in the layout the kernels index. Mirrors
 /// what `struct Environment` in `shaders/environment.slang` reads.
 pub(crate) struct Tables {
@@ -321,6 +354,32 @@ mod tests {
                 env.tables().power
             );
         }
+    }
+
+    /// Radiance HDR decodes through the same IDT as EXR: hand-written RGBE
+    /// bytes (flat scanlines — RLE only exists for widths ≥ 8) land as the
+    /// exact radiance their shared exponent encodes, converted to `ACEScg`.
+    /// RGBE `(m_r, m_g, m_b, e)` decodes as `m/256 × 2^(e−128)`.
+    #[test]
+    fn radiance_hdr_decodes_to_known_texels() {
+        let mut bytes = b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 2\n".to_vec();
+        bytes.extend_from_slice(&[128, 64, 32, 129]); // (1.0, 0.5, 0.25)
+        bytes.extend_from_slice(&[0, 0, 0, 0]); // black
+        let env = Environment::from_equirect_hdr(&bytes).expect("hand-written RGBE decodes");
+        assert_eq!((env.width(), env.height()), (2, 1));
+        let want = acescg_from_rec709(Vec3::new(1.0, 0.5, 0.25));
+        let got = Vec3::new(env.texels()[0], env.texels()[1], env.texels()[2]);
+        assert!(got.abs_diff_eq(want, 1e-6), "{got} vs {want}");
+        assert_eq!(&env.texels()[4..8], &[0.0, 0.0, 0.0, 1.0]);
+    }
+
+    /// The decoder refuses what isn't Radiance HDR instead of guessing.
+    #[test]
+    fn garbage_is_not_a_radiance_hdr() {
+        let Err(error) = Environment::from_equirect_hdr(b"#?not really") else {
+            panic!("garbage must not decode");
+        };
+        assert!(matches!(error, crate::Error::Scene(_)), "{error}");
     }
 
     /// The demo asset round-trips through the loader: right size, finite,

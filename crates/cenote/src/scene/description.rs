@@ -447,12 +447,34 @@ impl Default for Camera {
     }
 }
 
-/// The environment light: an equirect EXR surrounding the scene.
-#[derive(Clone, Debug, Default, PartialEq)]
+/// The environment light: an equirect radiance image surrounding the
+/// scene — or, with no image, a constant white sky — tinted and turned.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Environment {
-    /// The radiance image — linear, equirect, `.exr`. Never empty in a
-    /// valid description.
-    pub path: PathBuf,
+    /// The radiance image — linear, equirect, `.exr` or Radiance `.hdr`
+    /// (prep tells them apart by content, not extension). `None` is a
+    /// constant white sky, colored by `tint`.
+    pub path: Option<PathBuf>,
+    /// Linear `Rec.709` multiplier over the image's radiance — the whole
+    /// sky dims, brightens, or colors through it without touching the
+    /// image. Default white (no change).
+    pub tint: [f32; 3],
+    /// Environment-to-world placement. Only the linear part acts — the sky
+    /// is all directions, so translation has nothing to move — and it must
+    /// be invertible (sampling maps world directions back through the
+    /// inverse). Default identity.
+    pub transform: Transform,
+}
+
+impl Default for Environment {
+    /// A constant white sky: no image, no tint, no turn.
+    fn default() -> Self {
+        Self {
+            path: None,
+            tint: one3(),
+            transform: Transform::default(),
+        }
+    }
 }
 
 /// Render settings — the minimal set, so the format doesn't churn while

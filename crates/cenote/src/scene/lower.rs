@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use glam::{Mat4, Vec2, Vec3};
+use glam::{Mat3, Mat4, Vec2, Vec3};
 
 use super::changeset::{Dirty, Kind};
 use super::description::{self, ColorSpace, MeshSource, SceneDescription, Texturable, TextureRef};
@@ -51,9 +51,9 @@ pub(super) struct HostScene {
     /// prepped data to (re)upload — `None` keeps the resident image, whose
     /// content hash matched.
     pub(super) textures: BTreeMap<texture::Key, Option<texture::Prepared>>,
-    /// Loaded when the environment changed (always, on a fresh build);
-    /// `None` keeps the resident image and tables.
-    pub(super) environment: Option<Arc<Environment>>,
+    /// Lowered when the environment changed (always, on a fresh build);
+    /// `None` keeps the resident image and the scene-table constants.
+    pub(super) environment: Option<EnvironmentSpec>,
     /// The camera, when it changed — a material edit must not snap the
     /// view back to the authored pose.
     pub(super) camera: Option<Camera>,
@@ -84,6 +84,26 @@ pub(super) struct InstanceSpec {
     pub(super) camera_visible: bool,
 }
 
+/// The environment lowered from the description: the image when it must be
+/// (re)made resident, and the scene-table constants that always re-land —
+/// so a tint or placement edit costs a table rebuild, never a decode.
+pub(super) struct EnvironmentSpec {
+    /// The decoded image; `None` keeps the resident one, whose source
+    /// path matched.
+    pub(super) image: Option<Arc<Environment>>,
+    /// The image file the environment decodes from — the identity the
+    /// keep-resident check compares. `None` for a constant sky.
+    pub(super) source: Option<std::path::PathBuf>,
+    /// `ACEScg` multiplier over the image's radiance, sampled-in by the
+    /// kernel and folded into the selection power host-side.
+    pub(super) tint: Vec3,
+    /// The linear part of the environment-to-world placement — the sky is
+    /// all directions, so the translation is dropped here.
+    pub(super) to_world: Mat4,
+    /// Its inverse: world directions into environment space.
+    pub(super) from_world: Mat4,
+}
+
 /// Derive everything the GPU phase consumes, validating as it goes. Warns
 /// only about objects `dirty` names, so a long edit session doesn't
 /// repeat itself about parameters it already reported. `fresh` marks a
@@ -92,11 +112,15 @@ pub(super) struct InstanceSpec {
 /// `resident_textures` maps already-uploaded textures to their content
 /// hashes, so an edit re-preps only textures a dirty material references —
 /// and re-uploads only those whose source content actually changed.
+/// `resident_environment` is the path the resident environment decoded
+/// from, the same idea one image wide: an edit that leaves it alone (a
+/// tint or placement change) keeps the decode and the upload.
 pub(super) fn host_phase(
     description: &SceneDescription,
     dirty: &Dirty,
     fresh: bool,
     resident_textures: &BTreeMap<texture::Key, u64>,
+    resident_environment: Option<&Path>,
 ) -> Result<HostScene> {
     let (_, camera_source) = singleton(description.cameras(), "camera")?;
     singleton(description.settings(), "settings")?;
@@ -185,10 +209,18 @@ pub(super) fn host_phase(
     let camera = touched(Kind::Camera).then(|| lower_camera(camera_source));
     let environment = if fresh || touched(Kind::Environment) {
         Some(match description.environments().iter().next() {
-            Some((name, environment)) => load_environment(name, &environment.path)?,
+            Some((name, environment)) => {
+                lower_environment(name, environment, resident_environment)?
+            }
             // No environment is a black sky: zero power, so next-event
-            // estimation puts all its draws on the quads.
-            None => Arc::new(Environment::constant(Vec3::ZERO)),
+            // estimation puts all its draws on the light list.
+            None => EnvironmentSpec {
+                image: Some(Arc::new(Environment::constant(Vec3::ZERO))),
+                source: None,
+                tint: Vec3::ONE,
+                to_world: Mat4::IDENTITY,
+                from_world: Mat4::IDENTITY,
+            },
         })
     } else {
         None
@@ -586,7 +618,32 @@ fn emissive_geometry(
     }
 }
 
-/// Read and decode an environment EXR. Failures are [`Error::Scene`] —
+/// Lower one description environment: the tint converts to `ACEScg` and
+/// sanitizes the way material colors do, the placement drops to its linear
+/// part (apply validated invertibility, so the inverse exists), and the
+/// image loads only when the source path actually changed — a pathless
+/// environment is the constant white sky, colored by the tint alone.
+fn lower_environment(
+    name: &str,
+    environment: &description::Environment,
+    resident: Option<&Path>,
+) -> Result<EnvironmentSpec> {
+    let image = match &environment.path {
+        Some(path) if Some(path.as_path()) == resident => None,
+        Some(path) => Some(load_environment(name, path)?),
+        None => Some(Arc::new(Environment::constant(Vec3::ONE))),
+    };
+    let to_world = Mat4::from_mat3(Mat3::from_mat4(environment.transform.to_mat4()));
+    Ok(EnvironmentSpec {
+        image,
+        source: environment.path.clone(),
+        tint: acescg_from_rec709(Vec3::from(environment.tint)).max(Vec3::ZERO),
+        to_world,
+        from_world: to_world.inverse(),
+    })
+}
+
+/// Read and decode an environment image. Failures are [`Error::Scene`] —
 /// a bad image is scene data, not a device fault, and a live edit to one
 /// must not end the render.
 fn load_environment(name: &str, path: &Path) -> Result<Arc<Environment>> {
@@ -619,9 +676,21 @@ fn decode_environment(name: &str, path: &Path) -> Result<Arc<Environment>> {
             path.display()
         ))
     })?;
-    let environment = Environment::from_equirect_exr(&bytes).map_err(|error| {
+    // The format comes from the bytes, not the extension: EXR opens with
+    // its magic number, Radiance HDR with "#?" (usually "#?RADIANCE").
+    let environment = if bytes.starts_with(&[0x76, 0x2f, 0x31, 0x01]) {
+        Environment::from_equirect_exr(&bytes)
+    } else if bytes.starts_with(b"#?") {
+        Environment::from_equirect_hdr(&bytes)
+    } else {
+        return Err(scene_error(format!(
+            "environment \"{name}\": \"{}\" is neither an EXR nor a Radiance HDR",
+            path.display()
+        )));
+    }
+    .map_err(|error| {
         scene_error(format!(
-            "environment \"{name}\": \"{}\" doesn't decode as an EXR: {error}",
+            "environment \"{name}\": \"{}\" doesn't decode: {error}",
             path.display()
         ))
     })?;
@@ -715,7 +784,13 @@ mod tests {
     }
 
     fn host(description: &SceneDescription) -> Result<HostScene> {
-        host_phase(description, &all_dirty(description), true, &BTreeMap::new())
+        host_phase(
+            description,
+            &all_dirty(description),
+            true,
+            &BTreeMap::new(),
+            None,
+        )
     }
 
     /// `unwrap_err` without demanding `Debug` of the GPU-adjacent
@@ -896,14 +971,17 @@ mod tests {
         description
             .apply(&ChangeSet {
                 ops: vec![Op::Environment(EnvironmentPatch {
-                    // Exists (so apply accepts it) but is no EXR.
-                    path: Some(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml").into()),
+                    // Exists (so apply accepts it) but is no radiance image.
+                    path: Some(Some(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml").into())),
                     ..EnvironmentPatch::new("sky")
                 })],
             })
             .expect("valid data");
         let error = host_error(&description);
-        assert!(error.to_string().contains("decode"), "{error}");
+        assert!(
+            error.to_string().contains("neither an EXR nor a Radiance HDR"),
+            "{error}"
+        );
     }
 
     /// Delta lights lower into the light list — direction normalized,
@@ -1075,6 +1153,125 @@ mod tests {
     fn a_missing_environment_means_a_black_sky() {
         let host = host(&triangle_description()).expect("no environment is legal");
         let environment = host.environment.expect("fresh builds load one");
-        assert_eq!(environment.tables().power, 0.0);
+        let image = environment.image.expect("fresh builds carry the image");
+        assert_eq!(image.tables().power, 0.0);
+    }
+
+    /// The host phase over a triangle scene whose environment is authored
+    /// imageless — `path` never set — with the given tint and placement.
+    fn pathless_sky_host(tint: [f32; 3], transform: description::Transform) -> HostScene {
+        let mut description = triangle_description();
+        description
+            .apply(&ChangeSet {
+                ops: vec![Op::Environment(EnvironmentPatch {
+                    tint: Some(tint),
+                    transform: Some(transform),
+                    ..EnvironmentPatch::new("sky")
+                })],
+            })
+            .expect("valid data");
+        host(&description).expect("a pathless sky is legal")
+    }
+
+    /// No image means the constant *white* sky — 1×1, unit radiance,
+    /// through the one environment code path — with the authored tint
+    /// converted to `ACEScg` (the way every authored color enters) and
+    /// the placement reduced to its linear part, inverse in hand.
+    #[test]
+    fn a_pathless_environment_is_a_tinted_white_sky() {
+        let host = pathless_sky_host(
+            [0.5, 0.25, 0.125],
+            description::Transform::Trs {
+                translate: [7.0, 8.0, 9.0],
+                rotate_degrees: [0.0, 90.0, 0.0],
+                scale: [1.0; 3],
+            },
+        );
+        let environment = host.environment.expect("fresh builds load one");
+        let image = environment.image.expect("fresh builds carry the image");
+        assert_eq!((image.width(), image.height()), (1, 1));
+        assert_eq!(image.texels(), &[1.0, 1.0, 1.0, 1.0]);
+        assert!(environment.source.is_none());
+        let want = acescg_from_rec709(Vec3::new(0.5, 0.25, 0.125));
+        assert!(environment.tint.abs_diff_eq(want, 1e-6));
+        // The linear part only: the translation is gone, the turn stays,
+        // and the inverse undoes it.
+        assert_eq!(environment.to_world.w_axis, glam::Vec4::W);
+        let turned = environment.to_world.transform_vector3(Vec3::X);
+        assert!(turned.abs_diff_eq(-Vec3::Z, 1e-6), "{turned}");
+        let back = environment.from_world.transform_vector3(turned);
+        assert!(back.abs_diff_eq(Vec3::X, 1e-6), "{back}");
+    }
+
+    /// A Radiance `.hdr` file loads through the same path as an EXR —
+    /// told apart by magic bytes, not extension.
+    #[test]
+    fn a_radiance_hdr_environment_loads() {
+        let dir = std::env::temp_dir().join(format!("cenote-lower-hdr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let path = dir.join("sky.hdr");
+        let mut bytes = b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 2\n".to_vec();
+        bytes.extend_from_slice(&[128, 64, 32, 129, 0, 0, 0, 0]);
+        std::fs::write(&path, bytes).expect("write sky");
+
+        let mut description = triangle_description();
+        description
+            .apply(&ChangeSet {
+                ops: vec![Op::Environment(EnvironmentPatch {
+                    path: Some(Some(path.clone())),
+                    ..EnvironmentPatch::new("sky")
+                })],
+            })
+            .expect("valid data");
+        let host = host(&description).expect("the .hdr sky loads");
+        let environment = host.environment.expect("fresh builds load one");
+        let image = environment.image.expect("fresh builds carry the image");
+        assert_eq!((image.width(), image.height()), (2, 1));
+        assert_eq!(environment.source.as_deref(), Some(path.as_path()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The keep-resident check: an edit that leaves the source path alone
+    /// (a tint drag) reuses the resident image — no decode, no upload —
+    /// while a changed path loads. The environment's analogue of the
+    /// texture content-hash gate.
+    #[test]
+    fn an_unchanged_environment_source_keeps_the_resident_image() {
+        let dir = std::env::temp_dir().join(format!("cenote-lower-keep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let sky = dir.join("sky.exr");
+        crate::output::write_exr(&sky, 2, 2, &[0.3_f32; 16]).expect("test sky");
+        let mut description = triangle_description();
+        description
+            .apply(&ChangeSet {
+                ops: vec![Op::Environment(EnvironmentPatch {
+                    path: Some(Some(sky.clone())),
+                    tint: Some([0.5; 3]),
+                    ..EnvironmentPatch::new("sky")
+                })],
+            })
+            .expect("valid data");
+        let with_resident = |resident: Option<&Path>| {
+            host_phase(
+                &description,
+                &all_dirty(&description),
+                false,
+                &BTreeMap::new(),
+                resident,
+            )
+            .expect("host phase")
+            .environment
+            .expect("environment dirt lowers a spec")
+        };
+        let kept = with_resident(Some(&sky));
+        assert!(kept.image.is_none(), "same source must keep the image");
+        assert_eq!(kept.source.as_deref(), Some(sky.as_path()));
+        assert!(kept.tint.abs_diff_eq(acescg_from_rec709(Vec3::splat(0.5)), 1e-6));
+        let loaded = with_resident(Some(Path::new("/somewhere/else.exr")));
+        assert!(
+            loaded.image.is_some(),
+            "a changed source must load the new image"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

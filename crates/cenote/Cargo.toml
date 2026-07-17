@@ -23,7 +23,7 @@ glam = { version = "0.33.2", features = ["bytemuck"] }
 gpu-allocator = "0.28.0"
 # Texture decode, exactly the two source formats the corpus uses (float
 # sources ride the `exr` crate above).
-image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "hdr"] }
 # Intel's ISPC texture-compression kernels: production-quality BC4/5/6H/7
 # encoders, far past any hand-roll threshold. The DDS cache *around* them
 # is ~90 hand-rolled lines (texture.rs), so `ddsfile` stayed out.

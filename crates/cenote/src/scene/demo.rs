@@ -90,7 +90,9 @@ impl ChangeSet {
                 ..CameraPatch::new("main")
             }),
             Op::Environment(EnvironmentPatch {
-                path: Some(Path::new(env!("CARGO_MANIFEST_DIR")).join(Scene::DEMO_ENVIRONMENT)),
+                path: Some(Some(
+                    Path::new(env!("CARGO_MANIFEST_DIR")).join(Scene::DEMO_ENVIRONMENT),
+                )),
                 ..EnvironmentPatch::new("sky")
             }),
             Op::Mesh(MeshPatch {

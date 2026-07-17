@@ -182,9 +182,11 @@ void encode(Writer& writer, const CameraPatch& value) {
 }
 
 void encode(Writer& writer, const EnvironmentPatch& value) {
-    writer.array_header(2);
+    writer.array_header(4);
     encode(writer, value.name);
     encode(writer, value.path);
+    encode(writer, value.tint);
+    encode(writer, value.transform);
 }
 
 void encode(Writer& writer, const SettingsPatch& value) {

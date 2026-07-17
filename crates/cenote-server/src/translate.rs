@@ -164,10 +164,17 @@ fn op(op: wire::Op) -> core::Op {
             })
         }
         wire::Op::Environment(patch) => {
-            let wire::EnvironmentPatch { name, path } = patch;
+            let wire::EnvironmentPatch {
+                name,
+                path,
+                tint,
+                transform,
+            } = patch;
             core::Op::Environment(core::EnvironmentPatch {
                 name,
-                path: path.map(PathBuf::from),
+                path: path.map(|value| reset(value, PathBuf::from)),
+                tint,
+                transform: transform.map(self::transform),
             })
         }
         wire::Op::Settings(patch) => {

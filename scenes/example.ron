@@ -27,7 +27,9 @@
         )),
         Environment((
             name: "sky",
-            path: Some("../crates/cenote/assets/kloofendal_puresky.exr"),
+            // Doubly optional: the outer Some sets, the inner is the image
+            // itself — Some(None) would clear back to a constant white sky.
+            path: Some(Some("../crates/cenote/assets/kloofendal_puresky.exr")),
         )),
 
         // One unit plane, shared by every instance below at its own

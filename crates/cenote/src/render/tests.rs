@@ -715,7 +715,7 @@ fn textured_furnace_scene(
             ..CameraPatch::new("main")
         }),
         Op::Environment(EnvironmentPatch {
-            path: Some(sky_path),
+            path: Some(Some(sky_path)),
             ..EnvironmentPatch::new("sky")
         }),
         Op::Mesh(MeshPatch {
@@ -817,6 +817,118 @@ fn the_textured_furnace_closes() {
     assert!(
         (mean - 0.5).abs() / 0.5 < 0.015,
         "mapped-roughness furnace leaked: mean {mean} vs 0.5"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The environment tint scales its lighting linearly, applied at
+/// sampling: a half-gray tint over the unit sky must land every pixel at
+/// half the untinted render. The draws are identical — the scene has no
+/// other lights, so the environment's selection probability pins to 1
+/// under either tint — leaving pure radiance scaling, so the tolerance
+/// is float noise (via the tint's trip through `ACEScg`), not variance.
+#[test]
+fn the_environment_tint_scales_the_sky() {
+    use crate::scene::changeset::{EnvironmentPatch, MaterialPatch, Op};
+
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let dir = fixture_dir("env-tint");
+    let renderer = Renderer::new(&gpu).expect("renderer");
+    let sum_with = |tint: Option<[f32; 3]>| {
+        let ops = tint
+            .map(|tint| {
+                vec![Op::Environment(EnvironmentPatch {
+                    tint: Some(tint),
+                    ..EnvironmentPatch::new("sky")
+                })]
+            })
+            .unwrap_or_default();
+        let scene = textured_furnace_scene(
+            &gpu,
+            &dir,
+            MaterialPatch {
+                specular_weight: Some(0.0),
+                ..MaterialPatch::new("surface")
+            },
+            1.0,
+            ops,
+        );
+        accumulate_sum(&gpu, &renderer, &scene, 16, 4)
+    };
+    let full = sum_with(None);
+    let half = sum_with(Some([0.5; 3]));
+    for (halved, unit) in half.chunks_exact(4).zip(full.chunks_exact(4)) {
+        for (h, f) in halved[..3].iter().zip(&unit[..3]) {
+            assert!(
+                (h - 0.5 * f).abs() <= 1e-3 * f.max(1.0),
+                "a half-gray tint should halve the render: {h} vs {f}"
+            );
+        }
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Turning the environment turns the sky, in the authored direction: the
+/// image's left and right columns wear different colors, the camera looks
+/// down −Z (where the image's horizontal center faces), and a ±90° yaw
+/// about +Y decides which column faces it — +90° carries the environment's
+/// +X (the right column) to world −Z, −90° the left. An instanceless
+/// scene, so the frame center reads the sky directly.
+#[test]
+fn the_environment_placement_turns_the_sky() {
+    use crate::scene::changeset::{CameraPatch, ChangeSet, EnvironmentPatch, Op, SettingsPatch};
+    use crate::scene::description::{SceneDescription, Transform};
+
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let dir = fixture_dir("env-turn");
+    let sky = dir.join("columns.exr");
+    #[rustfmt::skip]
+    crate::output::write_exr(&sky, 2, 2, &[
+        4.0, 0.0, 0.0, 1.0,    0.0, 4.0, 0.0, 1.0,
+        4.0, 0.0, 0.0, 1.0,    0.0, 4.0, 0.0, 1.0,
+    ]).expect("column sky");
+    let renderer = Renderer::new(&gpu).expect("renderer");
+    let center = |yaw: f32| {
+        let mut description = SceneDescription::new();
+        description
+            .apply(&ChangeSet {
+                ops: vec![
+                    Op::Settings(SettingsPatch::new("main")),
+                    Op::Camera(CameraPatch::new("main")),
+                    Op::Environment(EnvironmentPatch {
+                        path: Some(Some(sky.clone())),
+                        transform: Some(Transform::Trs {
+                            translate: [0.0; 3],
+                            rotate_degrees: [0.0, yaw, 0.0],
+                            scale: [1.0; 3],
+                        }),
+                        ..EnvironmentPatch::new("sky")
+                    }),
+                ],
+            })
+            .expect("valid scene");
+        let scene = Scene::prep(&gpu, &mut description).expect("prep");
+        let sum = accumulate_sum(&gpu, &renderer, &scene, 16, 1);
+        let probe = pixel(&sum, 16, 8, 8);
+        (probe[0], probe[1])
+    };
+    // Channel dominance, not purity: the columns author pure Rec.709
+    // primaries, but the trip into ACEScg leaves Rec.709 green with a
+    // substantial red component (and vice versa) — the two yaws still
+    // land opposite orderings.
+    let (red, green) = center(90.0);
+    assert!(
+        green > 2.0 * red.max(1e-3),
+        "+90° yaw should face the camera at the green column: r {red} g {green}"
+    );
+    let (red, green) = center(-90.0);
+    assert!(
+        red > 2.0 * green.max(1e-3),
+        "-90° yaw should face the camera at the red column: r {red} g {green}"
     );
     std::fs::remove_dir_all(&dir).ok();
 }
