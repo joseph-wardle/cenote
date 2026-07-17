@@ -16,15 +16,17 @@ PXR_NAMESPACE_OPEN_SCOPE
 // Zero Rprims by design (D-098): with no Rprim types advertised, the render
 // index never hydrates geometry, and the Rprim/instancer factories below stay
 // unreachable. The camera and the renderBuffer are the whole prim vocabulary —
-// plus two light types, advertised for HdxTaskController's benefit: its
-// built-in-light check demands domeLight AND a camera light type before it
-// injects usdview's default camera light, and without that light every frame
-// is black (D-108) — plus material, the honest contract for a delegate that
-// reads materials (it is also what gates population on any non-scene-index
-// path). The light and material sprims themselves are inert; the translators
-// read the same prims from the terminal scene index. The non-empty lists live
-// as function-local statics in their getters — a namespace-scope
-// TfTokenVector initializer allocates, and would throw where nothing catches.
+// plus the light types the translators read, advertised because advertising
+// gates population: distant and dome also satisfy HdxTaskController's
+// built-in-light check, which demands domeLight AND a camera light type before
+// it injects usdview's default camera light, without which every frame is
+// black (D-108); rect, disk, sphere, and cylinder are step 4's area lights —
+// plus material, the honest contract for a delegate that reads materials (it
+// is also what gates population on any non-scene-index path). The light and
+// material sprims themselves are inert; the translators read the same prims
+// from the terminal scene index. The non-empty lists live as function-local
+// statics in their getters — a namespace-scope TfTokenVector initializer
+// allocates, and would throw where nothing catches.
 //
 // Two inherited defaults are load-bearing and deliberately not overridden
 // (restating them here would only invite drift): GetMaterialBindingPurpose()
@@ -37,6 +39,13 @@ PXR_NAMESPACE_OPEN_SCOPE
 static const TfTokenVector kNoTypes;
 
 namespace {
+
+/// The advertised light types, all backed by _NullLight below.
+bool _IsLightType(const TfToken& typeId) {
+    return typeId == HdPrimTypeTokens->distantLight || typeId == HdPrimTypeTokens->domeLight ||
+           typeId == HdPrimTypeTokens->rectLight || typeId == HdPrimTypeTokens->diskLight ||
+           typeId == HdPrimTypeTokens->sphereLight || typeId == HdPrimTypeTokens->cylinderLight;
+}
 
 /// The inert backing for the advertised light types — nothing on this
 /// side ever reads it.
@@ -70,8 +79,10 @@ const TfTokenVector& HdCenoteRenderDelegate::GetSupportedRprimTypes() const { re
 
 const TfTokenVector& HdCenoteRenderDelegate::GetSupportedSprimTypes() const {
     static const TfTokenVector kSprimTypes = {
-        HdPrimTypeTokens->camera, HdPrimTypeTokens->distantLight, HdPrimTypeTokens->domeLight,
-        HdPrimTypeTokens->material};
+        HdPrimTypeTokens->camera,        HdPrimTypeTokens->distantLight,
+        HdPrimTypeTokens->domeLight,     HdPrimTypeTokens->rectLight,
+        HdPrimTypeTokens->diskLight,     HdPrimTypeTokens->sphereLight,
+        HdPrimTypeTokens->cylinderLight, HdPrimTypeTokens->material};
     return kSprimTypes;
 }
 
@@ -108,7 +119,7 @@ HdSprim* HdCenoteRenderDelegate::CreateSprim(TfToken const& typeId, SdfPath cons
     if (typeId == HdPrimTypeTokens->camera) {
         return new HdCamera(sprimId);
     }
-    if (typeId == HdPrimTypeTokens->distantLight || typeId == HdPrimTypeTokens->domeLight) {
+    if (_IsLightType(typeId)) {
         return new _NullLight(sprimId);
     }
     if (typeId == HdPrimTypeTokens->material) {
@@ -122,7 +133,7 @@ HdSprim* HdCenoteRenderDelegate::CreateFallbackSprim(TfToken const& typeId) {
     if (typeId == HdPrimTypeTokens->camera) {
         return new HdCamera(SdfPath::EmptyPath());
     }
-    if (typeId == HdPrimTypeTokens->distantLight || typeId == HdPrimTypeTokens->domeLight) {
+    if (_IsLightType(typeId)) {
         return new _NullLight(SdfPath::EmptyPath());
     }
     if (typeId == HdPrimTypeTokens->material) {

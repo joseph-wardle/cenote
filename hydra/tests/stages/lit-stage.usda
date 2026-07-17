@@ -1,0 +1,119 @@
+#usda 1.0
+(
+    """The step-4 checkpoint stage: a real lit scene — a ground plane and
+    the step-3 checker board under the four UsdLux flavors the delegate
+    now translates. A warm RectLight pools on the ground left of the
+    board, a cool SphereLight pools right, a CylinderLight hangs overhead
+    as neutral fill, and a DomeLight_1 wraps everything in sky.hdr (a
+    generated ~8 KB flat-RGBE gradient with a sun blob behind the camera),
+    so every escaped ray lands on sky, never black. All three shaped
+    lights float inside the camera frustum: if their stand-in geometry
+    ever turned camera-visible, its black absorber would silhouette
+    against that sky, which is exactly what the smoke check hunts for
+    (tests/usdrecord_smoke.py). Intensities are spec-scale radiance —
+    unnormalized area lights in the tens against a sub-unit sky, hot
+    enough that each pool wins its patch of ground from the sun's
+    ambient. No pixel equality; that is step 6's FLIP golden."""
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "World"
+{
+    def Camera "Camera"
+    {
+        float focalLength = 35
+        double3 xformOp:translate = (0, -14, 2)
+        float3 xformOp:rotateXYZ = (90, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def Mesh "Ground"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-10, -16, 0), (10, -16, 0), (10, 8, 0), (-10, 8, 0)]
+        color3f[] primvars:displayColor = [(0.5, 0.44, 0.38)]
+    }
+
+    def Mesh "Board" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/Looks/checker>
+        int[] faceVertexCounts = [4, 4]
+        int[] faceVertexIndices = [0, 1, 4, 5, 1, 2, 3, 4]
+        point3f[] points = [(-2, 0, 0), (0, 0, 0), (2, 0, 0), (2, 0, 2), (0, 0, 2), (-2, 0, 2)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1), (0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "faceVarying"
+        )
+    }
+
+    def Scope "Looks"
+    {
+        def Material "checker"
+        {
+            token outputs:surface.connect = </World/Looks/checker/surface.outputs:surface>
+
+            def Shader "surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </World/Looks/checker/texture.outputs:rgb>
+                float inputs:opacity.connect = </World/Looks/checker/texture.outputs:a>
+                float inputs:roughness = 1.0
+                token outputs:surface
+            }
+
+            def Shader "texture"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./checker.png@
+                float2 inputs:st.connect = </World/Looks/checker/stReader.outputs:result>
+                float3 outputs:rgb
+                float outputs:a
+            }
+
+            def Shader "stReader"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                string inputs:varname = "st"
+                float2 outputs:result
+            }
+        }
+    }
+
+    def RectLight "Ember"
+    {
+        color3f inputs:color = (1, 0.5, 0.2)
+        float inputs:intensity = 30
+        float inputs:width = 2
+        float inputs:height = 1
+        double3 xformOp:translate = (-2.5, -2, 2.8)
+        float3 xformOp:rotateXYZ = (30, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def SphereLight "Frost"
+    {
+        color3f inputs:color = (0.25, 0.45, 1)
+        float inputs:intensity = 80
+        float inputs:radius = 0.4
+        double3 xformOp:translate = (2.5, -2, 2.8)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def CylinderLight "Bar"
+    {
+        float inputs:intensity = 12
+        float inputs:radius = 0.12
+        float inputs:length = 2.4
+        double3 xformOp:translate = (0, -1, 4.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight_1 "Sky"
+    {
+        asset inputs:texture:file = @./sky.hdr@
+    }
+}

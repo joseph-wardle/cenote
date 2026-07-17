@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
-"""The usdrecord smoke check: renders stages/first-light.usda and
-stages/preview-surface.usda through the Cenote renderer and asserts what
-a human would eyeball. For first-light: the run succeeds, the frame is
-not black, and the silhouette is the expected one (the warm near cube
-left of center and larger, the cool far cube right and smaller, the
-background black). For preview-surface: the textured board shows its
-checker — green and blue cells alternating in both directions, the
-texture's transparent corner cells cut out, the pattern appearing once
-per face — so the texture path, the alpha source channel, and the
-faceVarying st un-weld are all visibly working. No pixel equality; that
-is step 6's FLIP golden.
+"""The usdrecord smoke check: renders stages/first-light.usda,
+stages/preview-surface.usda, and stages/lit-stage.usda through the
+Cenote renderer and asserts what a human would eyeball. For first-light:
+the run succeeds, the frame is not black, and the silhouette is the
+expected one (the warm near cube left of center and larger, the cool
+far cube right and smaller, the background black). For preview-surface:
+the textured board shows its checker — green and blue cells alternating
+in both directions, the texture's transparent corner cells cut out, the
+pattern appearing once per face — so the texture path, the alpha source
+channel, and the faceVarying st un-weld are all visibly working. For
+lit-stage: the dome fills the background (sky above the horizon, its
+warm ground glow below it), the warm rect and cool sphere pool on
+opposite sides of the ground, and no pixel in the frame is dark — with
+sky behind everything, the only way to darkness is a light's stand-in
+geometry turning camera-visible and showing its black absorber. No
+pixel equality; that is step 6's FLIP golden.
 
 Run from anywhere with the USD prefix on PATH/PYTHONPATH (README.md's
 environment) and the plugin installed to hydra/dist/. The server binary
@@ -214,12 +219,93 @@ def analyze_preview_surface(out_path):
     )
 
 
+def analyze_lit_stage(out_path):
+    image = load(out_path)
+    width, height = image.width(), image.height()
+    stride = image.bytesPerLine()
+    pixels = image.constBits()
+
+    def patch(fx, fy):
+        """Mean RGB of a small patch at frame fractions (fx, fy)."""
+        cx, cy = int(fx * width), int(fy * height)
+        total = [0, 0, 0]
+        count = 0
+        for y in range(cy - 5, cy + 6):
+            for x in range(cx - 5, cx + 6):
+                pixel = image.pixelColor(x, y)
+                total[0] += pixel.red()
+                total[1] += pixel.green()
+                total[2] += pixel.blue()
+                count += 1
+        return [component / count for component in total]
+
+    # Every escaped ray lands on the dome, so nothing in the frame may be
+    # dark: a dark blob could only be a light's stand-in geometry gone
+    # camera-visible, silhouetting its black absorber against the sky.
+    # All three shaped lights float inside the frustum to keep this
+    # check honest.
+    floor = 255
+    for y in range(height):
+        row = pixels[y * stride : y * stride + width * 3]
+        for x in range(width):
+            floor = min(floor, max(row[x * 3], row[x * 3 + 1], row[x * 3 + 2]))
+    if floor <= 2 * DARK:
+        fail(f"a pixel bottoms out at {floor} — with sky behind everything, that is "
+             f"a black-absorber silhouette (a light shape turned camera-visible)")
+
+    # The dome as background, found without trusting orientation: its
+    # below-horizon ground glow is a warm-dark band (beyond the ground
+    # plane's far edge) that neither the sky nor the lit ground can
+    # imitate, at one of two vertically mirrored rows; the mirror row
+    # must be bright blue sky. The left sky probe sits exactly where the
+    # rect light's stand-in projects, so sky there re-proves invisibility.
+    def band_like(color):
+        return (color[0] > color[1] > color[2] and color[0] - color[2] >= 15
+                and max(color) < 150)
+
+    def sky_like(color):
+        return color[2] - color[0] >= 25 and color[2] >= 180
+
+    mirrored = (0.33, 0.67)
+    rows = {}
+    for fy in mirrored:
+        sides = (patch(0.05, fy), patch(0.95, fy))
+        rows[fy] = (all(band_like(side) for side in sides),
+                    all(sky_like(side) for side in sides))
+    band_rows = [fy for fy, (band, _) in rows.items() if band]
+    if len(band_rows) != 1:
+        fail(f"the dome's below-horizon band should sit at exactly one of the mirrored "
+             f"rows, found it at {band_rows or 'neither'}")
+    band_fy = band_rows[0]
+    sky_fy = mirrored[band_fy == mirrored[0]]
+    if not rows[sky_fy][1]:
+        fail(f"the row mirroring the horizon band (y={sky_fy}) should be sky, but is "
+             f"not bright blue-dominant")
+
+    # The light pools, on the ground side of the band (the flip the band
+    # just revealed), warm and cool on opposite sides — either side, so
+    # a mirrored frame still passes.
+    ground_fy = band_fy - 0.21 if band_fy < 0.5 else band_fy + 0.21
+    sides = (patch(0.1, ground_fy), patch(0.85, ground_fy))
+    warm = [c[0] - c[2] >= 25 and c[0] >= 200 for c in sides]
+    cool = [c[2] - c[0] >= 30 and c[2] >= 210 for c in sides]
+    if not ((warm[0] and cool[1]) or (warm[1] and cool[0])):
+        fail(f"the ground should pool warm under the rect and cool under the sphere "
+             f"on opposite sides, but reads {[[round(c, 1) for c in s] for s in sides]}")
+
+    print(
+        f"usdrecord smoke: OK — {width}x{height}, dome band and sky behind the scene, "
+        f"warm and cool pools on opposite sides, darkest pixel {floor} (no silhouettes)"
+    )
+
+
 def main():
     directory = Path(tempfile.mkdtemp(prefix="cenote-usdrecord-"))
     try:
         for stage, analyze in (
             (STAGES / "first-light.usda", analyze_first_light),
             (STAGES / "preview-surface.usda", analyze_preview_surface),
+            (STAGES / "lit-stage.usda", analyze_lit_stage),
         ):
             out_path = directory / f"{stage.stem}.png"
             record(stage, out_path)

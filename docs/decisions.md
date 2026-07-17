@@ -2822,3 +2822,98 @@ description, or the GPU material. Instead the F0's Rec.709 luminance collapses o
 `specular_ior` via ior = (1+√F0)/(1−√F0), clamped to [1, 5], the hue dropped under the
 one warning — more honest than common practice, which silently ignores the flag
 entirely.
+
+### D-118: One environment on the wire, any number of domes in the stage
+Status: accepted (2026-07-16). Two layers, split at the wire. **Below Hydra** (its own
+commit, drift guard regenerated both directions): the environment's image becomes
+optional — no path is a constant white sky through the same 1×1 code path the furnace
+tests trust — and two dials ride beside it, a linear Rec.709 tint folded over the
+image's radiance and a world-from-dome placement whose linear part turns the whole sky.
+Both apply at sampling time, in the one place every kernel entry point (radiance,
+sample, connect, locate, pdf) crosses the placement, so ReSTIR reconnection and MIS
+stay exact under a turned sky; a tint or placement edit keeps the resident image by
+source path. Radiance `.hdr` joins `.exr` as a decodable sky, told apart by magic bytes
+rather than extension; a placement must invert (sampling maps world directions back
+through it), validated at apply beside the instance rule; `EnvironmentPatch` gains the
+doubly-optional path, the tint, and the transform in both mirrors, protocol 3 → 4.
+**In the delegate**, a fourth translator — `HdCenoteDomePrim`, beside mesh, light, and
+material — owns the fact that cenote renders exactly one environment while UsdLux
+admits any number of domes. Its registry is an ordered map, and the order *is* the
+arbitration: the lowest visible `SdfPath` holds the slot, every other eligible dome is
+parked under a latched warning naming the winner (the latch re-arms when the parked
+dome later publishes — a later demotion is a fresh parking). Handoffs are atomic —
+demotion's `Remove` and the successor's patch ride one flush, so the wave never carries
+two skies merged nor none while a contender stands — and a dying winner fails over from
+its destructor: the survivors' cached payloads are re-arbitrated in the same flush the
+`Remove` rides, so the sky never goes dark between domes. Placement bakes the 180° yaw
+between the two equirect conventions innermost (USD centers the image on +Z, cenote on
+−Z — the wire always speaks cenote's convention, the server never learns USD's),
+composed with `domeOffset` (usdImaging's spelling of DomeLight_1's pole axis; the
+original DomeLight serves none and gets identity) and the flattened world transform. A
+degenerate placement falls back to the bare yaw instead of withdrawing — unlike a mesh,
+a dome with a broken transform still lights the scene, the sky has no size to
+collapse — under a warning gated on the *transition* into degeneracy (a latch would go
+quiet forever; no gate would fire on every unrelated drag). Texture admission is the
+exact inverse of the rect light's rule: float formats only (`.exr`/`.hdr` — the
+environment is radiance), and `texture:format` `latlong` or `automatic` only, checked
+last, once a file is actually at stake; every rejection degrades that one dome to its
+constant-sky tint under a latched warning, never the flush and never the slot.
+
+### D-119: Area lights are ordinary instances wearing a black absorber
+Status: accepted (2026-07-16). The rect, disk, sphere, and cylinder lights become the
+triple the plan promised — a `MeshPatch` of object-space triangles with the authored
+dimensions baked in, a `MaterialPatch`, an `InstancePatch` carrying the flattened
+matrix untouched — all named by the light's path, riding the same wire ops as any
+geometry; the renderer keeps no analytic light shapes, emissive triangles being its
+native area light. The load-bearing choices: **`camera_visible = false`, always** — the
+light illuminates, its shape is a sampling device, not scenery — matching what Arnold
+and MoonRay default to, since no USD-standard attribute exists to ask for the shape;
+one divergence is accepted openly rather than papered over: the camera-invisible
+emitter still blocks shadow rays (the triangles physically exist server-side), where
+per-ray-type-visibility renderers hide area lights from occlusion too — physical, and
+fixing it honestly needs a new ray-mask bit on the wire, deferred beyond M4.
+**Geometry**: rect as two triangles restating the schema's texture frame in cenote's
+v-down UV convention; disk a 64-segment fan; sphere a 32×16 UV sphere; cylinder a
+64-segment capless tube along X, UsdLux's own reading of the shape; rect and disk wound
+one-sided emitting −Z, and a negative-determinant placement flips every winding triple
+so a mirroring transform keeps the emitting face on the side UsdLux lights. Dimensions
+clamp non-negative — a negative width would silently flip the emitting side. **The
+black absorber**: the camera never sees the surface, but reflections and shadow rays
+still hit it, and the wire's default 80% gray would bounce light the light never
+emitted — so black diffuse, zero specular weight, emission only. **Rect textures**:
+LDR only — the emission slot rides the BC7 color pipeline, which would clip a float
+source to display range rather than reject it; the map replaces the constant color on
+the wire and the shader multiplies it onto the scalar luminance alone, so the tint has
+one lane left: its Rec.709 luminance folds into the scalar and any hue is dropped under
+a latched warning. **The normalize guard**: the area divided out is the world-space sum
+over the very triangles being sent — what the renderer integrates is exactly what the
+divisor weighed — and zero area keeps divisor 1, silently: the shape is already dark by
+geometry, the reading UsdLux prescribes for its own sizeFactor. Lifecycle mirrors the
+other translators: total re-read and total resend on any dirt in the lane, a spelling
+flip (a sphere toggling `treatAsPoint`) withdrawing the old objects in the same atomic
+flush the new ones ride, and a degenerate transform costing that one light — withdrawn
+under a warning — never the flush it rides in.
+
+### D-120: UsdLux radiometry — the formulas, and the distant correction
+Status: accepted (2026-07-16); amends D-108's implicit-normalize shortcut. Every light
+shares one radiometric spine: tint = `color`, times the luminance-normalized blackbody
+of `colorTemperature` when `enableColorTemperature` — via `usdLux`'s own
+`UsdLuxBlackbodyTemperatureAsRgb`, linked rather than re-derived — and scale =
+`intensity·2^exposure`; `normalize` divides by the emitting quantity each shape defines.
+**The distant correction**: D-108 read intensity as the delta's irradiance directly,
+which is an implicit `normalize`. The schema's own constants refute it: the 50000
+default intensity that "approximates sunlight" coheres only if intensity is the
+*luminance* of the 0.53° default disk, whose π·sin²(θ/2) ≈ 1/15,000 sr multiplies out
+to ≈ 3.4 units of irradiance — a sane sun; read as irradiance, the same defaults are a
+15,000× blowout. So an unnormalized distant light delivers
+`tint · scale · π·sin²(angle/2)`, and `normalize` (or a zero angle) makes intensity the
+irradiance itself; `first-light.usda` now authors `normalize = 1` with a comment saying
+why its 3 units survive. **treatAsPoint** (spheres only, the raw-attribute
+fallthrough): radiant intensity is luminance times the projected area, `I = L·π·r²` —
+or `intensity/4` when normalize has already divided the `4π·r²` surface out — with
+`r_world = r·|det|^(1/3)`, the one isotropic reading of an anisotropic stretch a point
+cannot express. The per-lobe `diffuse`/`specular` multipliers warn once and are
+ignored — an artistic split cenote's one transport does not carry — under D-117's
+warn-where-lossy policy, which this step extends without a new entry: silent where the
+authored value is what the renderer does anyway, one warning naming the prim where
+fidelity is actually lost, never a rejected wave.

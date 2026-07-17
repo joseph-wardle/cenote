@@ -3,6 +3,7 @@
 #include "pxr/imaging/hd/retainedDataSource.h"
 #include "pxr/imaging/hd/tokens.h"
 
+#include "domePrim.hpp"
 #include "lightPrim.hpp"
 #include "materialPrim.hpp"
 #include "meshPrim.hpp"
@@ -33,14 +34,18 @@ public:
 /// does not know gets null, which the observer simply never tracks: how
 /// unknown stays non-fatal forever. Mesh prims (implicits included,
 /// already converted by the registered filter stack) get the mesh
-/// translator; distant lights (usdview's camera light among them, per
-/// D-108) get the light translator; materials get the material
-/// translator. The rest of UsdLux is step 4.
+/// translator; five of the six UsdLux types the wire can spell —
+/// distant (usdview's camera light among them, per D-108), rect, disk,
+/// sphere, cylinder — get the light translator; domes get their own,
+/// which arbitrates the one environment slot among themselves (usdview's
+/// dome-toggle dome contends like any other); materials get the material
+/// translator.
 class _PrimFactory final : public HdsiPrimManagingSceneIndexObserver::PrimFactoryBase {
 public:
     explicit _PrimFactory(cenote::wire::ChangeSet* pending)
         : _pending(pending), _meshes(std::make_shared<HdCenoteMeshPrim::Registry>()),
           _lights(std::make_shared<HdCenoteLightPrim::Registry>()),
+          _domes(std::make_shared<HdCenoteDomePrim::Registry>()),
           _materials(std::make_shared<HdCenoteMaterialPrim::Registry>()) {}
 
     HdsiPrimManagingSceneIndexObserver::PrimBaseHandle
@@ -50,8 +55,16 @@ public:
             return std::make_shared<HdCenoteMeshPrim>(entry.primPath, observer, _pending, _meshes,
                                                       _materials);
         }
-        if (entry.primType == HdPrimTypeTokens->distantLight) {
-            return std::make_shared<HdCenoteLightPrim>(entry.primPath, observer, _pending, _lights);
+        if (entry.primType == HdPrimTypeTokens->distantLight ||
+            entry.primType == HdPrimTypeTokens->rectLight ||
+            entry.primType == HdPrimTypeTokens->diskLight ||
+            entry.primType == HdPrimTypeTokens->sphereLight ||
+            entry.primType == HdPrimTypeTokens->cylinderLight) {
+            return std::make_shared<HdCenoteLightPrim>(entry.primPath, entry.primType, observer,
+                                                       _pending, _lights);
+        }
+        if (entry.primType == HdPrimTypeTokens->domeLight) {
+            return std::make_shared<HdCenoteDomePrim>(entry.primPath, observer, _pending, _domes);
         }
         if (entry.primType == HdPrimTypeTokens->material) {
             return std::make_shared<HdCenoteMaterialPrim>(entry.primPath, observer, _pending,
@@ -66,6 +79,7 @@ private:
     /// The translators' resync tie-breakers (see each Registry's doc).
     std::shared_ptr<HdCenoteMeshPrim::Registry> _meshes;
     std::shared_ptr<HdCenoteLightPrim::Registry> _lights;
+    std::shared_ptr<HdCenoteDomePrim::Registry> _domes;
     std::shared_ptr<HdCenoteMaterialPrim::Registry> _materials;
 };
 

@@ -484,7 +484,55 @@ tests pass serially on the GPU machine; the C++ side compiles + its own lint; co
    division), `enableColorTemperature` (blackbody), `treatAsPoint`; rect/disk wound
    one-sided (−Z); distant `angle` collapsed to the delta; dome → the equirect environment
    (`latlong` format). *Checkpoint: a real lit, textured USD
-   stage renders recognizably — the milestone's core artifact.*
+   stage renders recognizably — the milestone's core artifact.* The locked detail (a
+   fifth structured interview, 2026-07-16; the genuinely new decisions are D-118…D-120
+   in [decisions.md](decisions.md)):
+   - *The wire growth first* (D-118, its own commit below Hydra): the environment's
+     image becomes optional — no path is a constant white sky — with a linear Rec.709
+     tint and a world-from-dome placement beside it, both applied at sampling time so
+     ReSTIR reconnection and MIS stay exact under a turned sky; Radiance `.hdr` joins
+     `.exr`, told apart by magic bytes; the placement must invert, validated at apply;
+     both wire mirrors and the corpus goldens grow together, protocol 3 → 4.
+   - *Two translators*: `HdCenoteLightPrim` covers distant, rect, disk, sphere, and
+     cylinder, resolving its spelling — delta or area triple — per sync, so a sphere
+     toggling `treatAsPoint` withdraws its old objects in the same atomic flush;
+     `HdCenoteDomePrim` owns the one environment slot through its registry, whose
+     order is the arbitration — lowest visible path wins, parked domes warn under a
+     re-arming latch, handoffs are atomic (never two skies, never none), and a dying
+     winner fails over from its destructor. The 180° yaw between USD's and cenote's
+     equirect conventions bakes innermost into every placement; a degenerate placement
+     falls back to the bare yaw under a transition-gated warning; dome textures admit
+     float formats only (`.exr`/`.hdr`, `latlong`/`automatic`), each rejection
+     degrading that one dome to its constant-sky tint, never the flush.
+   - *Area synthesis* (D-119): mesh + material + instance per light, named by the
+     light's path; `camera_visible = false` always (Arnold's and MoonRay's default —
+     no USD-standard attribute asks for the shape), with the occlusion divergence
+     accepted openly (the invisible emitter still blocks shadow rays; the honest fix
+     is a deferred ray-mask bit); a black-absorber material so the invisible surface
+     never bounces light it didn't emit; windings one-sided with the
+     negative-determinant flip for mirroring placements; rect textures LDR-only, the
+     tint's luminance folded into the scalar under one warning; `normalize` divides
+     by the world-space area of the very triangles sent, zero area guarded silently.
+   - *Radiometry* (D-120): tint = color × the luminance-normalized blackbody (via
+     linked `usdLux`, not re-derived), scale = `intensity·2^exposure`; the distant
+     correction amends D-108's implicit normalize — unnormalized intensity is
+     luminance, scaled by the disk's π·sin²(angle/2) steradians (the schema's
+     50000-approximates-sunlight default coheres only under that reading);
+     `treatAsPoint` delivers `I = L·π·r²` (or intensity/4 normalized) with
+     `r_world = r·|det|^(1/3)`; the per-lobe `diffuse`/`specular` multipliers warn
+     once and are ignored, extending D-117's policy without a new entry.
+   - *Checkpoint*: `hydra/tests/stages/lit-stage.usda` — ground, the step-3 checker
+     board, a warm rect pooling left, a cool sphere pooling right, a cylinder as
+     neutral fill, and a dome wrapping it all in `sky.hdr`, a generated ~8 KB
+     deterministic flat-RGBE sky (generator out of tree, like the checker) whose sun
+     sits behind the camera. All three shaped lights float inside the frustum on
+     purpose: with sky behind everything, the only route to a dark pixel is a
+     stand-in turning camera-visible and silhouetting its absorber — which is what
+     smoke stage three asserts, flip/mirror-agnostically, anchored on the dome's
+     below-horizon glow band. No pixel equality; that stays step 6's FLIP golden.
+   - *Landing*: two commits — the wire growth below Hydra first (drift guard never
+     red mid-history), then everything USD-side (both translators, the stage, the
+     smoke, docs) together, full gate green on the GPU machine.
 5. **Instancing** — the instancer topology schema + `instancedBy` → the array-instancer
    op (D-073, picked up here); per-instance transforms composed from the
    `hydra:instanceTranslations/Rotations/Scales` primvars *and* the aggregated
@@ -584,3 +632,44 @@ regression gate) but the **seams**:
   selection, the GPU-shared framebuffer, native analytic area lights, `open_pbr_surface`
   recognition, automatic crash recovery, the native `HdRenderer`, Windows hosts, and
   Houdini integration — and when each returns.
+
+## Appendix: Deferred beyond M4
+
+The steps 3–4 interviews drew a conscious line around the translated surface; this is
+everything on the far side of it, one line each. Unlike [deferrals.md](deferrals.md)'s
+entries these carry no named revival trigger — each returns when a real stage demands
+it.
+
+- **Multiple simultaneous domes** — lift `lower.rs`'s one-environment rule so parked
+  domes (D-118) render instead of warning.
+- **Light shaping and IES profiles** — the UsdLux ShapingAPI: cone, focus, profiles.
+- **Light and shadow linking** — USD collections/categories mapped to ray masks on the
+  wire.
+- **Per-ray-type visibility** — one new ray-mask bit would honor the per-lobe
+  `diffuse`/`specular` split, a never-occluding area light (D-119's accepted
+  divergence), and a camera-visibility attribute alike.
+- **Light filters and dome portals.**
+- **MeshLightAPI** — the renderer is already native (any emissive mesh); the gap is
+  Hydra-side translation only.
+- **Chromatic tint on textured emission, and HDR emission textures** — both blocked on
+  the emission slot's BC7 color pipeline (D-119's luminance fold and LDR rule).
+- **Dome format variants and LDR domes** — the ball, angular, and cube-cross unwraps;
+  8-bit skies.
+- **`treatAsLine`** — the cylinder's delta collapse, as `treatAsPoint` is the sphere's.
+- **`shadow:color`** — tinted shadows have no wire home.
+- **Analytic light shapes in the core** — only if a non-ReSTIR sampling path ever
+  appears; emissive triangles are the estimator's native area light.
+- **UV transforms (`UsdTransform2d`), UDIM tiles, wrap modes beyond repeat, and
+  multiple UV sets** — today each warns and degrades per D-117.
+- **Displacement** — no OpenPBR home (D-102's documented exception).
+- **MaterialX graph evaluation** — revisits D-102's fixed-closure stance.
+- **The specular workflow's F0 color** — today collapsed to luminance → IOR (D-117).
+- **Subdivision beyond the base cage** — refinement past
+  `HdMeshUtil::ComputeTriangleIndices` at refineLevel 0.
+- **Motion blur and camera shutter** — transform and deformation sampling at more than
+  time 0.0.
+- **AOVs beyond beauty + depth** — primId/selection already carries its trigger in
+  deferrals.md.
+- **Curves, points, and volumes** — mesh is the only Rprim schema translated.
+- **Camera depth of field** — plus the recorded cos⁴-like radial falloff finding that
+  camera work should revisit.

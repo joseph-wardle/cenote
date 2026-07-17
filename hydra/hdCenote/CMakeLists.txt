@@ -2,6 +2,7 @@
 # top level, installed into the gitignored dist/ layout that
 # PXR_PLUGINPATH_NAME points at (see ../README.md).
 add_library(hdCenote MODULE
+    domePrim.cpp
     lightPrim.cpp
     materialPrim.cpp
     meshPrim.cpp
@@ -15,7 +16,10 @@ add_library(hdCenote MODULE
 # Plug resolves the library by the exact LibraryPath in plugInfo.json — no
 # "lib" prefix.
 set_target_properties(hdCenote PROPERTIES PREFIX "")
-target_link_libraries(hdCenote PRIVATE cenote-transport hd hdsi)
+# usdLux supplies UsdLuxBlackbodyTemperatureAsRgb, the one spot of USD
+# outside imaging the delegate touches (the light translator's color
+# temperature).
+target_link_libraries(hdCenote PRIVATE cenote-transport hd hdsi usdLux)
 # tf/token.h reaches <ext/hash_set> on every GCC/Linux build (USD's
 # ARCH_HAS_GNU_STL_EXTENSIONS is unconditional there), and libstdc++'s
 # deprecation #warning fires straight through -isystem, which -Werror then

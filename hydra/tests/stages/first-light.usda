@@ -24,6 +24,10 @@ def Xform "World"
     def DistantLight "Sun"
     {
         float inputs:intensity = 3
+        // Normalized, the intensity is the delivered irradiance itself;
+        // unnormalized it would be the source's luminance, and the
+        // default 0.53° disk would scale these 3 units down to darkness.
+        bool inputs:normalize = 1
         float3 xformOp:rotateXYZ = (45, 0, 0)
         uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
     }
