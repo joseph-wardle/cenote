@@ -7,8 +7,8 @@ test; `transport/`, the client that spawns `cenote-server` and speaks to it —
 spawn, socket, and the shm framebuffer reader, the deliberately-POSIX corner
 of the tree; and `hdCenote/`, the scene-index-native render delegate plugin —
 the half that needs USD. The plan is
-[docs/m4-plan.md](../docs/m4-plan.md) (steps 1 through 5 carry their locked detail);
-rationale lives in [docs/decisions.md](../docs/decisions.md) (D-097…D-121).
+[docs/m4-plan.md](../docs/m4-plan.md) (steps 1 through 6 carry their locked detail);
+rationale lives in [docs/decisions.md](../docs/decisions.md) (D-097…D-123).
 
 Baseline: C++23, extensions off, `-Wall -Wextra -Werror`. Two-part portability
 rule (D-105): portable core C++23 only, and inside the plugin `.so` no library
@@ -34,10 +34,33 @@ cmake --build build/hydra --parallel
 cmake --install build/hydra   # → hydra/dist/hdCenote/ (gitignored)
 ```
 
+### The HDK flavor — Houdini's own USD (D-122)
+
+The same source builds against the USD baked into Houdini's HDK (25.05 here) — a
+second USD, not a second source — through `CENOTE_USD_FLAVOR=hdk`. It enters through
+Houdini's own CMake config, because the HDK ships **no `pxrConfig.cmake`**: that
+blessed entry point sets the `_GLIBCXX_USE_CXX11_ABI` choice, the `dsolib` RPATH, and
+the `pxr_boost` namespace — the three "will the `.so` even load" landmines a hand-rolled
+prefix reproduces and gets subtly wrong.
+
+```sh
+source /opt/hfs21.0.671/houdini_setup_bash        # puts Houdini's cmake/env on the path
+cmake -S hydra -B build/hydra-hdk -DCENOTE_USD_FLAVOR=hdk \
+      -DHoudini_DIR=/opt/hfs21.0.671/toolkit/cmake
+cmake --build build/hydra-hdk --parallel
+cmake --install build/hydra-hdk   # → hydra/dist/ (the hdk .so + UsdRenderers.json at root)
+```
+
+`stock` stays the default, so usdview, CI, and the whole existing gate are untouched. The
+one release-cycle of 26.05↔25.05 API drift is absorbed in the single
+[hdCenote/usdCompat.hpp](hdCenote/usdCompat.hpp) (`IsSupported`'s parameter list and one
+`HdMeshUtil` return type), guarded on `PXR_VERSION`; the material reader compiles against
+both untouched, its schemas being stable `using` aliases across the 25.11 rework.
+
 ## The pre-push ritual
 
 CI proves the wire half on a bare runner; everything that needs USD or a GPU
-is proven here instead, before every push. All five commands run from the
+is proven here instead, before every push. All six commands run from the
 repo root:
 
 ```sh
@@ -45,6 +68,7 @@ cmake --build build/hydra --parallel && cmake --install build/hydra && ctest --t
 find hydra \( -name '*.cpp' -o -name '*.hpp' \) -print0 | xargs -0r clang-format --dry-run -Werror
 find hydra -name '*.cpp' -print0 | xargs -0 -P"$(nproc)" -n1 clang-tidy -p build/hydra --quiet
 python3 hydra/tests/usdrecord_smoke.py
+python3 hydra/tests/flip_golden.py
 python3 hydra/tests/interactive_test.py
 ```
 
@@ -82,8 +106,8 @@ its middle instance killed through `inactiveIds`; two green native-instance widg
 PointInstancer prototype (recursion); all under a dome sky — and asserts each of the
 three instancing hues stands as two mirror copies, the killed brick's centre reads as
 sky, and no corner is dark. Buckets by colour and left/centre/right only, so a flipped
-or mirrored render still passes; pixel equality stays step 6's FLIP golden. It needs the
-USD prefix on `PATH`/`PYTHONPATH` (below) and a built `cenote-server`
+or mirrored render still passes; pixel equality is the FLIP golden's job (below). It needs
+the USD prefix on `PATH`/`PYTHONPATH` (below) and a built `cenote-server`
 (`target/{release,debug}`, or `$CENOTE_SERVER`).
 
 The interactive test drives the same stage through `testusdview` and asserts
@@ -94,6 +118,54 @@ right there); a SIGKILLed `cenote-server` leaves usdview alive, degraded, and
 warning about the recovery gesture; and the gesture itself — the renderer
 toggled away and back — spawns a fresh server and brings the silhouette home.
 It needs everything the smoke needs, plus a display.
+
+Where the colour-bucket smoke reads structure flip/mirror-agnostically, the FLIP
+golden pins *pixels*. It renders
+[tests/stages/golden-stage.usda](tests/stages/golden-stage.usda) — three matte cubes in
+the saturated `Rec.709` primaries — through `usdrecord --renderer Cenote` to a linear EXR
+and FLIP-compares it against [tests/golden/golden-stage.exr](tests/golden/golden-stage.exr),
+shelling out to the `cenote-flip` binary (`cargo build -p cenote-cli --bin cenote-flip`;
+an ~80-line wrapper of the repo's own `nv-flip`, so no second FLIP dependency enters the
+Python env — D-122). usdrecord on stock 26.05 is the pixel oracle, never husk: an
+Education-licence watermark would poison the golden, and the point is a clean,
+licence-free, GPU-testable pin of the server's colour pipeline. The primaries are the
+tripwire — they sit at the gamut edge, where the `Rec.709`→`ACEScg`→`Rec.709` round trip
+(delegate in, server out) has the least slack, so a dropped or drifted conversion fails
+the compare loudly. That round trip is exactly the bug the golden caught on its first
+render (D-123). A saturated-primary gamut guard runs first as a readable sanity check;
+FLIP absorbs the settled path-tracer noise a byte compare would trip on. Regenerate — and
+eyeball in `tev` before committing — when the render legitimately changes:
+
+```sh
+UPDATE_GOLDENS=1 python3 hydra/tests/flip_golden.py
+```
+
+## Rendering in husk (Houdini)
+
+husk builds its renderer list from `UsdRenderers.json` files at the **top level** of each
+`HOUDINI_PATH` entry — not the pxr plugin registry — so the hdk install drops one at the
+`hydra/dist/` root. The `.so` itself still loads through `PXR_PLUGINPATH_NAME`, and the
+server still comes from `$CENOTE_SERVER`; the JSON's top-level key is the plugin's
+registered type id, which is exactly what `--renderer` takes. `husk --list-renderers` then
+shows `HdCenoteRendererPlugin (Cenote)` (untagged — i.e. supported). One frame of the
+golden stage, headless:
+
+```sh
+QT_QPA_PLATFORM=offscreen \
+HOUDINI_PATH=$PWD/hydra/dist:& \
+PXR_PLUGINPATH_NAME=$PWD/hydra/dist/hdCenote/resources \
+CENOTE_SERVER=$PWD/target/release/cenote-server \
+husk --renderer HdCenoteRendererPlugin --camera /World/Camera --res 512 512 \
+     --frame 1 --frame-count 1 -o out_\$F4.exr \
+     --usd-input hydra/tests/stages/golden-stage.usda
+```
+
+husk here is a **load-and-run proof** against Houdini's own 25.05 — it drives the same
+`cenote-server` the usdview path does and stamps `__delegate: HdCenoteRendererPlugin` on
+the EXR — not a second pixel oracle (D-122): the server is byte-identical across hosts, so
+pixel truth stays the usdrecord FLIP golden above. If husk is unlicensed the milestone
+degrades to the compile-and-link it was upgraded from — the `find_package(Houdini)` build
+still links a load-ready `.so` and the usdrecord golden still stands.
 
 ## USD 26.05 — the pinned build (record)
 

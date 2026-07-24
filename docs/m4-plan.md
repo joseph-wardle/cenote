@@ -576,18 +576,62 @@ tests pass serially on the GPU machine; the C++ side compiles + its own lint; co
      mid-history), then everything USD-side (the instancer translator, the mesh
      composition, the stage, the smoke, docs) together, full gate green on the GPU machine.
 6. **Houdini-ready hardening + validation** — the build parameterized for stock-vs-HDK
-   USD, *compiled against the HDK* to prove the pivot (the HDK's USD may trail the 26.05
-   pin — the observer mechanism holds back to 23.11, so the guards are schema-semantic,
-   not architectural); packaging (`cenote-server` beside
-   the plugin, discovery via plugInfo/env); the corpus-test CI gate green; the end-to-end
-   usdview render golden on the GPU machine; module headers and docs current. *Checkpoint:
-   the same delegate source compiles against the HDK's USD. M4 done.*
+   USD, the delegate *run inside husk* against the HDK's own USD; the end-to-end usdview
+   FLIP golden on the GPU machine; docs current. *Checkpoint: `husk --renderer Cenote`
+   renders one frame of the golden stage, and the usdview golden passes. M4 done.* The
+   locked detail (a seventh structured interview, 2026-07-18; the genuinely new decision is
+   D-122 in [decisions.md](decisions.md), which reinterprets D-097's Houdini-later boundary
+   one notch — the trigger is that Houdini `hfs21.0.671` / USD 25.05 is installed on the
+   build machine, so the "compile proof" becomes a load-and-run for almost nothing):
+   - *Feasibility first* (T0): `husk --version` / license check. Licensed → the full proof.
+     Unlicensed → the milestone degrades with no design change to the compile proof it
+     replaced: `find_package(Houdini)` still links a load-ready `.so`, the usdview golden
+     still stands, only the final husk assertion slips.
+   - *The build learns a second USD, not a second source* (T1, D-122): `find_package(pxr
+     CONFIG)` stays as-is for stock 26.05 (usdview, CI, the whole gate untouched); an
+     `-DCENOTE_USD_FLAVOR=hdk` branch enters through `toolkit/cmake/HoudiniConfig.cmake` —
+     the HDK ships no `pxrConfig.cmake`, only Houdini's, and its USD is `pxr_boost`-namespaced.
+     The blessed entry point gets the `_GLIBCXX_USE_CXX11_ABI`, `dsolib` RPATH, and namespace
+     right for free — the "will the `.so` load" landmines a hand-rolled prefix reproduces and
+     gets wrong. Source unmoved; `hd hdsi usdLux` map onto Houdini's imported targets.
+   - *The drift is already absorbed by the aliases*: 25.05 sits before the 25.11 material
+     rework, but cenote's `HdMaterialNodeContainerSchema` / `HdMaterialConnectionVectorSchema`
+     are stable `using` aliases in `schemaTypeDefs.h` across both USDs (only the underlying
+     template was renamed), and cenote codes to the alias. So the reader is expected to
+     compile against 25.05 untouched — the trial compile is the proof; a single isolated
+     `usdCompat.hpp` shim only if it actually breaks, never pre-emptively.
+   - *The husk surface is the smallest thing that renders* (T2): the
+     `CreateRenderDelegate(HdRenderSettingsMap const&)` overload husk needs to initialize at
+     all — forwarding to the no-arg path and ignoring the map, since resolution arrives via
+     `HdRenderBuffer::Allocate`, not the dictionary — plus a three-line `UsdRenderers.json`
+     (`valid`, `menulabel`, `aovsupport:true`). That is the entire husk-enabling diff.
+   - *Renders one frame* (T3): the documented env recipe (`PXR_PLUGINPATH_NAME` +
+     `HOUDINI_PATH` + `CENOTE_SERVER`), husk rendering `golden-stage.usda` headless, asserted
+     non-black with the right silhouette by the same flip/mirror-agnostic colour-bucketing
+     the other stages use — husk's job here is load-and-run against 25.05, not a pixel oracle.
+   - *The end-to-end golden* (T4): a saturated primary through the full usdview/26.05 path,
+     FLIP-compared to a committed golden so a dropped server-side Rec.709 conversion fails
+     loudly (the one error the wire drift guard cannot see). `cenote-flip`, a ~80-line CLI
+     wrapping the repo's existing `nv-flip` (no second FLIP dep, D-100/D-104), is what the
+     Python smoke shells out to; `golden-stage.usda` stays small for a fast, stable render;
+     `UPDATE_GOLDENS=1` regenerates, heatmap on failure, run serially per the GPU-flake rule.
+   - *Deferred by name* to the real Houdini-integration milestone (research-justified, not
+     gaps): `GetRenderStats`/progress, `Stop(blocking)` beyond the stub / `Pause` / `Resume`,
+     `restartrendersettings`/`restartcamerasettings`, `HdRenderSettings`-Bprim consumption,
+     deep/cryptomatte AOVs, dialog-script LOP UIs, the self-contained relocatable package
+     (server beside the plugin, `dladdr` self-location).
+   - *Landing*: the gate grows to build **both** flavors (existing stock + `-DCENOTE_USD_FLAVOR=hdk`
+     compiles/links) and to run the usdrecord FLIP golden (GPU, serial) and the husk smoke
+     (if licensed); then the paper trail — README's HDK build + husk smoke + FLIP ritual,
+     `deferrals.md`'s husk-citizen entries — lands with the work that makes each real.
 
 ## 5. Fallback seams (pre-agreed, in slip order)
 
-- **HDK compile proof (step 6)** → the Houdini-ready *rule* is enforced by design
-  throughout, so the pivot is documented even if not proven-in-CI this milestone. First to
-  go; costs no correctness.
+- **husk render (step 6)** → if husk is unlicensed on the machine, the proof degrades to
+  the compile-and-link it was upgraded from (D-122): the `find_package(Houdini)` build still
+  links a load-ready `.so` against the HDK's 25.05 and the usdview golden still stands, so
+  the Houdini-ready *rule* is proven to the compiler even when it cannot be proven to husk.
+  First to go; costs no correctness.
 - **Instancing (step 5)** → single-instance only; the array op is the trim, deferred to
   its D-073 trigger (landscape-class scenes). Most lookdev assets are not instance-heavy.
 - **Depth AOV (step 2)** → beauty only; depth is cheap but droppable if the schedule
@@ -660,8 +704,11 @@ regression gate) but the **seams**:
 - The cross-language corpus drift guard is green in CI (no USD, no GPU); the full delegate
   compiles against stock USD; an end-to-end usdview render golden passes on the GPU
   machine.
-- The delegate source compiles against the HDK's USD — the Houdini pivot proven — even
-  though Houdini integration itself is a later milestone.
+- The one source builds against both the stock 26.05 and the HDK's own USD, and
+  `husk --renderer Cenote` renders one frame of the golden stage against the latter — the
+  Houdini pivot proven by load-and-run, not just by compile (D-122) — even though full
+  Houdini integration (render stats, restart declarations, the relocatable package, the
+  deferred husk citizens) is a later milestone.
 - A stranger can read the three components (`cenote-wire`, `cenote-server`, `hydra/`) and
   the wire types + corpus test to see exactly what crosses the boundary, and read
   [deferrals.md](deferrals.md) to know what M4 consciously left for later — primId

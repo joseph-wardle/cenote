@@ -356,14 +356,54 @@ of that first delegate lands here.
   (the hdStorm/hdPrman path). Only a renderer that grows a shader-graph backend needs
   this; like the runtime-attribute system (D-053), it is the first consequence if that
   architectural stance ever changes. (D-102)
-- **Houdini / Solaris integration** *(revisit: a Houdini demo is wanted, or a pipeline-TD
-  / rendering-research role targets Solaris specifically)* — Today: the delegate is built
-  and validated against stock OpenUSD for usdview; the render server and transport are
-  kept Houdini-ready (no usdview-specific or stock-USD-only assumptions). Production
-  shape: the same delegate source built against the HDK's USD (its own TBB /
-  `_GLIBCXX_USE_CXX11_ABI` / Python — which may trail the 26.05 pin; the observer
-  mechanism holds back to 23.11, so the guards are schema-semantic — material-context
-  fallback, render-settings renames — not architectural), a `UsdRenderers.json` menu
-  entry, `cenote-server` packaged beside the plugin, and end-to-end validation inside a
-  licensed Houdini — a packaging-and-ABI milestone, not a rearchitecture, by
-  construction of the M4 boundary. (D-097)
+- **Houdini / Solaris *production* integration** *(revisit: a Solaris demo is wanted, or a
+  pipeline-TD / rendering-research role targets Solaris specifically)* — Today (step 6
+  delivered, D-122): the same delegate source builds against the HDK's USD 25.05 through
+  `CENOTE_USD_FLAVOR=hdk`, the 26.05↔25.05 drift isolated in one `usdCompat.hpp`; a
+  top-level `UsdRenderers.json` lists cenote in `husk --list-renderers`; and `husk
+  --renderer HdCenoteRendererPlugin` renders one frame of the golden stage against
+  Houdini's own USD — a load-and-run proof, the usdrecord FLIP golden beside it. What
+  remains deferred is husk as a *first-class production citizen*: the render-stat/progress,
+  pause/resume, render-settings, deep-AOV, LOP-UI, and relocatable-packaging items below,
+  plus stage-scale validation inside a licensed Solaris pipeline. A packaging-and-features
+  milestone, not a rearchitecture, by construction of the M4 boundary. (D-097, D-122)
+- **husk render stats & progress** *(revisit: husk-driven farm rendering, where the
+  progress bar and per-frame stats are the operator's only feedback)* — Today: husk renders
+  to completion with no `GetRenderStats`; convergence rides the shm status header the
+  delegate already reads. Production shape: `HdRenderDelegate::GetRenderStats` populated from
+  that header (samples, converged, rejected-edit count), surfaced as husk's `ALF_PROGRESS`
+  and stat dictionary. (D-122)
+- **`Stop`/`Pause`/`Resume` beyond the engine stub** *(revisit: an interactive husk /
+  Solaris viewport, where a camera drag should pause and resume rather than restart from
+  scratch)* — Today: `Stop(bool)` is the stub the 26.03+ engine requires; no true
+  pause/resume. Production shape: the session's stop→apply→restart wave boundary wired to
+  husk's pause/resume control surface, so an in-flight edit suspends the render instead of
+  discarding it. (D-122)
+- **`restartrendersettings` / `restartcamerasettings` + `HdRenderSettings` Bprim**
+  *(revisit: a stage that authors a RenderSettings prim husk resolves and hands the
+  delegate)* — Today: `CreateRenderDelegate(HdRenderSettingsMap const&)` forwards to the
+  no-arg path and ignores the map — resolution reaches the delegate through
+  `HdRenderBuffer::Allocate`, the only setting one frame needs. Production shape: consume the
+  settings Bprim (sampling, AOV selection, product metadata) and declare which of its keys
+  force a restart versus a live update. (D-122)
+- **Deep AOVs** *(revisit: the Houdini compositing story, beside cryptomatte/object-ID above
+  — D-073)* — Today: beauty + first-hit depth. Production shape: per-sample deep-`z` output
+  husk writes as a deep EXR, the deep-composite pipeline's first ask. (D-122)
+- **Dialog-script LOP parameter UIs** *(revisit: a Solaris artist should tune cenote from
+  the LOP network, not the environment)* — Today: cenote is driven by scene data and env
+  overrides; it exposes no Houdini parameter interface. Production shape: the `.ds` dialog
+  scripts that give a Cenote ROP/LOP its parameter dialog inside Houdini. (D-122)
+- **Self-contained relocatable package** *(revisit: shipping cenote to a machine that is not
+  the build tree)* — Today: `PXR_PLUGINPATH_NAME`, `HOUDINI_PATH`, and `$CENOTE_SERVER` are
+  three documented env exports, and the server lives in `target/`, not beside the `.so`.
+  Production shape: `cenote-server` installed beside the plugin and located by `dladdr`
+  self-location, so the whole thing is one relocatable directory a `HOUDINI_PATH` entry
+  finds with no other env. The `$CENOTE_SERVER` override that makes discovery a one-liner
+  today is exactly what keeps this deferrable. (D-122)
+- **Delegate colorspace conversion for constant material colors** *(revisit: a front end
+  that authors a constant `UsdPreviewSurface` `diffuseColor`/`specularColor` — the golden's
+  sibling gap)* — Today: `_ReadDisplayColor` converts `displayColor` Rec.709→ACEScg (D-123),
+  but `materialPrim`'s constant node colors still cross the wire raw; no golden catches it,
+  because the preview-surface stage drives its base color from a *texture* (its own
+  color-space path). Production shape: the one-line twin of D-123's conversion in the
+  material-node switch. (D-123)

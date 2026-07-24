@@ -1,0 +1,7 @@
+{
+    "HdCenoteRendererPlugin": {
+        "valid": true,
+        "menulabel": "Cenote",
+        "defaultpurposes": ["render"]
+    }
+}

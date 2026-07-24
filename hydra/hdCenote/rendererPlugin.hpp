@@ -7,14 +7,22 @@
 #include "pxr/imaging/hd/rendererPlugin.h"
 #include "pxr/pxr.h"
 
+#include "usdCompat.hpp"
+
 PXR_NAMESPACE_OPEN_SCOPE
 
 class HdCenoteRendererPlugin final : public HdRendererPlugin {
 public:
     HdRenderDelegate* CreateRenderDelegate() override;
+    // husk creates the delegate through this settings-map overload; the base
+    // default returns nullptr, so a renderer that omits it is invisible to
+    // husk. Cenote honours no delegate settings, so it forwards (usdCompat
+    // note: both USD versions declare this overload identically — no shim).
+    HdRenderDelegate* CreateRenderDelegate(HdRenderSettingsMap const& settingsMap) override;
     void DeleteRenderDelegate(HdRenderDelegate* renderDelegate) override;
-    bool IsSupported(HdRendererCreateArgs const& rendererCreateArgs,
-                     std::string* reasonWhyNot = nullptr) const override;
+    // The pure IsSupported override differs by USD version; the parameter
+    // list comes from usdCompat.hpp (D-122).
+    bool IsSupported(CENOTE_ISSUPPORTED_PARAMS) const override;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

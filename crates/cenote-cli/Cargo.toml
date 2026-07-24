@@ -14,6 +14,11 @@ cenote-pbrt = { path = "../cenote-pbrt" }
 clap = { version = "4.6.1", features = ["derive"] }
 env_logger = "0.11.11"
 log = "0.4.33"
+# NVIDIA FLIP, the repo's one perceptual image metric (already the goldens'
+# in crates/cenote's tests): the `cenote-flip` bin wraps it so the Hydra
+# harness FLIP-compares usdrecord's EXR against the checked-in golden through
+# the same code the in-process goldens use — no second FLIP dependency.
+nv-flip = "0.1.2"
 
 [features]
 # Builds `render --denoise` (the flag itself always parses, and names

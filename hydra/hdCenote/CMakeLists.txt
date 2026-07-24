@@ -17,10 +17,11 @@ add_library(hdCenote MODULE
 # Plug resolves the library by the exact LibraryPath in plugInfo.json — no
 # "lib" prefix.
 set_target_properties(hdCenote PROPERTIES PREFIX "")
-# usdLux supplies UsdLuxBlackbodyTemperatureAsRgb, the one spot of USD
-# outside imaging the delegate touches (the light translator's color
-# temperature).
-target_link_libraries(hdCenote PRIVATE cenote-transport hd hdsi usdLux)
+# cenote_usd is the flavor-neutral USD handle chosen at the top level
+# (stock OpenUSD 26.05 or the HDK's own USD, D-122); usdLux rides inside it
+# for UsdLuxBlackbodyTemperatureAsRgb, the one spot of USD outside imaging
+# the delegate touches (the light translator's color temperature).
+target_link_libraries(hdCenote PRIVATE cenote-transport cenote_usd)
 # tf/token.h reaches <ext/hash_set> on every GCC/Linux build (USD's
 # ARCH_HAS_GNU_STL_EXTENSIONS is unconditional there), and libstdc++'s
 # deprecation #warning fires straight through -isystem, which -Werror then
@@ -40,3 +41,13 @@ target_compile_definitions(hdCenote PRIVATE
 
 install(TARGETS hdCenote DESTINATION hdCenote)
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/plugInfo.json" DESTINATION hdCenote/resources)
+
+# husk discovers renderers from UsdRenderers.json files at the top level of
+# each HOUDINI_PATH entry — a Houdini-path artifact, not a pxr plugin resource.
+# Installed at the dist root so `HOUDINI_PATH=<dist>:&` makes husk offer
+# `--renderer HdCenoteRendererPlugin`; the .so itself still loads through
+# PXR_PLUGINPATH_NAME as usual. Only the hdk build is ever seen by husk, so the
+# stock dist keeps none of this.
+if(CENOTE_USD_FLAVOR STREQUAL "hdk")
+    install(FILES UsdRenderers.json DESTINATION .)
+endif()

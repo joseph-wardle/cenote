@@ -2,6 +2,7 @@
 
 #include "instancerPrim.hpp"
 #include "materialPrim.hpp"
+#include "usdCompat.hpp"
 
 #include <array>
 #include <cmath>
@@ -42,8 +43,31 @@ namespace {
 /// The server's own neutral default base color (description.rs). Sent
 /// explicitly rather than left to get-or-create defaulting, so a
 /// displayColor that disappears across a resync cannot leave a stale
-/// color on the companion material.
+/// color on the companion material. Achromatic, so it needs no colour
+/// conversion — grey is grey in both Rec.709 and ACEScg.
 constexpr std::array<float, 3> kNeutralColor{0.8f, 0.8f, 0.8f};
+
+/// An authored linear Rec.709 colour (USD's displayColor convention),
+/// expressed in ACEScg — the space the server renders in. This is the
+/// C++ side of the one conversion `cenote::color::acescg_from_rec709`
+/// (crates/cenote/src/color.rs) does for every other authoring front end:
+/// the importer converts, so the delegate must too, or a displayColor is
+/// silently treated as already-ACEScg and renders oversaturated (and, once
+/// the server converts back to Rec.709 for display, a saturated primary
+/// lands outside the 709 gamut — the negative lobe the server now clamps).
+/// The matrix is `ACESCG_FROM_REC709` verbatim; the end-to-end golden
+/// (hydra/tests/flip_golden.py) round-trips a primary through both sides and
+/// pins the agreement, so a drift here fails there rather than silently.
+std::array<float, 3> _AcescgFromRec709(const std::array<float, 3>& c) {
+    const float r = c[0];
+    const float g = c[1];
+    const float b = c[2];
+    return {
+        0.6130974f * r + 0.33952314f * g + 0.04737945f * b,
+        0.07019373f * r + 0.9163539f * g + 0.013452399f * b,
+        0.020615594f * r + 0.10956978f * g + 0.86981466f * b,
+    };
+}
 
 TfToken _TokenOr(const HdTokenDataSourceHandle& source, const TfToken& fallback) {
     return source ? source->GetTypedValue(0.0f) : fallback;
@@ -120,15 +144,15 @@ std::optional<_Primvar<Array>> _ReadPrimvar(const SdfPath& path, const HdPrimvar
         return _Primvar<Array>{std::move(array), false};
     }
     VtValue triangulated;
-    const HdMeshComputationResult result = util.ComputeTriangulatedFaceVaryingPrimvar(
-        HdGetValueData(sampled), static_cast<int>(array.size()), HdGetValueTupleType(sampled).type,
-        &triangulated);
-    if (result == HdMeshComputationResult::Error) {
+    const cenote::TriangulateResult result = cenote::ComputeTriangulatedFaceVarying(
+        util, HdGetValueData(sampled), static_cast<int>(array.size()),
+        HdGetValueTupleType(sampled).type, &triangulated);
+    if (result == cenote::TriangulateResult::Error) {
         TF_WARN("<%s>: triangulating the faceVarying %s primvar failed; dropped", path.GetText(),
                 name.GetText());
         return std::nullopt;
     }
-    if (result == HdMeshComputationResult::Success) {
+    if (result == cenote::TriangulateResult::Success) {
         array = triangulated.UncheckedGet<Array>();
     }
     // Unchanged: the cage is already all triangles, right-handed, with
@@ -277,12 +301,12 @@ std::array<float, 3> _ReadDisplayColor(const HdSceneIndexPrim& prim) {
     const VtValue sampled = value->GetValue(0.0f);
     if (sampled.IsHolding<GfVec3f>()) {
         const GfVec3f color = sampled.UncheckedGet<GfVec3f>();
-        return {color[0], color[1], color[2]};
+        return _AcescgFromRec709({color[0], color[1], color[2]});
     }
     if (sampled.IsHolding<VtVec3fArray>()) {
         const VtVec3fArray& colors = sampled.UncheckedGet<VtVec3fArray>();
         if (!colors.empty()) {
-            return {colors[0][0], colors[0][1], colors[0][2]};
+            return _AcescgFromRec709({colors[0][0], colors[0][1], colors[0][2]});
         }
     }
     return kNeutralColor;

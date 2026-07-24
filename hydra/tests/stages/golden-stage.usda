@@ -1,0 +1,61 @@
+#usda 1.0
+(
+    """Step 6's end-to-end FLIP golden (T4). Three matte cubes painted the
+    three saturated Rec.709 primaries — pure red, green, blue — flat-lit by
+    one white distant light against a black background, from the same camera
+    and sun first-light.usda uses. Saturation is the whole point: the primaries
+    are exactly where the server's Rec.709→ACEScg 3×3 moves a colour the most,
+    so a golden captured through the full usdrecord → delegate → server → EXR
+    path pins that conversion — the one drift the USD-free wire corpus cannot
+    see. A future build that drops or corrupts the 3×3 renders the primaries in
+    the wrong place and fails the FLIP compare loudly (tests/flip_golden.py).
+    Small and plainly lit on purpose, for a fast and stable render."""
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "World"
+{
+    def Camera "Camera"
+    {
+        float focalLength = 35
+        double3 xformOp:translate = (0, -12, 0)
+        float3 xformOp:rotateXYZ = (90, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def DistantLight "Sun"
+    {
+        float inputs:intensity = 3
+        // Normalized (as in first-light): the intensity is the delivered
+        // irradiance, so the primaries land at a stable, unclipped exposure.
+        bool inputs:normalize = 1
+        float3 xformOp:rotateXYZ = (45, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def Cube "Red"
+    {
+        double size = 2
+        color3f[] primvars:displayColor = [(1, 0, 0)]
+        double3 xformOp:translate = (-2.2, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "Green"
+    {
+        double size = 2
+        color3f[] primvars:displayColor = [(0, 1, 0)]
+        double3 xformOp:translate = (0, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "Blue"
+    {
+        double size = 2
+        color3f[] primvars:displayColor = [(0, 0, 1)]
+        double3 xformOp:translate = (2.2, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}

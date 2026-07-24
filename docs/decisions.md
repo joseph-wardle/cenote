@@ -2967,3 +2967,133 @@ object would only be un-flattened again server-side); mesh-side re-derivation of
 (a second copy of `ComputeInstanceIndicesForProto` drifting from usdImaging's); and
 decomposing the aggregated native-instance matrix back into TRS (lossy, and the
 composition consumes the matrix directly anyway).
+
+### D-122: Houdini-ready means husk renders one frame — the proof the installed host makes cheap
+Status: accepted (2026-07-18); the seventh structured interview, informed by
+production-delegate research (hdPrman, hdMoonray, Karma/husk, hdCycles). Reinterprets
+D-097's "usdview is the milestone, Houdini a later one" by one notch, and closes M4. The
+trigger is a fact on the build machine: Houdini `hfs21.0.671` is installed, shipping USD
+**25.05** with HDK headers — so the "HDK compile proof" the plan penciled as a
+first-to-slip fallback is not a compile at all but a **load-and-run**: husk itself, the
+host's own 25.05, rendering cenote's pixels. Buying that costs almost nothing over the
+compile it replaces, so step 6's definition of done grows from "the source compiles
+against the HDK" to **"`husk --renderer Cenote` renders one frame,"** the usdview FLIP
+golden beside it and every heavier husk feature deferred by name.
+
+**The build learns a second USD, not a second source.** `find_package(pxr CONFIG)` stays
+exactly as it was for stock 26.05 (usdview, CI, the whole existing gate untouched); an
+`-DCENOTE_USD_FLAVOR=hdk` branch enters instead through `toolkit/cmake/HoudiniConfig.cmake`
+— the HDK ships **no `pxrConfig.cmake`**, only Houdini's, and its USD is the
+`pxr_boost`-namespaced flavor built to Houdini's ABI. That blessed entry point is the whole
+reason to prefer it over a hand-rolled include/lib prefix: it gets the
+`_GLIBCXX_USE_CXX11_ABI` choice, the `dsolib` RPATH, and the pxr_boost namespace right for
+free, and those three are exactly the "will the `.so` even load" landmines a by-hand prefix
+reproduces and gets subtly wrong. The source files do not move; the delegate's three link
+libraries (`hd hdsi usdLux`) map onto Houdini's imported targets and nothing else changes.
+
+**The schema drift the risk-watch feared is already absorbed by the aliases.** 25.05 trails
+the 26.05 pin by a release cycle, sitting *before* the 25.11 material-network rework — and
+cenote reads materials through `HdMaterialNodeContainerSchema` and
+`HdMaterialConnectionVectorSchema`, whose same-named `.h` files exist in neither USD because
+both are `using` aliases in `schemaTypeDefs.h`. The rework renamed only the underlying
+template (`HdSchemaBasedContainerSchema` in 25.05 → `HdContainerOfSchemasSchema` in 26.05);
+the alias names and their `.Get()`/`.GetNodes()` surface are stable across both, and cenote
+codes to the alias, never the template. So the material reader is expected to compile
+against 25.05 **untouched** — the trial compile is the proof, and a single isolated
+`usdCompat.hpp` shim is added only if that compile actually breaks, never pre-emptively. The
+husk-facing API cenote calls — the `HdRenderSettingsMap` constructor overload, `Stop(bool)`,
+`GetRenderStats`, `IsStopSupported` — is present in 25.05 already, so none of it forces a
+version guard.
+
+**The husk surface is the smallest thing that renders.** husk sends its initial settings *en
+masse* through `CreateRenderDelegate(HdRenderSettingsMap const&)`, so that overload must
+exist or the delegate never initializes — but it **forwards to the no-arg path and ignores
+the map**, because resolution already reaches the delegate the way usdview delivers it,
+through `HdRenderBuffer::Allocate`, not the settings dictionary. Beside it a three-line
+`UsdRenderers.json` (`valid`, `menulabel`, `aovsupport:true`) is what makes husk list cenote
+and treat its color AOV as a raster product. That is the entire husk-enabling diff;
+everything else husk *can* consume, cenote consciously does not yet.
+
+**The end-to-end golden guards the one thing the wire drift guard cannot see** — the
+server-side Rec.709 conversion: a saturated primary rendered through the full usdview/26.05
+path and FLIP-compared to a committed golden, so the day that conversion is dropped the
+primary blows out and the golden fails loudly. FLIP is the metric already trusted repo-wide
+(`nv-flip`, `crates/cenote/tests/golden.rs`), so rather than admit a second,
+possibly-disagreeing FLIP into the Python test env — against the standing dependency policy
+(D-100/D-104) — a ~80-line `cenote-flip` CLI wraps the same crate and the Python smoke shells
+out to it. The **usdrecord/26.05 render is the pixel oracle**; the **husk/25.05 render is
+not** — the server is byte-identical across both hosts, so a second golden would only assert
+pixel-parity between two renderers that conform framing and handedness differently. husk
+instead gets the lighter, flip/mirror-agnostic colour-bucket smoke the other stages use: its
+job in this milestone is to prove *load-and-run against 25.05*, not to be a second oracle.
+
+**Discovery stays env-driven, the package stays flat.** The `$CENOTE_SERVER` override already
+makes the server a one-line export under husk, so step 6 adds no relocatable-package
+machinery — `PXR_PLUGINPATH_NAME` for the plugin, `HOUDINI_PATH` for `UsdRenderers.json`,
+`CENOTE_SERVER` for the binary, all documented, nothing installed beside the `.so`. And the
+whole milestone degrades gracefully at its one external dependency: **if husk is unlicensed
+on the machine, B becomes the compile proof it replaced** — the `find_package(Houdini)` build
+still links a load-ready `.so`, the usdrecord golden still stands — with no design change,
+only a slipped final assertion. The license check is the first implementation step, not a
+surprise at the end.
+
+**Deferred to the real Houdini-integration milestone, by name** (research-justified, so the
+omissions are choices not gaps): `GetRenderStats`/progress reporting, `Stop(blocking)` beyond
+the stub / `Pause` / `Resume`, the `restartrendersettings`/`restartcamerasettings`
+declarations, `HdRenderSettings`-Bprim consumption, deep and cryptomatte AOVs, the
+dialog-script LOP parameter UIs, and the self-contained relocatable package (server beside
+the plugin, `dladdr` self-location). Rejected alternatives: a hand-rolled HDK prefix
+(reproduces by hand the ABI flags `HoudiniConfig.cmake` sets correctly); a Python FLIP
+dependency (a divergent second oracle and a new dep where an 80-line wrapper of the existing
+one suffices); dual FLIP goldens across two host renderers (brittle pixel-parity for no
+coverage the single oracle lacks); and consuming the husk settings map now (the render buffer
+already carries the only setting — resolution — that one frame needs).
+
+## 2026-07-24 — M4 step 6 lands: the golden caught the gamut bug it was built to catch
+
+### D-123: The saturated-primary golden caught a real gamut bug — the delegate converts displayColor, the server clamps its Rec.709 output
+Status: accepted (2026-07-24); implementing D-122's step-6 plan. D-122 framed the
+end-to-end golden as guarding "the one thing the wire drift guard cannot see — the
+server-side Rec.709 conversion." Built, it did exactly that on its first render, and
+the thing it caught was not a *dropped* conversion but a *missing* one on the way in,
+compounded by an unclamped one on the way out. Recording what the golden found and the
+two fixes that make it pin correct pixels, because the plan predicted the mechanism in
+the abstract and the implementation found it concrete.
+
+**The bug: a saturated primary rendered as `NaN`.** The color pipeline has two sides.
+On the way *in*, an authored linear-`Rec.709` color becomes `ACEScg` (the render space)
+through `cenote::color::acescg_from_rec709` — the pbrt importer does it, the `.ron`
+front end does it, and so the shader never sees a saturated-`ACEScg` albedo. On the way
+*out*, `cenote-server` converts the `ACEScg` frame back to `Rec.709` for the display
+host (D-101's hoisted 3×3). The delegate skipped the inbound half: `_ReadDisplayColor`
+sent `displayColor` **raw** as the server's `base_color`, so a `displayColor` of pure
+red reached the shader as `ACEScg` `(1,0,0)` — a color *more saturated than Rec.709 can
+hold*. The outbound 3×3 then maps it to a `Rec.709` triple with two **negative**
+components (green → `(-0.62, 1.14, -0.13)`), and a consumer's transfer curve raises each
+component to a power — `powf` of a negative is `NaN`. The golden stage's three saturated
+primaries turned ~300 pixels to `NaN`; the demo and every in-tree golden never did,
+because their colors are converted on the way in and so are always in-gamut on the way
+out. This is why the golden had to be *saturated primaries* and not the warmer palette
+of `first-light`: only a color at the gamut edge exposes the missing conversion.
+
+**Fix one — the delegate converts, like every other front end.** `_ReadDisplayColor`
+now applies the `Rec.709 → ACEScg` 3×3 (the C++ twin of `ACESCG_FROM_REC709`, matrix
+verbatim, drift pinned by the golden's own round-trip). A `displayColor` red round-trips
+to a `Rec.709` red on screen, in gamut, no negatives — and, rendered through the OpenPBR
+default dielectric specular layer, correctly *desaturated* by its white sheen rather
+than the over-saturated primary the raw path produced.
+
+**Fix two — the server clamps, completing D-101's silent-gamut defence.** Even with the
+inbound conversion, genuinely wide-gamut `ACEScg` content (a future texture or authored
+material outside `Rec.709`) can still map to negative `Rec.709`. A display cannot emit
+negative light, so `rec709_texels` clamps the conversion output to `≥ 0` — the honest
+gamut clip. In-gamut color is untouched and highlights above one are kept; only the
+below-zero out-of-gamut lobe is clipped. Two fast unit tests pin it (saturated primaries
+clamp non-negative; grey survives), so the guard no longer rides only on the GPU golden.
+
+**Known follow-up, by name.** `materialPrim.cpp` reads a `UsdPreviewSurface`'s constant
+`diffuseColor`/`specularColor` the same raw way `_ReadDisplayColor` used to — the same
+missing inbound conversion. No golden covers it yet (the preview-surface stage drives its
+base color from a *texture*, which carries its own color-space handling), so it is a live
+gap, not a caught bug: the one-line twin of fix one, deferred until a constant-color
+material front end is exercised.

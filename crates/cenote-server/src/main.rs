@@ -377,6 +377,17 @@ fn fail(shared: &mut Shared, socket: &TcpStream, message: String) {
 }
 
 /// Downloaded `ACEScg` RGBA texels → linear `Rec.709`, alpha untouched.
+///
+/// The negative lobe of the 3×3 is clamped away: an `ACEScg` colour more
+/// saturated than `Rec.709` can hold maps to a component below zero (the AP1
+/// gamut is wider than 709), and this is the display-referred buffer usdview,
+/// usdrecord, and husk read — a consumer's transfer curve raises each
+/// component to a power, and `powf` of a negative is `NaN`. A display cannot
+/// emit negative light, so clamping to zero is the honest gamut clip and the
+/// completion of D-101's silent-gamut defence: without it a saturated primary
+/// riddles the frame with `NaN` (the failure step 6's end-to-end golden
+/// surfaced). In-gamut colour is untouched, and highlights above one stay —
+/// only the below-zero out-of-gamut lobe is clipped.
 fn rec709_texels(matrix: &glam::Mat3, acescg: &[u8]) -> Vec<f32> {
     let mut rec709 = Vec::with_capacity(acescg.len() / 4);
     for texel in acescg.chunks_exact(16) {
@@ -387,8 +398,48 @@ fn rec709_texels(matrix: &glam::Mat3, acescg: &[u8]) -> Vec<f32> {
                     .expect("a 4-byte channel"),
             )
         };
-        let rgb = *matrix * Vec3::new(channel(0), channel(1), channel(2));
+        let rgb = (*matrix * Vec3::new(channel(0), channel(1), channel(2))).max(Vec3::ZERO);
         rec709.extend_from_slice(&[rgb.x, rgb.y, rgb.z, channel(3)]);
     }
     rec709
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rec709_texels;
+
+    /// One `ACEScg` RGBA texel as the 16 little-endian bytes a download hands us.
+    fn texel(rgba: [f32; 4]) -> Vec<u8> {
+        rgba.iter().flat_map(|c| c.to_le_bytes()).collect()
+    }
+
+    /// A saturated `ACEScg` primary sits outside the `Rec.709` gamut, so the
+    /// `3x3` sends two of its components below zero; the conversion must clamp
+    /// them away rather than publish negative light a consumer's transfer curve
+    /// would turn into `NaN` (the step-6 golden's failure mode). The clamp is
+    /// the completion of `D-101`'s silent-gamut defence.
+    #[test]
+    fn saturated_primaries_clamp_to_nonnegative() {
+        let matrix = cenote::color::rec709_from_acescg();
+        for primary in [[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]] {
+            let out = rec709_texels(&matrix, &texel(primary));
+            assert!(
+                out[..3].iter().all(|c| *c >= 0.0),
+                "ACEScg {primary:?} left a negative Rec.709 component: {:?}",
+                &out[..3]
+            );
+            assert!((out[3] - 1.0).abs() < 1e-6, "alpha must pass through untouched");
+        }
+    }
+
+    /// In-gamut colour is untouched: an `ACEScg` grey is grey in `Rec.709` (the
+    /// shared white point), so the clamp is a no-op and the value round-trips.
+    #[test]
+    fn in_gamut_colour_is_unchanged() {
+        let matrix = cenote::color::rec709_from_acescg();
+        let out = rec709_texels(&matrix, &texel([0.5, 0.5, 0.5, 1.0]));
+        for c in &out[..3] {
+            assert!((c - 0.5).abs() < 1e-5, "grey should survive the conversion: {out:?}");
+        }
+    }
 }
