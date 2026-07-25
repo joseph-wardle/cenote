@@ -33,7 +33,7 @@ import lights;
 import openpbr;
 import pathstate;
 import reservoir;
-import reservoir_di;
+import reservoir_path;
 import restir_scene;
 import rng;
 import scene;
@@ -52,7 +52,7 @@ struct Params {
     Queue<ShadowRay> shadows;    // the survivor's visibility ray, for trace_shadow
     SceneTable* scene;
     RestirScene* restir;
-    StoredReservoir* reservoirs; // this frame's per-pixel reservoirs (curr), read here
+    StoredPathReservoir* reservoirs; // this frame's per-pixel reservoirs (curr), read here
     float4* radiance;            // the film accumulator — the inline delta term adds here
     // The D-092 debug surface's single enum-selected target (§below), non-null
     // exactly when debugView != DEBUG_NONE. One RGBA float per pixel, zero-
@@ -117,7 +117,7 @@ float3 heat(float t) {
 // `confidenceScale` is the M value the heatmap saturates near — the candidate
 // count for single-frame RIS, its multiple after temporal or spatial reuse
 // compounds M (the caller sets it from which stages ran).
-float3 debugColor(uint view, Reservoir<DirectLightSample> reservoir, float confidenceScale) {
+float3 debugColor(uint view, Reservoir<PathSample> reservoir, float confidenceScale) {
     switch (view) {
     case DEBUG_SELECTED_LIGHT:
         // The environment reads as one steady near-white; instances scatter
@@ -126,7 +126,7 @@ float3 debugColor(uint view, Reservoir<DirectLightSample> reservoir, float confi
         if (isEnvironmentSample(reservoir.sample)) {
             return float3(0.75, 0.75, 0.78);
         }
-        return hueColor(frac(float(reservoir.sample.light) * 0.6180339887));
+        return hueColor(frac(float(reservoir.sample.rcVertex.instance) * 0.6180339887));
     case DEBUG_CONFIDENCE:
         // M — the generalized sample count. Flat at the candidate count for
         // single-frame RIS; temporal history ramps it toward the M-cap and
@@ -215,11 +215,15 @@ void restir_resolve(uint3 tid: SV_DispatchThreadID) {
     // nothing — no shadow ray, no continuation (that is shade_surface's). The
     // delta term above already landed; this pixel's debug surface stays at its
     // black zero-fill (nothing selected).
-    Reservoir<DirectLightSample> reservoir = loadReservoir(params.reservoirs[pixel]);
+    Reservoir<PathSample> reservoir = loadPathReservoir(params.reservoirs[pixel]);
     if (!(reservoir.unbiasedWeight > 0.0)) {
         return;
     }
-    DirectLightSample sample = reservoir.sample;
+    PathSample sample = reservoir.sample;
+    // The reconnection vertex is the light point (length-2 NEE base case): its
+    // `instance` carries the stable light id, `primitive`/`barycentrics` the
+    // emitter point (or the env sampling coordinate).
+    let rc = sample.rcVertex;
 
     // Unpack the debug word: the view enum, whether the spatial stage already
     // folded the survivor's visibility into W (so no shadow ray is owed here),
@@ -253,7 +257,7 @@ void restir_resolve(uint3 tid: SV_DispatchThreadID) {
     uint shadowPrimitive;
     float shadowTmax;
     if (isEnvironmentSample(sample)) {
-        let e = params.scene.env.connect(sample.barycentrics);
+        let e = params.scene.env.connect(rc.barycentrics);
         toLight = e.direction;
         radiance = e.radiance;
         connectPdf = e.pdf;
@@ -263,26 +267,26 @@ void restir_resolve(uint3 tid: SV_DispatchThreadID) {
     } else {
         // Translate the stable id back to the current instance; a light that
         // was deleted since the sample was stored resolves to nothing (drop).
-        let instance = params.restir.idToInstance[sample.light];
+        let instance = params.restir.idToInstance[rc.instance];
         if (instance == LIGHT_NONE) {
             return;
         }
         let lightMesh = params.scene.geometry[instance];
         // The candidate table's triangle records share the combined table's
         // indices, so the stored (instance, primitive) addresses this row.
-        LightRecord record = params.restir.candidateLights[lightMesh.light + sample.primitive];
-        var c = connectTriangle(record, sample.barycentrics, spawn.position);
+        LightRecord record = params.restir.candidateLights[lightMesh.light + rc.primitive];
+        var c = connectTriangle(record, rc.barycentrics, spawn.position);
         let emitter = params.scene.materials[instance];
         if (emitter.emissionTexture != TEXTURE_NONE) {
             c.radiance *= sampleColor(
                 emitter.emissionTexture,
-                interpolateUv(lightMesh, sample.primitive, sample.barycentrics));
+                interpolateUv(lightMesh, rc.primitive, rc.barycentrics));
         }
         toLight = c.direction;
         radiance = c.radiance;
         connectPdf = c.pdf;
         shadowLight = instance;
-        shadowPrimitive = sample.primitive;
+        shadowPrimitive = rc.primitive;
         shadowTmax = c.tmax;
     }
     // A survivor whose connection degenerated (behind the emitter, a pole) adds

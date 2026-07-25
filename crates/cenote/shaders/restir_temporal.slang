@@ -69,7 +69,7 @@
 import bluenoise;
 import pathstate;
 import reservoir;
-import reservoir_di;
+import reservoir_path;
 import restir_mis;
 import restir_reproject;
 import restir_scene;
@@ -82,9 +82,9 @@ struct Params {
     Queue<uint> hits;              // primary hits, dispatched indirectly; not consumed
     SceneTable* scene;
     RestirScene* restir;
-    StoredReservoir* reservoirsIn;   // this frame's candidate reservoirs (`cand`) — read
-    StoredReservoir* reservoirsPrev; // last frame's committed reservoirs (`prev`) — read
-    StoredReservoir* reservoirsOut;  // the temporal survivors (`curr`) — written
+    StoredPathReservoir* reservoirsIn;   // this frame's candidate reservoirs (`cand`) — read
+    StoredPathReservoir* reservoirsPrev; // last frame's committed reservoirs (`prev`) — read
+    StoredPathReservoir* reservoirsOut;  // the temporal survivors (`curr`) — written
     Reproject* reproject;            // prev camera + G-buffers + gate thresholds (5c)
     uint sampleIndex;
     // History-length multiplier: c_prev is clamped to `mCap · c_cand` before
@@ -130,7 +130,7 @@ void restir_temporal(uint3 tid: SV_DispatchThreadID) {
     entry.direction = params.paths.direction[slot];
     reproject.currGbuffer[pixel] = entry;
 
-    Reservoir<DirectLightSample> cand = loadReservoir(params.reservoirsIn[pixel]);
+    Reservoir<PathSample> cand = loadPathReservoir(params.reservoirsIn[pixel]);
     let cCanon = cand.confidence; // c_c ≥ M+1 > 0 for any hit pixel
 
     // Reproject this surface into last frame's screen and read `prev` there. The
@@ -138,14 +138,14 @@ void restir_temporal(uint3 tid: SV_DispatchThreadID) {
     // carries history (confidence > 0 — a hit last frame, so its G-buffer is
     // live), and the reprojected surface still matches this one (the gate).
     bool prevValid = false;
-    Reservoir<DirectLightSample> prev = reservoirInit<DirectLightSample>();
+    Reservoir<PathSample> prev = reservoirInit<PathSample>();
     // Defaulted to this surface so it is definitely assigned; only ever read once
     // reprojection has overwritten it with the real previous surface (guarded by
     // `prevValid`).
     Surface prevSurface = surface;
     uint prevPixel;
     if (reprojectPixel(reproject, surface.position, prevPixel)) {
-        prev = loadReservoir(params.reservoirsPrev[prevPixel]);
+        prev = loadPathReservoir(params.reservoirsPrev[prevPixel]);
         if (prev.confidence > 0.0) {
             GBufEntry prevEntry = reproject.prevGbuffer[prevPixel];
             prevSurface = reconstructSurfaceFrom(params.scene, prevEntry.hit,
@@ -204,7 +204,7 @@ void restir_temporal(uint3 tid: SV_DispatchThreadID) {
         canonShare = mis.canonShare;
     }
 
-    Reservoir<DirectLightSample> merged = reservoirInit<DirectLightSample>();
+    Reservoir<PathSample> merged = reservoirInit<PathSample>();
     float survivorTarget = 0.0;
 
     // The canonical: m_c = t_c + (1−t_c)·(1/V)·canonShare. With prev empty the
@@ -234,5 +234,5 @@ void restir_temporal(uint3 tid: SV_DispatchThreadID) {
     // the plain target, and `curr` carries the unshadowed W the next frame's prev
     // (and this frame's spatial) expects.
     reservoirFinalize(merged, survivorTarget);
-    params.reservoirsOut[pixel] = storeReservoir(merged);
+    params.reservoirsOut[pixel] = storePathReservoir(merged);
 }

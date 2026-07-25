@@ -1,0 +1,287 @@
+# Cenote — M6 Implementation Plan
+
+*Decisions locked 2026-07-24 via structured interview, preceded by a sourced research
+pass over ReSTIR-PT/GRIS ("Foundations of ReSTIR", Lin 2022), the SIGGRAPH 2023 course
+"A Gentle Introduction to ReSTIR" (Wyman et al.), the target paper **ReSTIR PT Enhanced**
+(Lin, Kettunen, Wyman, I3D 2026 — read to the equation level against its supplemental),
+and ReSTCV (Spatio-Temporal Control Variates with ReSTIR, SIGGRAPH 2026) — read against
+the engine hygiene of MoonRay (HPG 2017, "Vectorized Production Path Tracing") and Cycles
+X (the 2021 wavefront rewrite), whose architectures were each mined for what a
+production wavefront tracer treats as load-bearing. Parent scope is charter §4 M6:
+ReSTIR-PT — full path reuse via reconnection and hybrid shift maps, GRIS Jacobians,
+temporal + spatial reuse of whole light paths, and a convergence study. M6 is the
+reordered next milestone (geometry depth deferred — the charter's swap condition, a
+rendering-research primary target, is met). It builds on M3's GRIS-DI (D-085…D-092), not
+on geometry: the DI reservoir is the dormant-but-correct base case this milestone
+generalizes. Decisions D-124…D-133 in [decisions.md](decisions.md) carry the full
+rationale; this file is the working plan. Everything consciously *not* built lives in
+[deferrals.md](deferrals.md) with its revival trigger.*
+
+Three framing notes the research settled, because they govern every choice below:
+
+- **The thesis extends unchanged: ReSTIR PT and brute-force PT are the same estimator.**
+  As in M3, the oracle is cenote's own high-spp NEE+MIS accumulation — the whole claim is
+  that reuse converges to the *same film*. Falcor's ReSTIR PT is the behaviour spot-check,
+  never the numerical oracle. The M3 unbiasedness gate (reuse-on vs reuse-off → same
+  image) carries forward as the spine of validation, from the first path-reuse step, not
+  only at the end.
+- **Bias and correlation are separate axes — and M6 stays on the unbiased side of it.**
+  GRIS makes path reuse unbiased; what reuse costs is decorrelation (correlated unbiased
+  frames do not average at 1/N). The converged still stays spatial-only + fresh-per-frame
+  RNG (D-085). The plateau the user names — "converges fast early, slow late" — is that
+  correlation cost, and M6's answer to it is **ReSTCV** (unbiased, verified by
+  accumulating static frames), *not* Enhanced's duplication maps, which are the only
+  biased contribution in the paper and plateau *above* the reference under accumulation —
+  deferred to a preview-only future (deferrals.md, §7.4 of the paper says as much).
+- **This is an accumulation-first lookdev tracer, not a real-time one.** Temporal reuse
+  earns its cost only across a Hydra edit or camera move that resets the accumulator; on a
+  held frame it anneals to spatial-only accumulation. The interactivity bet is fast early
+  frames (ReSTIR) handing off to a clean tail (ReSTCV) — the decay ramp (D-089,
+  decayFrames=16) is the mechanism, already built, that this milestone generalizes from DI
+  to full paths.
+
+---
+
+## 1. Decisions locked in this session
+
+| # | Decision | Choice | Rationale |
+|---|---|---|---|
+| 1 | Spine (D-124) | **Full path reuse is the milestone** — the M3 reservoir generalizes from a direct-lighting sample to a whole light path. **Unified DI+GI reservoir** (Enhanced §6.1): one reservoir competes direct (a length-2 NEE path) and indirect candidates together and stores whichever wins, *retiring the separate DI reservoir*. c_cap exposure + ReSTCV fold in on top as the convergence study | A single lightweight reservoir over the full path space is the efficient, occupancy-friendly shape (Enhanced: 431→265 MB at 1080p, and the second-largest single speedup after Russian roulette). The DI reservoir was deliberately built (D-086) as the dormant base case of exactly this generalization; unifying is finishing that design, not bolting a second system beside it |
+| 2 | Shift mappings (D-125) | **Hybrid shift is the deliverable; reconnection shift is the validated scaffold.** Reconnection first (cheap, correct on diffuse/rough, **same-pixel Jacobian = 1** — the validation invariant), then hybrid (random-replay the early specular segments, reconnect at the first sufficiently-rough+distant vertex pair — survives glossy/specular). Constant per-pixel storage = the reconnection vertex + a seed. Classic roughness/distance thresholds first; **footprint-based criteria** (Enhanced §4) replace them as an in-milestone rung | Reconnection alone fails on the glossy/specular paths lookdev lives on; hybrid is what makes it production-usable, and it is the paper's default. Reconnection-first is a validation ladder: the Jacobian-1 same-pixel invariant is checkable before any non-trivial Jacobian exists. Random replay is *free* here — the stateless RNG (rng.slang) was designed so any decision replays from its keys |
+| 3 | Reuse axes (D-126) | **Both spatial and temporal**, clean and lightweight. Implementation order is **spatial-validated-first** (a same-pixel-topology shift has Jacobian 1, so spatial reuse is provable before temporal reprojection adds a variable), then temporal re-attached through M3's existing reproject + **decay-ramp** machinery. Reservoir storage is **temporal-ready and CV-ready from day one** so temporal and ReSTCV are additions, never re-layouts | Temporal is critical to the interactive feel and is in the final code path; but building spatial first means the shift and pairwise-MIS machinery are validated against a Jacobian-1 baseline before reprojection can hide a bug. Temporal and spatial share the same shift + defensive pairwise MIS (D-087), so spatial-first is a validation ladder, not architectural debt |
+| 4 | Convergence — the tail (D-127) | **ReSTCV is first-class and in-milestone.** Architect it as the **general control-variate form with plain ReSTIR PT as the zero-CV degenerate** — one code path, not two. It stores a per-reservoir accumulated-colour estimate as a control variate and is *unbiased* (verified by accumulating static frames). It is activated as the last-validated estimator rung. The decay ramp stays as the ReSTIR-early → better-long-term handoff | The user's "ReSTIR early, better long-term after" is exactly ReSTCV — the published, unbiased realization. Making plain ReSTIR PT the zero-CV degenerate keeps the codebase lightweight (no estimator fork) and gives a free A/B (CV on vs off → same converged image). It is the principled answer to the plateau that duplication maps address only with bias |
+| 5 | Reservoir layout (D-128) | **One unified ~64 B path reservoir, designed once** (Enhanced Alg 1): `W`; `float3 F` (the RGB integrand — target is scalar luminance, so F carries colour for the §6.3 colour-noise fix and exact resolve); two seeds (`initRandomSeed`, `rcVertexRandomSeed`) for random replay; `M` packed in flags; the reconnection vertex as the existing **`Hit`** (instance+prim+bary) + oct-encoded `wi` + radiance; cached Jacobian terms **pre-multiplied to one float** with the **NEE light PDF kept unpacked** (it feeds path MIS); plus the **ReSTCV accumulator slot** designed in from the start | The reservoir struct is the milestone's central artifact; getting it right once — holding every field the later rungs light up — is what prevents a re-layout mid-milestone. The `Hit` shape is reused verbatim from M1/M3 (pathstate.slang:27 already names it "the form later reservoir-based passes must hold"). 64 B keeps two temporal buffers + scratch inside a lean per-view budget |
+| 6 | Validation & flagship demo (D-129) | Three artifacts: **(1)** an unbiasedness proof — ReSTIR-PT-on vs brute-force accumulation converge to the same image on a **GI-heavy** scene (the M3 gate, now on indirect paths); **(2)** an **equal-time** win, PT vs ReSTIR PT, matched seconds; **(3)** a **convergence-under-reuse study** — mean-error-vs-sample-count curves showing the layered tail: PT → decay-ramp → ReSTCV. Ground truth = cenote's own brute force; Falcor = behaviour spot-check | The oracle must be cenote's own estimator — the thesis is that ReSTIR PT and brute force are the same estimator, so anything else measures the wrong thing (carried from D-090). The convergence-under-reuse curves are the milestone's poster and the quantitative proof the plateau fix works |
+
+## 1b. Amendments from the research review
+
+The locked decisions were reviewed against MoonRay, Cycles X, and the Enhanced paper's
+own dependency analysis — the axes a decisions interview under-weights (module
+boundaries, what production tracers refuse to abstract, the bias/accumulation
+interaction). No decision reversed; four amendments locked, and every one points toward a
+*smaller* codebase.
+
+| Amendment | Choice | Rationale |
+|---|---|---|
+| One integrator, no plugin seam (D-130) | **Do not build a pluggable-integrator abstraction.** cenote keeps ONE config-driven light-transport path; plain PT is the **zero-CV, no-reuse degenerate** of the ReSTIR-PT+ReSTCV path (D-127), reachable by config, not by a second integrator. The modularity that matters is the sampler / light-sampler / BSDF-closure seams cenote already has | MoonRay is one monolithic `PathIntegrator` (no base class, no virtuals, no registry — volumes/SSS are methods on it); Cycles is one data-driven stage machine. Both production tracers converge on one integrator. Building a swappable-estimator layer would be speculative generality — the named risk to resist (D-086) — and the zero-CV degenerate already gives the only fork that matters, for free |
+| Shift re-shades from the `Hit` (D-131) | The shift map **re-resolves the `Closure` at the reconnection `Hit`** (a re-shade), storing only the re-evaluable key, never a serialized BSDF. `Closure` is already a pure function of `Hit`+`Material` (openpbr.slang) — POD, value-typed, GPU-resident. Budget one re-shade per reconnection per neighbour as the dominant per-shift cost; **guard its bitwise determinism** under stochastic texture filtering | Both MoonRay (persists `Intersection`, not `Bsdf`) and Cycles (rebuilds `ShaderData`, re-runs the shader graph) say the same thing: closures are transient; store the shader *input*, re-shade on demand. cenote's POD closure is the exact shape MoonRay recommends over its own arena/pointer/vtable graph — a structural advantage to exploit, not to fight |
+| Duplication maps deferred; footprint & reciprocal kept (D-132) | **Duplication maps leave the milestone** → preview-only, biased, `deferrals.md`. **Footprint-based reconnection criteria** stay (Enhanced §4) — unbiased, isolated, computed from the **reciprocal area-density of PDFs/geometry cenote already has** (*not* ray differentials/cones), and they remove per-scene threshold tuning. **Reciprocal (paired) spatial reuse** stays (Enhanced §3) and is chosen **over** the deferred stochastic pairwise MIS — it nets ~1.63× *and lowers* FLIP (Gaussian neighbour concentration), a quality+perf win | Duplication maps are the only biased Enhanced contribution and plateau above the reference under accumulation (Fig 15; §7.4 says disable for offline) — dead weight for an accumulation-first renderer whose denoiser is a cadence-throttled view of the *accumulated* film. Footprint and reciprocal are separable, unbiased drop-ins ("generalizes to other reuse algs"). Splatting and CRIS are *not* built: gather reuse suffices and CRIS is subsumed by the GRIS formulation already in use |
+| Colour-noise fix, RR trap, AOV seam (D-133) | Fold in the near-free **colour-noise fix** (Enhanced §6.3 — scalar-luminance target vs RGB `F`, fixed by accumulating vector-valued resampling weights for shading; matters for lookdev colour). Handle the **Russian-roulette + random-replay trap** (remove RR from replay, fold survival into the initial-sample PSS PDF — supp §6). Decide the **AOV-under-reuse seam now**: albedo/normal guides resolve from the **canonical path pre-resampling** (cenote already does this via guide throughput, pathstate.slang:89-106); LPE/light-group AOVs stay deferred but the seam is acknowledged, not retrofitted | These are the traps and cheap wins the equation-level read surfaced. The AOV seam is MoonRay's sharpest warning — radiance decomposition observes every scattering event and ReSTIR reuse complicates per-event attribution, so the "which pass does a *reused* path land in?" question is answered by construction (canonical-path guides) rather than discovered late |
+
+## 2. Leaf defaults (stated, not interviewed — cheap to change)
+
+- **Dependencies** (per D-011): M6 adds none to core's public surface. The path reservoir
+  is more GPU-resident SoA beside the M3 reservoir buffers; the shift and ReSTCV are pure
+  shader functions; random replay needs *no* new RNG state — rng.slang is stateless by
+  design (every value a pure function of pixel/sample/dimension), which is precisely the
+  property GRIS shift replay rests on. No new crate, no new external library.
+- **Determinism** (D-085/D-089): path reuse preserves the bitwise-determinism invariant
+  the same way DI reuse did — spatial reads a **committed prior-pass buffer** (ping-pong,
+  a barrier between passes), neighbour and shift decisions come from **reserved
+  deterministic RNG dimensions** (rng.slang already reserves the RESTIR blocks at
+  256/512/768/1280 for exactly this), and no stage accumulates a reservoir with atomics.
+  Random replay is a re-ask with the source path's keys — free and deterministic. The
+  one new determinism obligation is the reconnection **re-shade** (D-131): it must return
+  bit-identical closures across invocations, which the stateless sampler gives *unless* a
+  texture-filter path injects per-call randomness — guarded by a re-shade-equality test.
+- **Reservoir memory**: ~64 B per pixel per buffer (the Enhanced Alg 1 layout, D-128).
+  **Three buffers per view** — prev/curr for the temporal ping-pong plus one scratch —
+  row-major linear, per-view ownership keyed by stable view identity (the M3 substrate,
+  reused). ~265 MB/view at 1080p (Enhanced's own figure for the unified reservoir),
+  *down* from what a separate DI + path reservoir pair would cost — unification is a
+  memory win, not a cost.
+- **Shift mapping**: reconnection re-resolves the `Closure` at the reconnection `Hit` and
+  evaluates the geometry-term-ratio Jacobian; hybrid random-replays the early
+  (near-specular) segments from the source seed and reconnects at the first vertex pair
+  that passes the reconnection criteria. Classic thresholds to start (roughness
+  α_min ≈ 0.2, a world-distance floor); the footprint criteria (Enhanced Eq 5, constant
+  c ≈ 0.02) replace them at their rung — a dual area-density test plus a single-vertex
+  roughness guard for environment lights, skipping the inverse-footprint test for
+  diffuse/emissive reconnection vertices.
+- **Target function & colour**: p̂ = luminance of the unshadowed path contribution;
+  `F` stores the RGB integrand so colour is exact at resolve and the §6.3 colour-noise fix
+  (vector resampling weights for shading) is a stored-field away. The canonical-sample
+  support condition (M3's support-coverage assert) generalizes to the path target — the
+  hybrid shift's random-replay candidate covers the support the reconnection candidate
+  cannot.
+- **Reuse counts** (offline lookdev best-practice, Lin 2022 ReSTIR_PT README, tuned in
+  validation): ~32 initial candidates, ~3 spatial rounds, ~6 neighbours at radius ~10 px;
+  M-cap ≈ 20; the few-frame confidence decay on the motion/edit→hold handoff (decayFrames
+  ≈ 16). Deeper bounces draw fewer candidates. Temporal reuse disabled at convergence, per
+  the paper's explicit offline recommendation — which the decay ramp already realizes.
+- **ReSTCV**: a per-reservoir accumulated-colour control variate; the estimator subtracts
+  the CV mean and adds it back analytically, leaving the residual to resample. Unbiasedness
+  is verified by the static-frame accumulation test (CV-on and CV-off converge to the same
+  image). *This rung carries a research prerequisite* (§6): a focused deep-read of the
+  ReSTCV reference (github.com/Hercier/ReSTCV) to pin the exact per-reservoir storage and
+  update math before it is built — it is the one rung not yet read to the equation level.
+- **Non-goals, graceful degradation**: **volumes** — volume vertices are *not*
+  reconnection-eligible; a path through participating media falls back to random-replay or
+  no-reuse (MoonRay couldn't keep volumes out of its integrator; M6 does not try to reuse
+  through them). **Light sampling** — the power-alias table stays the candidate source;
+  the light-BVH / presampled-tile / ReGIR upgrades stay deferred (the reservoir target
+  carries the visibility/BSDF the source PDF ignores, so the cheap source is safe).
+  **Splatting, CRIS, duplication maps, path guiding** — all out (deferrals.md), with
+  triggers.
+
+## 3. Layout additions
+
+```
+crates/
+├── cenote/
+│   ├── shaders/
+│   │   ├── reservoir.slang        # grows: the unified path Sample instantiation
+│   │   │                          # of the D-086 Reservoir<S> primitive (additive,
+│   │   │                          # as its doc block foretold); Rosetta block updated
+│   │   ├── shift.slang            # NEW: reconnection + hybrid shift maps, the
+│   │   │                          # reconnection criteria (classic → footprint),
+│   │   │                          # Jacobian eval; the re-shade-from-Hit path
+│   │   ├── restcv.slang           # NEW: the control-variate estimator (general form;
+│   │   │                          # zero-CV degenerate = plain ReSTIR PT)
+│   │   ├── restir_candidates.slang # grows: path candidates + the unified d=2 NEE ray
+│   │   ├── restir_temporal.slang   # grows: reproject + shift + pairwise-MIS on paths
+│   │   ├── restir_spatial.slang    # grows: k-neighbour path gather; reciprocal pairing
+│   │   ├── restir_resolve.slang    # grows: resolve the path survivor; colour-noise fix
+│   │   ├── reservoir_di.slang       # RETIRED: absorbed into the unified reservoir
+│   │   └── openpbr.slang            # Closure re-resolve entry for the reconnection re-shade
+│   └── src/
+│       ├── restir.rs              # grows: path reservoir lifecycle; reciprocal-pairing
+│       │                          # texture (self-inverting, re-randomized per frame)
+│       └── wavefront.rs           # the reuse stages carry paths, not just DI samples
+└── crates/cenote/tests/          # GI-heavy reference scene; Jacobian-1 invariant;
+                                   # unbiasedness-under-accumulation; re-shade-equality
+```
+
+Files earn existence (D-014). `shift.slang` and `restcv.slang` are the two genuinely new
+concepts a reader traces; everything else is the M3 chain generalized from a DI sample to
+a path. `reservoir_di.slang` is deleted, not left dormant — unification is the point.
+
+## 4. Build order (~12–16 weeks at 10 h/wk)
+
+Larger than M3's 8–10: full path reuse adds the shift maps, ReSTCV, footprint criteria,
+and reciprocal reuse on top of machinery M3 only had to build for an identity shift. The
+ordering is: **finish the shift entirely before reusing it across space and time, then
+layer the estimator, then optimize** — so nothing is ever built on an unvalidated shift,
+and each robustification is measured against a working baseline. Every step ends green:
+compiles, clippy-clean (incl. `--features denoise`), tests pass on the GPU machine
+(serially — `--test-threads=1`), committed.
+
+0. **Plan docs + reservoir struct + validation harness** — this file; the decisions.md
+   D-124…D-133 entries; the deferrals moves (done); README row. Design the ~64 B unified
+   reservoir struct once (temporal-buffered, ReSTCV slot + two seeds designed in). Extend
+   the test harness: the **Jacobian-1 same-pixel invariant**, converge-to-reference on a
+   GI-heavy scene, and **unbiasedness-under-accumulation** (accumulate static frames).
+   *Checkpoint: struct allocates and round-trips; the harness runs against the M3
+   estimator as a baseline. Nothing renders differently.*
+1. **Unified reservoir, DI-equivalent** — route the current DI through the new unified
+   reservoir restricted to length-2 (NEE) paths; retire `reservoir_di.slang`. *Checkpoint:
+   the existing DI goldens (restir-demo, restir-many-lights) still pass — same output,
+   new architecture. The one architectural change, done as a reproduce-then-extend
+   migration, risks nothing.*
+2. **Reconnection shift + spatial, indirect** — extend the reservoir to multi-vertex
+   paths; implement the reconnection shift (re-resolve `Closure` at the reconnection
+   `Hit`, D-131); spatial reuse only. *Checkpoint: same-pixel Jacobian = 1 exactly;
+   spatial-only path reuse converges to brute force on a **diffuse** GI scene. First true
+   path reuse.*
+3. **Hybrid shift (classic thresholds)** — random-replay the early specular segments +
+   gated reconnection; handle the RR-replay trap (D-133). *Checkpoint: converges to brute
+   force on a **glossy** GI scene — lookdev materials render right. Core ReSTIR PT.*
+4. **Footprint reconnection criteria** — replace the classic thresholds with the dual
+   area-density test (Enhanced §4). *Checkpoint: fewer dark/firefly artifacts on distant
+   glossy reconnections; convergence equal-or-better; per-scene tuning gone.*
+5. **Temporal reuse** — re-point `restir_temporal` at the path reservoir through the
+   hybrid shift; reprojection + the decay ramp on paths. *Checkpoint: converges with
+   temporal on; the decay-ramp handoff (temporal early → spatial-only + accumulation late)
+   is measured. Spatial + temporal complete, all unbiased.*
+6. **Colour-noise fix + ReSTCV** — first the near-free vector-resampling-weight fix
+   (D-133); then, *after its deep-read prerequisite* (§6), ReSTCV as the general
+   control-variate form (plain ReSTIR PT = zero-CV degenerate). *Checkpoint: CV-on and
+   CV-off converge to the same image (unbiasedness); the convergence-under-reuse curves
+   show the tail flatten. The plateau fix — the headline.*
+7. **Reciprocal (paired) spatial reuse** — self-inverting per-frame pairing textures;
+   ~1.63× spatial speedup and lower FLIP. *Checkpoint: equal-quality at lower wall-clock;
+   the equal-time figure improves; no structured pairing artifacts (textures
+   re-randomized per frame).*
+8. **Validation harness + flagship demo** — the three D-129 artifacts: the GI-heavy
+   unbiasedness gate, the equal-time PT-vs-ReSTIR-PT figure, the layered
+   convergence-under-reuse curves (PT → decay-ramp → ReSTCV). *Checkpoint: ReSTIR PT and
+   brute force converge to the same golden; the curves are the poster.*
+9. **Polish** — goldens regenerated and eyeballed, module headers and the reservoir
+   Rosetta block current, README flagship section, decisions.md current. *M6 done.*
+
+## 5. Fallback seams (pre-agreed, in slip order)
+
+- **Reciprocal spatial reuse (step 7)** → plain O(M) defensive pairwise MIS (M3's, on
+  paths). First to go: it is a perf optimization on an already-correct, already-fast
+  estimator; the milestone's correctness and the headline (ReSTCV) do not depend on it.
+- **Footprint criteria (step 4)** → the classic roughness/distance thresholds from step 3
+  (they work; footprint removes per-scene tuning and improves distant-glossy, but the
+  estimator is unbiased and correct without it).
+- **The colour-noise fix (step 6a)** → scalar-luminance resolve as-is; a lookdev colour
+  refinement, not a correctness gate.
+- **Steps 1, 2, 3, 5, 6b, and 8 are never compressed** — the unified reservoir, the
+  reconnection scaffold, the hybrid shift, temporal reuse, ReSTCV, and validation *are*
+  the milestone. ReSTCV in particular is first-class by the user's explicit direction; it
+  is a defined later rung, never a cut.
+
+## 6. Risk watch
+
+The step-2/3 unknown is the **shift on glossy/specular paths** — the reconnection shift is
+silently *wrong* there (it does not crash; it shifts the mean), which is exactly why the
+hybrid shift and the reconnection-first validation ladder exist: the same-pixel Jacobian-1
+invariant (D-125) is guarded by construction and checked from step 2, and the
+unbiasedness gate (reuse-on vs brute force) runs from the first path-reuse step, as it did
+in M3. Two concrete implementation traps the equation-level read surfaced, neither
+improvised mid-step: (1) the **Russian-roulette + random-replay trap** — naive RR-replay
+can turn a survived base path into a killed shifted path, invalidating the sample; the fix
+(remove RR from replay, fold survival into the initial-sample PSS PDF) lands *with* step 3,
+not after; (2) **re-shade determinism** — the shift re-resolves the `Closure` at the
+reconnection vertex, and a stochastic texture-filter path would break the bit-exactness
+random replay assumes; guarded by a re-shade-equality test from step 2. The **correlation
+floor** is the expected step-5/6 incident (reuse correlates frames; they average slower
+than 1/N): the pre-agreed answer is the converged-still contract (spatial-only fresh-RNG,
+D-085) and then **ReSTCV** (the unbiased tail fix, step 6) — with the deferred
+compatibility-guided-neighbours / MCMC decorrelation as the named next move if the floor
+still bites. **Memory**: ~265 MB/view at 1080p is a win over separate reservoirs, but the
+per-view × N-viewport multiplier (M3's substrate) still applies — watched, not a blocker.
+One **research prerequisite gates step 6**: ReSTCV is the single rung not yet read to the
+equation level; a focused deep-read of the reference implementation precedes it (it does
+not block steps 0–5, which are independent of it). Build-side, the **AOV-under-reuse
+seam** (D-133) is the piece most likely to reveal a hidden assumption — resolved early by
+sourcing guides from the canonical path, not discovered late.
+
+## 7. Definition of done
+
+- A GI-heavy scene rendered with ReSTIR PT and with reuse disabled converge to the same
+  image (FLIP under threshold) — the unbiasedness gate, on indirect paths, in CI on the
+  GPU machine.
+- The Jacobian-1 same-pixel invariant and the re-shade-equality check hold as always-on
+  tripwires (the two silent-bias classes the shift can introduce), and CV-on vs CV-off
+  converge to the same image (ReSTCV unbiasedness).
+- Viewer: open a GI-heavy scene, orbit — the preview warm-starts through the move via
+  temporal reuse and re-converges on hold via spatial-only + ReSTCV; the frame stops
+  pinning the GPU once settled.
+- The equal-time figure (PT vs ReSTIR PT, matched seconds) and the convergence-under-reuse
+  curves (mean-error vs reference, layered PT → decay-ramp → ReSTCV) regenerate from the
+  flagship scene — the poster.
+- CI: existing demo and corpus FLIP goldens stay green — at converged spp ReSTIR PT ≡
+  brute force, so they remain a free regression gate; the change-set, apply-order, and
+  bitwise-determinism tests stay green through the path reservoir buffers.
+- A stranger can read `wavefront.rs`'s stage sequence and see the reuse stages carry whole
+  paths, read `shift.slang` and `reservoir.slang`'s Rosetta block to map the code to the
+  Enhanced paper and the course, and read [deferrals.md](deferrals.md) to know exactly
+  what — duplication maps, splatting/CRIS, the light-BVH, path guiding — was consciously
+  left for later and when it returns.
+
+## Appendix: primary sources
+
+- **ReSTIR PT Enhanced** — Lin, Kettunen, Wyman, I3D 2026 (paper + supplemental).
+  research.nvidia.com/labs/rtr/publication/lin2026restirptenhanced/ · DOI 10.1145/3804494.
+- **Foundations of ReSTIR / GRIS** — Lin et al., SIGGRAPH 2022; reference implementation
+  ReSTIR_PT (github.com/DQLin/ReSTIR_PT — the offline lookdev parameter defaults).
+- **A Gentle Introduction to ReSTIR** — Wyman et al., SIGGRAPH 2023 course
+  (intro-to-restir.cwyman.org) — the shift-map and confidence-cap practitioner reference.
+- **ReSTCV** — Spatio-Temporal Control Variates with ReSTIR, SIGGRAPH 2026; code
+  github.com/Hercier/ReSTCV (the step-6 deep-read target).
+- **Engine hygiene oracles** — MoonRay (HPG 2017, "Vectorized Production Path Tracing";
+  OpenMoonRay/moonray) and Cycles X (the 2021 wavefront rewrite, intern/cycles).

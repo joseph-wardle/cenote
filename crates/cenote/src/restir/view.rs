@@ -23,7 +23,7 @@
 
 use ash::vk;
 
-use super::StoredReservoir;
+use super::StoredPathReservoir;
 use crate::error::Result;
 use crate::gpu::{Buffer, Context, MemoryLocation, Pass};
 
@@ -47,9 +47,9 @@ impl ViewId {
     pub const PRIMARY: ViewId = ViewId(0);
 }
 
-/// Bytes one reservoir occupies — the [`StoredReservoir`] stride, the plan's
-/// 24 B/pixel figure.
-const RESERVOIR_STRIDE: u64 = size_of::<StoredReservoir>() as u64;
+/// Bytes one reservoir occupies — the [`StoredPathReservoir`] stride, the plan's
+/// 96 B/pixel figure for the unified path reservoir (D-128).
+const RESERVOIR_STRIDE: u64 = size_of::<StoredPathReservoir>() as u64;
 
 /// Host layout mirror of `GBufEntry` in `shaders/restir_reproject.slang`, sizing
 /// the per-pixel G-buffer below. The entry is written and read only by the shader

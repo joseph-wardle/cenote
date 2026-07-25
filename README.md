@@ -219,6 +219,7 @@ cargo test --workspace   # on the GPU machine — includes the goldens
 | `docs/m2-plan.md` | The M2 implementation plan |
 | `docs/m3-plan.md` | The M3 implementation plan |
 | `docs/m4-plan.md` | The M4 implementation plan |
+| `docs/m6-plan.md` | The M6 implementation plan (ReSTIR PT — full path reuse; M5 geometry depth deferred) |
 | `docs/deferrals.md` | Living ledger of consciously deferred production features and their revival triggers |
 
 ## License

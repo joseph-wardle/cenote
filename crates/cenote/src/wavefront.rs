@@ -1103,7 +1103,7 @@ impl Wavefront {
         if let Some(restir) = restir {
             assert!(
                 restir.reservoir.size()
-                    >= pixels * size_of::<crate::restir::StoredReservoir>() as u64,
+                    >= pixels * size_of::<crate::restir::StoredPathReservoir>() as u64,
                 "reservoir buffer smaller than the target"
             );
             assert_eq!(
@@ -1448,7 +1448,7 @@ impl Wavefront {
             passes.push(Pass::Fill {
                 buffer: restir.reservoir,
                 offset: 0,
-                size: pixels * size_of::<crate::restir::StoredReservoir>() as u64,
+                size: pixels * size_of::<crate::restir::StoredPathReservoir>() as u64,
                 value: 0,
             });
         }
@@ -2352,7 +2352,7 @@ mod tests {
         let reservoir = gpu
             .create_buffer(
                 "test.reservoir",
-                u64::from(width) * u64::from(height) * size_of::<crate::restir::StoredReservoir>() as u64,
+                u64::from(width) * u64::from(height) * size_of::<crate::restir::StoredPathReservoir>() as u64,
                 vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                 MemoryLocation::GpuOnly,
             )
@@ -2372,14 +2372,14 @@ mod tests {
         let scratch = gpu
             .create_buffer(
                 "test.reservoir.scratch",
-                u64::from(width) * u64::from(height) * size_of::<crate::restir::StoredReservoir>() as u64,
+                u64::from(width) * u64::from(height) * size_of::<crate::restir::StoredPathReservoir>() as u64,
                 vk::BufferUsageFlags::STORAGE_BUFFER
                     | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
                     | vk::BufferUsageFlags::TRANSFER_DST,
                 MemoryLocation::GpuOnly,
             )
             .expect("scratch buffer");
-        let reservoir_di = RestirInputs {
+        let reservoir_initial = RestirInputs {
             reservoir: &reservoir,
             temporal: None,
             scratch: None,
@@ -2418,7 +2418,7 @@ mod tests {
         // Both the single-frame RIS estimator (step 3) and the spatial-reuse
         // estimator (step 4) are the same integral as the path tracer.
         for (label, inputs) in [
-            ("initial RIS", &reservoir_di),
+            ("initial RIS", &reservoir_initial),
             ("spatial reuse", &reservoir_spatial),
         ] {
             let restir = mean(Some(inputs));
@@ -2494,7 +2494,7 @@ mod tests {
         .expect("wavefront");
 
         let reservoir_bytes =
-            u64::from(width) * u64::from(height) * size_of::<crate::restir::StoredReservoir>() as u64;
+            u64::from(width) * u64::from(height) * size_of::<crate::restir::StoredPathReservoir>() as u64;
         let gbuffer_bytes = u64::from(width) * u64::from(height) * 48;
         let store_usage = vk::BufferUsageFlags::STORAGE_BUFFER
             | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
@@ -2685,7 +2685,7 @@ mod tests {
                   candidate confidence, so `curr ≡ cand` bit-for-bit, not merely close"
     )]
     fn temporal_decay_is_a_noop_past_its_window() {
-        use crate::restir::StoredReservoir;
+        use crate::restir::StoredPathReservoir;
         let Some(gpu) = crate::gpu::test_context() else {
             return;
         };
@@ -2703,7 +2703,7 @@ mod tests {
         .expect("wavefront");
 
         let reservoir_bytes =
-            u64::from(width) * u64::from(height) * size_of::<StoredReservoir>() as u64;
+            u64::from(width) * u64::from(height) * size_of::<StoredPathReservoir>() as u64;
         let gbuffer_bytes = u64::from(width) * u64::from(height) * 48;
         let store_usage = vk::BufferUsageFlags::STORAGE_BUFFER
             | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
@@ -2775,7 +2775,7 @@ mod tests {
         std::mem::swap(&mut prev, &mut curr);
         std::mem::swap(&mut gbuffer_prev, &mut gbuffer_curr);
 
-        let history: Vec<StoredReservoir> =
+        let history: Vec<StoredPathReservoir> =
             bytemuck::pod_collect_to_vec(&gpu.download_buffer(&prev).expect("download prev"));
         let history_max = history.iter().map(|r| r.confidence).fold(0.0_f32, f32::max);
         assert!(history_max > 0.0, "frame 0 should leave a history for the ramp to decay");
@@ -2791,9 +2791,9 @@ mod tests {
         // The handoff frame: sampleIndex == window ⇒ decay = saturate(1 − 1) = 0.
         frame(window, true, &gbuffer_prev, &gbuffer_curr, &prev, &curr);
 
-        let cand_r: Vec<StoredReservoir> =
+        let cand_r: Vec<StoredPathReservoir> =
             bytemuck::pod_collect_to_vec(&gpu.download_buffer(&cand).expect("download cand"));
-        let curr_r: Vec<StoredReservoir> =
+        let curr_r: Vec<StoredPathReservoir> =
             bytemuck::pod_collect_to_vec(&gpu.download_buffer(&curr).expect("download curr"));
         for (i, (c, u)) in cand_r.iter().zip(&curr_r).enumerate() {
             assert_eq!(
@@ -2896,7 +2896,7 @@ mod tests {
                 "test.reservoir",
                 u64::from(width)
                     * u64::from(height)
-                    * size_of::<crate::restir::StoredReservoir>() as u64,
+                    * size_of::<crate::restir::StoredPathReservoir>() as u64,
                 vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                 MemoryLocation::GpuOnly,
             )
@@ -2994,7 +2994,7 @@ mod tests {
                 "test.reservoir.furnace",
                 u64::from(width)
                     * u64::from(height)
-                    * size_of::<crate::restir::StoredReservoir>() as u64,
+                    * size_of::<crate::restir::StoredPathReservoir>() as u64,
                 vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                 MemoryLocation::GpuOnly,
             )
@@ -3095,7 +3095,7 @@ mod tests {
         let reservoir = gpu
             .create_buffer(
                 "test.debug.reservoir",
-                texels * size_of::<crate::restir::StoredReservoir>() as u64,
+                texels * size_of::<crate::restir::StoredPathReservoir>() as u64,
                 storage,
                 MemoryLocation::GpuOnly,
             )
@@ -3232,7 +3232,7 @@ mod tests {
             | vk::BufferUsageFlags::TRANSFER_DST;
         let bytes = u64::from(width)
             * u64::from(height)
-            * size_of::<crate::restir::StoredReservoir>() as u64;
+            * size_of::<crate::restir::StoredPathReservoir>() as u64;
         let run = |spatial: bool| -> Vec<u8> {
             let reservoir = gpu
                 .create_buffer("test.determinism.reservoir", bytes, reservoir_usage, MemoryLocation::GpuOnly)

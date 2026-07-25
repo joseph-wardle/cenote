@@ -72,7 +72,7 @@ import bluenoise;
 import openpbr;
 import pathstate;
 import reservoir;
-import reservoir_di;
+import reservoir_path;
 import restir_mis;
 import restir_scene;
 import restir_target;
@@ -95,8 +95,8 @@ struct Params {
     Queue<uint> hits;            // primary hits, dispatched indirectly; not consumed
     SceneTable* scene;
     RestirScene* restir;
-    StoredReservoir* reservoirsIn;  // candidate stage's output — self + neighbours, read
-    StoredReservoir* reservoirsOut; // this stage's output — the merged survivor, written
+    StoredPathReservoir* reservoirsIn;  // candidate stage's output — self + neighbours, read
+    StoredPathReservoir* reservoirsOut; // this stage's output — the merged survivor, written
     uint sampleIndex;
     uint width;
     uint height;
@@ -122,7 +122,7 @@ Params params;
 // through `unshadowed` — the survivor's finalize divides by U_c, folding its own
 // V into W (see the header). One inline ray, or none when the unshadowed target
 // is already zero (nothing to shade, so nothing to occlude).
-float targetVisAware(Surface s, DirectLightSample sample, out float unshadowed) {
+float targetVisAware(Surface s, PathSample sample, out float unshadowed) {
     let t = evalTarget(params.scene, params.restir, s, sample);
     unshadowed = t.unshadowed;
     if (!(t.unshadowed > 0.0)) {
@@ -141,10 +141,10 @@ float targetVisAware(Surface s, DirectLightSample sample, out float unshadowed) 
 // One accepted neighbour, held between the gather pass (which spends its rays)
 // and the stream pass (which needs t_c and V, known only once every neighbour
 // is gathered). `IDefaultInitializable` so the fixed-size array below can be
-// default-constructed — a struct holding a `DirectLightSample` needs the
+// default-constructed — a struct holding a `PathSample` needs the
 // conformance spelled out for that.
 struct AcceptedNeighbour : IDefaultInitializable {
-    DirectLightSample sample;
+    PathSample sample;
     float confidence;  // c_i
     float weightNumer; // b_i · p̂_c(Y_i) · W_i — the resampling weight before (1−t_c)/V
     float unshadowed;  // U_c(Y_i) — the finalize divisor if this neighbour wins
@@ -166,7 +166,7 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
     uint base = pixel - slot;
 
     Surface canonical = reconstructSurface(params.paths, params.scene, slot);
-    Reservoir<DirectLightSample> canonicalReservoir = loadReservoir(params.reservoirsIn[pixel]);
+    Reservoir<PathSample> canonicalReservoir = loadPathReservoir(params.reservoirsIn[pixel]);
     let cCanon = canonicalReservoir.confidence; // c_c ≥ M+1 > 0 for any hit pixel
 
     // p̂_c(Y_c) and U_c(Y_c): the canonical sample re-targeted here, with its one
@@ -223,7 +223,7 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
 
         // A miss or unreached neighbour reads confidence 0 from the wave-cleared
         // buffer — nothing to reuse, drop before its surface is rebuilt.
-        Reservoir<DirectLightSample> neighbour = loadReservoir(params.reservoirsIn[neighbourPixel]);
+        Reservoir<PathSample> neighbour = loadPathReservoir(params.reservoirsIn[neighbourPixel]);
         if (!(neighbour.confidence > 0.0)) {
             continue;
         }
@@ -273,7 +273,7 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
     let tc = cTot > 0.0 ? cCanon / cTot : 1.0; // c_c/c_tot; =1 when V=0 (canonical only)
     let invV = validCount > 0 ? 1.0 / float(validCount) : 0.0;
 
-    Reservoir<DirectLightSample> merged = reservoirInit<DirectLightSample>();
+    Reservoir<PathSample> merged = reservoirInit<PathSample>();
     float survivorTarget = 0.0;
 
     // The canonical: m_c = t_c + (1−t_c)·(1/V)·Σ shares. With V=0 the sum term
@@ -290,7 +290,7 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
     // neighbour's confidence, so the merged M is c_tot — the compounded history.
     for (uint i = 0; i < validCount; i++) {
         let a = accepted[i];
-        Reservoir<DirectLightSample> nb = reservoirInit<DirectLightSample>();
+        Reservoir<PathSample> nb = reservoirInit<PathSample>();
         nb.sample = a.sample;
         nb.confidence = a.confidence;
         let weight = (1.0 - tc) * invV * a.weightNumer;
@@ -303,5 +303,5 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
     // survivor's own visibility into W (it was resampled ∝ p̂_c = U_c·V), so
     // restir_resolve shades it unshadowed with no further ray.
     reservoirFinalize(merged, survivorTarget);
-    params.reservoirsOut[pixel] = storeReservoir(merged);
+    params.reservoirsOut[pixel] = storePathReservoir(merged);
 }

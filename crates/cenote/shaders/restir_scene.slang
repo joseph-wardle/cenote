@@ -12,6 +12,33 @@
 // `geometry[instance].light + primitive` in either.
 
 import lights;
+import reservoir_path;
+
+// -- The unified reservoir's NEE (length-2) interpretation -------------------
+// M6 retired the separate DI reservoir into the unified path reservoir (D-124):
+// a direct-lighting sample is a length-2 NEE path whose reconnection vertex
+// `rcVertex` *is* the light surface point. So the light's stable identity lives
+// in `rcVertex.instance` — never the volatile TLAS custom index — and the
+// sentinels and the environment predicate that used to sit in `reservoir_di.slang`
+// live here, on the DI scene slice every reuse stage already imports. The
+// multi-vertex path fields of `PathSample` stay zero until step 2 lights them up.
+//
+// Reserved stable ids, mirroring `src/restir/identity.rs`. The environment
+// (HDRI) is a reservoir candidate but not an instance, so it carries a fixed
+// sentinel; instance ids begin above the reserved block. `LIGHT_ID_NONE` marks
+// an empty or dropped reservoir.
+public static const uint LIGHT_ID_ENVIRONMENT = 0;
+public static const uint LIGHT_ID_NONE = 0xffffffff;
+
+// An HDRI draw held in the unified reservoir: the reconnection vertex names the
+// environment, and its `barycentrics` hold the 2D sampling coordinate
+// `Environment::sample` inverts — not a point on a triangle. Storing the primary
+// sample (rather than the direction) makes the reconnection exact: `restir_resolve`
+// re-samples the same coordinate to reproduce the direction, radiance, and pdf
+// bit for bit.
+public bool isEnvironmentSample(PathSample sample) {
+    return sample.rcVertex.instance == LIGHT_ID_ENVIRONMENT;
+}
 
 public struct RestirScene {
     // Triangle-only power-alias table — the reservoir candidates that are

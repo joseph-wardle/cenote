@@ -15,7 +15,7 @@ import color;
 import lights;
 import openpbr;
 import pathstate;
-import reservoir_di;
+import reservoir_path;
 import restir_scene;
 import scene;
 import surface;
@@ -82,7 +82,8 @@ public Surface reconstructSurfaceFrom(SceneTable* scene, Hit hit, float4 ray,
 }
 
 // A light sample reconnected to a shading point: the direction, radiance, and
-// shadow-ray target a stored `DirectLightSample` makes at `from`. The one place
+// shadow-ray target a stored NEE `PathSample` (its reconnection vertex the light
+// point) makes at `from`. The one place
 // the light-type branch lives (D-093): an environment sample is a *direction*,
 // position-independent, so the same `connect` serves every surface; a triangle
 // sample re-derives its cosθ/d² geometry against `from`. A dropped light (id no
@@ -97,7 +98,7 @@ public struct Connection {
 };
 
 public Connection connectSampleAt(SceneTable* scene, RestirScene* restir,
-                                  DirectLightSample sample, float3 from) {
+                                  PathSample sample, float3 from) {
     Connection c;
     c.toLight = float3(0.0);
     c.radiance = float3(0.0);
@@ -106,8 +107,12 @@ public Connection connectSampleAt(SceneTable* scene, RestirScene* restir,
     c.shadowPrimitive = 0;
     c.shadowTmax = 1e30;
 
+    // The reconnection vertex is the light point (length-2 NEE base case): its
+    // `instance` field carries the stable light id, `primitive`/`barycentrics`
+    // the point on the emitter (or the env sampling coordinate).
+    let rc = sample.rcVertex;
     if (isEnvironmentSample(sample)) {
-        let e = scene.env.connect(sample.barycentrics);
+        let e = scene.env.connect(rc.barycentrics);
         if (e.pdf > 0.0) {
             c.toLight = e.direction;
             c.radiance = e.radiance;
@@ -118,25 +123,25 @@ public Connection connectSampleAt(SceneTable* scene, RestirScene* restir,
 
     // Translate the stable id back to the current instance; a light deleted
     // since the neighbour stored this sample resolves to nothing (drop).
-    let instance = restir.idToInstance[sample.light];
+    let instance = restir.idToInstance[rc.instance];
     if (instance == LIGHT_NONE) {
         return c;
     }
     let lightMesh = scene.geometry[instance];
-    LightRecord record = restir.candidateLights[lightMesh.light + sample.primitive];
-    var tri = connectTriangle(record, sample.barycentrics, from);
+    LightRecord record = restir.candidateLights[lightMesh.light + rc.primitive];
+    var tri = connectTriangle(record, rc.barycentrics, from);
     if (tri.pdf > 0.0) {
         let emitter = scene.materials[instance];
         if (emitter.emissionTexture != TEXTURE_NONE) {
             tri.radiance *= sampleColor(
                 emitter.emissionTexture,
-                interpolateUv(lightMesh, sample.primitive, sample.barycentrics));
+                interpolateUv(lightMesh, rc.primitive, rc.barycentrics));
         }
         c.toLight = tri.direction;
         c.radiance = tri.radiance;
         c.valid = true;
         c.shadowLight = instance;
-        c.shadowPrimitive = sample.primitive;
+        c.shadowPrimitive = rc.primitive;
         c.shadowTmax = tri.tmax;
     }
     return c;
@@ -154,7 +159,7 @@ public struct TargetEval {
 };
 
 public TargetEval evalTarget(SceneTable* scene, RestirScene* restir,
-                             Surface s, DirectLightSample sample) {
+                             Surface s, PathSample sample) {
     TargetEval t;
     t.connection = connectSampleAt(scene, restir, sample, s.position);
     t.throughSurface = false;
@@ -177,6 +182,6 @@ public TargetEval evalTarget(SceneTable* scene, RestirScene* restir,
 // ray. The visibility-aware canonical target adds one ray on top of the same
 // `evalTarget` core (`targetVisAware`, in restir_spatial.slang).
 public float targetUnshadowed(SceneTable* scene, RestirScene* restir,
-                              Surface s, DirectLightSample sample) {
+                              Surface s, PathSample sample) {
     return evalTarget(scene, restir, s, sample).unshadowed;
 }

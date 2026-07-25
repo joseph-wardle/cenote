@@ -12,7 +12,7 @@
 //!
 //! The reservoir buffer is deliberately `AoS` where the path pool is `SoA`:
 //! every reuse stage touches a whole reservoir at once, so packing its fields
-//! together is the cache-friendly layout here (see `DirectLightSample` and the
+//! together is the cache-friendly layout here (see `PathSample` and the
 //! packed-reservoir mirror below). The persistent per-pixel record is
 //! {sample, `unbiasedWeight`, confidence} — `weightSum` is pass-local and never
 //! stored, the one invariant `reservoir.slang` documents at length.
@@ -27,44 +27,87 @@ use crate::lights::LightRecord;
 pub(crate) use identity::{EmissiveLight, LightIdentityRegistry};
 use identity::{LIGHT_ID_NONE, LightRemap};
 
-/// The DI reservoir's concrete sample — the host mirror of `DirectLightSample`
-/// in `shaders/reservoir_di.slang`. A light surface point in the re-evaluable
-/// reconnection form (the `Hit` shape), which is what makes the DI shift map
-/// the identity and the GRIS Jacobian 1. `light` is the *stable* light id (the
-/// registry below), never the volatile TLAS custom index.
+/// The path reservoir's reconnection vertex — the host mirror of the shader
+/// `Hit` (`pathstate.slang`) in its reservoir role: instance + primitive +
+/// barycentrics, the re-evaluable form the shift re-shades from (D-131). Reused
+/// verbatim (D-128) rather than a bespoke packed vertex, so the reconnection
+/// point has one shared shape across primary shading and reuse.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
-pub struct DirectLightSample {
-    /// Stable light id (see the identity registry).
-    pub light: u32,
-    /// Triangle index within the light's mesh.
+pub(crate) struct ReconnectionVertex {
+    /// TLAS instance custom index.
+    pub instance: u32,
+    /// Triangle index within the instance's mesh.
     pub primitive: u32,
-    /// The sampled point on that triangle.
+    /// The reconnection point on that triangle.
     pub barycentrics: [f32; 2],
 }
 
-/// The persistent per-pixel reservoir record — the host mirror of
-/// `StoredReservoir`. {sample, W, c} = 24 B exactly; `weightSum` is pass-local
-/// and never stored (see `shaders/reservoir.slang`). The reservoir buffers are
-/// arrays of this, one entry per pixel, row-major (Morton ordering deferred —
-/// it would perturb the pixel↔slot mapping the determinism invariant rests on).
+/// The full-path reservoir's concrete sample — the host mirror of `PathSample`
+/// in `shaders/reservoir_path.slang`. A whole light path held in the
+/// re-evaluable reconnection form (reconnection vertex + the seeds a
+/// random-replay shift replays from), never a serialized path: constant
+/// per-pixel storage, the shift re-resolves the closure on demand (D-131).
+/// Laid out in std430 16-byte lanes so this mirror packs identically to the
+/// shader struct — the round-trip fixture pins the offsets agree.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
-pub struct StoredReservoir {
-    /// Y — the held light sample.
-    pub sample: DirectLightSample,
-    /// `W_Y` — the unbiased contribution weight.
-    pub unbiased_weight: f32,
-    /// M — the generalized sample count.
-    pub confidence: f32,
+pub(crate) struct PathSample {
+    /// xₖ — the reconnection vertex.
+    pub rc_vertex: ReconnectionVertex,
+    /// Lₖ — radiance cached beyond the reconnection vertex (the sub-path tail),
+    /// so the reconnection shift recomputes the contribution without re-tracing.
+    pub rc_vertex_radiance: [f32; 3],
+    /// ωₖ — oct-encoded outgoing direction at the reconnection vertex.
+    pub rc_vertex_wi: u32,
+    /// F — the RGB path integrand in this pixel's domain; p̂ = luminance(F).
+    pub f: [f32; 3],
+    /// The NEE light pdf, kept unpacked — it feeds the path MIS at resolve.
+    pub nee_light_pdf: f32,
+    /// The initial-sample RNG seed: the random-replay key for the early
+    /// segments (and the deferred duplication-map hash key).
+    pub init_random_seed: u32,
+    /// The RNG seed replayed from the reconnection vertex onward.
+    pub rc_vertex_random_seed: u32,
+    /// The shift Jacobian terms pre-multiplied into one float (same-pixel = 1).
+    pub cached_jacobian: f32,
+    /// Reserved (reconnection-vertex classification); zero until step 2.
+    pub reserved: u32,
 }
 
-// The layout mirrors `shaders/reservoir_di.slang`; the sizes are the plan's
-// 24 B/pixel figure. A drift on either side is a bias bug waiting to happen,
-// so pin both at compile time — the GPU round-trip test (T3) then proves the
-// field *offsets* agree, which sizes alone cannot.
-const _: () = assert!(size_of::<DirectLightSample>() == 16);
-const _: () = assert!(size_of::<StoredReservoir>() == 24);
+/// The persistent per-pixel path reservoir record — the host mirror of
+/// `StoredPathReservoir`. {sample, W, M} plus the reserved `ReSTCV` lane = 96 B;
+/// `weightSum` is pass-local and never stored (see `shaders/reservoir.slang`).
+/// The path reservoir buffers are arrays of this, one entry per pixel, row-major.
+/// Larger than Enhanced's 64 B by three named choices (see the shader) — packing
+/// back toward 64 B is the deferred size optimization if the per-view budget bites.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub(crate) struct StoredPathReservoir {
+    /// Y — the held path sample.
+    pub sample: PathSample,
+    /// `W_Y` — the unbiased contribution weight.
+    pub unbiased_weight: f32,
+    /// M — the generalized sample count (kept float; see the shader).
+    pub confidence: f32,
+    /// Reserved (path/reconnection flags); zero until step 2.
+    pub flags: u32,
+    /// Pad: 16-byte-aligns the `ReSTCV` lane so this mirror matches std430.
+    pub pad0: u32,
+    /// `ReSTCV` accumulated colour — the per-reservoir control variate (D-127);
+    /// zero until step 6, where its update math is pinned after the deep-read.
+    pub cv_accumulator: [f32; 3],
+    /// `ReSTCV` running weight; zero until step 6.
+    pub cv_normalization: f32,
+}
+
+// The layout mirrors `shaders/reservoir_path.slang`. As with the DI record, a
+// drift on either side is a silent bias bug, so pin the sizes at compile time —
+// the GPU round-trip test then proves the field *offsets* agree, which the
+// three std430 `float3` lanes make load-bearing and sizes alone cannot.
+const _: () = assert!(size_of::<ReconnectionVertex>() == 16);
+const _: () = assert!(size_of::<PathSample>() == 64);
+const _: () = assert!(size_of::<StoredPathReservoir>() == 96);
 
 /// The GPU mirror of `struct RestirScene` in `shaders/restir_scene.slang`: the
 /// reservoir path's own scene slice — the triangle-only candidate light table,
@@ -222,21 +265,7 @@ mod tests {
     use ash::vk;
     use bytemuck::{Pod, Zeroable};
 
-    use super::{DirectLightSample, StoredReservoir};
     use crate::gpu::{Bindings, MemoryLocation};
-
-    /// Mirrors `struct Params` in `shaders/reservoir_di_test.slang`.
-    #[repr(C)]
-    #[derive(Clone, Copy, Pod, Zeroable)]
-    struct RoundTripParams {
-        input: vk::DeviceAddress,
-        output: vk::DeviceAddress,
-        loaded_weight_sum: vk::DeviceAddress,
-        count: u32,
-        _pad0: u32,
-        _pad1: u32,
-        _pad2: u32,
-    }
 
     /// Audit the reservoir primitive on the GPU it ships on, through the
     /// test-only kernel `shaders/reservoir_test.slang`. `ReSTIR` bias is
@@ -717,17 +746,36 @@ mod tests {
         assert_eq!(out[reject_from + 1], 0xffff_ffff, "an off-screen point must reject");
     }
 
-    /// T3: the persistent reservoir record round-trips between the GPU's
-    /// `StoredReservoir` and this host mirror, byte for byte, and load/store
-    /// are inverse. The fixture gives every scalar field a distinct transform
-    /// (a plain copy would survive a symmetric layout mismatch unseen), so a
-    /// swapped or mis-aligned field lands a value this side did not predict.
-    /// The `AoS` reservoir buffer is exactly this array — proving it
-    /// round-trips is proving the buffers allocate and read back correctly,
-    /// the step-2 checkpoint.
+    /// T0 (M6): the 96 B path reservoir record round-trips between the GPU's
+    /// `StoredPathReservoir` and this host mirror, byte for byte. The struct is
+    /// the milestone's central artifact — designed once (D-128) so no rung
+    /// re-lays it out — and its three std430 `float3` lanes make the offsets, not
+    /// just the size, load-bearing: a `float3` padded to a 16-byte slot on one
+    /// side and packed on the other would shift every field after it and bias
+    /// silently. Each scalar field gets a distinct transform (a plain copy would
+    /// survive a symmetric layout slip unseen); the reserved flags/pad/`ReSTCV`
+    /// lanes are seeded non-zero on input and asserted zero on output, proving
+    /// `store` clears the step-6 slots and that those bytes exist where expected.
+    /// This is the "struct allocates and round-trips" step-0 checkpoint.
     #[test]
-    fn stored_reservoir_round_trips_through_the_gpu() {
+    #[allow(clippy::too_many_lines, reason = "one assertion per reservoir field — the exhaustiveness is the test")]
+    fn stored_path_reservoir_round_trips_through_the_gpu() {
+        use super::{PathSample, ReconnectionVertex, StoredPathReservoir};
+
         const COUNT: u32 = 4096; // several workgroups, varied per-field values
+
+        /// Mirrors `struct Params` in `shaders/reservoir_path_test.slang`.
+        #[repr(C)]
+        #[derive(Clone, Copy, Pod, Zeroable)]
+        struct PathRoundTripParams {
+            input: vk::DeviceAddress,
+            output: vk::DeviceAddress,
+            loaded_weight_sum: vk::DeviceAddress,
+            count: u32,
+            _pad0: u32,
+            _pad1: u32,
+            _pad2: u32,
+        }
 
         let Some(gpu) = crate::gpu::test_context() else {
             return;
@@ -735,25 +783,45 @@ mod tests {
 
         // Distinctive per-field inputs: any field read from the wrong offset
         // reads a neighbour's unrelated value, and the transform then misses.
-        let input: Vec<StoredReservoir> = (0..COUNT)
-            .map(|i| StoredReservoir {
-                sample: DirectLightSample {
-                    light: i * 7 + 1,
-                    primitive: i * 13 + 3,
-                    barycentrics: [i as f32 * 0.001 + 0.1, i as f32 * 0.002 + 0.2],
-                },
-                unbiased_weight: i as f32 * 0.5 + 1.0,
-                confidence: i as f32 * 0.25 + 2.0,
+        // The reserved lanes carry non-zero junk so the zero-on-output assert
+        // proves `store` clears them rather than finding them already clear.
+        let input: Vec<StoredPathReservoir> = (0..COUNT)
+            .map(|i| {
+                let f = i as f32;
+                StoredPathReservoir {
+                    sample: PathSample {
+                        rc_vertex: ReconnectionVertex {
+                            instance: i * 7 + 1,
+                            primitive: i * 13 + 3,
+                            barycentrics: [f * 0.001 + 0.1, f * 0.001 + 0.2],
+                        },
+                        rc_vertex_radiance: [f * 0.001 + 0.3, f * 0.001 + 0.4, f * 0.001 + 0.5],
+                        rc_vertex_wi: i * 17 + 5,
+                        f: [f * 0.001 + 0.6, f * 0.001 + 0.7, f * 0.001 + 0.8],
+                        nee_light_pdf: f * 0.001 + 1.0,
+                        init_random_seed: i * 19 + 7,
+                        rc_vertex_random_seed: i * 23 + 9,
+                        cached_jacobian: f * 0.001 + 2.0,
+                        reserved: i * 29 + 11,
+                    },
+                    unbiased_weight: f * 0.5 + 1.0,
+                    confidence: f * 0.25 + 2.0,
+                    // Reserved lanes: non-zero junk `store` must overwrite with 0.
+                    flags: i * 31 + 13,
+                    pad0: i * 37 + 15,
+                    cv_accumulator: [f * 0.001 + 9.0, f * 0.001 + 9.3, f * 0.001 + 9.6],
+                    cv_normalization: f * 0.001 + 9.9,
+                }
             })
             .collect();
 
-        let spirv = crate::shaders::compile_fixture("reservoir_di_test")
-            .expect("compile reservoir_di_test");
+        let spirv = crate::shaders::compile_fixture("reservoir_path_test")
+            .expect("compile reservoir_path_test");
         let pipeline = gpu
             .create_compute_pipeline(
                 &spirv,
-                c"reservoir_di_test",
-                size_of::<RoundTripParams>() as u32,
+                c"reservoir_path_test",
+                size_of::<PathRoundTripParams>() as u32,
                 Bindings::None,
             )
             .expect("pipeline");
@@ -762,30 +830,26 @@ mod tests {
             | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
             | vk::BufferUsageFlags::TRANSFER_SRC;
         let input_buffer = gpu
-            .upload_buffer(
-                "test.reservoir.di.in",
-                bytemuck::cast_slice(&input),
-                io_usage,
-            )
+            .upload_buffer("test.reservoir.path.in", bytemuck::cast_slice(&input), io_usage)
             .expect("upload input");
         let output_buffer = gpu
             .create_buffer(
-                "test.reservoir.di.out",
-                u64::from(COUNT) * size_of::<StoredReservoir>() as u64,
+                "test.reservoir.path.out",
+                u64::from(COUNT) * size_of::<StoredPathReservoir>() as u64,
                 io_usage,
                 MemoryLocation::GpuOnly,
             )
             .expect("output buffer");
         let weight_sum_buffer = gpu
             .create_buffer(
-                "test.reservoir.di.wsum",
+                "test.reservoir.path.wsum",
                 u64::from(COUNT) * 4,
                 io_usage,
                 MemoryLocation::GpuOnly,
             )
             .expect("weight-sum buffer");
 
-        let params = RoundTripParams {
+        let params = PathRoundTripParams {
             input: input_buffer.device_address(),
             output: output_buffer.device_address(),
             loaded_weight_sum: weight_sum_buffer.device_address(),
@@ -802,43 +866,79 @@ mod tests {
         )
         .expect("dispatch");
 
-        let output: Vec<StoredReservoir> =
+        let output: Vec<StoredPathReservoir> =
             bytemuck::pod_collect_to_vec(&gpu.download_buffer(&output_buffer).expect("download"));
         let weight_sum: Vec<f32> = bytemuck::pod_collect_to_vec(
             &gpu.download_buffer(&weight_sum_buffer).expect("download"),
         );
 
         for (i, (got, src)) in output.iter().zip(&input).enumerate() {
-            // Integer fields must match exactly; a layout slip turns them into
-            // reinterpreted float bytes, wildly wrong.
-            assert_eq!(got.sample.light, src.sample.light + 1, "light[{i}]");
-            assert_eq!(
-                got.sample.primitive,
-                src.sample.primitive + 2,
-                "primitive[{i}]"
-            );
             let near = |a: f32, b: f32, what: &str| {
                 assert!((a - b).abs() < 1e-4, "{what}[{i}]: {a} vs {b}");
             };
+            // Integer fields must match exactly; a layout slip turns them into
+            // reinterpreted float bytes, wildly wrong.
+            assert_eq!(
+                got.sample.rc_vertex.instance,
+                src.sample.rc_vertex.instance + 1,
+                "instance[{i}]"
+            );
+            assert_eq!(
+                got.sample.rc_vertex.primitive,
+                src.sample.rc_vertex.primitive + 2,
+                "primitive[{i}]"
+            );
             near(
-                got.sample.barycentrics[0],
-                src.sample.barycentrics[0] + 0.25,
+                got.sample.rc_vertex.barycentrics[0],
+                src.sample.rc_vertex.barycentrics[0] + 0.25,
                 "bary.x",
             );
             near(
-                got.sample.barycentrics[1],
-                src.sample.barycentrics[1] + 0.5,
+                got.sample.rc_vertex.barycentrics[1],
+                src.sample.rc_vertex.barycentrics[1] + 0.5,
                 "bary.y",
             );
+            near(got.sample.rc_vertex_radiance[0], src.sample.rc_vertex_radiance[0] + 1.0, "Lk.x");
+            near(got.sample.rc_vertex_radiance[1], src.sample.rc_vertex_radiance[1] + 2.0, "Lk.y");
+            near(got.sample.rc_vertex_radiance[2], src.sample.rc_vertex_radiance[2] + 3.0, "Lk.z");
+            assert_eq!(got.sample.rc_vertex_wi, src.sample.rc_vertex_wi + 4, "wi[{i}]");
+            near(got.sample.f[0], src.sample.f[0] + 0.1, "F.x");
+            near(got.sample.f[1], src.sample.f[1] + 0.2, "F.y");
+            near(got.sample.f[2], src.sample.f[2] + 0.3, "F.z");
+            near(got.sample.nee_light_pdf, src.sample.nee_light_pdf * 2.0, "neePdf");
+            assert_eq!(
+                got.sample.init_random_seed,
+                src.sample.init_random_seed + 5,
+                "initSeed[{i}]"
+            );
+            assert_eq!(
+                got.sample.rc_vertex_random_seed,
+                src.sample.rc_vertex_random_seed + 6,
+                "rcSeed[{i}]"
+            );
+            near(got.sample.cached_jacobian, src.sample.cached_jacobian * 3.0, "jacobian");
+            assert_eq!(got.sample.reserved, src.sample.reserved + 7, "reserved[{i}]");
             near(got.unbiased_weight, src.unbiased_weight * 2.0, "W");
             near(got.confidence, src.confidence + 100.0, "M");
+
+            // store must clear the reserved flags/pad and the step-6 `ReSTCV` lane,
+            // regardless of the non-zero junk seeded on input.
+            assert_eq!(got.flags, 0, "flags[{i}] not cleared");
+            assert_eq!(got.pad0, 0, "pad0[{i}] not cleared");
+            // `== 0.0` against a literal is the exact-zero idiom clippy exempts
+            // (as the weightSum check below): store writes these lanes to exactly 0.
+            assert!(
+                got.cv_accumulator.iter().all(|&c| c == 0.0),
+                "cvAccumulator[{i}] not cleared"
+            );
+            assert!(got.cv_normalization == 0.0, "cvNormalization[{i}] not cleared");
         }
 
         // load must zero weightSum regardless of what was stored — the
         // pass-local invariant, enforced at the read boundary.
         assert!(
             weight_sum.iter().all(|&w| w == 0.0),
-            "loadReservoir left a non-zero weightSum"
+            "loadPathReservoir left a non-zero weightSum"
         );
     }
 }

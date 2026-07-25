@@ -3097,3 +3097,129 @@ missing inbound conversion. No golden covers it yet (the preview-surface stage d
 base color from a *texture*, which carries its own color-space handling), so it is a live
 gap, not a caught bug: the one-line twin of fix one, deferred until a constant-color
 material front end is exercised.
+
+## 2026-07-24 — M6 locked: full path reuse (ReSTIR PT), the plan and its amendments
+
+M6 is the reordered next milestone (geometry depth deferred — the charter's swap condition,
+a rendering-research primary target, is met). It builds on M3's GRIS-DI, not on geometry.
+These entries lock the decisions the structured interview and the research review produced;
+the working plan is [m6-plan.md](m6-plan.md), and everything consciously *not* built lives in
+[deferrals.md](deferrals.md) with its revival trigger. The research pass read the target
+paper **ReSTIR PT Enhanced** (Lin, Kettunen, Wyman, I3D 2026) to the equation level against
+its supplemental, plus the SIGGRAPH 2023 course, ReSTCV (SIGGRAPH 2026), and the engine
+hygiene of MoonRay (HPG 2017) and Cycles X (the 2021 wavefront rewrite).
+
+### D-124: Full path reuse is the spine — the M3 reservoir generalizes to a whole light path
+Status: accepted (2026-07-24). The milestone extends the DI reservoir from a length-2 direct
+connection to a path of any length. A **unified DI+GI reservoir** (Enhanced §6.1) competes a
+direct (length-2 NEE) candidate and indirect candidates in *one* reservoir and stores whichever
+wins, **retiring the separate DI reservoir**. *Why:* a single lightweight reservoir over the
+full path space is the occupancy-friendly shape (Enhanced: 431→265 MB at 1080p, the
+second-largest single speedup after Russian roulette). The DI reservoir was deliberately built
+(D-086) as the dormant base case of exactly this generalization; unifying finishes that design
+rather than bolting a second system beside it. c_cap exposure + ReSTCV (D-127) fold in on top.
+
+### D-125: Hybrid shift is the deliverable; reconnection shift is the validated scaffold
+Status: accepted (2026-07-24). Reconnection shift first (cheap, correct on diffuse/rough,
+**same-pixel Jacobian = 1** — the validation invariant), then the **hybrid shift**
+(random-replay the early specular segments, reconnect at the first sufficiently-rough+distant
+vertex pair). Classic roughness/distance thresholds first; **footprint-based criteria**
+(Enhanced §4) replace them at their own rung. *Why:* reconnection alone is silently wrong on
+the glossy/specular paths lookdev lives on; hybrid is the paper's default and what makes reuse
+production-usable. Reconnection-first is a validation ladder — the Jacobian-1 invariant is
+checkable before any non-trivial Jacobian exists. Random replay is *free*: the stateless RNG
+(rng.slang) was built so any decision replays from its keys.
+
+### D-126: Both spatial and temporal reuse — spatial validated first
+Status: accepted (2026-07-24). Both axes ship. Implementation order is **spatial-first** (a
+same-pixel-topology shift has Jacobian 1, so spatial reuse is provable before temporal
+reprojection adds a variable), then temporal through M3's existing reproject + **decay-ramp**
+machinery. The reservoir is **temporal- and CV-ready from day one** so both are additions, not
+re-layouts. *Why:* temporal is critical to the interactive feel and is in the final path; but
+building spatial first validates the shift and pairwise-MIS machinery against a Jacobian-1
+baseline before reprojection can hide a bug. Spatial and temporal share the same shift +
+defensive pairwise MIS (D-087), so spatial-first is a validation ladder, not architectural debt.
+
+### D-127: ReSTCV is the unbiased convergence tail — first-class, in-milestone
+Status: accepted (2026-07-24). ReSTCV (Spatio-Temporal Control Variates, SIGGRAPH 2026) is
+architected as the **general control-variate form with plain ReSTIR PT as the zero-CV
+degenerate** — one code path, not two. It stores a per-reservoir accumulated-colour control
+variate and is *unbiased* (verified by accumulating static frames). *Why:* the user's "ReSTIR
+early, better long-term after" is exactly ReSTCV — the published, unbiased realization of the
+convergence-plateau fix. Making plain ReSTIR PT the zero-CV degenerate keeps the codebase
+lightweight (no estimator fork) and gives a free A/B (CV on vs off → same converged image). It
+is the principled answer to the plateau that Enhanced's duplication maps address only with bias.
+Its exact per-reservoir storage/update math is the one rung not yet read to the equation level:
+a focused deep-read of github.com/Hercier/ReSTCV gates the step that builds it (m6-plan.md §6).
+
+### D-128: One unified ~64 B (cenote: 96 B) path reservoir, designed once
+Status: accepted (2026-07-24). The reservoir struct — the milestone's central artifact — is
+designed once (Enhanced Alg 1) holding every field the later rungs light up: `W`; `float3 F`
+(RGB integrand — target is scalar luminance, so F carries colour for the §6.3 fix and exact
+resolve); two seeds for random replay; `M`; the reconnection vertex as the existing **`Hit`**
+(instance+prim+bary) + oct `wi` + radiance; cached Jacobian terms pre-multiplied to one float
+with the **NEE light pdf kept unpacked** (it feeds path MIS); plus the **ReSTCV slot placed
+last** so the step-6 deep-read pins it without moving any field before it. *Why:* getting the
+layout right once is what prevents a re-layout mid-milestone. cenote's record is **96 B, not
+Enhanced's 64 B**, by three deliberate choices — `Hit`'s float2 barycentrics (one shared vertex
+form) over the paper's 2×16-bit unorm; the float `confidence` its reservoir primitive already
+carries (fractional temporal decay) over the paper's 8-bit M; and the reserved CV lane the
+paper lacks. Packing back toward 64 B (2×16u barycentrics, 8-bit M) is the deferred size
+optimization if the per-view × N-viewport budget bites (deferrals.md). Implemented in T0:
+`shaders/reservoir_path.slang`, the `src/restir.rs` mirror, and a GPU round-trip test pinning
+the three std430 `float3`-lane offsets, not just the size.
+
+### D-129: Validation & flagship demo — three artifacts, cenote's own brute force the oracle
+Status: accepted (2026-07-24). **(1)** an unbiasedness proof — ReSTIR-PT-on vs brute-force
+accumulation converge to the same image on a **GI-heavy** scene (the M3 gate, now on indirect
+paths); **(2)** an **equal-time** win, PT vs ReSTIR PT, matched seconds; **(3)** a
+**convergence-under-reuse study** — mean-error-vs-sample-count curves showing the layered tail
+(PT → decay-ramp → ReSTCV). *Why:* the oracle must be cenote's own estimator — the thesis is
+that ReSTIR PT and brute force are the same estimator, so anything else measures the wrong
+thing (D-090). Falcor is the behaviour spot-check, never the numerical oracle.
+
+### D-130: One integrator, no plugin seam
+Status: accepted (2026-07-24); amendment from the research review. **No pluggable-integrator
+abstraction.** cenote keeps ONE config-driven light-transport path; plain PT is the **zero-CV,
+no-reuse degenerate** of the ReSTIR-PT+ReSTCV path (D-127), reachable by config, not by a
+second integrator. *Why:* MoonRay is one monolithic `PathIntegrator` (no base class, no
+virtuals, no registry); Cycles is one data-driven stage machine. Both production tracers
+converge on one integrator. A swappable-estimator layer would be speculative generality (the
+named risk, D-086); the zero-CV degenerate already gives the only fork that matters, for free.
+
+### D-131: The shift re-shades from the `Hit`
+Status: accepted (2026-07-24); amendment from the research review. The shift map **re-resolves
+the `Closure` at the reconnection `Hit`** (a re-shade), storing only the re-evaluable key,
+never a serialized BSDF. `Closure` is already a pure function of `Hit`+`Material` (openpbr.slang)
+— POD, value-typed, GPU-resident. Budget one re-shade per reconnection per neighbour as the
+dominant per-shift cost, and **guard its bitwise determinism** under stochastic texture
+filtering (a re-shade-equality test from step 2). *Why:* MoonRay (persists `Intersection`, not
+`Bsdf`) and Cycles (rebuilds `ShaderData`, re-runs the shader graph) both say closures are
+transient — store the shader input, re-shade on demand. cenote's POD closure is the exact shape
+MoonRay recommends over its own arena/pointer/vtable graph: a structural advantage to exploit.
+
+### D-132: Duplication maps deferred; footprint & reciprocal reuse kept
+Status: accepted (2026-07-24); amendment from the research review. **Duplication maps leave the
+milestone** → preview-only, biased, deferrals.md. **Footprint-based reconnection criteria**
+stay (Enhanced §4) — unbiased, isolated, computed from the **reciprocal area-density of
+PDFs/geometry cenote already has** (*not* ray differentials/cones), removing per-scene
+threshold tuning. **Reciprocal (paired) spatial reuse** stays (Enhanced §3), chosen **over**
+the deferred stochastic pairwise MIS — it nets ~1.63× *and lowers* FLIP. Splatting and CRIS are
+**not** built (gather suffices; CRIS is subsumed by the GRIS formulation). *Why:* duplication
+maps are Enhanced's only biased contribution and plateau *above* the reference under
+accumulation (Fig 15; §7.4 says disable for offline) — dead weight for an accumulation-first
+renderer whose denoiser is a cadence-throttled view of the *accumulated* film. Footprint and
+reciprocal are separable, unbiased drop-ins ("generalizes to other reuse algs").
+
+### D-133: Colour-noise fix, the RR+random-replay trap, the AOV-under-reuse seam
+Status: accepted (2026-07-24); amendment from the research review. Fold in the near-free
+**colour-noise fix** (Enhanced §6.3 — scalar-luminance target vs RGB `F`, fixed by accumulating
+vector-valued resampling weights for shading; F is a stored field for it, D-128). Handle the
+**Russian-roulette + random-replay trap** (remove RR from replay, fold survival into the
+initial-sample PSS PDF — supp §6) *with* the hybrid-shift step, not after. Decide the
+**AOV-under-reuse seam now**: albedo/normal guides resolve from the **canonical path
+pre-resampling** (cenote already does this via guide throughput, pathstate.slang:89-106);
+LPE/light-group AOVs stay deferred but the seam is acknowledged, not retrofitted. *Why:* these
+are the traps and cheap wins the equation-level read surfaced. The AOV seam is MoonRay's
+sharpest warning — radiance decomposition observes every scattering event and reuse complicates
+per-event attribution, so "which pass does a *reused* path land in?" is answered by construction.

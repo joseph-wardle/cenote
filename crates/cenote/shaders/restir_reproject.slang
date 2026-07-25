@@ -9,8 +9,9 @@
 // the M-cap and the feed convention, both upstream in `restir_temporal.slang`.
 //
 // -- The G-buffer -------------------------------------------------------------
-// A `StoredReservoir` holds only the light point, nothing about the receiving
-// surface, so the gate — which compares this pixel's surface against the one the
+// A `StoredPathReservoir` holds only the sample (its NEE reconnection vertex the
+// light point), nothing about the receiving surface, so the gate — which
+// compares this pixel's surface against the one the
 // reprojected `prev` was resampled for — needs last frame's *hit* persisted.
 // This stores the re-evaluable hit + ray (not a resolved position/normal), so
 // `reconstructSurfaceFrom` rebuilds the full previous surface — closure included

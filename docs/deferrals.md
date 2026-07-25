@@ -204,6 +204,26 @@ built to extend but that M3 consciously does not build.
   compatibility-guided neighbour selection (bias reuse toward similar surfaces) and
   MCMC-style decorrelation of the reused stream. The named next move for the step-4/5
   correlation risk, so it is a plan and not a scramble. (D-085, D-089)
+- **Duplication maps — spatiotemporal decorrelation for the interactive preview**
+  *(revisit: only if a live per-frame denoised preview during motion is built — see the
+  two-tier denoiser under Display & denoise)* — Today: M6 ships without them; correlation
+  in the reused stream is fought unbiased and by construction — the decay ramp hands
+  temporal → spatial-only + fresh-per-frame RNG (D-085), and the once-per-second OIDN
+  view averages the temporal-correlated early window into a decorrelated tail before it
+  ever samples the film. Production shape (Lin et al. 2026, *ReSTIR PT Enhanced* §5):
+  each pixel counts how many reservoirs in a 17×17 neighbourhood share its
+  `initRandomSeed` and throttles the temporal confidence cap where that count is high,
+  killing the firefly "correlation blobs" a denoiser mistakes for signal. It is the
+  *only biased* Enhanced contribution (~3.25 % worst-case, and it plateaus **above** the
+  reference under accumulation — the paper itself says disable it for unbiased offline,
+  §7.4), so it can never touch the accumulated film. Its one payoff — cleaner denoiser
+  input — lands only for a denoiser that consumes the noisy early frames, which cenote's
+  cadence-throttled view of the *accumulated* film does not. Free to add later:
+  `initRandomSeed` is already stored for random replay, so no reservoir re-layout is
+  needed. If it ever ships it is a preview-view-only feature, fenced from the estimator
+  by the same seam that keeps denoising a view (never the film) — and should be A/B'd
+  against the unbiased compatibility-guided + MCMC decorrelation above, which carry no
+  bias into a preview that might then be let to accumulate. (D-085, D-089)
 
 ## Performance & sync (one measured pre-M3 pass, per D-043)
 
@@ -237,6 +257,25 @@ built to extend but that M3 consciously does not build.
   interactivity)* — Today: OIDN on the accumulated film at a throttled cadence,
   Cycles' viewport pattern. Production shape only matters when frames stop being
   progressive accumulations.
+- **Two-tier interactive denoising — fast GPU denoiser early, OIDN at convergence**
+  *(revisit: next — the ~1 s cadence makes the denoised view feel non-interactive, and a
+  fast interactive denoiser is critical to how a renderer's interactivity feels)* —
+  Today: OIDN runs on the accumulated film at a ~1 s throttled cadence, a lagging *view*
+  of the estimator (never part of it, `cenote-viewer/src/denoise.rs`). The CPU filter
+  costs ~200 ms at 720p and trails the orbit by up to a second, which reads as
+  non-interactive during motion. Production shape: a fast GPU denoiser for roughly the
+  first 32 samples — NVIDIA **NRD** (ReLAX is the variant tuned for ReSTIR / path-traced
+  signals; ReBLUR the general one) or the **OptiX** AI denoiser (GPU, temporal mode,
+  driven by the albedo/normal guides cenote already emits) — handed off to OIDN once
+  accumulation passes ~32 spp for the higher-quality still. The crossover mirrors the
+  estimator's own ReSTIR-early / better-long-term shape and the decay ramp's frame-16
+  handoff. Trade-off between the two candidates: NRD is the more interactive-tuned but
+  integration-heavy path (needs motion vectors, normalised hit distance, and a G-buffer
+  contract — much of which the ReSTIR/AOV plumbing already produces); the OptiX denoiser
+  is the lighter lift (albedo/normal already in hand). Which denoiser, and whether the
+  fast tier runs per-frame during motion, is the open sub-decision — and the per-frame
+  case is the exact trigger that would revive duplication maps under ReSTIR & light
+  reuse above. This is what makes ReSTIR PT's fast early frames *feel* fast. (D-081)
 
 ## Viewer & lookdev
 

@@ -44,7 +44,7 @@ import lights;
 import openpbr;
 import pathstate;
 import reservoir;
-import reservoir_di;
+import reservoir_path;
 import restir_scene;
 import rng;
 import scene;
@@ -61,7 +61,7 @@ struct Params {
     Queue<uint> hits;      // primary hits, dispatched indirectly; not consumed here
     SceneTable* scene;
     RestirScene* restir;
-    StoredReservoir* reservoirs; // this frame's per-pixel reservoirs (curr), written here
+    StoredPathReservoir* reservoirs; // this frame's per-pixel reservoirs (curr), written here
     uint sampleIndex;      // which sample of every pixel's sequence this wave is
     uint candidates;       // M — the initial-RIS light-candidate count
     uint width;            // frame width — decodes the pixel's (x,y) for the blue-noise key
@@ -81,9 +81,9 @@ Params params;
 // but one unit of confidence, because the technique did draw a sample and the
 // balance heuristic's counts must match the draws. On selection the caller's
 // running p̂(Y) is updated so finalize needs no re-evaluation.
-void streamCandidate(inout Reservoir<DirectLightSample> reservoir,
+void streamCandidate(inout Reservoir<PathSample> reservoir,
                      inout float survivorTarget, Closure closure, Frame frame,
-                     float3 spawnNormal, float3 wo, DirectLightSample sample,
+                     float3 spawnNormal, float3 wo, PathSample sample,
                      float3 toLight, float3 radiance, float lightPdf, bool reachable,
                      uint M, float uAccept) {
     float target = 0.0;
@@ -143,7 +143,7 @@ void restir_candidates(uint3 tid: SV_DispatchThreadID) {
     let envProb = restir.envSelectProb;
     let M = params.candidates;
 
-    Reservoir<DirectLightSample> reservoir = reservoirInit<DirectLightSample>();
+    Reservoir<PathSample> reservoir = reservoirInit<PathSample>();
     // p̂ at the held survivor, tracked as the stream runs so finalize needs no
     // re-evaluation (the survivor's target is whatever won the last acceptance).
     float survivorTarget = 0.0;
@@ -157,19 +157,22 @@ void restir_candidates(uint3 tid: SV_DispatchThreadID) {
         let uAccept = sample_ranked_1d(pixel, ranked,
                                        restirCandidateDimension(i, RESTIR_ACCEPT));
 
-        DirectLightSample sample;
+        // The unified reservoir's NEE (length-2) sample: the reconnection vertex
+        // is the light point, the multi-vertex path fields stay zero until step 2.
+        // Zero-init so those unused fields are deterministic in the stored buffer.
+        PathSample sample = PathSample();
         float3 toLight;
         float3 radiance;
         float lightPdf; // p_L: the draw's solid-angle pdf, selection folded in
         if (uLight < envProb) {
             // The environment: store the image point the draw landed on, which
-            // reproduces the direction exactly at resolve (see reservoir_di /
+            // reproduces the direction exactly at resolve (see restir_scene /
             // environment.connect). Storing the *point* — not the primary
             // sample — is what lets the BSDF-escape candidate below share it.
             let e = params.scene.env.sample(uPoint);
-            sample.light = LIGHT_ID_ENVIRONMENT;
-            sample.primitive = 0;
-            sample.barycentrics = e.uv;
+            sample.rcVertex.instance = LIGHT_ID_ENVIRONMENT;
+            sample.rcVertex.primitive = 0;
+            sample.rcVertex.barycentrics = e.uv;
             toLight = e.direction;
             radiance = e.radiance;
             lightPdf = envProb * e.pdf;
@@ -191,9 +194,9 @@ void restir_candidates(uint3 tid: SV_DispatchThreadID) {
             }
             // Stamp the STABLE id, not the volatile instance: the sample must
             // survive a light being added or removed before it is reused.
-            sample.light = restir.instanceToId[c.instance];
-            sample.primitive = c.primitive;
-            sample.barycentrics = c.bary;
+            sample.rcVertex.instance = restir.instanceToId[c.instance];
+            sample.rcVertex.primitive = c.primitive;
+            sample.rcVertex.barycentrics = c.bary;
             toLight = c.direction;
             radiance = c.radiance;
             lightPdf = (1.0 - envProb) * c.pdf;
@@ -220,7 +223,7 @@ void restir_candidates(uint3 tid: SV_DispatchThreadID) {
         let scatter = sampleBsdf(closure, wo, uLobe, uDir);
         let wiWorld = frame.toWorld(scatter.wi);
 
-        DirectLightSample sample;
+        PathSample sample = PathSample();
         float3 toLight = float3(0.0);
         float3 radiance = float3(0.0);
         float lightPdf = 0.0; // p_L at the point the BSDF ray reached
@@ -265,9 +268,9 @@ void restir_candidates(uint3 tid: SV_DispatchThreadID) {
                             c.radiance *= sampleColor(emitter.emissionTexture,
                                 interpolateUv(lightMesh, primitive, bary));
                         }
-                        sample.light = restir.instanceToId[instance];
-                        sample.primitive = primitive;
-                        sample.barycentrics = bary;
+                        sample.rcVertex.instance = restir.instanceToId[instance];
+                        sample.rcVertex.primitive = primitive;
+                        sample.rcVertex.barycentrics = bary;
                         toLight = c.direction;
                         radiance = c.radiance;
                         lightPdf = (1.0 - envProb) * c.pdf;
@@ -280,9 +283,9 @@ void restir_candidates(uint3 tid: SV_DispatchThreadID) {
                 // through the same `environment.connect` a light candidate uses.
                 let hitUv = params.scene.env.locate(wiWorld);
                 let e = params.scene.env.connect(hitUv);
-                sample.light = LIGHT_ID_ENVIRONMENT;
-                sample.primitive = 0;
-                sample.barycentrics = hitUv;
+                sample.rcVertex.instance = LIGHT_ID_ENVIRONMENT;
+                sample.rcVertex.primitive = 0;
+                sample.rcVertex.barycentrics = hitUv;
                 toLight = e.direction;
                 radiance = e.radiance;
                 lightPdf = envProb * e.pdf;
@@ -295,5 +298,5 @@ void restir_candidates(uint3 tid: SV_DispatchThreadID) {
     }
 
     reservoirFinalize(reservoir, survivorTarget);
-    params.reservoirs[pixel] = storeReservoir(reservoir);
+    params.reservoirs[pixel] = storePathReservoir(reservoir);
 }
