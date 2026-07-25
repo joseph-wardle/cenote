@@ -71,7 +71,9 @@ pub(crate) struct PathSample {
     pub rc_vertex_random_seed: u32,
     /// The shift Jacobian terms pre-multiplied into one float (same-pixel = 1).
     pub cached_jacobian: f32,
-    /// Reserved (reconnection-vertex classification); zero until step 2.
+    /// Bit 0: the path kind — 0 a length-2 NEE sample, 1 a length-≥3
+    /// reconnection sample (`PATH_KIND_*` in `restir_scene.slang`); the rest
+    /// reserved.
     pub reserved: u32,
 }
 

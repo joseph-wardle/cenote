@@ -15,8 +15,8 @@
 // The estimator identity E[H(Y)·W_Y] = ∫H holds for any H, so the visibility
 // and throughput left out of the target reappear here at no cost to
 // unbiasedness. A directly visible light's emission stays in `shade_surface`
-// (bounce 0); the BSDF continuation is indirect-only, its first-hit emission
-// suppressed — that emitter is already a reservoir candidate (D-088).
+// (bounce 0); the indirect tail excludes its first vertex's emission — that
+// emitter is the BSDF draw's own light candidate (D-088, D-134).
 //
 // The delta lights (distant, point) are the reservoir's deliberate exclusion:
 // zero solid angle, so no BSDF sample reaches them and no reservoir candidate
@@ -35,6 +35,7 @@ import pathstate;
 import reservoir;
 import reservoir_path;
 import restir_scene;
+import restir_target;
 import rng;
 import scene;
 import surface;
@@ -220,10 +221,6 @@ void restir_resolve(uint3 tid: SV_DispatchThreadID) {
         return;
     }
     PathSample sample = reservoir.sample;
-    // The reconnection vertex is the light point (length-2 NEE base case): its
-    // `instance` carries the stable light id, `primitive`/`barycentrics` the
-    // emitter point (or the env sampling coordinate).
-    let rc = sample.rcVertex;
 
     // Unpack the debug word: the view enum, whether the spatial stage already
     // folded the survivor's visibility into W (so no shadow ray is owed here),
@@ -245,55 +242,22 @@ void restir_resolve(uint3 tid: SV_DispatchThreadID) {
         params.debug[pixel] = float4(debugColor(debugView, reservoir, confidenceScale), 1.0);
     }
 
-    // Reconstruct the survivor's connection — the exact direction, radiance,
-    // and next-event pdf its target was built from (reconnection is exact: the
-    // environment re-samples its stored coordinate, a triangle re-derives from
-    // its stored point).
-    float3 toLight;
-    float3 radiance;
-    float connectPdf;      // the reconnection's solid-angle pdf — a validity
-                           //   gate only; W already carries the MIS weighting
-    uint shadowLight;      // shadow-ray identity target, or LIGHT_NONE
-    uint shadowPrimitive;
-    float shadowTmax;
-    if (isEnvironmentSample(sample)) {
-        let e = params.scene.env.connect(rc.barycentrics);
-        toLight = e.direction;
-        radiance = e.radiance;
-        connectPdf = e.pdf;
-        shadowLight = LIGHT_NONE;
-        shadowPrimitive = 0;
-        shadowTmax = 1e30;
-    } else {
-        // Translate the stable id back to the current instance; a light that
-        // was deleted since the sample was stored resolves to nothing (drop).
-        let instance = params.restir.idToInstance[rc.instance];
-        if (instance == LIGHT_NONE) {
-            return;
-        }
-        let lightMesh = params.scene.geometry[instance];
-        // The candidate table's triangle records share the combined table's
-        // indices, so the stored (instance, primitive) addresses this row.
-        LightRecord record = params.restir.candidateLights[lightMesh.light + rc.primitive];
-        var c = connectTriangle(record, rc.barycentrics, spawn.position);
-        let emitter = params.scene.materials[instance];
-        if (emitter.emissionTexture != TEXTURE_NONE) {
-            c.radiance *= sampleColor(
-                emitter.emissionTexture,
-                interpolateUv(lightMesh, rc.primitive, rc.barycentrics));
-        }
-        toLight = c.direction;
-        radiance = c.radiance;
-        connectPdf = c.pdf;
-        shadowLight = instance;
-        shadowPrimitive = rc.primitive;
-        shadowTmax = c.tmax;
-    }
-    // A survivor whose connection degenerated (behind the emitter, a pole) adds
-    // nothing; W built on a positive target keeps this rare.
-    if (!(connectPdf > 0.0)) {
+    // Reconstruct the survivor's connection through the shared `connectSampleAt`
+    // (restir_target.slang — the same reconstruction every reuse target ran, so
+    // resolve can never drift from what was resampled), whichever kind survived:
+    // a light point re-derived exactly (the environment re-samples its stored
+    // coordinate, a triangle re-connects its stored point), or a reconnection
+    // vertex x₂ re-formed at the cached Lo(x₂) (D-134) — the reconnection shift,
+    // but to the resolving pixel itself; re-forming in *this* domain (rather
+    // than reading a stored F) is what keeps a reused survivor's colour local.
+    // A dropped light or a degenerate connection (behind the emitter, a pole)
+    // is invalid and adds nothing; W already carries the Jacobian and MIS
+    // weighting, so validity is the only gate here.
+    let connection = connectSampleAt(params.scene, params.restir, sample, spawn.position);
+    if (!connection.valid) {
         return;
     }
+    let toLight = connection.toLight;
 
     let wiLight = frame.toLocal(toLight);
     let throughSurface = dot(toLight, spawn.normal) < 0.0;
@@ -305,17 +269,21 @@ void restir_resolve(uint3 tid: SV_DispatchThreadID) {
     // by the throughput and the reservoir's UCW. No MIS weight — the light-vs-
     // BSDF balance heuristic was already folded into W at candidate time, so
     // applying one here would double-weight the survivor.
-    let f = throughput * radiance * evalBsdf(closure, wiLight, wo) * abs(wiLight.z);
+    let f = throughput * connection.radiance * evalBsdf(closure, wiLight, wo) * abs(wiLight.z);
     let contribution = f * reservoir.unbiasedWeight;
     if (!any(contribution > 0.0)) {
         return;
     }
 
-    if (visibilityInWeight) {
-        // The spatial stage already traced this survivor's visibility and folded
-        // it into W (W = weightSum/U, the unshadowed target — see restir_spatial):
-        // so shade unshadowed and add straight to the film. Pixel-owned, exactly
-        // like the delta term above, so no shadow queue and determinism holds.
+    if (visibilityInWeight || isReconnectionSample(sample)) {
+        // No shadow ray owed: the spatial stage already traced this survivor's
+        // visibility and folded it into W (W = weightSum/U, the unshadowed
+        // target — see restir_spatial), or the sample is a reconnection whose
+        // x₁→x₂ segment was found by the own pixel's real trace (a foreign
+        // reconnection survivor can only arrive through spatial, whose target
+        // spent the ray). Shade unshadowed and add straight to the film —
+        // pixel-owned, exactly like the delta term above, so no shadow queue
+        // and determinism holds.
         params.radiance[pixel] += float4(contribution, 0.0);
         return;
     }
@@ -324,11 +292,11 @@ void restir_resolve(uint3 tid: SV_DispatchThreadID) {
     // ray. Queue it — trace_shadow applies visibility and lands the contribution.
     ShadowRay shadow;
     shadow.origin = throughSurface ? spawn.below : spawn.position;
-    shadow.light = shadowLight;
+    shadow.light = connection.shadowLight;
     shadow.direction = toLight;
-    shadow.primitive = shadowPrimitive;
+    shadow.primitive = connection.shadowPrimitive;
     shadow.contribution = contribution;
-    shadow.tmax = shadowTmax;
+    shadow.tmax = connection.shadowTmax;
     shadow.pixel = pixel;
     shadow.pad0 = 0;
     shadow.pad1 = 0;

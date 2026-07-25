@@ -97,6 +97,59 @@ public struct Connection {
     public float shadowTmax;
 };
 
+// The classic reconnection roughness floor (D-125): below it the reconnection
+// vertex is too sharp for the baked-radiance shift to reuse across pixels.
+static const float RECONNECT_MIN_ROUGHNESS = 0.2;
+
+// Whether a reconnection vertex may be *reused* by the (baked-radiance)
+// reconnection shift. Baking Lo(x₂) assumes it is ~direction-independent, so a
+// vertex is eligible only when its glossy/metal/glass lobes are weak: mostly
+// diffuse, no coat, and any dielectric specular is rough. A sharper vertex is
+// exact in its *own* pixel (resolve re-forms it there), but reusing it at a
+// neighbour would bias the mean — so the shift drops it (unbiased, just no
+// borrow) until step 3's hybrid shift re-evaluates f₂ (D-125). A no-op on a
+// purely diffuse scene, where every vertex is eligible — the T2 checkpoint.
+public bool reconnectionEligible(Material m) {
+    return m.metalness < 0.25 && m.transmissionWeight < 0.25 && m.coatWeight < 0.25
+        && (m.specularWeight < 0.25 || m.specularRoughness >= RECONNECT_MIN_ROUGHNESS);
+}
+
+// The reconnection eligibility of the vertex `hit` names, resolved against its
+// textured material so a metalness/roughness map is not missed.
+public bool reconnectionEligibleAt(SceneTable* scene, Hit hit) {
+    let mesh = scene.geometry[hit.instance];
+    let uv = interpolateUv(mesh, hit.primitive, hit.barycentrics);
+    return reconnectionEligible(resolveMaterial(scene.materials[hit.instance], uv));
+}
+
+// The Jacobian of shifting `sample` from the surface at `fromSource` (where it
+// was drawn) to the surface at `fromTarget` — the |∂ω_target/∂ω_source| the
+// GRIS resampling weight and the cross-domain MIS targets carry (D-135):
+//
+//   - an NEE sample stores a domain-independent light point, so its shift is
+//     the identity and the Jacobian exactly 1;
+//   - a reconnection sample moves its x₁→x₂ connection, the geometry-term
+//     ratio [|cosθ₂|/d²]_target / [|cosθ₂|/d²]_source (surface.slang) — exactly
+//     1 when the domains coincide, the same-pixel invariant (D-125);
+//   - a reconnection sample whose x₂ is too glossy for the baked-radiance
+//     shift has *no defined shift* (until step 3's hybrid, D-136), returned as
+//     Jacobian 0 — the partial-shift convention: its shifted target scales to
+//     zero, so it contributes nothing across domains while the pair it sits in
+//     still counts in the pairwise MIS. Dropping the pair instead would make
+//     the MIS weights a function of the neighbour's *realized* sample and
+//     overweight eligible points by the ineligible probability — a bias.
+public float reconnectionShiftJacobian(SceneTable* scene, PathSample sample,
+                                       float3 fromSource, float3 fromTarget) {
+    if (!isReconnectionSample(sample)) {
+        return 1.0;
+    }
+    if (!reconnectionEligibleAt(scene, sample.rcVertex)) {
+        return 0.0;
+    }
+    return reconnectionJacobian(scene.geometry[sample.rcVertex.instance],
+                                sample.rcVertex, fromSource, fromTarget);
+}
+
 public Connection connectSampleAt(SceneTable* scene, RestirScene* restir,
                                   PathSample sample, float3 from) {
     Connection c;
@@ -107,10 +160,39 @@ public Connection connectSampleAt(SceneTable* scene, RestirScene* restir,
     c.shadowPrimitive = 0;
     c.shadowTmax = 1e30;
 
-    // The reconnection vertex is the light point (length-2 NEE base case): its
-    // `instance` field carries the stable light id, `primitive`/`barycentrics`
-    // the point on the emitter (or the env sampling coordinate).
     let rc = sample.rcVertex;
+
+    // A length-≥3 indirect sample: the reconnection segment connects `from` to
+    // the stored geometry vertex x₂ (D-134). The direction re-forms from x₂'s
+    // reconstructed point (bit-identical to candidate and every reusing domain),
+    // the radiance is the cached Lo(x₂), and the visibility target is x₂'s own
+    // triangle — an identity shadow test along the reconnection segment, exactly
+    // as a light point's (connectTriangle). The reconnection Jacobian is the
+    // caller's (restir_spatial): it needs both the source and target surfaces,
+    // which a single-surface target evaluation does not have.
+    if (isReconnectionSample(sample)) {
+        let mesh = scene.geometry[rc.instance];
+        let x2 = reconnectionPoint(mesh, rc);
+        let delta = x2 - from;
+        let dist2 = dot(delta, delta);
+        if (dist2 > 0.0) {
+            // normalize(), not a hand-rolled rsqrt: the candidate stage derives
+            // its tail direction with the same instruction on the same vector,
+            // so the two stay bit-identical.
+            c.toLight = normalize(delta);
+            c.radiance = sample.rcVertexRadiance;
+            c.valid = true;
+            c.shadowLight = rc.instance;
+            c.shadowPrimitive = rc.primitive;
+            c.shadowTmax = sqrt(dist2) * 1.001;
+        }
+        return c;
+    }
+
+    // Otherwise the reconnection vertex is the light point (length-2 NEE base
+    // case): its `instance` field carries the stable light id,
+    // `primitive`/`barycentrics` the point on the emitter (or the env
+    // sampling coordinate).
     if (isEnvironmentSample(sample)) {
         let e = scene.env.connect(rc.barycentrics);
         if (e.pdf > 0.0) {

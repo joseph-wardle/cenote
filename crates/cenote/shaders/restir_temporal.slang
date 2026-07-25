@@ -131,7 +131,7 @@ void restir_temporal(uint3 tid: SV_DispatchThreadID) {
     reproject.currGbuffer[pixel] = entry;
 
     Reservoir<PathSample> cand = loadPathReservoir(params.reservoirsIn[pixel]);
-    let cCanon = cand.confidence; // c_c ≥ M+1 > 0 for any hit pixel
+    let cCanon = cand.confidence; // c_c > 0 for any hit pixel
 
     // Reproject this surface into last frame's screen and read `prev` there. The
     // neighbour is valid only if reprojection landed on-screen, that pixel
@@ -180,6 +180,22 @@ void restir_temporal(uint3 tid: SV_DispatchThreadID) {
         pcYc = targetUnshadowed(params.scene, params.restir, surface, cand.sample);
     }
 
+    // Step-2 scope (D-134/D-136): a length-≥3 reconnection sample does not
+    // cross the frame boundary — its *temporal* shift is not defined until
+    // step 5, which owes it three things at once: the reconnection Jacobian
+    // across the reprojected surface, a stable identity for `rcVertex.instance`
+    // (a raw TLAS index today, which a scene edit renumbers — the very hazard
+    // the light-id registry solves for NEE samples), and a re-test of the
+    // x₁→x₂ visibility resolve deliberately skips. As with an ineligible
+    // spatial shift, the treatment is the partial-shift convention: the
+    // cross-frame target is zero while the pair still counts, so the MIS stays
+    // a fixed function of each sample (unbiased — history just carries no GI
+    // until step 5; this frame's candidate passes through with full weight).
+    // Guarding *before* any target of prev's sample is evaluated also keeps a
+    // stale instance index from ever being dereferenced.
+    let prevShiftable = !isReconnectionSample(prev.sample);
+    let candShiftable = !isReconnectionSample(cand.sample);
+
     let ci = prevValid ? prev.confidence : 0.0;
     let cTot = cCanon + ci;
     let tc = cTot > 0.0 ? cCanon / cTot : 1.0; // c_c/c_tot; =1 when prev is empty
@@ -193,10 +209,13 @@ void restir_temporal(uint3 tid: SV_DispatchThreadID) {
     float bi = 0.0;
     float canonShare = 0.0;
     if (prevValid) {
-        pcYi = targetUnshadowed(params.scene, params.restir, surface, prev.sample);
-        // p̂_i — prev's own-domain target — on the reconstructed previous surface.
-        let piYi = targetUnshadowed(params.scene, params.restir, prevSurface, prev.sample);
-        let piYc = cand.unbiasedWeight > 0.0
+        float piYi = 0.0;
+        if (prevShiftable) {
+            pcYi = targetUnshadowed(params.scene, params.restir, surface, prev.sample);
+            // p̂_i — prev's own-domain target — on the reconstructed previous surface.
+            piYi = targetUnshadowed(params.scene, params.restir, prevSurface, prev.sample);
+        }
+        let piYc = candShiftable && cand.unbiasedWeight > 0.0
             ? targetUnshadowed(params.scene, params.restir, prevSurface, cand.sample)
             : 0.0;
         let mis = pairwiseMis(ci, piYi, piYc, cCanon, pcYi, pcYc);

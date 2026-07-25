@@ -35,6 +35,15 @@ public struct Hit {
 // the width of a custom index — so the medium packs beside the lobe tag.
 public static const uint MEDIUM_NONE = 0xffffff;
 
+// Bounces before this always survive — they carry most of the image's energy,
+// and killing them early would just trade traced rays for noise. From here on,
+// paths gamble survival against their throughput and the survivors are
+// reweighted to keep the estimate unbiased. Integrator policy, not schema, but
+// it lives with the other every-kernel constants because two loops must agree
+// on it: `shade_surface`'s queued bounces and the `ReSTIR` candidate stage's
+// inline indirect tail roll survival on the same bounce indices (D-134).
+public static const uint ROULETTE_START = 3;
+
 // The scatter state packed into one word: the sampled-lobe tag (`LOBE_*`
 // in openpbr.slang) in the top byte, the interior medium's instance in
 // the low 24 bits. Packing keeps every kernel's push constants inside

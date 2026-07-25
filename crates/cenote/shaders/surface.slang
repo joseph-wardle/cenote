@@ -126,6 +126,45 @@ public SpawnPoint spawnPoint(GeometryRecord mesh, Hit hit, float3 rayDirection) 
     return spawn;
 }
 
+// The world-space point of a reconnection vertex, independent of the ray that
+// found it: `spawnPoint`'s two offset points straddle the raw reconstructed
+// position, so their midpoint recovers it without the direction-dependent
+// nudge. Candidate, resolve, and every reusing neighbour recover the exact same
+// x₂ from its `Hit` this way, keeping the reconnection direction — and so the
+// shift's target and Jacobian — bit-identical across the stages (D-134).
+public float3 reconnectionPoint(GeometryRecord mesh, Hit hit) {
+    let spawn = spawnPoint(mesh, hit, float3(0.0, 0.0, 1.0));
+    return 0.5 * (spawn.position + spawn.below);
+}
+
+// The reconnection-shift Jacobian for reusing a path whose reconnection vertex
+// is `hit`: the ratio of the connection's geometry factor |cosθ₂|/d² between the
+// target domain (a surface at `fromTarget`) and the source domain (`fromSource`,
+// where the sample was drawn). This is |∂ω_target/∂ω_source| for the fixed
+// vertex x₂ — the measure change the GRIS resampling weight needs (Lin 2022).
+// Exactly 1 when the two domains coincide (the same-pixel invariant, D-125); 0
+// for a degenerate connection, which drops the shifted sample. Only x₂'s
+// geometric normal enters, so its facing is irrelevant (the cosine is |·|).
+public float reconnectionJacobian(GeometryRecord mesh, Hit hit,
+                                  float3 fromSource, float3 fromTarget) {
+    let spawn = spawnPoint(mesh, hit, float3(0.0, 0.0, 1.0));
+    let x2 = 0.5 * (spawn.position + spawn.below);
+    let n2 = spawn.normal;
+    let toSource = fromSource - x2;
+    let toTarget = fromTarget - x2;
+    let d2Source = dot(toSource, toSource);
+    let d2Target = dot(toTarget, toTarget);
+    if (!(d2Source > 0.0) || !(d2Target > 0.0)) {
+        return 0.0;
+    }
+    let cosSource = abs(dot(n2, toSource)) * rsqrt(d2Source);
+    let cosTarget = abs(dot(n2, toTarget)) * rsqrt(d2Target);
+    if (!(cosSource > 0.0)) {
+        return 0.0;
+    }
+    return (cosTarget * d2Source) / (cosSource * d2Target);
+}
+
 // The shading normal under a tangent-space normal map. The tangent frame
 // derives per hit from the triangle's positions and UVs (no authored tangents
 // until anisotropy demands them): solve the triangle's 2×2 UV system for the

@@ -814,6 +814,19 @@ public struct BsdfSample {
     public uint lobe; // LOBE_*, recorded into path state
 };
 
+// A scatter worth tracing: a real draw (positive pdf, off the horizon) whose
+// world direction leaves through the same geometric face the shading frame put
+// it on. Directions valid in the shading frame but passing through the real
+// triangle are the standard shading-normal trade — a sliver of energy lost
+// near silhouettes, never light through walls — and every estimator that
+// scatters (`shade_surface`, the ReSTIR candidate draw, its inline tail) must
+// reject them by this one test, or their MIS densities silently drift apart.
+public bool scatterExitsSurface(BsdfSample scatter, float3 wiWorld,
+                                float3 geometricNormal) {
+    return scatter.pdf > 0.0 && scatter.wi.z != 0.0
+        && (scatter.wi.z > 0.0) == (dot(wiWorld, geometricNormal) > 0.0);
+}
+
 // Draw a scattered direction: pick one technique by the closure's weights
 // — rescaling uLobe to a full-range uniform, which the glass technique
 // then spends on its reflect/refract branch — and return the mixture pdf

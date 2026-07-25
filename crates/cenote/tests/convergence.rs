@@ -96,13 +96,13 @@ fn restir_converges_faster_than_brute_force() {
     );
 
     // The headline: at a matched budget ReSTIR carries clearly less error,
-    // by a real margin — not the sliver a near-tie could fake. ReSTIR owns
-    // only the primary hit's direct lighting here (the indirect bounces are
-    // the same path tracer in both), so the win lands around 2×; a 1.5×
-    // floor asserts it without pinning the exact factor a driver's
-    // floating-point reordering could nudge. Read off brute force's clean
-    // numbers, so the win isn't an artifact of the reference sharing samples
-    // with ReSTIR.
+    // by a real margin — not the sliver a near-tie could fake. Since M6 step 2
+    // (D-134) the reservoir owns the *whole* path integral at the primary hit —
+    // direct light plus the reconnection-reused indirect — so the win compounds
+    // the resampling of both; it lands around 2×, and a 1.5× floor asserts it
+    // without pinning the exact factor a driver's floating-point reordering could
+    // nudge. Read off brute force's clean numbers, so the win isn't an artifact
+    // of the reference sharing samples with ReSTIR.
     assert!(
         restir_low * 1.5 < brute_low,
         "ReSTIR should carry clearly less error at {LOW_SPP} spp: \

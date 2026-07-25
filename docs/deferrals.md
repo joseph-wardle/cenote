@@ -180,12 +180,31 @@ built to extend but that M3 consciously does not build.
   *orthogonal* to screen-space ReSTIR — the accelerator for the vertices a screen-space
   reservoir can't see. It instantiates the same reservoir primitive; that is why the
   primitive is index-agnostic. (D-086)
-- **Reservoir path reuse — reconnection/hybrid shift, splatting, CRIS** *(revisit: M6,
-  ReSTIR-PT)* — Today: reuse is direct-illumination only, an identity shift with a
-  Jacobian of 1. Production shape: full path reuse via reconnection and hybrid shift
-  maps (non-trivial Jacobians), reservoir splatting, and continuous RIS — M6's whole
-  subject. It reuses the D-086 primitive and the `Hit`-shaped reconnection vertex M1
-  chose; the DI shift built in M3 is the dormant-but-correct base case. (D-086, D-087)
+- **Reservoir path reuse — hybrid shift, splatting, CRIS** *(revisit: M6,
+  ReSTIR-PT)* — Today: M6 step 2 (D-134/D-135) landed the **reconnection shift** — full-path
+  spatial reuse with the geometry-term Jacobian — so reuse is no longer direct-only; Lo(x₂) is
+  baked direction-independent and gated to diffuse reconnection vertices (D-136). Still pending:
+  the **hybrid shift** (random-replay the near-specular prefix, un-bake f₂ so glossy vertices
+  reconnect — step 3, D-125), **temporal path reuse** (step 5 — the cross-frame shift needs the
+  Jacobian over the reprojected surface, a stable identity for the reconnection vertex's
+  instance, and a visibility re-test; until then restir_temporal zeroes a reconnection sample's
+  cross-frame targets, D-136), reservoir **splatting**, and continuous RIS. It reuses the D-086
+  primitive and the `Hit`-shaped reconnection vertex M1 chose; the DI shift built in M3 is the
+  base case the reconnection shift generalized. (D-086, D-087, D-134)
+- **Stochastic opacity in the reused indirect tail** *(revisit: a lookdev scene with
+  cutout/fractional-opacity geometry along an indirect bounce — beside the tail's scope
+  lines, D-136)* — Today: the inline tail the candidate stage traces for a reconnection
+  sample (D-134) commits every crossing as opaque (nearest hit wins), the same shortcut the
+  DI BSDF candidate takes; the hash-driven stochastic pass-through that `intersect`/`trace_shadow`
+  run is not replayed there, so an alpha-cutout leaf in an indirect bounce reads solid. The
+  diffuse/glossy checkpoint scenes carry none. Production shape: thread the same deterministic
+  transparency split through the tail's continuation and NEE rays — out with volumes, which are
+  likewise not reconnection-eligible (m6-plan §2). Two interior-media corners sit in the same
+  bucket: an emitter *nested inside* a closed interior reaches the BSDF draw as a light
+  candidate with no Beer–Lambert over the segment (the tail itself absorbs correctly since
+  D-134's medium seeding), and a reconnection sample whose x₁→x₂ segment crossed an absorbing
+  interior bakes the *source* pixel's absorption into Lo — exact in its own pixel, approximate
+  at a neighbour. (D-134, D-136)
 - **Presampled light tiles** *(revisit: measured per-candidate global-gather bottleneck
   at large light counts)* — Today: candidates are drawn directly from the
   power-proportional alias table. Production shape: Wyman–Panteleev (2021) RIS over

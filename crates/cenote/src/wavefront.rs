@@ -156,11 +156,9 @@ struct ShadeMissParams {
     aov: vk::DeviceAddress,
     /// Which strategies reach the lights — a [`LightSampling`] as `u32`.
     light_sampling: u32,
-    /// `1` for the one bounce whose escaping ray is the `ReSTIR` BSDF strategy's
-    /// reach to the environment (the primary continuation's first hit), so its
-    /// env radiance is suppressed — already a reservoir candidate (D-088). `0`
-    /// on every other bounce and outside [`RenderMode::Restir`].
-    restir_suppress: u32,
+    /// Explicit tail padding to the struct's 8-byte alignment (`Pod` forbids the
+    /// implicit padding a lone trailing `u32` would leave).
+    _pad0: u32,
 }
 
 /// Push constants for the surface-shading kernel
@@ -192,10 +190,10 @@ struct ShadeSurfaceParams {
 
 /// Pack `ShadeSurfaceParams::packed`, mirrored by the unpack at the top of
 /// `shade_surface.slang`. Both byte-wide fields are asserted in range by
-/// [`Wavefront::new`]. `restir` sets bit 24 on *every* bounce in `ReSTIR` mode;
-/// the kernel reads it two ways: at bounce 0 the reservoir owns next-event
-/// estimation (skip this kernel's NEE), and at bounce 1 the reservoir's BSDF
-/// candidate owns the primary continuation's first-hit emission (suppress it).
+/// [`Wavefront::new`]. `restir` sets bit 24 — `ReSTIR` mode, where the unified
+/// reservoir owns the whole primary-hit path integral (D-134): the kernel keeps
+/// only the directly visible emission and the guides at bounce 0, pushing no
+/// continuation, so `ReSTIR` waves record bounce 0 alone.
 fn pack_shade_surface(
     bounce: u32,
     max_bounces: u32,
@@ -226,9 +224,10 @@ struct RestirCandidatesParams {
     /// `width`; temporal reads the reprojection block's; candidates carried
     /// neither, so it gains this scalar (its block has the room).
     width: u32,
-    /// Explicit tail padding to the struct's 8-byte alignment (`Pod` forbids the
-    /// implicit padding a lone trailing `u32` would leave).
-    _pad0: u32,
+    /// Path depth cap — the indirect tail the candidate stage traces inline is
+    /// bounded to the same depth as the path tracer (D-134), so reuse and brute
+    /// force cover the same path lengths and converge to the same image.
+    max_bounces: u32,
 }
 
 /// Push constants for the `ReSTIR` temporal-reuse stage
@@ -1190,23 +1189,24 @@ impl Wavefront {
             bounce,
             _pad0: 0,
         };
+        // ReSTIR mode records bounce 0 alone: the reservoir owns the whole
+        // primary-hit path integral (D-134), shade_surface pushes no
+        // continuation there, and every later round would dispatch nothing —
+        // so the wave doesn't record them.
+        let bounces = if restir.is_some() { 1 } else { self.max_bounces };
         WaveParams {
             ranges,
-            intersect: (0..self.max_bounces).map(intersect).collect(),
-            // One instance per bounce: only ReSTIR's bounce-1 emission
-            // suppression (the primary continuation escaping to the sky) varies.
-            shade_miss: (0..self.max_bounces)
-                .map(|bounce| ShadeMissParams {
-                    paths: self.paths.addresses(),
-                    misses: self.queues.addresses(queue::MISS, &self.queues.miss),
-                    scene: scene.table().device_address(),
-                    radiance: radiance.device_address(),
-                    aov: aov_table.device_address(),
-                    light_sampling: self.light_sampling as u32,
-                    restir_suppress: u32::from(restir.is_some() && bounce == 1),
-                })
-                .collect(),
-            shade_surface: (0..self.max_bounces)
+            intersect: (0..bounces).map(intersect).collect(),
+            shade_miss: ShadeMissParams {
+                paths: self.paths.addresses(),
+                misses: self.queues.addresses(queue::MISS, &self.queues.miss),
+                scene: scene.table().device_address(),
+                radiance: radiance.device_address(),
+                aov: aov_table.device_address(),
+                light_sampling: self.light_sampling as u32,
+                _pad0: 0,
+            },
+            shade_surface: (0..bounces)
                 .map(|bounce| ShadeSurfaceParams {
                     paths: self.paths.addresses(),
                     hits: self.queues.addresses(queue::HIT, &self.queues.hit),
@@ -1220,9 +1220,6 @@ impl Wavefront {
                         bounce,
                         self.max_bounces,
                         self.light_sampling,
-                        // ReSTIR mode, flagged on every bounce: the kernel keys
-                        // its bounce-0 NEE skip and bounce-1 emission suppression
-                        // off it.
                         restir.is_some(),
                     ),
                 })
@@ -1336,7 +1333,7 @@ impl Wavefront {
                 sample_index: sample,
                 candidates: Self::RESTIR_CANDIDATES,
                 width,
-                _pad0: 0,
+                max_bounces: self.max_bounces,
             },
             temporal,
             spatial,
@@ -1463,8 +1460,11 @@ impl Wavefront {
             // The bounce loop, recorded ahead of time: each round consumes
             // the ray queue, refills it with the paths that scattered, and
             // ends by tracing the round's next-event shadow rays. Rounds
-            // after every path has died dispatch nothing.
-            for bounce in 0..self.max_bounces {
+            // after every path has died dispatch nothing — and ReSTIR mode,
+            // whose primary hit pushes no continuation, records bounce 0 alone
+            // (the params vectors are sized to the recorded rounds).
+            let bounces = params.shade_surface.len() as u32;
+            for bounce in 0..bounces {
                 passes.push(fill(queue::HIT));
                 passes.push(fill(queue::MISS));
                 passes.push(fill(queue::SHADOW));
@@ -1474,14 +1474,14 @@ impl Wavefront {
                     queue::RAY,
                 ));
                 // The ray queue was just consumed; empty it for this
-                // round's shade_surface — except on the last bounce, where
-                // the kernel terminates every path instead of pushing.
-                if bounce + 1 < self.max_bounces {
+                // round's shade_surface — except on the last recorded bounce,
+                // where the kernel terminates every path instead of pushing.
+                if bounce + 1 < bounces {
                     passes.push(fill(queue::RAY));
                 }
                 passes.push(indirect(
                     &self.shade_miss,
-                    bytemuck::bytes_of(&params.shade_miss[bounce as usize]),
+                    bytemuck::bytes_of(&params.shade_miss),
                     queue::MISS,
                 ));
                 // ReSTIR mode, primary hit: stream the reservoir candidates,
@@ -1540,14 +1540,13 @@ impl Wavefront {
 struct WaveParams {
     /// One raygen instance per pool-sized pixel range.
     ranges: Vec<RaygenParams>,
-    /// One instance per bounce: bounce 0 traces with the camera visibility
-    /// bit, later bounces with all bits, and each keys its own
-    /// transparency stream.
+    /// One instance per recorded bounce (bounce 0 alone in `ReSTIR` mode):
+    /// bounce 0 traces with the camera visibility bit, later bounces with all
+    /// bits, and each keys its own transparency stream.
     intersect: Vec<IntersectParams>,
-    /// One instance per bounce, like `shade_surface`: only `ReSTIR`'s bounce-1
-    /// emission suppression varies across them.
-    shade_miss: Vec<ShadeMissParams>,
-    /// One instance per bounce.
+    /// One instance for every bounce — nothing in it varies per round.
+    shade_miss: ShadeMissParams,
+    /// One instance per recorded bounce; its length is the wave's bounce count.
     shade_surface: Vec<ShadeSurfaceParams>,
     trace_shadow: TraceShadowParams,
     /// The bounce-0 reservoir stages' push constants, present only in
@@ -2285,16 +2284,15 @@ mod tests {
 
     /// The M3 unbiasedness gate (D-090), run for both reservoir estimators: the
     /// single-frame RIS of step 3 *and* the spatial reuse of step 4 must each
-    /// converge to the same image as the M2 path tracer. They share every
-    /// secondary bounce; only the primary *direct* term differs — the reservoir
-    /// owns the whole of it (M light candidates plus one internalized BSDF
-    /// candidate, combined under the count-weighted balance heuristic), so
-    /// `ReSTIR` suppresses the primary continuation's bounce-1 emission that the
-    /// path tracer's BSDF strategy adds. It is the same integral estimated three
-    /// ways: a biased reservoir (a dropped Jacobian, a wrong count in a balance
-    /// or pairwise-MIS weight, a stale target, a mishandled visibility fold, a
-    /// missed suppression) would shift the converged mean a few percent — exactly
-    /// what this catches. Spatial adds the neighbour gather, the defensive
+    /// converge to the same image as the M2 path tracer. Since M6 step 2 the
+    /// reservoir owns the *whole* path integral at the primary hit (D-134) — M
+    /// light candidates plus the internalized BSDF draw's light and continuation
+    /// candidates, combined under the count-weighted balance heuristic; only the
+    /// directly visible emission and the delta term stay outside it. It is the
+    /// same integral estimated three ways: a biased reservoir (a dropped
+    /// Jacobian, a wrong count in a balance or pairwise-MIS weight, a stale
+    /// target, a mishandled visibility fold) would shift the converged mean a
+    /// few percent — exactly what this catches. Spatial adds the neighbour gather, the defensive
     /// pairwise MIS, and the k+1 visibility rays on top, so its agreement gates
     /// the whole step-4 estimator end to end. The scene is a lit environment
     /// *and* an area emitter, so both light-candidate branches — the env coin
@@ -2428,6 +2426,212 @@ mod tests {
                 "{label} disagrees with the path tracer: {restir} vs {path} ({deviation:.4} relative)"
             );
         }
+    }
+
+    /// The step-2 checkpoint (D-134): first true path reuse. The unified
+    /// reservoir now owns the *whole* path integral at the primary hit — direct
+    /// *and* indirect — so the M3 unbiasedness gate lifts onto indirect paths.
+    /// On an all-matte GI scene every reconnection vertex is reuse-eligible, so
+    /// the reconnection shift and its geometry-term Jacobian carry the full
+    /// weight (a glossy scene would drop most reuse, D-125): a dropped Jacobian,
+    /// a wrong reconnection target, or a mis-baked tail radiance would shift the
+    /// converged mean, which this catches against the brute-force path tracer.
+    /// Both the initial RIS (own-pixel, identity shift) and the spatial reuse
+    /// (cross-pixel reconnection shift) must land on the path tracer's image; the
+    /// sphere-and-ground interreflection under a bright emitter makes the indirect
+    /// term the reservoir carries a real fraction of the picture, not incidental.
+    #[test]
+    fn restir_path_reuse_matches_the_path_tracer_on_diffuse_gi() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        // All matte: every bounce vertex is a valid reconnection point, so
+        // reconnection reuse is exercised, not gated away. A bright environment
+        // plus an area emitter light the diffuse interreflection between the
+        // sphere and the ground.
+        let objects = [
+            Object {
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::Y),
+                material: Material::matte(Vec3::new(0.75, 0.4, 0.35), 0.5),
+            },
+            Object {
+                mesh: ground_plane(4.0),
+                transform: Mat4::IDENTITY,
+                material: Material::matte(Vec3::splat(0.8), 0.5),
+            },
+            Object {
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::Y * 3.0)
+                    * Mat4::from_scale(Vec3::splat(0.7)),
+                material: Material::emitter(Vec3::splat(4.0)),
+            },
+        ];
+        let camera = Camera {
+            position: Vec3::new(0.0, 2.5, 6.0),
+            look_at: Vec3::new(0.0, 1.0, 0.0),
+            up: Vec3::Y,
+            vfov_degrees: 45.0,
+            lens: None,
+        };
+        let scene = Scene::new(&gpu, &objects, camera, &Environment::constant(Vec3::splat(0.5)))
+            .expect("scene");
+        assert_spatial_reuse_matches_brute_force(&gpu, &scene, "diffuse GI");
+    }
+
+    /// Emitters reflect too: the reflected component of an emissive *and*
+    /// reflective surface — light bouncing off a glowing object onto its
+    /// surroundings — rides the BSDF draw's continuation-tail candidate, a
+    /// separate sample from the emission the light candidate carries (D-134).
+    /// Dropping it (or double-counting the emission into the tail) would shift
+    /// the converged mean against the brute-force path tracer, which this
+    /// catches: the sphere glows dimly but reflects brightly, so the ground
+    /// near it is lit substantially by the lost-term-if-lost.
+    #[test]
+    fn restir_carries_reflection_off_emissive_surfaces() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let objects = [
+            Object {
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::Y),
+                // Emissive *and* diffuse — the material Hydra can author
+                // (emissiveColor beside diffuseColor) that a pure
+                // `Material::emitter` (black base) never exercises.
+                material: Material {
+                    emission: Vec3::splat(0.5),
+                    ..Material::matte(Vec3::splat(0.9), 0.5)
+                },
+            },
+            Object {
+                mesh: ground_plane(4.0),
+                transform: Mat4::IDENTITY,
+                material: Material::matte(Vec3::splat(0.8), 0.5),
+            },
+        ];
+        let camera = Camera {
+            position: Vec3::new(0.0, 2.5, 6.0),
+            look_at: Vec3::new(0.0, 1.0, 0.0),
+            up: Vec3::Y,
+            vfov_degrees: 45.0,
+            lens: None,
+        };
+        let scene = Scene::new(&gpu, &objects, camera, &Environment::constant(Vec3::ONE))
+            .expect("scene");
+        assert_spatial_reuse_matches_brute_force(&gpu, &scene, "an emissive-reflective surface");
+    }
+
+    /// The indirect tail must carry the path tracer's interior-medium state: a
+    /// closed-surface refraction at the primary hit puts the scattered segment
+    /// inside x₁'s own interior, so the tail's first vertex — the glass's far
+    /// wall — shades at the inverted IOR, the segment absorbs by Beer–Lambert,
+    /// and every later transmission toggles the medium from *inside*, not
+    /// vacuum (D-134). `shade_surface`'s continuation carried all three in path
+    /// state; the inline tail must seed them from the draw's lobe or everything
+    /// seen *through* glass diverges from brute force — which this catches: the
+    /// tinted sphere fills the frame's center, so its transmitted background
+    /// and the light it passes onto the ground are a real fraction of the mean.
+    #[test]
+    fn restir_tracks_interior_media_through_the_indirect_tail() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let mut glass = Material::glass(0.4, 1.5);
+        glass.transmission_color = Vec3::new(0.85, 0.35, 0.2);
+        glass.transmission_depth = 0.5;
+        let objects = [
+            Object {
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::Y),
+                material: glass,
+            },
+            Object {
+                mesh: ground_plane(4.0),
+                transform: Mat4::IDENTITY,
+                material: Material::matte(Vec3::splat(0.8), 0.5),
+            },
+        ];
+        let camera = Camera {
+            position: Vec3::new(0.0, 2.5, 6.0),
+            look_at: Vec3::new(0.0, 1.0, 0.0),
+            up: Vec3::Y,
+            vfov_degrees: 45.0,
+            lens: None,
+        };
+        let scene = Scene::new(&gpu, &objects, camera, &Environment::constant(Vec3::ONE))
+            .expect("scene");
+        assert_spatial_reuse_matches_brute_force(&gpu, &scene, "a tinted glass interior");
+    }
+
+    /// The shared unbiasedness harness of the path-reuse gates above: render
+    /// `scene` with the brute-force path tracer and with candidates + spatial
+    /// reuse, accumulate both to the same budget, and require the converged
+    /// means to agree — the M3 gate (`ReSTIR` ≡ the path tracer), on whatever
+    /// estimator seam the calling test's scene isolates.
+    fn assert_spatial_reuse_matches_brute_force(gpu: &Context, scene: &Scene, what: &str) {
+        let kernels = Kernels::embedded();
+        let (width, height) = (32, 32);
+        let samples: u32 = 256;
+        let buffer = |name: &str| {
+            gpu.create_buffer(
+                name,
+                u64::from(width)
+                    * u64::from(height)
+                    * size_of::<crate::restir::StoredPathReservoir>() as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                    | vk::BufferUsageFlags::TRANSFER_DST,
+                MemoryLocation::GpuOnly,
+            )
+            .expect("reservoir buffer")
+        };
+        let reservoir = buffer("test.gi.reservoir");
+        let scratch = buffer("test.gi.scratch");
+        let wavefront = Wavefront::new(
+            gpu,
+            &kernels,
+            4096,
+            Wavefront::DEFAULT_MAX_BOUNCES,
+            LightSampling::Mis,
+        )
+        .expect("wavefront");
+        let spatial = RestirInputs {
+            reservoir: &reservoir,
+            temporal: None,
+            scratch: Some(&scratch),
+            debug: None,
+            debug_view: DebugView::Off,
+        };
+        let mean = |inputs: Option<&RestirInputs>| -> f64 {
+            let radiance = radiance_buffer(gpu, width, height);
+            let mut total = 0.0;
+            for sample in 0..samples {
+                wavefront
+                    .trace_then(
+                        gpu, scene, &radiance, width, height, sample, None, inputs, &[],
+                    )
+                    .expect("trace");
+                let pixels: Vec<f32> = bytemuck::pod_collect_to_vec(
+                    &gpu.download_buffer(&radiance).expect("download"),
+                );
+                total += pixels
+                    .chunks_exact(4)
+                    .map(|pixel| f64::from(pixel[0]) + f64::from(pixel[1]) + f64::from(pixel[2]))
+                    .sum::<f64>();
+            }
+            total / f64::from(samples * width * height)
+        };
+
+        let path = mean(None);
+        assert!(path > 0.01, "the scene should be lit, got mean {path}");
+        let restir = mean(Some(&spatial));
+        let deviation = (restir - path).abs() / path;
+        assert!(
+            deviation < 0.03,
+            "spatial path reuse disagrees with the path tracer on {what}: \
+             {restir} vs {path} ({deviation:.4} relative)"
+        );
     }
 
     /// The scene the temporal gates share — a lit environment *and* an area
@@ -2950,16 +3154,13 @@ mod tests {
     /// The `ReSTIR` white furnace (M3 plan §6, §7): an albedo-1 Lambert plane
     /// under a uniform sky must reflect exactly that sky — energy neutral. It is
     /// the cheap, always-on bias tripwire that fails *fast* on the silent-bias
-    /// class step 3.4 opens up. The internalized BSDF candidate and the M light
-    /// candidates must combine, under the count-weighted balance heuristic, into
-    /// one unbiased estimate of the direct term; and the primary continuation's
-    /// suppressed first-hit emission must cover *precisely* what that BSDF
-    /// candidate already counted. Break either half — an env BSDF candidate
-    /// without the matching suppression, or the reverse — and the furnace leaks
-    /// light or darkens, long before a 4096-spp FLIP run would notice. No area
-    /// or delta lights, so envSelectProb is 1 and every candidate that doesn't
-    /// escape is an env draw: the env BSDF candidate and its suppression are
-    /// squarely on the hot path.
+    /// class step 3.4 opens up. The internalized BSDF draw's candidates and the
+    /// M light candidates must combine, under the count-weighted balance
+    /// heuristic, into one unbiased estimate of the reservoir's whole term —
+    /// count either side twice (or drop one) and the furnace leaks light or
+    /// darkens, long before a 4096-spp FLIP run would notice. No area or delta
+    /// lights, so envSelectProb is 1 and every candidate that doesn't escape is
+    /// an env draw: the env BSDF candidate is squarely on the hot path.
     #[test]
     fn restir_white_furnace_stays_energy_neutral() {
         let Some(gpu) = crate::gpu::test_context() else {

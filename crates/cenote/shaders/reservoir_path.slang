@@ -83,7 +83,8 @@ public struct PathSample : IDefaultInitializable {
     public uint initRandomSeed;      // 48..52 replay/dup-map key for early segments
     public uint rcVertexRandomSeed;  // 52..56 replay seed from xₖ onward
     public float cachedJacobian;     // 56..60 shift Jacobian terms, pre-multiplied
-    public uint reserved;            // 60..64 reserved (reconnection classification)
+    public uint reserved;            // 60..64 bit 0: the path kind (PATH_KIND_*
+                                     //   in restir_scene.slang); rest reserved
 };
 
 // The persistent per-pixel path reservoir record: {sample, W, M} + the reserved

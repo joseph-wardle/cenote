@@ -22,6 +22,7 @@
 // mirror or glass shows. Same pixel-owned adds, same determinism.
 
 import lights;
+import nee;
 import openpbr;
 import pathstate;
 import rng;
@@ -47,12 +48,6 @@ struct Params {
 [vk::push_constant]
 Params params;
 
-// Bounces before this always survive — they carry most of the image's
-// energy, and killing them early would just trade traced rays for noise.
-// From here on, paths gamble survival against their throughput and the
-// survivors are reweighted to keep the estimate unbiased.
-static const uint ROULETTE_START = 3;
-
 // Record the denoiser guides for this pixel: `weight` of the surface's
 // albedo estimate and shading normal, added to the wave's zero-filled
 // per-pixel accumulators. Pixel-owned like every radiance write — one
@@ -72,16 +67,11 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     let bounce = params.packed & 0xff;
     let maxBounces = (params.packed >> 8) & 0xff;
     let lightSampling = (params.packed >> 16) & 0xff;
-    // Bit 24 marks ReSTIR mode, set on every bounce. At the primary hit
-    // (bounce 0) the reservoir stages own next-event estimation, so this kernel
-    // skips its own NEE there. At the primary continuation's first hit
-    // (bounce 1) the reservoir's internalized BSDF candidate already owns
-    // whatever emitter that ray lands on (D-088), so this kernel suppresses
-    // that emission — the two halves of "the reservoir owns primary direct
-    // lighting," which together keep ReSTIR-on and ReSTIR-off unbiased.
-    let restirEnabled = ((params.packed >> 24) & 1) != 0;
-    let restirPrimary = restirEnabled && bounce == 0;
-    let restirSuppressEmission = restirEnabled && bounce == 1;
+    // Bit 24 marks ReSTIR mode. The unified reservoir owns the whole path
+    // integral at the primary hit (D-134), so this kernel keeps only the
+    // directly visible emission and the guides there — no NEE, no continuation
+    // — and, with no rays pushed, is never dispatched past bounce 0.
+    let restirPrimary = ((params.packed >> 24) & 1) != 0 && bounce == 0;
     uint path = params.hits.entries[tid.x];
     uint pixel = params.paths.pixel[path];
     Hit hit = params.paths.hit[path];
@@ -105,12 +95,8 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     var medium = bounce == 0 ? MEDIUM_NONE
                : pathStateMedium(params.paths.state[path]);
     if (medium != MEDIUM_NONE) {
-        Material interior = params.scene.materials[medium];
-        if (interior.transmissionDepth > 0.0) {
-            let sigma = -log(clamp(interior.transmissionColor, 1e-4, 1.0))
-                      / interior.transmissionDepth;
-            throughput.xyz *= exp(-sigma * distance(origin, spawn.position));
-        }
+        throughput.xyz *= interiorTransmittance(params.scene, medium,
+                                                origin, spawn.position);
     }
 
     // Emission. This hit is the BSDF strategy's way of reaching a light,
@@ -123,24 +109,12 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     var contribution = float3(0.0);
     if (mesh.light != LIGHT_NONE && spawn.frontFace) {
         var weight = 1.0;
-        if (restirSuppressEmission) {
-            // The primary continuation's first-hit emission is the BSDF
-            // strategy's reach to this light — already a reservoir candidate at
-            // bounce 0, so counting it here would double it.
-            weight = 0.0;
-        } else if (throughput.w > 0.0) {
+        if (throughput.w > 0.0) {
             if (lightSampling == LIGHT_SAMPLING_NEE) {
                 weight = 0.0;
             } else if (lightSampling == LIGHT_SAMPLING_MIS) {
-                let delta = spawn.position - origin;
-                let cosLight = abs(dot(spawn.normal, direction));
-                // The full next-event pdf: choose the light list over the
-                // environment, then this triangle (records sit in
-                // primitive order from the instance's first) and this
-                // point on it.
-                let neePdf = (1.0 - params.scene.env.selectProb)
-                           * params.scene.lights[mesh.light + hit.primitive].pdf
-                           * dot(delta, delta) / cosLight;
+                let neePdf = emitterHitNeePdf(params.scene, mesh, hit.primitive,
+                                              spawn, origin, direction);
                 weight = powerHeuristic(throughput.w, neePdf);
             }
         }
@@ -200,104 +174,54 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
         return;
     }
 
-    // Next-event estimation: connect this vertex to one candidate — a
-    // direction toward the environment or a light from the list, chosen
-    // in proportion to their power (the choice rides the low end of the
-    // NEE_LIGHT draw; the list branch remaps the leftover back to a full-
-    // range uniform for the alias walk). A candidate below the horizon is
-    // legal when the base transmits — the connection then leaves through
-    // the surface. The contribution is fully weighted here; trace_shadow
-    // just adds it if the connection is unoccluded.
-    let envProb = params.scene.env.selectProb;
+    // Next-event estimation: one candidate connection, drawn and weighted by
+    // the shared `sampleNee` (nee.slang — one copy with the ReSTIR tail, so
+    // the two estimators can never drift). The contribution is fully weighted
+    // there; trace_shadow just adds it if the connection is unoccluded.
     if (!restirPrimary && lightSampling != LIGHT_SAMPLING_BSDF
-        && (params.scene.lightCount > 0 || envProb > 0.0)) {
+        && (params.scene.lightCount > 0 || params.scene.env.selectProb > 0.0)) {
         let uLight = sample_1d(pixel, params.sampleIndex,
                                bounceDimension(bounce, NEE_LIGHT));
         let uPoint = sample_2d(pixel, params.sampleIndex,
                                bounceDimension(bounce, NEE_POINT));
-        ShadowRay shadow;
-        shadow.pixel = pixel;
-        shadow.pad0 = 0;
-        shadow.pad1 = 0;
-        shadow.pad2 = 0;
-        var unshadowed = float3(0.0);
-        if (uLight < envProb) {
-            // Environment: a direction, unoccluded iff the shadow ray hits
-            // nothing (LIGHT_NONE is no instance's ID). A pole sample
-            // reports pdf 0 and is skipped — it carries no usable density.
-            let candidate = params.scene.env.sample(uPoint);
-            let wiLight = frame.toLocal(candidate.direction);
-            let throughSurface = dot(candidate.direction, spawn.normal) < 0.0;
-            if (candidate.pdf > 0.0 && wiLight.z != 0.0
-                && (wiLight.z < 0.0) == throughSurface) {
-                let neePdf = envProb * candidate.pdf;
-                let scatterPdf = bsdfPdf(closure, wiLight, wo);
-                let weight = lightSampling == LIGHT_SAMPLING_MIS
-                           ? powerHeuristic(neePdf, scatterPdf)
-                           : 1.0;
-                unshadowed = throughput.xyz * candidate.radiance
-                    * evalBsdf(closure, wiLight, wo)
-                    * abs(wiLight.z) * (weight / neePdf);
-                shadow.origin = throughSurface ? spawn.below : spawn.position;
-                shadow.light = LIGHT_NONE;
-                shadow.primitive = 0;
-                shadow.direction = candidate.direction;
-                shadow.tmax = 1e30;
-            }
-        } else {
-            // A light from the list. Scene prep pins envProb to exactly 1
-            // when the list is powerless, so this branch always has
-            // something to walk.
-            let uList = (uLight - envProb) / (1.0 - envProb);
-            var candidate = sampleLights(params.scene.lights, params.scene.lightCount,
-                                         uList, uPoint, spawn.position);
-            // A textured emitter's record carries the map's scale; the
-            // map itself evaluates at the sampled point, so this strategy
-            // sees exactly the radiance a BSDF path hitting that point
-            // would (the estimators must agree pointwise, not on average).
-            if (!candidate.delta) {
-                let emitter = params.scene.materials[candidate.instance];
-                if (emitter.emissionTexture != TEXTURE_NONE) {
-                    candidate.radiance *= sampleColor(
-                        emitter.emissionTexture,
-                        interpolateUv(params.scene.geometry[candidate.instance],
-                                      candidate.primitive, candidate.bary));
-                }
-            }
-            let wiLight = frame.toLocal(candidate.direction);
-            let throughSurface = dot(candidate.direction, spawn.normal) < 0.0;
-            if (candidate.pdf > 0.0 && wiLight.z != 0.0
-                && (wiLight.z < 0.0) == throughSurface) {
-                // The candidate's pdf at this vertex against the pdf BSDF
-                // sampling would give the direction — except at a delta
-                // light, which BSDF sampling reaches with probability
-                // zero: its weight is 1 under every mode.
-                let neePdf = (1.0 - envProb) * candidate.pdf;
-                let weight = !candidate.delta
-                          && lightSampling == LIGHT_SAMPLING_MIS
-                           ? powerHeuristic(neePdf, bsdfPdf(closure, wiLight, wo))
-                           : 1.0;
-                unshadowed = throughput.xyz * candidate.radiance
-                    * evalBsdf(closure, wiLight, wo)
-                    * abs(wiLight.z) * (weight / neePdf);
-                shadow.origin = throughSurface ? spawn.below : spawn.position;
-                shadow.light = candidate.instance;
-                shadow.primitive = candidate.primitive;
-                shadow.direction = candidate.direction;
-                shadow.tmax = candidate.tmax;
-            }
-        }
-        if (any(unshadowed > 0.0)) {
-            shadow.contribution = unshadowed;
+        let nee = sampleNee(params.scene, spawn, frame, closure, wo,
+                            throughput.xyz, lightSampling, uLight, uPoint);
+        if (any(nee.unshadowed > 0.0)) {
+            ShadowRay shadow;
+            shadow.origin = nee.origin;
+            shadow.light = nee.light;
+            shadow.direction = nee.direction;
+            shadow.primitive = nee.primitive;
+            shadow.contribution = nee.unshadowed;
+            shadow.tmax = nee.tmax;
+            shadow.pixel = pixel;
+            shadow.pad0 = 0;
+            shadow.pad1 = 0;
+            shadow.pad2 = 0;
             params.shadows.push(shadow);
         }
+    }
+
+    // ReSTIR mode owns the *whole* path integral at the primary hit through the
+    // unified reservoir (D-134): the candidate stage already traced the indirect
+    // tail and the reuse stages resolve it, so the continuation stops here — no
+    // scatter, no next bounce. What stays with this kernel at the primary hit is
+    // the directly-visible emission (kept above, the reservoir's deliberate
+    // exclusion, D-088) and the denoiser guides, which record the primary
+    // surface in full since nothing rides onward. This is the pixel's terminal
+    // add.
+    if (restirPrimary) {
+        if (aovOn && any(guide > 0.0)) {
+            recordGuides(params.aov, pixel, guide, aovAlbedo, shading);
+        }
+        params.radiance[pixel] += float4(contribution, 1.0);
+        return;
     }
 
     // Scatter off the mixture: one technique drawn by BSDF_LOBE (the
     // pick's leftover, rescaled, drives the glass technique's
     // reflect-or-refract branch), the estimator divided by the full
-    // mixture pdf. The sidedness guard requires the scattered ray to
-    // leave through the same geometric face the shading frame put it on.
+    // mixture pdf, gated by the shared sidedness test (openpbr.slang).
     let uLobe = sample_1d(pixel, params.sampleIndex,
                           bounceDimension(bounce, BSDF_LOBE));
     let u = sample_2d(pixel, params.sampleIndex,
@@ -305,8 +229,7 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     let scatter = sampleBsdf(closure, wo, uLobe, u);
     let wiWorld = frame.toWorld(scatter.wi);
     var scattered = float3(0.0);
-    if (scatter.pdf > 0.0 && scatter.wi.z != 0.0
-        && (scatter.wi.z > 0.0) == (dot(wiWorld, spawn.normal) > 0.0)) {
+    if (scatterExitsSurface(scatter, wiWorld, spawn.normal)) {
         scattered = throughput.xyz * evalBsdf(closure, scatter.wi, wo)
                   * (abs(scatter.wi.z) / scatter.pdf);
     }

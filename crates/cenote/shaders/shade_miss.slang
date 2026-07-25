@@ -18,11 +18,7 @@ struct Params {
     float4* radiance;   // the film's per-pixel accumulator for this wave
     AovTable* aov;      // the wave's AOV targets; enabled = 0 skips them
     uint lightSampling; // LIGHT_SAMPLING_*: which strategies reach the lights
-    // Set for the one bounce (the primary continuation's first, in ReSTIR mode)
-    // whose escaping ray is the BSDF strategy's reach to the environment — a
-    // reservoir candidate already (D-088), so its env radiance is suppressed
-    // here to avoid double-counting. 0 on every other bounce and outside ReSTIR.
-    uint restirSuppress;
+    uint pad0;          // matches the host's tail padding to 8-byte alignment
 };
 
 [vk::push_constant]
@@ -40,9 +36,7 @@ void shade_miss(uint3 tid: SV_DispatchThreadID) {
     let throughput = params.paths.throughput[path];
 
     var weight = 1.0;
-    if (params.restirSuppress != 0) {
-        weight = 0.0;
-    } else if (throughput.w > 0.0) {
+    if (throughput.w > 0.0) {
         if (params.lightSampling == LIGHT_SAMPLING_NEE) {
             weight = 0.0;
         } else if (params.lightSampling == LIGHT_SAMPLING_MIS) {

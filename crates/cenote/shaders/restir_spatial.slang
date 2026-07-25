@@ -167,7 +167,7 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
 
     Surface canonical = reconstructSurface(params.paths, params.scene, slot);
     Reservoir<PathSample> canonicalReservoir = loadPathReservoir(params.reservoirsIn[pixel]);
-    let cCanon = canonicalReservoir.confidence; // c_c ≥ M+1 > 0 for any hit pixel
+    let cCanon = canonicalReservoir.confidence; // c_c > 0 for any hit pixel
 
     // p̂_c(Y_c) and U_c(Y_c): the canonical sample re-targeted here, with its one
     // visibility ray — the "+1" of the k+1. An empty/degenerate canonical (rare
@@ -241,25 +241,56 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
             continue;
         }
 
+        // The reconnection-shift Jacobians (D-134/D-135), through the shared
+        // `reconnectionShiftJacobian`: 1 for an NEE sample (identity shift), the
+        // geometry-term ratio for an eligible reconnection sample, and 0 where
+        // the shift is undefined (a too-glossy x₂, D-136) — the partial-shift
+        // convention, so the pair still counts in V/c_tot and the MIS weights
+        // stay a fixed function of each sample. `jShift` maps neighbour i's
+        // sample into this (canonical) surface; `jCanon` maps the canonical's
+        // sample into neighbour i's. Folded into the cross-domain targets so
+        // the shipped defensive pairwise MIS (restir_mis) needs no
+        // reconnection-aware variant: it already compares c·p̂ across the pair.
+        let jShift = reconnectionShiftJacobian(params.scene, neighbour.sample,
+                                               neighbourSurface.position,
+                                               canonical.position);
+        let jCanon = reconnectionShiftJacobian(params.scene, canonicalReservoir.sample,
+                                               canonical.position,
+                                               neighbourSurface.position);
+
         // The three targets the pairwise ratios need. p̂_c(Y_i) is visibility-aware
-        // (one ray, at this surface); the two own-domain p̂_i are unshadowed.
+        // (one ray, at this surface); the two own-domain p̂_i are unshadowed. A
+        // neighbour whose shift is undefined (jShift 0) contributes nothing, so
+        // its own targets — and the canonical's ray for it — are skipped.
         float ucYi = 0.0;
-        let pcYi = targetVisAware(canonical, neighbour.sample, ucYi); // p̂_c(Y_i), 1 ray
-        let piYi = targetUnshadowed(params.scene, params.restir,
-                                    neighbourSurface, neighbour.sample); // p̂_i(Y_i)
-        let piYc = canonicalReservoir.unbiasedWeight > 0.0
+        float pcYi = 0.0; // p̂_c(Y_i), 1 ray
+        float piYi = 0.0; // p̂_i(Y_i)
+        if (jShift > 0.0) {
+            pcYi = targetVisAware(canonical, neighbour.sample, ucYi);
+            piYi = targetUnshadowed(params.scene, params.restir,
+                                    neighbourSurface, neighbour.sample);
+        }
+        // Symmetrically, a canonical whose shift into the neighbour's domain
+        // is undefined (jCanon 0) scores zero there — skip its evaluation too.
+        let piYc = jCanon > 0.0 && canonicalReservoir.unbiasedWeight > 0.0
             ? targetUnshadowed(params.scene, params.restir,
                                neighbourSurface, canonicalReservoir.sample) // p̂_i(Y_c)
             : 0.0;
 
+        // p̂_c(Y_i) and p̂_i(Y_c) are the *shifted* targets: scale each by its
+        // shift's Jacobian to state it in the comparison's measure.
+        let pcYiShifted = pcYi * jShift;
+        let piYcShifted = piYc * jCanon;
+
         let ci = neighbour.confidence;
         // b_i at Y_i, and the canonical's share of this pair at Y_c.
-        let mis = pairwiseMis(ci, piYi, piYc, cCanon, pcYi, pcYc);
+        let mis = pairwiseMis(ci, piYi, piYcShifted, cCanon, pcYiShifted, pcYc);
 
         AcceptedNeighbour a;
         a.sample = neighbour.sample;
         a.confidence = ci;
-        a.weightNumer = mis.bi * pcYi * neighbour.unbiasedWeight;
+        // The GRIS weight of the shifted neighbour: m_i·p̂_c(shift(Y_i))·W_i·J_i.
+        a.weightNumer = mis.bi * pcYiShifted * neighbour.unbiasedWeight;
         a.unshadowed = ucYi;
         a.accept = sample_ranked_1d(pixel, ranked,
                                     restirSpatialDimension(n, RESTIR_SPATIAL_ACCEPT));

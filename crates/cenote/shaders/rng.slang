@@ -73,6 +73,11 @@ public static const uint RESTIR_BSDF_BASE = 512;
 public static const uint RESTIR_BSDF_LOBE = 0;   // which technique scatters
 public static const uint RESTIR_BSDF_DIR = 1;    // scattered direction (2D: slots 1,2)
 public static const uint RESTIR_BSDF_ACCEPT = 3; // reservoir stream acceptance
+// The continuation tail's own acceptance (D-134): the BSDF draw yields up to
+// two candidates — the light its ray reached, and the indirect tail past the
+// hit — and each streams under its own draw. Slot 4 was already claimed by the
+// delta term below, so the tail takes 5.
+public static const uint RESTIR_BSDF_TAIL_ACCEPT = 5;
 
 public uint restirBsdfDimension(uint slot) {
     return RESTIR_BSDF_BASE + slot;
@@ -82,7 +87,8 @@ public uint restirBsdfDimension(uint slot) {
 // reservoir (D-088): a single selection of a delta light ∝ power. A delta light
 // is a point or a direction, so its connection has no positional sampling — one
 // 1D draw picks the light and that is the whole sample. Fixed, immediately past
-// the BSDF block (which owns slots 0..3), so neither shifts the other.
+// the BSDF acceptance (slots 0..3; the tail acceptance sits at 5), so none of
+// the three shift each other.
 public static const uint RESTIR_DELTA = RESTIR_BSDF_BASE + 4;
 
 public uint restirDeltaDimension() {

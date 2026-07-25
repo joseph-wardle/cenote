@@ -14,15 +14,44 @@
 import lights;
 import reservoir_path;
 
-// -- The unified reservoir's NEE (length-2) interpretation -------------------
-// M6 retired the separate DI reservoir into the unified path reservoir (D-124):
-// a direct-lighting sample is a length-2 NEE path whose reconnection vertex
-// `rcVertex` *is* the light surface point. So the light's stable identity lives
-// in `rcVertex.instance` — never the volatile TLAS custom index — and the
-// sentinels and the environment predicate that used to sit in `reservoir_di.slang`
-// live here, on the DI scene slice every reuse stage already imports. The
-// multi-vertex path fields of `PathSample` stay zero until step 2 lights them up.
+// -- The unified reservoir's two path kinds ----------------------------------
+// M6's unified reservoir (D-124) holds two shapes of sample, discriminated by
+// the low bit of `PathSample.reserved` — zero by default, so a zero-initialized
+// sample reads as the NEE base case:
 //
+//   PATH_KIND_NEE (step 1, D-124) — a length-2 direct-lighting path whose
+//     reconnection vertex `rcVertex` *is* the light surface point. The light's
+//     stable identity lives in `rcVertex.instance` (never the volatile TLAS
+//     custom index), `primitive`/`barycentrics` the emitter point (or the env
+//     sampling coordinate). The light-id sentinels and the environment
+//     predicate below interpret it.
+//
+//   PATH_KIND_RECONNECTION (step 2, D-134) — a length-≥3 indirect path whose
+//     reconnection vertex is a *geometry* vertex x₂ (the first indirect bounce,
+//     a real surface hit): `rcVertex.instance` is a live TLAS instance, not a
+//     light id, and `rcVertexRadiance` caches Lo(x₂) — the outgoing reflected
+//     radiance there — so the reconnection shift re-forms the contribution
+//     without re-tracing the tail. The NEE interpretation below does *not*
+//     apply to it, so every predicate here guards on the kind first.
+//
+// The kind lives beside the NEE interpretation (rather than in the
+// light-agnostic `reservoir_path.slang`) because it is exactly the discriminator
+// that says whether that interpretation applies.
+public static const uint PATH_KIND_NEE = 0;          // length-2 direct: rcVertex = light point
+public static const uint PATH_KIND_RECONNECTION = 1; // length-≥3 indirect: rcVertex = x₂
+
+public uint pathKind(PathSample sample) {
+    return sample.reserved & 0x1;
+}
+
+// A length-≥3 indirect sample: `rcVertex` is a geometry vertex, `rcVertexRadiance`
+// its cached outgoing radiance. Resolve and the shift both re-form the RGB
+// integrand *in their own domain* from `rcVertexRadiance` — no per-domain `F`
+// is ever stored, so none can go stale under reuse (step 2, D-134).
+public bool isReconnectionSample(PathSample sample) {
+    return pathKind(sample) == PATH_KIND_RECONNECTION;
+}
+
 // Reserved stable ids, mirroring `src/restir/identity.rs`. The environment
 // (HDRI) is a reservoir candidate but not an instance, so it carries a fixed
 // sentinel; instance ids begin above the reserved block. `LIGHT_ID_NONE` marks
@@ -37,7 +66,11 @@ public static const uint LIGHT_ID_NONE = 0xffffffff;
 // re-samples the same coordinate to reproduce the direction, radiance, and pdf
 // bit for bit.
 public bool isEnvironmentSample(PathSample sample) {
-    return sample.rcVertex.instance == LIGHT_ID_ENVIRONMENT;
+    // Guard on the kind first: a reconnection sample's `rcVertex.instance` is a
+    // live TLAS instance id, which can legitimately be 0 — only an NEE sample's
+    // instance carries the environment sentinel.
+    return pathKind(sample) == PATH_KIND_NEE
+        && sample.rcVertex.instance == LIGHT_ID_ENVIRONMENT;
 }
 
 public struct RestirScene {

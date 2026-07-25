@@ -3223,3 +3223,80 @@ LPE/light-group AOVs stay deferred but the seam is acknowledged, not retrofitted
 are the traps and cheap wins the equation-level read surfaced. The AOV seam is MoonRay's
 sharpest warning — radiance decomposition observes every scattering event and reuse complicates
 per-event attribution, so "which pass does a *reused* path land in?" is answered by construction.
+
+## 2026-07-25 — M6 step 2: the reconnection shift, first true path reuse
+
+### D-134: The unified reservoir owns the whole primary-hit path integral
+Status: accepted (2026-07-25). The reservoir now estimates the *entire* reflected radiance at
+the primary hit — direct **and** indirect — not just the direct term (D-124 finished). The
+internalized BSDF draw (D-088) yields up to **two candidates with disjoint path supports**: the
+**light** its scattered ray reaches (an emitter's emission or the environment — the length-2
+sample, competing with the M light candidates), and the **continuation** past any surface hit —
+the candidate stage traces the indirect tail inline (`traceTail` in restir_candidates.slang, the
+same per-vertex estimator `shade_surface` runs via the shared `nee.slang`, accumulated into
+`Lo(x₂→x₁)` instead of the film) and stores a length-≥3 **reconnection sample**: `rcVertex` = x₂,
+`rcVertexRadiance` = the *reflected-only* Lo(x₂), MIS weight 1 (NEE cannot reach a length-≥3
+path, so the balance-heuristic denominator keeps only the BSDF density). The two-candidate split
+is load-bearing: **emitters reflect too** — an emissive-and-reflective surface's emission is the
+light candidate and its reflection the tail, so neither is lost nor double-counted (guarded by
+`restir_carries_reflection_off_emissive_surfaces`). `shade_surface`'s bounce-1+ continuation is
+turned **off** in ReSTIR mode — the reservoir+resolve produce all indirect light (the ReSTIR PT
+integrator, D-130). Resolve and the shift **re-form** the RGB integrand in *their* domain from
+the cached Lo (no stored per-domain `F`, which would go stale under reuse). The two path kinds
+are discriminated by `PathSample.reserved`'s low bit (zero = NEE, so a zero-init sample reads as
+the base case). The tail seeds its interior medium from the draw's lobe: a closed-surface
+refraction at x₁ starts the tail *inside* x₁'s own interior — Beer–Lambert over x₁→x₂, the far
+wall's closure at the inverted IOR, and every later transmission toggling from inside — exactly
+the state `shade_surface`'s continuation carried in the path state (guarded by
+`restir_tracks_interior_media_through_the_indirect_tail`). *Why:* one reservoir over the whole
+path space is Enhanced §6.1 and the D-124
+spine; a surface hit is exactly where the tail begins, so the candidate that used to die there
+now continues. Checkpoint green: initial RIS (own-pixel, identity shift) converges to the
+brute-force path tracer, and the two ReSTIR goldens' means moved <0.2% (unbiased) with slightly
+*lower* variance — regenerated, the FLIP pin now tracks the new estimator.
+
+### D-135: The reconnection shift is a re-target plus a geometry-term Jacobian, folded into the shipped pairwise MIS
+Status: accepted (2026-07-25). Reusing a reconnection sample across pixels re-forms its target at
+the new surface — connect that surface to the stored x₂ at radiance Lo(x₂), shade f(x₁′;ω)·|cosθ|·Lo
+(`connectSampleAt` handles both kinds; the reconnection segment's visibility is an *identity*
+shadow test to x₂'s own triangle, exactly as a light point's) — and multiplies by the
+**reconnection Jacobian** J = [|cosθ₂|/d²]_target / [|cosθ₂|/d²]_source (Lin 2022), the solid-angle
+measure change of the moved connection. **Exactly 1 when the domains coincide** (the same-pixel
+invariant, D-125 — by construction: identical inputs, ratio 1). It integrates into cenote's
+*existing* defensive pairwise MIS (restir_mis.slang, D-087) with **no reconnection-aware variant**:
+the two cross-domain targets `pcYi` (neighbour shifted to canonical) and `piYc` (canonical shifted
+to neighbour) are each scaled by their shift's Jacobian before the ratios, which is precisely where
+the measure change belongs; an NEE sample stores a domain-independent light point (identity shift,
+J = 1), so the direct path is untouched. *Why:* the Jacobian needs *both* surfaces, which only the
+spatial stage has — so it lives there, not in the per-surface target. Checkpoint green: spatial path
+reuse converges to the path tracer on an all-matte GI scene (reconnection reuse dominant), and on
+the mixed glossy gate.
+
+### D-136: Step 2 bakes Lo direction-independent; undefined shifts carry Jacobian 0, never a dropped pair
+Status: accepted (2026-07-25). `rcVertexRadiance` caches Lo(x₂) as a **direction-independent** exit
+radiance (f₂ baked in). This is exact for a *diffuse* x₂ and exact for **any** x₂ in its *own*
+pixel (the connection direction does not move), but reusing a *glossy* x₂ across pixels would bias
+the mean (f₂ is directional). So a classic **reconnection eligibility guard** (α_min ≈ 0.2,
+`reconnectionEligible` — mostly-diffuse material, weak specular/metal/glass) marks where the
+baked-radiance shift is *undefined*, folded into one shared `reconnectionShiftJacobian`
+(restir_target.slang): 1 for NEE (identity), the geometry ratio where defined, **0 where not** —
+the partial-shift convention. The zero Jacobian nulls the sample's cross-domain target while
+**the pair still counts** in V/c_tot and the canonical's share; skipping the pair instead would
+make the pairwise-MIS weights a function of the neighbour's *realized* sample and overweight
+every eligible point by the neighbour's ineligible probability — a small brightening bias on
+mixed scenes the fixed-function form provably avoids (weights sum to 1 pointwise). A glossy
+reconnection vertex still shades exactly in its own pixel (resolve re-forms it there); it just
+carries nothing across domains. **The same convention guards the frame boundary**: a
+reconnection sample's *temporal* shift is undefined until step 5 — it owes the Jacobian across
+the reprojected surface, a stable identity for `rcVertex.instance` (a raw TLAS index, which a
+scene edit renumbers — the hazard the light-id registry solves for NEE), and a visibility
+re-test — so restir_temporal zeroes its cross-frame targets the same pair-preserving way, and a
+stale instance is never dereferenced. Direct light still compounds temporally; path history
+joins it at step 5. Un-baking f₂ (storing the incident-side radiance + `rcVertexWi`,
+re-evaluating f₂ at the shifted connection) is exactly the **hybrid shift**, step 3 (D-125) —
+the field is reserved, zero until then. This is a **no-op on the diffuse checkpoint** (every
+vertex eligible). Two further scope lines, both deferred (deferrals.md): the inline tail treats
+crossings as **opaque** (stochastic opacity in the reused tail is out, with volumes — the
+checkpoint scenes carry none), and a **distance criterion** on the reconnection (the footprint
+criteria, step 4) is not yet applied, so a very short reconnection can still spike the 1/d²
+Jacobian — watched, not yet a firefly source at checkpoint spp.

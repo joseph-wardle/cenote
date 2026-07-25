@@ -65,6 +65,23 @@ public float opacityAt(SceneTable* scene, uint instance, uint primitive, float2 
     return opacity;
 }
 
+// Beer–Lambert transmittance over one path segment through an instance's
+// interior: absorption toward the medium's target color, scaled by its
+// transmission depth. A zero depth means no interior — the tint sat on the
+// interface instead — and transmits fully. Callers pass a real interior
+// (`medium != MEDIUM_NONE`); shared by `shade_surface`'s per-bounce loop and
+// the `ReSTIR` candidate tail, so the two absorb identically.
+public float3 interiorTransmittance(SceneTable* scene, uint medium,
+                                    float3 from, float3 to) {
+    Material interior = scene.materials[medium];
+    if (interior.transmissionDepth > 0.0) {
+        let sigma = -log(clamp(interior.transmissionColor, 1e-4, 1.0))
+                  / interior.transmissionDepth;
+        return exp(-sigma * distance(from, to));
+    }
+    return float3(1.0);
+}
+
 // Trace one next-event connection and return its visibility in [0, 1]: 0 when a
 // solid occluder blocks it, otherwise the product of (1 − opacity) over every
 // fractional-opacity crossing — Cycles' deterministic transparency split, so
