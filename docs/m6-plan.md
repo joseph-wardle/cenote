@@ -196,6 +196,7 @@ compiles, clippy-clean (incl. `--features denoise`), tests pass on the GPU machi
    hybrid shift; reprojection + the decay ramp on paths. *Checkpoint: converges with
    temporal on; the decay-ramp handoff (temporal early → spatial-only + accumulation late)
    is measured. Spatial + temporal complete, all unbiased.*
+   Expanded to a three-rung ladder in §4c (interviewed 2026-07-26).
 6. **Colour-noise fix + ReSTCV** — first the near-free vector-resampling-weight fix
    (D-133); then, *after its deep-read prerequisite* (§6), ReSTCV as the general
    control-variate form (plain ReSTIR PT = zero-CV degenerate). *Checkpoint: CV-on and
@@ -446,6 +447,63 @@ reference's own noise floor on both glossy scenes; *per-scene tuning gone* —
 `RECONNECT_MIN_DISTANCE` and the x_k roughness gate are deleted, and the one
 surviving constant (c = 0.02) is the paper's own scene-independent fraction.
 Step 4 is closed: D-140 records the criterion.
+
+## 4c. Step-5 plan — temporal reuse (interviewed 2026-07-26)
+
+Interviewed after step 4 landed (`8072816`). The deliverable was already pinned by the
+step-2 scope comment in restir_temporal.slang, which names the three debts step 5 owes
+at once: the shift across the reprojected surface, a stable identity for
+`rcVertex.instance`, and a re-test of the visibility resolve deliberately skips — the
+third falls out of the first (the shift re-traces the reconnection segment or terminal
+connection at the destination pixel, exactly as spatial's block does). Five decisions,
+resolved in dependency order; each rung below ends green (compiles, clippy-clean incl.
+`--features denoise`, GPU tests serial, committed), exactly like the milestone's steps.
+
+| # | Decision | Choice | Rationale |
+|---|---|---|---|
+| 1 | Shift-block home | **Factor, not copy.** Spatial's per-sample shift-and-target block (kind dispatch → shift → visibility ray → shifted target, own-domain target, re-rooted sample) becomes two shared helpers beside the shifts in restir_target.slang — the forward form (neighbour-into-here, one ray) and the ray-free reverse (canonical-into-neighbour-domain). Spatial is rewritten to call them; temporal calls the same two with its one reprojected neighbour | Duplicating ~100 lines of shift dispatch plants the drift-into-silent-bias hazard restir_target.slang exists to prevent. The one stated obstacle — a shared module cannot own a TLAS binding — does not apply: the shift functions already take the TLAS as a parameter, so the helpers do too. The NEE arms stay per-stage (vis-aware in spatial, unshadowed in temporal) — that asymmetry is D-094's feed convention, not drift |
+| 2 | `rcVertex.instance` across edits | **Epoch gate, not an instance registry.** `ViewState` remembers which scene build its `prev` was rendered against; when the current build differs, temporal drops the pair for non-NEE prev samples (`prevValid = false` *before* any dereference — the neighbour simply doesn't exist that frame). NEE history keeps surviving edits through the light-id registry, as in M3; both indirect kinds gate uniformly. The instance-identity registry goes to deferrals.md, revival trigger: editing-heavy interactive workflows | A reconnection sample at rest holds a raw TLAS custom index; an edit renumbers it into the wrong (or out-of-bounds) instance. The registry answer — per-instance stable ids, mesh fingerprints, at-rest remap, cross-build index composition — buys exactly one frame of indirect warm-start across an edit that resets the film anyway. The gate is ~3 kernel lines plus a build counter and dereferences nothing stale by construction. Camera-only motion rebuilds nothing, so the common temporal case (orbiting) never trips it. Replay is structurally index-free (seeds + dims, re-traced through the current TLAS) but gates anyway — one condition, both kinds |
+| 3 | Cost discipline | **Measurement-only, again — no held-camera identity fast path.** One free ordering fix lands with the step: the ramped confidence folds into `prevValid` before any shift work, so a decayed-to-zero prev is no neighbour at all and the converged still provably spends zero shift rays | The fast path (trust the stored F at identity reprojection on a static scene — sound by the D-138/D-139 invariant) can only fire on a *held* camera, where the decay ramp anneals temporal to zero within decayFrames anyway, and can never fire during *motion*, where reprojection is non-identity and the real shift is irreducible — a second code path optimizing precisely the window where perf matters least (step-3 decision 4's discipline, D-086's named risk). The checkpoint reports temporal-on/off frame times; the fast path is the named follow-up if the ≤ decayFrames window ever shows in the numbers |
+| 4 | Proof obligations | **Assert correctness, report performance** (the step-3c precedent). Pinned-temporal unbiasedness (decayFrames = 0 forces temporal live to convergence, D-094) on three kind-covering scenes — diffuse GI (NEE + k = 2), glossy-primary (k ≥ 3 + replay mix), sharp-chain (pure replay, both terminals) — through `matches_brute_force`; a **bitwise G-buffer-surface assertion** (the surface reconstructed from the G-buffer entry equals the path-pool reconstruction bit-for-bit); a host unit test on the epoch plumbing; ReSTIR goldens regenerated + eyeballed, brute goldens bit-identical. The handoff curve and frame times are reported, never asserted | The shift math is already pinned (shared functions, the bit-identity harness) and reprojection is M3-tested; the genuinely new surface is the temporal *wiring*, the epoch gate, and unbiasedness-on-paths. The G-buffer surface is the one input temporal sources differently from spatial — proving it bit-identical transfers the same-pixel invariant to the frame boundary for free. Indirect history crossing the boundary is a new estimator realization, so the ReSTIR goldens move (the §4a decision-5 precedent). No new analytic microtest: restir_temporal_test audits the M-cap/decay algebra, which kinds don't touch |
+| 5 | Rung structure | **Three rungs, one commit each**: T5a the no-op refactor, T5b the behavior change, T5c evidence + docs | Two rungs can't tell "the refactor broke spatial" from "the temporal wiring is wrong" — T5a's bit-identical goldens make that distinction free. Four would split out the epoch gate, ~a dozen lines T5b's own gates already cover |
+
+The ladder — each rung green and committable:
+
+- **T5a — the shared shift block, a provable no-op.** The forward and reverse helpers
+  land in restir_target.slang; restir_spatial's gather loop rewrites to call them;
+  temporal is untouched. *Gates: every existing test green; **both golden sets
+  bit-identical** — the rung is a pure refactor and proves it; clippy both variants.*
+- **T5b — indirect samples cross the frame boundary.** The two helper calls land in
+  restir_temporal (forward: prev → this surface, with its visibility ray; reverse:
+  cand → the G-buffer-reconstructed prev surface, ray-free), both through the current
+  TLAS; the `prevIsNee`/`candIsNee` scope guards and the step-2 J = 0 convention die;
+  the decayed-zero fold into `prevValid` lands before any shift work; the epoch gate
+  lands end-to-end (build counter on `ViewState` → push constant → guard-before-
+  dereference). *Gates: the decision-4 set — pinned-temporal unbiasedness on the three
+  scenes, the bitwise G-buffer-surface assertion, the epoch unit test, ReSTIR goldens
+  regenerated + eyeballed, brute goldens bit-identical.*
+- **T5c — evidence and docs.** The decay-handoff curve (relMSE at 1/2/4/8/16/32
+  accumulated frames, temporal-on vs off, on the indirect-glossy scene — the warm-start
+  win early, convergence-equality late) and temporal-on/off frame times (demo + glossy)
+  through the `#[ignore]` timing seam, recorded here; D-141 append-only; the comment
+  sweep — restir_temporal's step-2-scope block rewritten to what temporal now does,
+  spatial's "temporal never passes a foreign indirect sample through" clause corrected
+  to the re-rooting argument, stray "until step 5" notes resolved; the §4 build-order
+  entry checked off; the instance-identity registry recorded in deferrals.md with its
+  revival trigger.
+
+Leaf defaults settled with the interview (cheap to change, not re-interviewed): both
+directions of the cross-frame shift trace the *current* TLAS — no previous-frame TLAS
+exists, and pairwise-MIS weights remain a valid partition for any deterministic targets,
+the standard treatment; the M-cap and decay ramp are untouched (they scale
+`prev.confidence` before the combine, kind-blind, and the microtest's cap-then-decay
+ordering holds); the temporal NEE arm stays unshadowed and the W feed convention
+(unshadowed into `prev`/spatial) is unchanged; a temporally-shifted indirect winner
+still satisfies spatial's canonical-trust invariant because the temporal shift re-forms
+F at this pixel this frame — visibility re-traced, the sample re-rooted — exactly what
+generation would have produced; the helpers live beside the shifts in
+restir_target.slang (one module for target + shift, as today); restir_temporal_test.slang
+is unchanged.
 
 ## 5. Fallback seams (pre-agreed, in slip order)
 
