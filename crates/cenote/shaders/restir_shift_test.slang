@@ -40,7 +40,7 @@ static const uint SHIFT_BROKEN = 0x200;
 static const uint SHIFT_REPLAY = 0x400;
 // A live length-2 NEE (direct-lighting) survivor: no shift to run — its
 // reconnection vertex is a light point — but the host's kind-mix report
-// (the step-4 baseline metric, §4b) needs it as the denominator's third kind.
+// (the step-4 checkpoint metric, §4b) needs it as the denominator's third kind.
 static const uint SHIFT_NEE = 0x800;
 
 struct Params {

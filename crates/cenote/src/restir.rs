@@ -394,7 +394,7 @@ mod tests {
         );
     }
 
-    /// The step-4 correctness spine (D-093): the defensive pairwise-MIS spatial
+    /// The M3 step-4 correctness spine (D-093): the defensive pairwise-MIS spatial
     /// combine — its MIS weights, its accepted-count normalizer, and its
     /// visibility-aware target folded into W — is unbiased. Each of ~260k threads
     /// runs `shaders/restir_spatial_test.slang`, an independent estimate of

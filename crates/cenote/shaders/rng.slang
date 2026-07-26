@@ -92,7 +92,7 @@ public uint restirDeltaDimension() {
     return RESTIR_DELTA;
 }
 
-// ReSTIR spatial-reuse dimensions (step 4). The spatial stage gathers k
+// ReSTIR spatial-reuse dimensions (M3 step 4). The spatial stage gathers k
 // neighbours around the primary hit and streams each — plus the pixel's own
 // canonical reservoir — through a fresh reservoir under defensive pairwise MIS.
 // Each neighbour needs a 2D disk offset (which pixel) and a 1D reservoir-merge

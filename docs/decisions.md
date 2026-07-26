@@ -3412,3 +3412,36 @@ asserted at a 1.3× floor). The direct-lit variant measurably does NOT clear tha
 per-vertex estimator is already low-variance there and the one-survivor resampling costs more than
 5-neighbour reuse recovers; the honest scope note, recorded so nobody re-litigates it from the
 convergence curves alone.
+
+### D-140: Step 4 prices reconnection by footprint area, not roughness — the classic thresholds die
+Status: accepted (2026-07-26). The pair criteria (a variance guard, not a bias guard — D-131/D-137)
+are now the **dual ray footprint test** of ReSTIR PT Enhanced §4 (Eq 5): a pair (x_{k−1}, x_k)
+reconnects when the area each endpoint's lobe spreads over at the other end stays above a fixed
+fraction of the primary ray's own spread — `1/(p·G) ≥ rhs` in both directions, with
+`rhs = (c/100)·‖x₀−x₁‖²·4π/|⟨n₁,x̂₁x₀⟩|` computed once per pixel (geometric normal, the G-term
+convention) and `c = FOOTPRINT_C = 0.02`, the paper's scene-independent fraction. The classic
+per-scene knobs — `RECONNECT_MIN_DISTANCE` and the roughness floor at x_k — are deleted outright,
+no toggle (the step-3 tree at `cfd7fb8` is the A/B seam); `reconnectionRough` survives
+**single-sided**, at x_{k−1} only (§4.2 — its job is the re-shaded-closure firefly guard where the
+lobe re-evaluates, and x_k's sharpness is now priced by the inverse term instead of banned).
+Placement is **lock-then-demote**: the forward test joins the pair search on the two factors
+`reconnectionEnd` already computes; the inverse test needs p_k(ω_k), which exists only after the
+scatter out of x_k draws, so it runs there — only when x_k is sharp-capable (the shared
+`sharpCapable` weight test; a diffuse lobe cannot fail it) — and on failure demotes
+`ctx.shiftable`, re-arming the search at later pairs. The already-streamed at-lock NEE event keeps
+its verdict exactly (footnote 6: a light draw's pdf ignores the incident direction, so its suffix
+has no inverse lobe to test); deeper events ride the drawn ω_k. Both tests run multiply-form
+(`rhs·(p·G_factor) ≤ 1`), IEEE-clean at grazing: cos → 0 pushes rhs to ∞ and the pair simply never
+locks, the paper's own behavior. Evidence (§4b measurements, classic baseline at `cfd7fb8`): the
+dedicated distant-glossy scene — a roughness-0.12 metal panel 16 m out, lit only through a
+light-sandwich card so the floor sees nothing but the sharp reflection — flips from 0 reconnection
+/ 155 replay under classic to **154 reconnection at k = 2 / 1 replay**, the acceptance classic's
+0.2 floor structurally refused, pinned forever by a coverage assert; mirror-chain locks earlier
+(597 → 881) with the k ≥ 5 corridor intact and the demote branch live; sharp-chain is bit-identical
+(guard-carried); convergence is equal; the ReSTIR goldens came out bit-identical (the criterion
+consumes no random dimensions and agrees with classic on every golden-scene pair); frame time is
+cost-neutral where the mix doesn't move and ~18% faster on distant-glossy (replay-kind reuse became
+reconnection, so spatial got cheaper). One scale note, from Eq 5's own arithmetic: at these camera
+depths a roughness-0.05 lobe prices its acceptance at ~80 m of segment — the criterion is *strict*
+on sharp lobes, which is the point; the evidence scene's 0.12/16 m is the same physics at a
+testable scale.

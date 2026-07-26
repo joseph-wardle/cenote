@@ -1,5 +1,5 @@
 // Resolve the primary hit's reservoir: shade the survivor that came out of
-// initial RIS (and, from step 4 on, reuse) and hand its visibility to
+// initial RIS (and, from M3 step 4 on, reuse) and hand its visibility to
 // `trace_shadow`. The last of M3's four discrete reservoir stages (D-091).
 //
 // The reservoir sorted its survivor on an *unshadowed* scalar target; this

@@ -191,6 +191,7 @@ compiles, clippy-clean (incl. `--features denoise`), tests pass on the GPU machi
    area-density test (Enhanced §4). *Checkpoint: fewer dark/firefly artifacts on distant
    glossy reconnections; convergence equal-or-better; per-scene tuning gone.*
    Expanded to a two-rung ladder in §4b (interviewed 2026-07-26).
+   **Done** (2026-07-26): T4a `04898a7` + T4b; checkpoint met — §4b's measurements.
 5. **Temporal reuse** — re-point `restir_temporal` at the path reservoir through the
    hybrid shift; reprojection + the decay ramp on paths. *Checkpoint: converges with
    temporal on; the decay-ramp handoff (temporal early → spatial-only + accumulation late)
@@ -436,7 +437,17 @@ the card floats just *in front of the panel*, facing it — its front halfspace 
 the panel alone, no surface anywhere sees it directly, and the floor's light is
 purely the panel's sharp reflection.
 
+Checkpoint verdict (T4b), against the §4 entry's three claims: *fewer dark/firefly
+artifacts on distant glossy reconnections* — delivered as the mechanism the paper
+describes, the artifact-prone whole-path replays becoming k = 2 reconnections (the
+kind-mix flip above), with the ~18% distant-glossy frame-time win as the visible
+side of the same trade; *convergence equal-or-better* — equal, within the
+reference's own noise floor on both glossy scenes; *per-scene tuning gone* —
+`RECONNECT_MIN_DISTANCE` and the x_k roughness gate are deleted, and the one
+surviving constant (c = 0.02) is the paper's own scene-independent fraction.
+Step 4 is closed: D-140 records the criterion.
 
+## 5. Fallback seams (pre-agreed, in slip order)
 
 - **Reciprocal spatial reuse (step 7)** → plain O(M) defensive pairwise MIS (M3's, on
   paths). First to go: it is a perf optimization on an already-correct, already-fast
