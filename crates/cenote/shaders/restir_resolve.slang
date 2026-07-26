@@ -64,9 +64,9 @@ struct Params {
     // Bit 8: visibility-in-weight — the spatial stage ran, so the survivor's W
     // already carries its own visibility (the spatial pass spent the ray). Bit 9:
     // temporal-ran — scales the confidence heatmap. Bit 10: CV shading — shade
-    // the spatial pass's vector-weight lane instead of the survivor (§6.3, M6
-    // step 6a). The flags ride here rather than in fields of their own: the
-    // block sits at Vulkan's guaranteed 128 push-constant bytes.
+    // the spatial pass's control-variate lane instead of the survivor (M6
+    // steps 6a/6b-i). The flags ride here rather than in fields of their own:
+    // the block sits at Vulkan's guaranteed 128 push-constant bytes.
     uint flags;
     uint sampleIndex;            // this wave's sample — the delta term's one NEE draw
 };
@@ -89,9 +89,9 @@ static const uint DEBUG_UNBIASED_WEIGHT = 3; // W heatmap
 // The packed `flags` word: the enum above in the low byte, then two
 // which-stages-ran flags that set the confidence heatmap's scale — the
 // spatial visibility-in-weight flag in bit 8, the temporal-ran flag in bit 9 —
-// and the CV-shading flag in bit 10 (§6.3 vector-weight shading, M6 step 6a):
-// the host sets it only when the spatial stage ran AND its CV toggle is on,
-// so this stage shades the accumulated vector-weight lane instead of the
+// and the CV-shading flag in bit 10 (control-variate shading, M6 steps
+// 6a/6b-i): the host sets it only when the spatial stage ran AND its CV
+// toggle is on, so this stage shades the combined CV lane instead of the
 // survivor. Off is survivor-only shading — the D-130 zero-CV degenerate.
 static const uint DEBUG_VIEW_MASK = 0xff;
 static const uint DEBUG_VISIBILITY_IN_WEIGHT = 0x100;
@@ -218,16 +218,13 @@ void restir_resolve(uint3 tid: SV_DispatchThreadID) {
 
     // -- The reservoir survivor ----------------------------------------------
     // The survivor and its unbiased contribution weight. An empty reservoir
-    // (nothing selected, or the target rejected it) carries W 0 and adds
-    // nothing — no shadow ray, no continuation (that is shade_surface's). The
-    // delta term above already landed; this pixel's debug surface stays at its
-    // black zero-fill (nothing selected).
+    // (nothing selected, or the target rejected it) carries W 0 and shades no
+    // survivor — no shadow ray, no continuation (that is shade_surface's) —
+    // and its debug surface stays at its black zero-fill. The CV lane is the
+    // one thing an empty reservoir can still carry (§below), so the empty
+    // return waits until the CV branch has run.
     StoredPathReservoir stored = params.reservoirs[pixel];
     Reservoir<PathSample> reservoir = loadPathReservoir(stored);
-    if (!(reservoir.unbiasedWeight > 0.0)) {
-        return;
-    }
-    PathSample sample = reservoir.sample;
 
     // Unpack the debug word: the view enum, whether the spatial stage already
     // folded the survivor's visibility into W (so no shadow ray is owed here),
@@ -243,31 +240,40 @@ void restir_resolve(uint3 tid: SV_DispatchThreadID) {
     // candidate count on its own; temporal compounds M toward its M-cap ceiling
     // (≈ RESTIR_TEMPORAL_M_CAP × candidates ≈ 320, mirrored from wavefront.rs);
     // spatial reuse a further rough 6× for the default k ≈ 5 neighbours (D-093).
-    if (debugView != DEBUG_NONE) {
+    if (debugView != DEBUG_NONE && reservoir.unbiasedWeight > 0.0) {
         var confidenceScale = temporalInWeight ? 320.0 : 16.0;
         if (visibilityInWeight) { confidenceScale *= 6.0; }
         params.debug[pixel] = float4(debugColor(debugView, reservoir, confidenceScale), 1.0);
     }
 
-    // -- §6.3 vector-weight shading (M6 step 6a) -----------------------------
-    // The spatial stage accumulated every merge candidate's w⃗ =
-    // w_scalar·F/luminance(F) into the CV lane of its output — each candidate's
-    // own colour at its own scalar weight, visibility and Jacobian already
-    // folded — so the lane *is* the reservoir-owned term's RGB estimate, every
-    // candidate's chroma averaged where the survivor path below rides one
-    // sample's hue. No ray is owed (each candidate's visibility was spent at
-    // its merge site) and no connection is re-formed; pixel-owned add, exactly
-    // like the delta term above. The host sets the bit only when spatial ran
-    // with its CV toggle on; toggle-off falls through to survivor shading —
-    // the D-130 zero-CV degenerate the A/B gates compare. An empty stream
-    // already returned above (W = 0 ⇔ weightSum = 0 ⇔ the lane is zero).
+    // -- Control-variate shading (M6 step 6b-i; §6.3 shading at 6a) ----------
+    // The spatial stage combined this pixel's candidate mean with its
+    // per-neighbour control-variate terms into the CV lane of its output
+    // (restir_spatial's module header) — every candidate's colour and every
+    // neighbour's running estimate averaged in, visibility and Jacobians paid
+    // at their merge sites — so the lane *is* the reservoir-owned term's RGB
+    // estimate. No ray is owed and no connection is re-formed; pixel-owned
+    // add, exactly like the delta term above. The host sets the bit only when
+    // spatial ran with its CV toggle on; toggle-off falls through to survivor
+    // shading — the D-130 zero-CV degenerate the A/B gates compare. Runs even
+    // at W = 0: a pixel whose own candidates all died can still carry its
+    // neighbours' estimates (their mean is this pixel's integral too — that
+    // is the control variate working). The lane is *signed* per channel — the
+    // residual terms subtract — so the add tests non-zero, not positive, and
+    // no clamp is applied: accumulation averages the transients out, and the
+    // film's own guard drops a non-finite sample (this guard mirrors it).
     if ((params.flags & DEBUG_CV_SHADING) != 0) {
         let vector = throughput * stored.cvAccumulator;
-        if (any(vector > 0.0)) {
+        if (all(isfinite(vector)) && any(vector != 0.0)) {
             params.radiance[pixel] += float4(vector, 0.0);
         }
         return;
     }
+
+    if (!(reservoir.unbiasedWeight > 0.0)) {
+        return;
+    }
+    PathSample sample = reservoir.sample;
 
     // -- The replay-carried survivor (k > 2, D-138; replay kind, D-139) ------
     // Its integrand was formed in *this* pixel's domain by whichever stage

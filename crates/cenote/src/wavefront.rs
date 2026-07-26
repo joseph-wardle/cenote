@@ -733,10 +733,10 @@ impl DebugView {
     /// scales to temporal's compounded M-cap ceiling rather than the candidate
     /// count. Mirrors `DEBUG_TEMPORAL_IN_WEIGHT` in `shaders/restir_resolve.slang`.
     const TEMPORAL_IN_WEIGHT: u32 = 0x200;
-    /// Bit 10 of that word: shade the spatial pass's accumulated vector-weight
-    /// (CV) lane instead of the survivor — Enhanced §6.3, M6 step 6a. Set only
-    /// when the spatial stage ran *and* [`RestirInputs::cv_shading`] is on;
-    /// clear is survivor-only shading, the zero-CV degenerate (D-130). Mirrors
+    /// Bit 10 of that word: shade the spatial pass's control-variate lane
+    /// instead of the survivor — `ReSTCV`, M6 steps 6a/6b-i. Set only when the
+    /// spatial stage ran *and* [`RestirInputs::cv_shading`] is on; clear is
+    /// survivor-only shading, the zero-CV degenerate (D-130). Mirrors
     /// `DEBUG_CV_SHADING` in `shaders/restir_resolve.slang`.
     const CV_SHADING: u32 = 0x400;
 }
@@ -766,10 +766,10 @@ pub struct RestirInputs<'a> {
     /// resolve shades it without a shadow ray). `None` is the step-3
     /// single-frame-RIS path.
     pub scratch: Option<&'a Buffer>,
-    /// Whether resolve shades the spatial pass's accumulated vector-weight (CV)
-    /// lane rather than the survivor (Enhanced §6.3, M6 step 6a). Acted on only
-    /// when `scratch` is `Some` — spatial is the stage that accumulates the
-    /// lane; without it resolve shades the survivor regardless. `false` is the
+    /// Whether resolve shades the spatial pass's control-variate lane rather
+    /// than the survivor (`ReSTCV`, M6 steps 6a/6b-i). Acted on only when
+    /// `scratch` is `Some` — spatial is the stage that combines the lane;
+    /// without it resolve shades the survivor regardless. `false` is the
     /// zero-CV degenerate (D-130) the A/B gates flip to.
     pub cv_shading: bool,
     /// The debug false-colour target (one RGBA f32 per pixel), or `None` when
@@ -1350,8 +1350,8 @@ impl Wavefront {
             0
         };
         // The CV-shading flag (DebugView::CV_SHADING, mirrored in
-        // restir_resolve.slang): resolve shades the vector-weight lane the
-        // spatial stage accumulated (§6.3, step 6a) — so it is gated on spatial
+        // restir_resolve.slang): resolve shades the control-variate lane the
+        // spatial stage combined (steps 6a/6b-i) — so it is gated on spatial
         // actually running, not just the toggle.
         let cv_shading = if restir.cv_shading && restir.scratch.is_some() {
             DebugView::CV_SHADING

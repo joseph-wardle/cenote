@@ -3528,3 +3528,38 @@ visibly desaturates (mean FLIP 0.020 against the old pin, carried by that speckl
 constant-factor luminance-variance win D-142 recalibrated the headline toward is 6b's to
 deliver — the control variate proper — not this rung's; 6a's deliverable is the chroma fix,
 and the invariance is why measuring it needed the per-channel lens in the first place.
+
+### D-144: 6b-i lands the spatial control variate on G-semantics, repaying visibility where the rays are
+Status: accepted (2026-07-26). Rung 6b-i (m6-plan §4d decision 5) ships ReSTCV's spatial update
+as interviewed — candidate-mean init (store now takes the lane as a required argument; the
+round-trip fixture pins it by value), temporal pass-through, per-neighbour α⟨F_j⟩ + ⟨F_i − αF_j⟩
+with cenote's pairwise ratios, α = the per-channel `aovAlbedo` ratio (non-finite → 1, clamp ≤ 2),
+c fixed at 1.6, resolve shading the signed lane — with one divergence the interview never had to
+face and the implementation had to settle. **The reference's integrands all embed traced
+visibility** (its shifts always trace); **cenote's one-ray-per-candidate policy prices NEE
+candidates, own-domain targets, and reverse targets unshadowed** (D-093/D-094), so the reference
+formulas transplanted verbatim would be biased by every unshadowed evaluation paired against a
+shadowed one. The resolution is that a control variate never needed the true integral on both
+sides — only *matched* semantics: the lane transports **G, the pre-visibility integral the
+candidate stream itself estimates** (NEE terms unshadowed, indirect terms concrete — their walks
+traced every ray), the residual bracket α⊙(lane_j − estG_j) pairs G against G and is zero-mean
+by construction, and the visibility-aware F-estimates use only evaluations whose rays the
+spatial pass actually spends. Two consequences, both named in restir_spatial's header: an
+indirect canonical's backshift — the one evaluation cenote never prices — gets pair-partition
+weight zero on indirect points (the neighbour's own sample covers them at weight 1, the same
+Kettunen coverage move the dead-shift fallbacks make; partition of unity holds pointwise, so
+unbiasedness survives and only the residual's pairing weakens on indirect samples), and the
+centre estimate repays the canonical lane's deficit at the one sample whose shadow ray the pass
+traces: centre = lane_c + W_c·chroma_c·(p̂ᵛⁱˢ − p̂ᵘⁿˢʰ), whose correction has mean exactly
+F_c − G_c and is identically zero for an indirect canonical. The numbers behave accordingly:
+the chroma scene improves where the constant factor lives (many-lights 8 spp per-channel relMSE
+R 0.03372 → 0.03219, G 0.03374 → 0.03120, B 0.04059 → 0.03796; scalar 0.03602 → 0.03378) and
+the indirect-glossy scene pays the pairing cost (~3% at 8 spp, 0.08893 → 0.09164) — recorded,
+not hidden, per the honest-numbers precedent. Signed transients are real and unclamped (demo
+per-frame minima reach −0.96 in one channel; means agree with the survivor estimator to ~0.14%
+at 32 spp): accumulate's finite-guard, the auto-stop floor, and tonemap's saturate were each
+checked to carry them. The survivor pin (D-143) re-ran bit-exact — store's signature changed
+but toggle-off's arithmetic did not. Named seam for 6b-ii: prev's persisted lane is today the
+candidate mean (spatial's scratch never survives a frame), so the temporal recurrence must
+either blend against that or persist the combined CV — and the unshadowed fraction of whatever
+it blends must ride with it (cvNormalization is the natural carrier if one is needed).

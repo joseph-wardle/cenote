@@ -161,7 +161,8 @@ void restir_temporal(uint3 tid: SV_DispatchThreadID) {
     entry.direction = params.paths.direction[slot];
     reproject.currGbuffer[pixel] = entry;
 
-    Reservoir<PathSample> cand = loadPathReservoir(params.reservoirsIn[pixel]);
+    StoredPathReservoir candStored = params.reservoirsIn[pixel];
+    Reservoir<PathSample> cand = loadPathReservoir(candStored);
     let cCanon = cand.confidence; // c_c > 0 for any hit pixel
 
     // Reproject this surface into last frame's screen and read `prev` there. The
@@ -323,5 +324,9 @@ void restir_temporal(uint3 tid: SV_DispatchThreadID) {
     // winner's shift visibility was 1), so its stored F/W pair reads
     // downstream exactly as generation's would (D-138/D-139).
     reservoirFinalize(merged, survivorTarget);
-    params.reservoirsOut[pixel] = storePathReservoir(merged);
+    // The CV lane passes through untouched (6b-i): the candidate mean rides to
+    // the spatial combine exactly as the candidate stage formed it. The 6b-ii
+    // temporal recurrence — the decayed-M blend against prev's lane — lands
+    // here, beside the merge it mirrors, when that rung opens.
+    params.reservoirsOut[pixel] = storePathReservoir(merged, candStored.cvAccumulator);
 }

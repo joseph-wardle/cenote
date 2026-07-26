@@ -649,6 +649,30 @@ The ladder — each rung green and committable:
   CV-on ≡ CV-off — both converge to the brute reference within the existing floors;
   survivor-toggle goldens bit-identical; goldens regenerated + eyeballed; equal-frame
   relMSE recorded.*
+  **Done (2026-07-26, D-144).** Landed as interviewed, on one settled divergence: the
+  reference's integrands all embed traced visibility, cenote's one-ray-per-candidate
+  policy doesn't — so the lane transports **G, the pre-visibility integral the
+  candidate stream itself estimates** (NEE unshadowed, indirect concrete), the
+  residual bracket pairs G against G (zero-mean whatever α is), the F-estimates use
+  only ray-priced evaluations, an indirect canonical's unpriceable backshift gets
+  partition weight zero (coverage falls to the neighbour's own sample at weight 1),
+  and the centre repays the deficit at the one sample whose ray the pass traces:
+  centre = lane + W_c·chroma·(p̂ᵛⁱˢ − p̂ᵘⁿˢʰ), mean exactly F − G (D-144). Candidate
+  init is Σ m·F/q — no ÷M, the stream's own MIS weights normalize; α reads the
+  denoiser guides' `aovAlbedo` (the reference's own albedo shape). All gates green:
+  unbiasedness pair CV-on (many-lights 8/32 spp 0.03378/0.00645, was 0.03602/0.00652;
+  indirect 0.09164/0.02400, was 0.08893/0.02363); survivor pins bit-exact through the
+  store-signature change; goldens regenerated + eyeballed (per-frame speckle visibly
+  calms, means agree to ~0.14%, per-frame minima now signed as designed); brute
+  goldens byte-untouched; floor report re-run — ×N flat 1.04–1.17, still no floor.
+  Equal-frame chroma record: many-lights 8 spp per-channel relMSE R 0.03372→0.03219,
+  G 0.03374→0.03120, B 0.04059→0.03796 — the constant factor shows earliest where
+  frames are fewest, as the recalibrated headline predicts — while 32 spp sits at
+  noise level (R 0.00632/G 0.00608/B 0.00696) and indirect-glossy pays the weakened
+  indirect pairing ~3% at 8 spp. Recorded, not hidden. Named 6b-ii seam: prev's
+  persisted lane is the candidate mean (scratch never survives a frame); the
+  recurrence must blend against that or persist the combined CV, carrying its
+  unshadowed fraction with it.
 - **6b-ii — the temporal recurrence.** The M-weighted blend lands in restir_temporal
   beside the merge it mirrors, weighted by the decayed confidence, reset by the epoch
   gate and reprojection failure; prev's CV rides the existing buffers — no new

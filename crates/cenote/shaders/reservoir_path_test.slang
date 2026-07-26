@@ -1,7 +1,8 @@
 // Test-only kernel: proves the persistent path-reservoir record round-trips
 // between the GPU's `StoredPathReservoir` and the host's byte-for-byte mirror in
-// src/restir.rs, and that load/store are inverse — the reserved CV lane zeroed,
-// the pass-local weightSum dropped. Never embedded, never shipped. The same
+// src/restir.rs, and that load/store are inverse — the CV lane carried through
+// store (live from 6b-i), the pass-local weightSum dropped. Never embedded,
+// never shipped. The same
 // reasoning the reservoir primitive's own test rests on applies: a pure
 // load→store copy would survive a symmetric layout mismatch unseen, so each
 // field gets a *distinct* transform the host predicts per field, and any swapped
@@ -55,10 +56,13 @@ void reservoir_path_test(uint3 tid: SV_DispatchThreadID) {
     r.unbiasedWeight *= 2.0;
     r.confidence += 100.0;
 
-    // store zeroes flags/pad/CV regardless of input — the host asserts they
-    // come back zero, which pins both that those lanes exist and that the step-6
-    // slots start clean.
-    params.output[tid.x] = storePathReservoir(r);
+    // The CV lane rides beside the live reservoir (it is a store argument, not
+    // a `Reservoir` field), so its transform pins the 16-byte-aligned float3
+    // at bytes 80..92 by value — a per-component offset catches a rolled or
+    // shifted lane. store still zeroes flags/pad/cvNormalization regardless of
+    // input; the host asserts those come back zero.
+    let cvLane = params.input[tid.x].cvAccumulator + float3(0.4, 0.5, 0.6);
+    params.output[tid.x] = storePathReservoir(r, cvLane);
 
     // The ωₖ packing round-trips: a hashed unit direction per thread — both
     // hemispheres, the octahedron's folds included — must decode back to

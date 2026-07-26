@@ -121,13 +121,80 @@ Params params;
 // machinery.
 
 // The chroma direction F/luminance(F) of an unshadowed RGB contribution — the
-// §6.3 vector-weight factor (M6 step 6a, m6-plan §4d decision 3): each merge
-// site accumulates w⃗ = w_scalar·F/luminance(F), the scalar resampling weight
-// already in hand (visibility, Jacobian, and pairwise m folded) times the
-// candidate's own colour direction. luminance(F) = 0 ⇔ F = 0, so the zero
-// guard loses nothing.
+// §6.3 vector-weight factor (M6 step 6a, m6-plan §4d decision 3): multiplied
+// by a scalar target already in hand (visibility, Jacobian folded), it
+// re-forms that target's RGB — chroma·p̂ᶜᵛⁱˢ = F·V·J — which is how the CV's
+// F-estimates below shade every candidate in colour without a second
+// evaluation. luminance(F) = 0 ⇔ F = 0, so the zero guard loses nothing.
 float3 chromaDirection(float3 f, float lum) {
     return lum > 0.0 ? f / lum : float3(0.0);
+}
+
+// -- The spatial control variate (M6 step 6b-i, D-144) -----------------------
+// ReSTCV's per-neighbour update (Shi 2026 Eq 8), riding the pass's own
+// samples, targets, and pairwise ratios — resampling is untouched. For each
+// accepted neighbour j the lane earns one estimate of this pixel's integral,
+//
+//   ⟨F_c⟩_{←j} = estF_j + α_j ⊙ (⟨G_j⟩ − estG_j),
+//
+// estF_j the two-sample pairwise-MIS estimate of F_c (visibility-aware — the
+// rays this pass traces), ⟨G_j⟩ the neighbour's transported lane, and estG_j
+// the matching estimate of the *same* G_j from the same two samples, so the
+// bracket is zero-mean and the whole term unbiased for F_c whatever α is.
+//
+// G — the lane's transported semantics — is the pre-visibility integral the
+// candidate stream itself estimates: NEE terms unshadowed, indirect terms
+// concrete (their walks traced every ray). The reference's integrands all
+// embed visibility because its shifts always trace; cenote's one-ray-per-
+// candidate policy (D-093/D-094) prices own-domain and reverse targets
+// unshadowed, so the CV divergences land exactly where the missing rays are
+// (the named D-144 divergence, both halves below):
+//
+//   - estG_j's canonical-sample term exists only for an NEE canonical (its
+//     backshift re-forms unshadowed for free); an indirect canonical's
+//     backshift is the one evaluation cenote never prices, so the pair
+//     partition for G_j sets the canonical technique's weight to zero on
+//     indirect points — the neighbour's own sample covers them alone (its
+//     weight there is 1), the Kettunen coverage move the dead-shift
+//     fallbacks already make. Partition of unity holds pointwise either way,
+//     so unbiasedness survives; only the residual's pairing weakens on
+//     indirect samples.
+//
+//   - the centre estimate repays the canonical lane's visibility deficit at
+//     the one sample whose shadow ray this pass traces:
+//     centre = lane_c + W_c·chroma_c·(p̂ᵛⁱˢ − p̂ᵘⁿˢʰ) — the correction's mean
+//     is exactly F_c − G_c (zero for an indirect canonical, where the two
+//     targets are the same number), so the centre is unbiased for F_c.
+//
+// The combination is the reference's: (Σ_j ⟨F_c⟩_{←j} + c·centre)/(V + c),
+// uniform neighbour weights (M-weighting is temporal-only), c the fixed
+// central importance below. Signed per channel by design — no positivity
+// clamp, non-finite terms dropped (the reference's isfinite policy) — and
+// resolve shades the lane; accumulation averages the transients out.
+
+// The central importance c — how many neighbours' worth of weight the centre
+// estimate carries. The supplemental's closed form c = ½(√(1+6N+N²)−N+1)
+// gives ≈1.6 at the reference's N≈2.4; fixed here (decision 5), the
+// reference's live per-frame variance model (~5%) deferred behind a
+// measurement (D-043).
+static const float CV_CENTRAL_IMPORTANCE = 1.6;
+
+// α — the per-channel primary-hit albedo ratio (ReSTCV Eq 9): the
+// neighbour's colour estimate is demodulated by its own albedo and
+// remodulated by this pixel's, the denoiser-demodulation intuition — and the
+// same tabulated `aovAlbedo` the denoiser guides read supplies both sides.
+// α is deterministic (geometry and material only), so any value is unbiased;
+// the guards — non-finite ratio → 1, clamp ≤ 2 — are the reference's own
+// variance hygiene against near-zero albedos.
+float alphaChannel(float c, float n) {
+    let a = c / n;
+    return isfinite(a) ? min(a, 2.0) : 1.0;
+}
+
+float3 albedoRatio(float3 canonical, float3 neighbour) {
+    return float3(alphaChannel(canonical.x, neighbour.x),
+                  alphaChannel(canonical.y, neighbour.y),
+                  alphaChannel(canonical.z, neighbour.z));
 }
 
 // The visibility-aware canonical target p̂_c = U_c·V of a light sample at *this*
@@ -165,7 +232,6 @@ struct AcceptedNeighbour : IDefaultInitializable {
     float confidence;  // c_i
     float weightNumer; // b_i · p̂_c(Y_i) · W_i — the resampling weight before (1−t_c)/V
     float unshadowed;  // U_c(Y_i) — the finalize divisor if this neighbour wins
-    float3 chroma;     // F/luminance(F) in *this* domain — the §6.3 vector factor
     float accept;      // WRS acceptance draw
 };
 
@@ -184,8 +250,10 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
     uint base = pixel - slot;
 
     Surface canonical = reconstructSurface(params.paths, params.scene, slot);
-    Reservoir<PathSample> canonicalReservoir = loadPathReservoir(params.reservoirsIn[pixel]);
+    StoredPathReservoir canonicalStored = params.reservoirsIn[pixel];
+    Reservoir<PathSample> canonicalReservoir = loadPathReservoir(canonicalStored);
     let cCanon = canonicalReservoir.confidence; // c_c > 0 for any hit pixel
+    let canonNee = pathKind(canonicalReservoir.sample) == PATH_KIND_NEE;
 
     // p̂_c(Y_c) and U_c(Y_c): the canonical sample re-targeted here, with its one
     // visibility ray — the "+1" of the k+1. An empty/degenerate canonical (rare
@@ -200,7 +268,7 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
     float pcYc = 0.0;
     float3 canonChroma = float3(0.0);
     if (canonicalReservoir.unbiasedWeight > 0.0) {
-        if (pathKind(canonicalReservoir.sample) != PATH_KIND_NEE) {
+        if (!canonNee) {
             ucYc = luminance(canonicalReservoir.sample.F);
             pcYc = ucYc;
             canonChroma = chromaDirection(canonicalReservoir.sample.F, ucYc);
@@ -210,6 +278,11 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
             canonChroma = chromaDirection(rgb, ucYc);
         }
     }
+    // The canonical sample's visibility-aware RGB contribution W_c·F̂(Y_c) =
+    // W_c·p̂ᵛⁱˢ·chroma — rgb·V·W_c for an NEE canonical, the concrete F·W_c for
+    // an indirect one. Every pair's F-estimate below reuses it as its
+    // canonical-sample term.
+    let canonVisF = canonicalReservoir.unbiasedWeight * (pcYc * canonChroma);
 
     let px = int(pixel % params.width);
     let py = int(pixel / params.width);
@@ -224,6 +297,7 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
     uint validCount = 0;             // V — accepted neighbours
     float cTot = cCanon;             // c_tot — running Σ confidence
     float canonShareSum = 0.0;       // Σ_i c_c·p̂_c(Y_c)/(c_i·p̂_i(Y_c) + c_c·p̂_c(Y_c))
+    float3 cvPairSum = float3(0.0);  // Σ_j ⟨F_c⟩_{←j} — the per-neighbour CV terms
 
     let k = min(params.neighbours, MAX_SPATIAL_NEIGHBOURS);
     for (uint n = 0; n < k; n++) {
@@ -256,7 +330,8 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
 
         // A miss or unreached neighbour reads confidence 0 from the wave-cleared
         // buffer — nothing to reuse, drop before its surface is rebuilt.
-        Reservoir<PathSample> neighbour = loadPathReservoir(params.reservoirsIn[neighbourPixel]);
+        StoredPathReservoir neighbourStored = params.reservoirsIn[neighbourPixel];
+        Reservoir<PathSample> neighbour = loadPathReservoir(neighbourStored);
         if (!(neighbour.confidence > 0.0)) {
             continue;
         }
@@ -282,12 +357,14 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
         // stores a domain-independent light point — identity shift, Jacobian
         // 1 — through this stage's own arms: the visibility-aware p̂_c and
         // the unshadowed own-domain p̂_i.
+        let neeNeighbour = pathKind(neighbour.sample) == PATH_KIND_NEE;
         float ucYi = 0.0;
         float pcYiShifted = 0.0; // p̂_c(shift(Y_i))·J_i, 1 ray
         float piYi = 0.0;        // p̂_i(Y_i)
         float3 chroma = float3(0.0);
+        float3 fOwn = float3(0.0); // f_j(Y_j) at G-semantics — the residual's own term
         var shifted = neighbour.sample;
-        if (pathKind(neighbour.sample) != PATH_KIND_NEE) {
+        if (!neeNeighbour) {
             let sh = shiftIntoDomain(sceneTlas, params.scene,
                                      neighbour.sample, canonical);
             pcYiShifted = sh.target;
@@ -297,37 +374,77 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
             // The shifted integrand is this domain's F (the shift rewrote it),
             // and `unshadowed` is its luminance — the §6.3 chroma pair.
             chroma = chromaDirection(sh.sample.F, sh.unshadowed);
+            // The own-domain integrand, concretely traced at generation —
+            // G's indirect terms carry their visibility already lived.
+            fOwn = neighbour.sample.F;
         } else {
             float3 rgb;
             pcYiShifted = targetVisAware(canonical, neighbour.sample, ucYi, rgb);
             chroma = chromaDirection(rgb, ucYi);
-            piYi = targetUnshadowed(params.scene, params.restir,
-                                    neighbourSurface, neighbour.sample);
+            let tOwn = evalTarget(params.scene, params.restir, neighbourSurface,
+                                  neighbour.sample);
+            piYi = tOwn.unshadowed;
+            // G's NEE terms are unshadowed — the same RGB the own-domain
+            // target is the luminance of.
+            fOwn = tOwn.contribution;
         }
         // Symmetrically, the canonical's sample stated in the neighbour's
-        // domain: p̂_i(Y_c)·J through the shared ray-free reverse
-        // (`targetInDomain` — own-domain targets spend no ray, any kind).
-        // Skipped when its own-domain target is already zero (the canonical's
-        // share is zero regardless), which also spares the per-neighbour
-        // replay rays.
+        // domain: p̂_i(Y_c)·J through the shared ray-free reverse — own-domain
+        // targets spend no ray, any kind. An NEE canonical re-forms through
+        // `evalTarget` (what `targetInDomain` routes to for its kind), and its
+        // RGB doubles as the residual's backshift term; an indirect canonical
+        // prices through `targetInDomain`, and the residual deliberately never
+        // reads its backshift (the D-144 partition — see the module header).
+        // Skipped when the canonical's own-domain target is already zero (its
+        // share is zero regardless), which also spares the replay rays.
         float piYcShifted = 0.0;
+        float3 fBack = float3(0.0); // f_j(T(Y_c)) at G-semantics — NEE canonical only
         if (canonicalReservoir.unbiasedWeight > 0.0 && pcYc > 0.0) {
-            piYcShifted = targetInDomain(sceneTlas, params.scene, params.restir,
-                                         canonicalReservoir.sample,
-                                         neighbourSurface);
+            if (canonNee) {
+                let tBack = evalTarget(params.scene, params.restir,
+                                       neighbourSurface, canonicalReservoir.sample);
+                piYcShifted = tBack.unshadowed;
+                fBack = tBack.contribution;
+            } else {
+                piYcShifted = targetInDomain(sceneTlas, params.scene, params.restir,
+                                             canonicalReservoir.sample,
+                                             neighbourSurface);
+            }
         }
 
         let ci = neighbour.confidence;
         // b_i at Y_i, and the canonical's share of this pair at Y_c.
         let mis = pairwiseMis(ci, piYi, piYcShifted, cCanon, pcYiShifted, pcYc);
 
+        // -- This pair's control-variate term (6b-i, D-144; module header) ---
+        // estF: the two-sample pairwise estimate of this pixel's integral,
+        // visibility-aware — each scalar target re-formed in RGB through its
+        // chroma. estG: the matching estimate of the neighbour's transported
+        // G_j — its own sample under the same b_i (weight 1 on indirect
+        // points, where the canonical technique is declared uncovered), plus
+        // the canonical's unshadowed backshift for an NEE canonical. The
+        // bracket α⊙(lane_j − estG) is zero-mean; a non-finite term drops to
+        // zero while the neighbour stays counted in V (the reference's
+        // isfinite policy, and V must match the resampling stream's).
+        let alpha = albedoRatio(canonical.closure.aovAlbedo,
+                                neighbourSurface.closure.aovAlbedo);
+        let weightNumer = mis.bi * pcYiShifted * neighbour.unbiasedWeight;
+        let estF = weightNumer * chroma + mis.canonShare * canonVisF;
+        var estG = (neeNeighbour ? mis.bi : 1.0) * neighbour.unbiasedWeight * fOwn;
+        if (canonNee) {
+            estG += mis.canonShare * canonicalReservoir.unbiasedWeight * fBack;
+        }
+        let cvPair = estF + alpha * (neighbourStored.cvAccumulator - estG);
+        if (all(isfinite(cvPair))) {
+            cvPairSum += cvPair;
+        }
+
         AcceptedNeighbour a;
         a.sample = shifted;
         a.confidence = ci;
         // The GRIS weight of the shifted neighbour: m_i·p̂_c(shift(Y_i))·W_i·J_i.
-        a.weightNumer = mis.bi * pcYiShifted * neighbour.unbiasedWeight;
+        a.weightNumer = weightNumer;
         a.unshadowed = ucYi;
-        a.chroma = chroma;
         a.accept = sample_ranked_1d(pixel, ranked,
                                     restirSpatialDimension(n, RESTIR_SPATIAL_ACCEPT));
         accepted[validCount] = a;
@@ -342,15 +459,6 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
 
     Reservoir<PathSample> merged = reservoirInit<PathSample>();
     float survivorTarget = 0.0;
-    // The §6.3 vector-weight sum (M6 step 6a): every merge candidate's
-    // w⃗ = w_scalar·F/luminance(F), accumulated beside the scalar stream. Its
-    // expectation is the same reservoir-owned term the survivor·W estimate
-    // carries — E[Σᵢ mᵢ·F(Yᵢ)·W_i·Jᵢ·Vᵢ] = ∫f by GRIS for any per-candidate
-    // integrand — but every candidate's *colour* is averaged in, where the
-    // survivor's estimate rides one sample's hue (the colour-noise fix,
-    // Enhanced §6.3). Spatial-only by design: these candidates carry
-    // uncorrelated chroma; temporal history's is correlated (footnote 7).
-    float3 cvLane = float3(0.0);
 
     // The canonical: m_c = t_c + (1−t_c)·(1/V)·Σ shares. With V=0 the sum term
     // vanishes (t_c=1) and it passes through as its sole candidate.
@@ -360,7 +468,6 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
     if (reservoirMerge(merged, canonicalReservoir, wCanon, acceptCanon)) {
         survivorTarget = ucYc;
     }
-    cvLane += wCanon * canonChroma;
 
     // Each accepted neighbour: m_i = (1−t_c)·(1/V)·b_i, its resampling weight the
     // stashed b_i·p̂_c(Y_i)·W_i scaled by that. reservoirMerge inherits the
@@ -374,18 +481,31 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
         if (reservoirMerge(merged, nb, weight, a.accept)) {
             survivorTarget = a.unshadowed;
         }
-        cvLane += weight * a.chroma;
     }
 
     // Finalize by the *unshadowed* survivor target: W = weightSum/U_c folds the
     // survivor's own visibility into W (it was resampled ∝ p̂_c = U_c·V), so
     // restir_resolve shades it unshadowed with no further ray.
     reservoirFinalize(merged, survivorTarget);
-    // The vector sum rides the CV lane of this pass's output — pass-local by
-    // construction (the scratch never persists a frame), so 6a adds no
-    // cross-frame semantics. Resolve shades from it when the host's CV toggle
-    // is on; toggle-off never reads it (the D-130 survivor-shading degenerate).
-    var stored = storePathReservoir(merged);
-    stored.cvAccumulator = cvLane;
-    params.reservoirsOut[pixel] = stored;
+
+    // -- The CV combination (6b-i, D-144; module header) ---------------------
+    // The centre: the canonical's transported candidate mean, its NEE
+    // visibility deficit repaid at the one sample whose ray this pass traced —
+    // chroma·(p̂ᵛⁱˢ − p̂ᵘⁿˢʰ)·W_c has mean F_c − G_c, and is exactly zero for an
+    // indirect canonical (the two targets are the same number). Then the
+    // reference's convex combination over the V pair estimates, the centre at
+    // its fixed importance c. With V = 0 the lane is the corrected centre
+    // alone — spatial-on with no accepted neighbours still shades the CV.
+    // The lane rides this pass's output, pass-local as ever (the scratch
+    // never persists a frame); resolve shades it when the host's CV toggle is
+    // on, and toggle-off never reads it (the D-130 survivor-shading
+    // degenerate). Signed per channel; the only sanitization is non-finite → 0.
+    let centre = canonicalStored.cvAccumulator
+               + canonicalReservoir.unbiasedWeight * canonChroma * (pcYc - ucYc);
+    var cvOut = (cvPairSum + CV_CENTRAL_IMPORTANCE * centre)
+              / (float(validCount) + CV_CENTRAL_IMPORTANCE);
+    if (!all(isfinite(cvOut))) {
+        cvOut = float3(0.0);
+    }
+    params.reservoirsOut[pixel] = storePathReservoir(merged, cvOut);
 }

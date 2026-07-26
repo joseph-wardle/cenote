@@ -91,6 +91,23 @@ struct Params {
 [vk::push_constant]
 Params params;
 
+// -- The candidate-mean CV init (M6 step 6b-i, D-144) ------------------------
+// Beside the scalar stream, every candidate adds its MIS-weighted contribution
+// m·F/q into the CV lane — the balance-heuristic estimate of the whole
+// reservoir-owned integral from the *same* draws, every candidate counted
+// where the reservoir keeps one. No ÷M finalize is owed: the reference's mean
+// divides M uniform weights, and here the m's normalize across techniques by
+// construction. The lane's semantics are the stream's own: an NEE candidate
+// enters unshadowed (its visibility ray is the one the pipeline defers —
+// spatial repays the deficit at the sample whose ray it traces), an indirect
+// candidate enters as its concretely-traced F — visibility lived. A non-finite
+// term is dropped, never poisoning the lane (the reference's isfinite policy).
+void cvAccumulate(inout float3 cvLane, float3 contribution) {
+    if (all(isfinite(contribution))) {
+        cvLane += contribution;
+    }
+}
+
 // Fold one reconnected candidate into the reservoir under the count-weighted
 // balance heuristic. `toLight`/`radiance` reconstruct the connection; `lightPdf`
 // is p_L (the next-event solid-angle density of this point, selection folded in,
@@ -101,7 +118,7 @@ Params params;
 // but one unit of confidence, because the technique did draw a sample and the
 // balance heuristic's counts must match the draws. On selection the caller's
 // running p̂(Y) is updated so finalize needs no re-evaluation.
-void streamCandidate(inout Reservoir<PathSample> reservoir,
+void streamCandidate(inout Reservoir<PathSample> reservoir, inout float3 cvLane,
                      inout float survivorTarget, Closure closure, Frame frame,
                      float3 spawnNormal, float3 wo, PathSample sample,
                      float3 toLight, float3 radiance, float lightPdf, bool reachable,
@@ -117,10 +134,16 @@ void streamCandidate(inout Reservoir<PathSample> reservoir,
         let wiLight = frame.toLocal(toLight);
         let throughSurface = dot(toLight, spawnNormal) < 0.0;
         if (wiLight.z != 0.0 && (wiLight.z < 0.0) == throughSurface) {
-            target = luminance(radiance * evalBsdf(closure, wiLight, wo) * abs(wiLight.z));
+            let rgb = radiance * evalBsdf(closure, wiLight, wo) * abs(wiLight.z);
+            target = luminance(rgb);
             let bsdfDensity = bsdfPdf(closure, wiLight, wo);
             let denom = float(M) * lightPdf + bsdfDensity;
             weight = (target > 0.0 && denom > 0.0) ? target / denom : 0.0;
+            if (weight > 0.0) {
+                // m·F/q with the technique density cancelled — the same
+                // denominator the scalar weight divides (see the header MIS).
+                cvAccumulate(cvLane, rgb / denom);
+            }
         }
     }
     if (reservoirUpdate(reservoir, sample, weight, uAccept)) {
@@ -164,9 +187,9 @@ struct RcContext {
 // streams nothing: the walk is one technique draw whatever it meets, so
 // unlike the counted light mixture above there is no draw-count to keep
 // honest, and confidence tracks the events actually offered.
-void streamTailEvent(inout Reservoir<PathSample> reservoir, inout float survivorTarget,
-                     RcContext ctx, float3 wiWorld, float3 suffix,
-                     float neeLightPdf, uint terminal, float uAccept) {
+void streamTailEvent(inout Reservoir<PathSample> reservoir, inout float3 cvLane,
+                     inout float survivorTarget, RcContext ctx, float3 wiWorld,
+                     float3 suffix, float neeLightPdf, uint terminal, float uAccept) {
     PathSample sample = PathSample();
     sample.rcVertex = ctx.rc;
     sample.rcVertexWi = packUnitDirection(wiWorld);
@@ -185,6 +208,9 @@ void streamTailEvent(inout Reservoir<PathSample> reservoir, inout float survivor
     if (!(target > 0.0)) {
         return;
     }
+    // F/q — the walk is one technique draw, so m = 1 and the density is the
+    // candidate weight's own denominator (reconnection pdf × roulette fold).
+    cvAccumulate(cvLane, sample.F / (ctx.reconPdf * ctx.survival));
     if (reservoirUpdate(reservoir, sample, target / (ctx.reconPdf * ctx.survival),
                         uAccept)) {
         survivorTarget = target;
@@ -199,13 +225,16 @@ void streamTailEvent(inout Reservoir<PathSample> reservoir, inout float survivor
 // with every pdf divided in, so the candidate weight divides only the
 // survivals the walk actually rolled before the event — the D-138 fold, which
 // is what lets the replay never roll.
-void streamReplayEvent(inout Reservoir<PathSample> reservoir, inout float survivorTarget,
-                       uint seed, float3 F, uint terminal, uint bounce,
-                       float survival, float uAccept) {
+void streamReplayEvent(inout Reservoir<PathSample> reservoir, inout float3 cvLane,
+                       inout float survivorTarget, uint seed, float3 F,
+                       uint terminal, uint bounce, float survival, float uAccept) {
     let target = luminance(F);
     if (!(target > 0.0)) {
         return;
     }
+    // F/q, as in the tail event: F carries every pdf divided in, so only the
+    // roulette fold remains to divide.
+    cvAccumulate(cvLane, F / survival);
     PathSample sample = PathSample();
     sample.F = F;
     sample.initRandomSeed = seed;
@@ -270,7 +299,8 @@ struct WalkVertex {
 // drawn scatter's f·cos/pdf (the prefix chain's first factor, in replay's
 // exact form); `x1` the previous-vertex shading the bounce-1 pair search
 // reconnects off.
-void walkTail(inout Reservoir<PathSample> reservoir, inout float survivorTarget,
+void walkTail(inout Reservoir<PathSample> reservoir, inout float3 cvLane,
+              inout float survivorTarget,
               uint pixel, uint ranked, uint seed, SceneTable* scene,
               uint maxBounces, Hit hit, float3 drawnDir, float3 origin,
               uint medium, float rhs, float3 x1FOverPdf, WalkVertex x1) {
@@ -341,7 +371,7 @@ void walkTail(inout Reservoir<PathSample> reservoir, inout float survivorTarget,
                 let uAccept = sample_ranked_1d(pixel, ranked,
                     restirTailDimension(bounce, RESTIR_TAIL_SCATTER_ACCEPT));
                 if (!ctx.shiftable) {
-                    streamReplayEvent(reservoir, survivorTarget, seed,
+                    streamReplayEvent(reservoir, cvLane, survivorTarget, seed,
                                       prefixHere * scene.env.radiance(walkDir)
                                           * envEscapeMisWeight(scene, walkDir,
                                                                prevScatterPdf),
@@ -351,11 +381,11 @@ void walkTail(inout Reservoir<PathSample> reservoir, inout float survivorTarget,
                     let neePdf = scene.env.selectProb > 0.0
                         ? scene.env.selectProb * scene.env.pdf(wiEval)
                         : 0.0;
-                    streamTailEvent(reservoir, survivorTarget, ctx, rcWiWorld,
+                    streamTailEvent(reservoir, cvLane, survivorTarget, ctx, rcWiWorld,
                                     suffix * scene.env.radiance(wiEval), neePdf,
                                     RC_TERMINAL_SCATTER, uAccept);
                 } else {
-                    streamTailEvent(reservoir, survivorTarget, ctx, rcWiWorld,
+                    streamTailEvent(reservoir, cvLane, survivorTarget, ctx, rcWiWorld,
                                     suffix * scene.env.radiance(walkDir)
                                         * envEscapeMisWeight(scene, walkDir,
                                                              prevScatterPdf),
@@ -399,17 +429,17 @@ void walkTail(inout Reservoir<PathSample> reservoir, inout float survivorTarget,
             let uAccept = sample_ranked_1d(pixel, ranked,
                 restirTailDimension(bounce, RESTIR_TAIL_SCATTER_ACCEPT));
             if (!ctx.shiftable) {
-                streamReplayEvent(reservoir, survivorTarget, seed,
+                streamReplayEvent(reservoir, cvLane, survivorTarget, seed,
                                   prefixHere * vMaterial.emission
                                       * powerHeuristic(prevScatterPdf, neePdf),
                                   RC_TERMINAL_SCATTER, bounce, pendingSurvival,
                                   uAccept);
             } else if (scatterWasRcDraw) {
-                streamTailEvent(reservoir, survivorTarget, ctx, rcWiWorld,
+                streamTailEvent(reservoir, cvLane, survivorTarget, ctx, rcWiWorld,
                                 suffix * vMaterial.emission, neePdf,
                                 RC_TERMINAL_SCATTER, uAccept);
             } else {
-                streamTailEvent(reservoir, survivorTarget, ctx, rcWiWorld,
+                streamTailEvent(reservoir, cvLane, survivorTarget, ctx, rcWiWorld,
                                 suffix * vMaterial.emission
                                     * powerHeuristic(prevScatterPdf, neePdf),
                                 0.0, RC_TERMINAL_BAKED, uAccept);
@@ -497,16 +527,16 @@ void walkTail(inout Reservoir<PathSample> reservoir, inout float survivorTarget,
                     let uAccept = sample_ranked_1d(pixel, ranked,
                         restirTailDimension(bounce, RESTIR_TAIL_NEE_ACCEPT));
                     if (!ctx.shiftable) {
-                        streamReplayEvent(reservoir, survivorTarget, seed,
+                        streamReplayEvent(reservoir, cvLane, survivorTarget, seed,
                                           nee.unshadowed * vis, RC_TERMINAL_NEE,
                                           bounce, pendingSurvival, uAccept);
                     } else if (justLocked) {
-                        streamTailEvent(reservoir, survivorTarget, ctx, nee.direction,
+                        streamTailEvent(reservoir, cvLane, survivorTarget, ctx, nee.direction,
                                         suffix * nee.radiance * (vis / nee.pdf), nee.pdf,
                                         nee.delta ? RC_TERMINAL_BAKED : RC_TERMINAL_NEE,
                                         uAccept);
                     } else {
-                        streamTailEvent(reservoir, survivorTarget, ctx, rcWiWorld,
+                        streamTailEvent(reservoir, cvLane, survivorTarget, ctx, rcWiWorld,
                                         nee.unshadowed * vis, 0.0, RC_TERMINAL_BAKED,
                                         uAccept);
                     }
@@ -638,6 +668,9 @@ void restir_candidates(uint3 tid: SV_DispatchThreadID) {
     // p̂ at the held survivor, tracked as the stream runs so finalize needs no
     // re-evaluation (the survivor's target is whatever won the last acceptance).
     float survivorTarget = 0.0;
+    // The candidate-mean CV init (6b-i): Σ m·F/q over the whole stream — see
+    // `cvAccumulate`. Every stream site below feeds it beside the reservoir.
+    float3 cvLane = float3(0.0);
 
     // -- M light candidates: the alias table + the environment coin flip -----
     for (uint i = 0; i < M; i++) {
@@ -693,7 +726,7 @@ void restir_candidates(uint3 tid: SV_DispatchThreadID) {
             lightPdf = (1.0 - envProb) * c.pdf;
         }
 
-        streamCandidate(reservoir, survivorTarget, closure, frame, spawn.normal, wo,
+        streamCandidate(reservoir, cvLane, survivorTarget, closure, frame, spawn.normal, wo,
                         sample, toLight, radiance, lightPdf, lightPdf > 0.0, M, uAccept);
     }
 
@@ -810,7 +843,7 @@ void restir_candidates(uint3 tid: SV_DispatchThreadID) {
                 x1.frame = frame;
                 x1.wo = wo;
                 x1.rough = reconnectionRough(material);
-                walkTail(reservoir, survivorTarget, pixel, ranked, seed,
+                walkTail(reservoir, cvLane, survivorTarget, pixel, ranked, seed,
                          params.scene, params.maxBounces, rc, wiWorld,
                          scatterOrigin, scatterMedium, rhs, fOverPdf, x1);
             } else {
@@ -829,10 +862,10 @@ void restir_candidates(uint3 tid: SV_DispatchThreadID) {
             }
         }
 
-        streamCandidate(reservoir, survivorTarget, closure, frame, spawn.normal, wo,
+        streamCandidate(reservoir, cvLane, survivorTarget, closure, frame, spawn.normal, wo,
                         sample, toLight, radiance, lightPdf, found, M, uAccept);
     }
 
     reservoirFinalize(reservoir, survivorTarget);
-    params.reservoirs[pixel] = storePathReservoir(reservoir);
+    params.reservoirs[pixel] = storePathReservoir(reservoir, cvLane);
 }

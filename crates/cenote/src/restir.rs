@@ -112,10 +112,11 @@ pub(crate) struct StoredPathReservoir {
     pub flags: u32,
     /// Pad: 16-byte-aligns the `ReSTCV` lane so this mirror matches std430.
     pub pad0: u32,
-    /// `ReSTCV` accumulated colour — the per-reservoir control variate (D-127);
-    /// zero until step 6, where its update math is pinned after the deep-read.
+    /// `ReSTCV` accumulated colour — the per-reservoir control variate (D-127),
+    /// live from 6b-i (D-144): candidate mean out of the candidate stage,
+    /// passed through temporal, the CV combination out of spatial.
     pub cv_accumulator: [f32; 3],
-    /// `ReSTCV` running weight; zero until step 6.
+    /// `ReSTCV` running weight; reserved-zero until 6b-ii claims or retires it.
     pub cv_normalization: f32,
 }
 
@@ -825,7 +826,9 @@ mod tests {
                     },
                     unbiased_weight: f * 0.5 + 1.0,
                     confidence: f * 0.25 + 2.0,
-                    // Reserved lanes: non-zero junk `store` must overwrite with 0.
+                    // Reserved lanes: non-zero junk `store` must overwrite with
+                    // 0. The CV lane (live from 6b-i) instead round-trips with
+                    // its own transform, like every live field.
                     flags: i * 31 + 13,
                     pad0: i * 37 + 15,
                     cv_accumulator: [f * 0.001 + 9.0, f * 0.001 + 9.3, f * 0.001 + 9.6],
@@ -949,16 +952,19 @@ mod tests {
             near(got.unbiased_weight, src.unbiased_weight * 2.0, "W");
             near(got.confidence, src.confidence + 100.0, "M");
 
-            // store must clear the reserved flags/pad and the step-6 `ReSTCV` lane,
-            // regardless of the non-zero junk seeded on input.
+            // The CV lane is live from 6b-i: it rides through store as an
+            // argument, and its per-component transform pins the float3 at
+            // bytes 80..92 by value, not just by the size assert.
+            near(got.cv_accumulator[0], src.cv_accumulator[0] + 0.4, "cv.x");
+            near(got.cv_accumulator[1], src.cv_accumulator[1] + 0.5, "cv.y");
+            near(got.cv_accumulator[2], src.cv_accumulator[2] + 0.6, "cv.z");
+
+            // store must clear the reserved flags/pad and the still-reserved
+            // cvNormalization, regardless of the non-zero junk seeded on input.
             assert_eq!(got.flags, 0, "flags[{i}] not cleared");
             assert_eq!(got.pad0, 0, "pad0[{i}] not cleared");
             // `== 0.0` against a literal is the exact-zero idiom clippy exempts
-            // (as the weightSum check below): store writes these lanes to exactly 0.
-            assert!(
-                got.cv_accumulator.iter().all(|&c| c == 0.0),
-                "cvAccumulator[{i}] not cleared"
-            );
+            // (as the weightSum check below): store writes this lane to exactly 0.
             assert!(got.cv_normalization == 0.0, "cvNormalization[{i}] not cleared");
         }
 

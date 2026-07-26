@@ -177,15 +177,15 @@ pub struct Renderer {
     /// back through last frame's camera and a disocclusion gate drops history the
     /// camera moved off. Preserved across [`Renderer::reload`].
     temporal_reuse: bool,
-    /// Whether `ReSTIR` shades the spatial pass's accumulated vector weights —
-    /// every merge candidate's colour at its own resampling weight — from the
-    /// reservoir's CV lane, rather than the survivor alone (Enhanced §6.3, M6
-    /// step 6a). On by default: it is the estimator's colour-noise fix and
-    /// costs no rays. Off is survivor-only shading, the zero-CV degenerate
-    /// (D-130) the A/B gates compare against; step 6b widens the same toggle
-    /// to the full control variate. Meaningful only in [`RenderMode::Restir`]
-    /// with spatial reuse on (spatial-off configs shade the survivor
-    /// regardless). Preserved across [`Renderer::reload`].
+    /// Whether `ReSTIR` shades the spatial pass's control-variate lane — the
+    /// candidate mean blended with every neighbour's running colour estimate
+    /// (`ReSTCV`, M6 step 6b-i; the §6.3 vector-weight shading of 6a was this
+    /// estimator's zero-CV shallow end) — rather than the survivor alone. On
+    /// by default: it is the estimator's colour-noise fix and costs no rays.
+    /// Off is survivor-only shading, the zero-CV degenerate (D-130) the A/B
+    /// gates compare against. Meaningful only in [`RenderMode::Restir`] with
+    /// spatial reuse on (spatial-off configs shade the survivor regardless).
+    /// Preserved across [`Renderer::reload`].
     cv_shading: bool,
     /// Relative std-error below which the accumulate kernel counts a pixel as
     /// converged (M3 step 6b/6c) — the auto-stop metric's threshold. Defaults to
@@ -363,19 +363,18 @@ impl Renderer {
         self.temporal_reuse
     }
 
-    /// Toggle §6.3 vector-weight ("CV") shading (M6 step 6a): shade the spatial
-    /// pass's accumulated vector weights from the reservoir's CV lane — every
-    /// merge candidate's colour averaged — rather than the survivor alone. On
-    /// by default; off is survivor-only shading, the zero-CV degenerate (D-130)
-    /// the A/B gates flip to, and step 6b's CV-off. Meaningful only in
-    /// [`RenderMode::Restir`] with spatial reuse on; takes effect on the next
-    /// [`Renderer::accumulate`], so the caller resets its film to switch
-    /// cleanly.
+    /// Toggle control-variate shading (`ReSTCV`, M6 step 6b-i): shade the
+    /// spatial pass's CV lane — the candidate mean plus the per-neighbour
+    /// control-variate terms — rather than the survivor alone. On by default;
+    /// off is survivor-only shading, the zero-CV degenerate (D-130) the A/B
+    /// gates flip to. Meaningful only in [`RenderMode::Restir`] with spatial
+    /// reuse on; takes effect on the next [`Renderer::accumulate`], so the
+    /// caller resets its film to switch cleanly.
     pub fn set_cv_shading(&mut self, enabled: bool) {
         self.cv_shading = enabled;
     }
 
-    /// Whether CV (vector-weight) shading is on.
+    /// Whether control-variate shading is on.
     #[must_use]
     pub fn cv_shading(&self) -> bool {
         self.cv_shading

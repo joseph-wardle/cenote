@@ -79,14 +79,18 @@
 //   cvAccumulator/cvNormalization — the ReSTCV control-variate slot (D-127): a
 //                     per-reservoir accumulated-colour estimate, placed LAST so
 //                     step 6 could pin its update math without moving any field
-//                     before it (D-128). Live from step 6a: the spatial pass
-//                     accumulates its merge stream's vector weights
-//                     w⃗ = w_scalar·F/luminance(F) here (§6.3 colour-noise fix)
-//                     and resolve shades from the lane — pass-local, since the
-//                     spatial scratch never persists a frame. Zero-CV shading
-//                     (the host toggle off) is plain ReSTIR PT — the
-//                     degenerate, D-130. `cvNormalization` stays reserved-zero
-//                     until 6b.
+//                     before it (D-128). Live from step 6b-i (D-144), and now
+//                     every store site names its lane: the candidate stage
+//                     writes the mean of its whole stream's contributions
+//                     Σ m·F/q (the unshadowed-NEE + concrete-indirect estimate,
+//                     the lane's transported semantics), temporal passes it
+//                     through untouched (the 6b-ii recurrence will blend here),
+//                     and spatial replaces it with the per-neighbour
+//                     control-variate combination — visibility repaid at the
+//                     samples whose rays that pass traces — which resolve
+//                     shades. Zero-CV shading (the host toggle off) is plain
+//                     ReSTIR PT — the degenerate, D-130. `cvNormalization`
+//                     stays reserved-zero until 6b-ii claims or retires it.
 //
 // -- The pass-local weightSum invariant carries over --------------------
 // `StoredPathReservoir` stores {sample, W, M} plus the reserved CV slot, and
@@ -161,15 +165,21 @@ public struct StoredPathReservoir {
 };
 
 // Persist a live path reservoir, dropping the pass-local weightSum and zeroing
-// the reserved slots until the steps that own them fill them in.
-public StoredPathReservoir storePathReservoir(Reservoir<PathSample> r) {
+// the reserved slots until the steps that own them fill them in. The CV lane
+// is a required argument rather than a default (M6 step 6b-i): the live
+// `Reservoir` deliberately has no colour-estimate field — the lane is a
+// passenger beside resampling, never inside it — so every store site must say
+// what its pass's estimate is, and a site that had nothing to say would be a
+// stage the CV silently died in.
+public StoredPathReservoir storePathReservoir(Reservoir<PathSample> r,
+                                              float3 cvAccumulator) {
     StoredPathReservoir s;
     s.sample = r.sample;
     s.unbiasedWeight = r.unbiasedWeight;
     s.confidence = r.confidence;
     s.flags = 0;
     s.pad0 = 0;
-    s.cvAccumulator = float3(0);
+    s.cvAccumulator = cvAccumulator;
     s.cvNormalization = 0;
     return s;
 }
