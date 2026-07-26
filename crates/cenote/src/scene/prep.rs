@@ -131,6 +131,7 @@ impl Scene {
             env_from_world: spec.from_world,
             identity,
             restir,
+            epoch: 0,
         })
     }
 
@@ -227,6 +228,11 @@ impl Scene {
         if let Some(camera) = host.camera {
             self.camera = camera;
         }
+        // A new build: the instance tables above re-uploaded (and the TLAS may
+        // have renumbered), so build-keyed history is now stale — see
+        // `Scene::epoch`. Bumped only on success: a rejected edit left the
+        // previous build fully live.
+        self.epoch += 1;
         Ok(())
     }
 }
@@ -529,12 +535,28 @@ mod tests {
         let mut description = replay(&history);
         let mut scene = Scene::prep(&gpu, &mut description).expect("prep");
 
+        // The temporal epoch gate's scene half (§4c decision 2), asserted
+        // across the same walk: a fresh build is build 0, a camera move is
+        // not a build (it re-uploads nothing), and every applied edit bumps
+        // the counter exactly once — whatever it dirtied.
+        assert_eq!(scene.epoch(), 0, "a fresh build is build 0");
+        let camera = *scene.camera();
+        *scene.camera_mut() = camera;
+        assert_eq!(scene.epoch(), 0, "a camera move must not bump the build");
+
+        let mut builds = 0;
         for (label, set) in edit_walk(&sky, &wood) {
             description.apply(&set).expect(label);
             let dirty = description.take_dirty();
             scene
                 .update(&gpu, &description, &dirty)
                 .unwrap_or_else(|error| panic!("{label}: {error}"));
+            builds += 1;
+            assert_eq!(
+                scene.epoch(),
+                builds,
+                "{label}: an applied edit must bump the build counter exactly once"
+            );
             history.push(set);
             let fresh = Scene::prep(&gpu, &mut replay(&history)).expect("fresh prep");
             assert_eq!(

@@ -112,6 +112,15 @@ pub struct ViewState {
     /// `CpuToGpu`, one small struct — and reached by `restir_temporal` through a
     /// single push pointer.
     reproject: Buffer,
+    /// The scene build (`Scene::epoch`) `prev` was rendered against, recorded
+    /// at each [`Self::swap`]. When the *current* build differs — an edit
+    /// landed between frames — an indirect prev sample's `rcVertex.instance`
+    /// is a raw TLAS custom index the rebuild may have renumbered, so the
+    /// temporal stage drops such pairs before any dereference (the epoch
+    /// gate); NEE history survives the edit through the light-id registry.
+    /// Starts at 0, matching a fresh scene's — harmless either way, since a
+    /// fresh state's `prev` is empty.
+    prev_epoch: u64,
 }
 
 impl ViewState {
@@ -146,6 +155,7 @@ impl ViewState {
                 vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                 MemoryLocation::CpuToGpu,
             )?,
+            prev_epoch: 0,
         };
 
         // An all-zero reservoir is the empty one: sample 0, W 0, and — the
@@ -178,10 +188,19 @@ impl ViewState {
     /// produced each committed reservoir travels with it (the disocclusion gate
     /// compares against exactly that surface). One swap of each pair, at frame
     /// end — the ping-pong that lets the temporal pass read a fully-committed
-    /// prior buffer with a barrier between, never a half-written one.
-    pub fn swap(&mut self) {
+    /// prior buffer with a barrier between, never a half-written one. `epoch`
+    /// is the scene build the committed frame rendered against
+    /// (`Scene::epoch`), recorded so the next frame can tell whether the
+    /// history is still index-safe — see [`Self::prev_epoch`].
+    pub fn swap(&mut self, epoch: u64) {
         std::mem::swap(&mut self.prev, &mut self.curr);
         std::mem::swap(&mut self.gbuffer_prev, &mut self.gbuffer_curr);
+        self.prev_epoch = epoch;
+    }
+
+    /// The scene build `prev` was rendered against — see the field.
+    pub fn prev_epoch(&self) -> u64 {
+        self.prev_epoch
     }
 
     /// The view this state belongs to.
@@ -400,7 +419,9 @@ mod tests {
         assert!(!views.is_empty());
     }
 
-    /// The ping-pong swap exchanges prev and curr and nothing else.
+    /// The ping-pong swap exchanges prev and curr — nothing else moves — and
+    /// records the scene build the committed frame rendered against (the
+    /// temporal epoch gate's host half, §4c decision 2).
     #[test]
     fn swap_exchanges_prev_and_curr() {
         let Some(gpu) = crate::gpu::test_context() else {
@@ -419,7 +440,10 @@ mod tests {
             state.gbuffer_curr().device_address(),
             state.reproject().device_address(),
         );
-        state.swap();
+        // A fresh state's history matches build 0 — vacuously safe, its
+        // `prev` is empty.
+        assert_eq!(state.prev_epoch(), 0, "a fresh state starts at build 0");
+        state.swap(3);
         assert_eq!(state.prev().device_address(), curr, "prev takes curr's buffer");
         assert_eq!(state.curr().device_address(), prev, "curr takes prev's buffer");
         // The G-buffer pair ping-pongs in lockstep with the reservoirs, so a
@@ -429,5 +453,13 @@ mod tests {
         assert_eq!(state.cand().device_address(), cand, "cand is untouched");
         assert_eq!(state.scratch().device_address(), scratch, "scratch is untouched");
         assert_eq!(state.reproject().device_address(), reproject, "reproject is not swapped");
+        // The committed frame's scene build travels with the history: the
+        // next frame compares it against the current `Scene::epoch` to decide
+        // whether indirect samples may cross the boundary.
+        assert_eq!(state.prev_epoch(), 3, "swap records the committed build");
+        state.swap(3);
+        assert_eq!(state.prev_epoch(), 3, "an editless frame keeps the build");
+        state.swap(7);
+        assert_eq!(state.prev_epoch(), 7, "an edit's new build replaces it");
     }
 }

@@ -219,6 +219,13 @@ pub struct Scene {
     /// coin-flip probability, and the identity remap — rebuilt beside the
     /// scene table whenever a light edit dirties it.
     restir: RestirResources,
+    /// The scene-build counter: bumped by every applied edit
+    /// ([`Scene::update`]), never by a camera move (which rebuilds nothing).
+    /// An edit re-uploads the instance tables and may renumber TLAS custom
+    /// indices, so data keyed to a build — a path reservoir's raw
+    /// `rcVertex.instance` — goes stale when this moves; the temporal epoch
+    /// gate compares it against the build its history was rendered under.
+    epoch: u64,
 }
 
 /// One material texture resident on the GPU, with the content hash of the
@@ -384,6 +391,7 @@ impl Scene {
             env_from_world: Mat4::IDENTITY,
             identity,
             restir,
+            epoch: 0,
         })
     }
 
@@ -391,6 +399,15 @@ impl Scene {
     #[must_use]
     pub fn tlas(&self) -> &AccelerationStructure {
         &self.tlas
+    }
+
+    /// Which build of the scene this is — bumped by every applied edit
+    /// ([`Scene::update`]), untouched by camera moves. Consumers holding
+    /// build-keyed data (a reservoir's raw TLAS custom index) compare epochs
+    /// to tell it went stale; see the field.
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     /// The environment's emitted power as the selection heuristic weighs

@@ -280,11 +280,14 @@ impl Film {
 
     /// Commit this frame's reservoirs: `curr` becomes next frame's `prev`.
     /// The renderer calls this at frame end when temporal reuse is on, so the
-    /// next frame's temporal pass reads a fully-committed prior buffer. A no-op
-    /// before any `ReSTIR` wave has built the state.
-    pub(super) fn swap_reservoirs(&mut self) {
+    /// next frame's temporal pass reads a fully-committed prior buffer.
+    /// `epoch` is the scene build the frame rendered against
+    /// ([`Scene::epoch`](crate::scene::Scene::epoch)), recorded with the
+    /// history for the temporal epoch gate. A no-op before any `ReSTIR` wave
+    /// has built the state.
+    pub(super) fn swap_reservoirs(&mut self, epoch: u64) {
         if let Some(view) = self.view.as_mut() {
-            view.swap();
+            view.swap(epoch);
         }
     }
 

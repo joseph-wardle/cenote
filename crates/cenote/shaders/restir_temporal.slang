@@ -9,13 +9,23 @@
 // Exactly the defensive pairwise-MIS combine `restir_spatial` runs, with one
 // neighbour — the reprojected `prev` — and two differences:
 //
-//   1. It is **unshadowed**. Temporal adds no shadow rays; both the canonical
-//      and the neighbour are weighed by the plain unshadowed target p̂ =
-//      luminance(L·f·|cosθ|), and `curr` carries the *unshadowed* W. The one
-//      committed visibility test still happens exactly once downstream —
-//      spatial's V-fold, or resolve's traced shadow ray — so the feed
-//      convention (unshadowed W into `prev`/spatial, visibility-folded W into
-//      the dead-end `scratch`) is never mixed (D-094).
+//   1. Its NEE arms are **unshadowed**. Temporal spends no shadow ray on a
+//      light sample: both sides of an NEE pair are weighed by the plain
+//      unshadowed target p̂ = luminance(L·f·|cosθ|), and an NEE survivor's
+//      `curr` carries the *unshadowed* W. The one committed visibility test
+//      still happens exactly once downstream — spatial's V-fold, or resolve's
+//      traced shadow ray — so the feed convention (unshadowed W into
+//      `prev`/spatial, visibility-folded W into the dead-end `scratch`) is
+//      never mixed (D-094). An *indirect* prev sample — reconnection or
+//      replay — crosses the frame boundary through the shared shift block
+//      instead (`shiftIntoDomain`, restir_target.slang; step 5b): its F is
+//      re-formed at this pixel through the current TLAS — prefix replayed,
+//      reconnection visibility re-traced, Jacobian priced — exactly as
+//      spatial shifts a screen-space neighbour. That ray belongs to the
+//      shift (the integrand is undefined without it), not to an NEE resolve;
+//      on a win the *re-rooted* sample is stored, its W finalized by its
+//      complete integrand — precisely what generation at this pixel would
+//      have produced, so downstream's canonical trust (D-138/D-139) holds.
 //
 //   2. The neighbour's confidence is **M-capped** before it is combined:
 //      c_prev ← min(c_prev, M_CAP · c_cand). A candidates frame already credits
@@ -43,14 +53,25 @@
 // never a bias (D-094) — so the estimator below is unchanged; only *which* prev
 // reservoir and *which* surface feed it move.
 //
+// -- The frame boundary and the epoch gate (step 5b) -------------------------
+// History may have been rendered against an *older scene build*: an edit
+// re-uploads the instance tables and may renumber TLAS custom indices, and an
+// indirect sample at rest holds one raw (`rcVertex.instance`). The host
+// reports whether prev's build is still current (`prevSameScene`); when it
+// isn't, indirect history is dropped before any dereference — the neighbour
+// simply doesn't exist that frame — while NEE history keeps surviving edits
+// through the light-id registry (M3). Camera-only motion rebuilds nothing, so
+// the common temporal case (orbiting) never trips the gate.
+//
 // -- The decay ramp (step 5d) ------------------------------------------------
 // The history confidence is scaled by a short linear ramp on samples-since-reset
 // (`sampleIndex`), `decay = saturate(1 − sampleIndex / decayFrames)`, before the
 // M-cap and the combine. On a moving camera the film resets every frame, so
 // `sampleIndex` stays low and `decay ≈ 1` — temporal is fully live, the
 // warm-start. On a held camera `sampleIndex` climbs and `decay` reaches *exactly*
-// zero at `decayFrames`; from there `prev.confidence` is zero, so `ci = 0`, the
-// neighbour's MIS weight and resampling weight both vanish, and the combine
+// zero at `decayFrames`; from there the zeroed confidence folds into
+// `prevValid` before any shift work (§4c decision 3) — the neighbour is
+// dropped outright, no shift or visibility ray spent — and the combine
 // reduces to the candidate passing straight through — `curr ≡ cand`. The
 // converged still is therefore temporal-*free*: spatial-only, fresh per-frame
 // RNG, independent unbiased frames averaging at 1/N to the brute-force reference
@@ -78,6 +99,12 @@ import restir_target;
 import rng;
 import scene;
 
+// The scene TLAS, as every reuse stage binds it: the cross-frame shift of an
+// indirect prev sample traces it — replay segments and the shift's one
+// visibility ray. The NEE arms trace nothing (D-094).
+[vk::binding(0, 0)]
+RaytracingAccelerationStructure sceneTlas;
+
 struct Params {
     Paths paths;
     Queue<uint> hits;              // primary hits, dispatched indirectly; not consumed
@@ -96,7 +123,10 @@ struct Params {
     // spatial-only accumulation (step 5d). `0` disables the ramp (the pinned CI
     // gate); see the header.
     uint decayFrames;
-    uint pad0; // matches the host's tail padding to 8-byte alignment
+    // 1 when `prev` was rendered against the current scene build, 0 across an
+    // edit — the epoch gate (see the header). At 0 indirect history is
+    // dropped before its stored TLAS index is ever dereferenced.
+    uint prevSameScene;
 };
 
 [vk::push_constant]
@@ -147,7 +177,16 @@ void restir_temporal(uint3 tid: SV_DispatchThreadID) {
     uint prevPixel;
     if (reprojectPixel(reproject, surface.position, prevPixel)) {
         prev = loadPathReservoir(params.reservoirsPrev[prevPixel]);
-        if (prev.confidence > 0.0) {
+        // The epoch gate (see the header): across a scene edit an indirect
+        // prev sample's `rcVertex.instance` is a raw TLAS custom index the
+        // rebuild may have renumbered — nothing may dereference it, so the
+        // neighbour simply doesn't exist this frame. The kind bits are plain
+        // data, safe to read; NEE history flows on through the light-id
+        // registry. One frame of indirect warm-start is the whole cost, on
+        // an edit that reset the film anyway.
+        let staleIndirect = params.prevSameScene == 0
+                          && pathKind(prev.sample) != PATH_KIND_NEE;
+        if (!staleIndirect && prev.confidence > 0.0) {
             GBufEntry prevEntry = reproject.prevGbuffer[prevPixel];
             prevSurface = reconstructSurfaceFrom(params.scene, prevEntry.hit,
                                                  prevEntry.direction, prevEntry.origin.xyz);
@@ -163,14 +202,20 @@ void restir_temporal(uint3 tid: SV_DispatchThreadID) {
     // adds `prev.confidence`). The cap bounds history *length*; the decay anneals
     // the whole temporal contribution to zero as a held camera converges (see the
     // header). Both fold into the single confidence the MIS weights and the merge
-    // read, before either — the consistency the microtest guards. `decay` hits
-    // exactly zero past the window, so `prev.confidence` is zero and the neighbour
-    // drops out entirely, leaving `curr ≡ cand`.
+    // read, before either — the consistency the microtest guards.
     let decay = params.decayFrames > 0
         ? saturate(1.0 - float(params.sampleIndex) / float(params.decayFrames))
         : 1.0;
     if (prevValid) {
         prev.confidence = min(prev.confidence, params.mCap * cCanon) * decay;
+        // A decayed-to-zero history is no neighbour at all (§4c decision 3).
+        // The estimate is untouched — a zero-confidence neighbour's MIS and
+        // resampling weights already vanish (both carry c_i), and with the
+        // pair gone t_c = 1 collapses the combine to the same pass-through —
+        // but folding the zero into `prevValid` here, *before* any shift
+        // work, is what lets the converged still (decay 0) provably spend
+        // zero temporal rays: `curr ≡ cand` with nothing traced.
+        prevValid = prev.confidence > 0.0;
     }
 
     // p̂_c(Y_c): the canonical (this frame's candidate) sample's unshadowed target
@@ -186,45 +231,56 @@ void restir_temporal(uint3 tid: SV_DispatchThreadID) {
             : targetUnshadowed(params.scene, params.restir, surface, cand.sample);
     }
 
-    // Step-2 scope (D-134/D-136): an indirect sample — reconnection or replay
-    // — does not cross the frame boundary; its *temporal* shift is not
-    // defined until step 5, which owes it three things at once: the shift
-    // across the reprojected surface, a stable identity for
-    // `rcVertex.instance` (a raw TLAS index today, which a scene edit
-    // renumbers — the very hazard the light-id registry solves for NEE
-    // samples), and a re-test of the visibility resolve deliberately skips.
-    // As with an undefined spatial shift, the treatment is the partial-shift
-    // convention: the cross-frame target is zero while the pair still counts,
-    // so the MIS stays a fixed function of each sample (unbiased — history
-    // just carries no GI until step 5; this frame's candidate passes through
-    // with full weight). Guarding *before* any target of prev's sample is
-    // evaluated also keeps a stale instance index from ever being
-    // dereferenced.
-    let prevIsNee = pathKind(prev.sample) == PATH_KIND_NEE;
-    let candIsNee = pathKind(cand.sample) == PATH_KIND_NEE;
-
+    // The cross-frame pair (step 5b), spatial's per-neighbour block with the
+    // one reprojected neighbour. An indirect sample — reconnection or replay
+    // — crosses through the shared shift-and-target block
+    // (restir_target.slang): forward, `shiftIntoDomain` re-forms prev's F at
+    // this pixel through the current TLAS — the shift map, its one
+    // visibility ray, the partial-shift zero for an undefined shift (D-136)
+    // — and hands back the re-rooted sample to store on a win; reverse,
+    // `targetInDomain` states cand's sample in prev's domain ray-free, as
+    // own-domain targets always are. The NEE arms are this stage's own and
+    // *unshadowed* — no shadow ray, the committed visibility test still
+    // downstream (D-094).
+    //
+    // The pairwise ratios (spatial's, p̂_i on the reconstructed *prev*
+    // surface):
+    //   b_i        = c_i·p̂_i(Y_i) / (c_i·p̂_i(Y_i) + c_c·p̂_c(Y_i))   at prev's sample
+    //   canonShare = c_c·p̂_c(Y_c) / (c_i·p̂_i(Y_c) + c_c·p̂_c(Y_c))   at cand's sample
     let ci = prevValid ? prev.confidence : 0.0;
     let cTot = cCanon + ci;
     let tc = cTot > 0.0 ? cCanon / cTot : 1.0; // c_c/c_tot; =1 when prev is empty
     let invV = prevValid ? 1.0 : 0.0;          // V ∈ {0, 1}
 
-    // The pairwise ratios (spatial's, now with p̂_i on the reprojected *prev*
-    // surface — distinct from p̂_c once the camera has moved):
-    //   b_i        = c_i·p̂_i(Y_i) / (c_i·p̂_i(Y_i) + c_c·p̂_c(Y_i))   at prev's sample
-    //   canonShare = c_c·p̂_c(Y_c) / (c_i·p̂_i(Y_c) + c_c·p̂_c(Y_c))   at cand's sample
-    float pcYi = 0.0;      // p̂_c(Y_i) — cand's target at prev's sample, this surface
+    float pcYi = 0.0;              // p̂_c(shift(Y_i))·J — prev's sample priced here
+    float ucYi = 0.0;              // its unshadowed target — the finalize divisor
     float bi = 0.0;
     float canonShare = 0.0;
+    var prevShifted = prev.sample; // the re-rooted sample, stored on a prev win
     if (prevValid) {
-        float piYi = 0.0;
-        if (prevIsNee) {
+        float piYi = 0.0; // p̂_i(Y_i) — prev's own-domain target
+        if (pathKind(prev.sample) != PATH_KIND_NEE) {
+            let sh = shiftIntoDomain(sceneTlas, params.scene, prev.sample, surface);
+            pcYi = sh.target;
+            piYi = sh.ownTarget;
+            ucYi = sh.unshadowed;
+            prevShifted = sh.sample;
+        } else {
+            // An NEE sample stores a domain-independent light point —
+            // identity shift, Jacobian 1 — priced unshadowed on both
+            // surfaces (temporal's NEE policy; spatial's is vis-aware).
             pcYi = targetUnshadowed(params.scene, params.restir, surface, prev.sample);
-            // p̂_i — prev's own-domain target — on the reconstructed previous surface.
             piYi = targetUnshadowed(params.scene, params.restir, prevSurface, prev.sample);
+            ucYi = pcYi;
         }
-        let piYc = candIsNee && cand.unbiasedWeight > 0.0
-            ? targetUnshadowed(params.scene, params.restir, prevSurface, cand.sample)
-            : 0.0;
+        // The canonical's sample stated in prev's domain. Skipped when its
+        // own-domain target is already zero (its share is zero regardless),
+        // which also spares the replay rays — spatial's same guard.
+        float piYc = 0.0;
+        if (cand.unbiasedWeight > 0.0 && pcYc > 0.0) {
+            piYc = targetInDomain(sceneTlas, params.scene, params.restir,
+                                  cand.sample, prevSurface);
+        }
         let mis = pairwiseMis(ci, piYi, piYc, cCanon, pcYi, pcYc);
         bi = mis.bi;
         canonShare = mis.canonShare;
@@ -243,22 +299,29 @@ void restir_temporal(uint3 tid: SV_DispatchThreadID) {
     }
 
     // The neighbour: m_i = (1−t_c)·(1/V)·b_i, its resampling weight
-    // b_i·p̂_c(Y_i)·W_prev scaled by that. reservoirMerge inherits prev's (capped)
-    // confidence, so the merged M is c_c + min(c_prev, M_CAP·c_c) — the bounded
-    // history.
+    // b_i·p̂_c(shift(Y_i))·J·W_prev scaled by that. The merged reservoir takes
+    // the *shifted* sample — the one whose F is this pixel's — and inherits
+    // prev's (capped) confidence, so the merged M is c_c + min(c_prev,
+    // M_CAP·c_c) — the bounded history.
     if (prevValid) {
         let acceptPrev = sample_ranked_1d(pixel, ranked,
                                           restirTemporalDimension(RESTIR_TEMPORAL_PREV));
+        Reservoir<PathSample> nb = reservoirInit<PathSample>();
+        nb.sample = prevShifted;
+        nb.confidence = prev.confidence;
         let weight = (1.0 - tc) * invV * bi * pcYi * prev.unbiasedWeight;
-        if (reservoirMerge(merged, prev, weight, acceptPrev)) {
-            survivorTarget = pcYi;
+        if (reservoirMerge(merged, nb, weight, acceptPrev)) {
+            survivorTarget = ucYi;
         }
     }
 
-    // Finalize by the *unshadowed* canonical target at the survivor: W =
-    // weightSum/p̂. Temporal folds no visibility, so — unlike spatial — this is
-    // the plain target, and `curr` carries the unshadowed W the next frame's prev
-    // (and this frame's spatial) expects.
+    // Finalize by the survivor's *unshadowed* target in this domain: W =
+    // weightSum/p̂. An NEE survivor folded no visibility — temporal's NEE arms
+    // are rayless — so `curr` carries the unshadowed W the next frame's prev
+    // (and this frame's spatial) expects (D-094). An indirect survivor's
+    // divisor is the luminance of its re-formed, complete integrand (a
+    // winner's shift visibility was 1), so its stored F/W pair reads
+    // downstream exactly as generation's would (D-138/D-139).
     reservoirFinalize(merged, survivorTarget);
     params.reservoirsOut[pixel] = storePathReservoir(merged);
 }

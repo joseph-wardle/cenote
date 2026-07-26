@@ -263,9 +263,12 @@ struct RestirTemporalParams {
     /// pinned-temporal gate forces temporal live. Sourced from
     /// [`TemporalReuse::decay_frames`].
     decay_frames: u32,
-    /// Explicit tail padding to the struct's 8-byte alignment (three trailing
-    /// `u32`s would otherwise be implicit padding, which `Pod` forbids).
-    _pad0: u32,
+    /// 1 when `prev` was rendered against the current scene build, 0 across
+    /// an edit — the epoch gate ([`TemporalReuse::prev_same_scene`]): at 0
+    /// the kernel drops indirect history before dereferencing its stored
+    /// TLAS index. Also the slot that pads the struct to its 8-byte
+    /// alignment (implicit padding would break `Pod`).
+    prev_same_scene: u32,
 }
 
 /// The GPU mirror of `struct Reproject` in `shaders/restir_reproject.slang`: the
@@ -790,6 +793,17 @@ pub struct TemporalReuse<'a> {
     /// Carried here rather than fixed like the M-cap because that gate is exactly
     /// the caller that must override it.
     pub decay_frames: u32,
+    /// Whether `prev` was rendered against the *current* scene build — the
+    /// epoch gate (§4c decision 2). The renderer compares the build recorded
+    /// at the last frame-end swap ([`ViewState::prev_epoch`](crate::restir::ViewState::prev_epoch))
+    /// with the live [`Scene::epoch`](crate::scene::Scene::epoch). `false`
+    /// means an edit landed since: an indirect prev sample's
+    /// `rcVertex.instance` is a raw TLAS custom index the rebuild may have
+    /// renumbered, so `restir_temporal` drops such history before any
+    /// dereference this frame; NEE history survives through the light-id
+    /// registry. Camera-only motion never bumps the build, so the common
+    /// temporal case (orbiting) always passes `true`.
+    pub prev_same_scene: bool,
 }
 
 /// The engine: five stage pipelines over one path pool and its queues.
@@ -976,9 +990,10 @@ impl Wavefront {
                 size_of::<RestirCandidatesParams>(),
                 Bindings::Scene,
             )?,
-            // Binds the scene set for the environment and textured emitters its
-            // unshadowed target reads; it traces nothing (temporal adds no
-            // shadow rays), so the TLAS in that set goes unused.
+            // Also binds the scene set: the cross-frame shift of an indirect
+            // prev sample traces the TLAS (replay segments and its one
+            // visibility ray), and the NEE target eval reads the environment
+            // and textured emitters. The NEE arms stay rayless (D-094).
             restir_temporal: pipeline(
                 &kernels.restir_temporal,
                 size_of::<RestirTemporalParams>(),
@@ -1284,7 +1299,7 @@ impl Wavefront {
             sample_index: sample,
             m_cap: Self::RESTIR_TEMPORAL_M_CAP,
             decay_frames: t.decay_frames,
-            _pad0: 0,
+            prev_same_scene: u32::from(t.prev_same_scene),
         });
 
         // Spatial reuse on: build its params, and route resolve at the scratch
@@ -3361,23 +3376,29 @@ mod tests {
     }
 
     /// Run the step-5 temporal pipeline (held camera, spatial off) and the
-    /// matching path-tracer reference on that scene, both to `samples` spp, and
+    /// matching path-tracer reference on `scene`, both to `samples` spp, and
     /// return `(temporal_mean, path_mean)`. `decay_frames` is the ramp window
     /// forwarded to `restir_temporal` (`0` disables it —
-    /// [`Wavefront::RESTIR_TEMPORAL_DECAY_FRAMES`]); the two convergence gates
-    /// below differ only in that argument. Factored out so the wiring — the
-    /// four-buffer routing, the per-frame reprojection block, and the frame-end
-    /// prev/curr + G-buffer swap — is written and audited once. On the held camera
-    /// reprojection is the identity pixel, the disocclusion gate passes, and the
-    /// G-buffer is written, swapped, and read every frame while history compounds
-    /// under the M-cap.
+    /// [`Wavefront::RESTIR_TEMPORAL_DECAY_FRAMES`]); the convergence gates
+    /// below differ in that argument and in the scene — sample-kind coverage
+    /// is the caller's scene choice (§4c decision 4). Factored out so the
+    /// wiring — the four-buffer routing, the per-frame reprojection block, and
+    /// the frame-end prev/curr + G-buffer swap — is written and audited once.
+    /// On the held camera reprojection is the identity pixel, the disocclusion
+    /// gate passes, and the G-buffer is written, swapped, and read every frame
+    /// while history compounds under the M-cap.
     #[expect(
         clippy::too_many_lines,
         reason = "the four-buffer temporal wiring and the per-frame swap are one \
                   harness — splitting them would scatter what the gates check"
     )]
-    fn temporal_gate_means(gpu: &crate::gpu::Context, samples: u32, decay_frames: u32) -> (f64, f64) {
-        let (scene, camera) = temporal_gate_scene(gpu);
+    fn temporal_gate_means(
+        gpu: &crate::gpu::Context,
+        scene: &Scene,
+        samples: u32,
+        decay_frames: u32,
+    ) -> (f64, f64) {
+        let camera = *scene.camera();
         let kernels = Kernels::embedded();
         let (width, height) = (32u32, 32u32);
         let wavefront = Wavefront::new(
@@ -3410,7 +3431,7 @@ mod tests {
             let mut total = 0.0_f64;
             for sample in 0..samples {
                 wavefront
-                    .trace_then(gpu, &scene, &radiance, width, height, sample, None, None, &[])
+                    .trace_then(gpu, scene, &radiance, width, height, sample, None, None, &[])
                     .expect("trace");
                 let pixels: Vec<f32> = bytemuck::pod_collect_to_vec(
                     &gpu.download_buffer(&radiance).expect("download"),
@@ -3479,6 +3500,9 @@ mod tests {
                         prev: &prev,
                         reproject: &reproject_buf,
                         decay_frames,
+                        // No edits land mid-harness: every frame renders the
+                        // same scene build, as the renderer would report.
+                        prev_same_scene: true,
                     }),
                     scratch: None,
                     debug: None,
@@ -3486,7 +3510,7 @@ mod tests {
                 };
                 wavefront
                     .trace_then(
-                        gpu, &scene, &radiance, width, height, sample, None, Some(&inputs), &[],
+                        gpu, scene, &radiance, width, height, sample, None, Some(&inputs), &[],
                     )
                     .expect("trace");
                 let pixels: Vec<f32> = bytemuck::pod_collect_to_vec(
@@ -3524,11 +3548,225 @@ mod tests {
         // Decay off: if the ramp were live it would anneal temporal away by frame
         // `RESTIR_TEMPORAL_DECAY_FRAMES`, silently turning this into a
         // candidate-only convergence check, blind to a temporal bias (D-094).
-        let (temporal, path) = temporal_gate_means(&gpu, 256, 0);
+        let (scene, _) = temporal_gate_scene(&gpu);
+        let (temporal, path) = temporal_gate_means(&gpu, &scene, 256, 0);
         let deviation = (temporal - path).abs() / path;
         assert!(
             deviation < 0.03,
             "temporal reuse disagrees with the path tracer: {temporal} vs {path} ({deviation:.4} relative)"
+        );
+    }
+
+    /// The step-5b pinned-temporal gate on the replayed-prefix shape (§4c
+    /// decision 4): the sub-floor glossy primary forces every reusable GI
+    /// sample through k = 3 — seed-replayed first bounce, reconnection one
+    /// vertex deeper — and those samples now cross the *frame* boundary
+    /// through the shared shift block. Held live to convergence (decay off),
+    /// the mean must still match the path tracer: a cross-frame Jacobian
+    /// against the wrong cached half, a reconnection visibility trusted
+    /// instead of re-traced, or a survivor stored un-re-rooted all shift it.
+    #[test]
+    fn temporal_reuse_matches_the_path_tracer_behind_a_glossy_primary() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let scene = glossy_primary_scene(&gpu);
+        let (temporal, path) = temporal_gate_means(&gpu, &scene, 256, 0);
+        let deviation = (temporal - path).abs() / path;
+        assert!(
+            deviation < 0.03,
+            "temporal reuse disagrees with the path tracer behind a glossy \
+             primary: {temporal} vs {path} ({deviation:.4} relative)"
+        );
+    }
+
+    /// The step-5b pinned-temporal gate on the pure-replay shape (§4c
+    /// decision 4): the all-sharp mirror corridor forms no reconnection lock
+    /// anywhere, so every indirect sample crossing the frame boundary is a
+    /// whole-path seed replay with its terminal — NEE or SCATTER — re-drawn
+    /// from the stored dims. A replay keyed off the wrong stream across the
+    /// boundary, a terminal-kind mismatch scored as a hit, or an NEE
+    /// terminal's re-drawn connection left untested would all surface here as
+    /// a converged mean off the reference.
+    #[test]
+    fn temporal_reuse_matches_the_path_tracer_on_a_sharp_chain() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let scene = sharp_chain_scene(&gpu);
+        let (temporal, path) = temporal_gate_means(&gpu, &scene, 256, 0);
+        let deviation = (temporal - path).abs() / path;
+        assert!(
+            deviation < 0.03,
+            "temporal reuse disagrees with the path tracer on an all-sharp \
+             chain: {temporal} vs {path} ({deviation:.4} relative)"
+        );
+    }
+
+    /// The step-5b G-buffer-surface gate (§4c decision 4): the surface
+    /// temporal reconstructs from a persisted `GBufEntry` must equal the
+    /// path-pool reconstruction **bit for bit** — the entry is the one input
+    /// temporal sources differently from spatial, so this is what transfers
+    /// the same-pixel shift invariant (D-138/D-139) to the frame boundary.
+    /// One temporal frame writes the real G-buffer; the fixture
+    /// (`restir_gbuffer_test.slang`) then rebuilds both surfaces in a single
+    /// invocation — layout, store, and load included — and reports a per-field
+    /// mismatch mask this asserts empty at every hit pixel.
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the one-frame temporal wiring and the fixture dispatch are \
+                  one flow — splitting them would scatter what the gate checks"
+    )]
+    fn temporal_gbuffer_surface_is_bit_identical() {
+        /// Mirrors `struct Params` in `shaders/restir_gbuffer_test.slang`.
+        #[repr(C)]
+        #[derive(Clone, Copy, Pod, Zeroable)]
+        struct GbufferTestParams {
+            paths: PathsAddrs,
+            hits: QueueAddrs,
+            scene: vk::DeviceAddress,
+            gbuffer: vk::DeviceAddress,
+            mismatch: vk::DeviceAddress,
+        }
+        const GBUF_EVALUATED: u32 = 0x8000_0000; // mirrors the fixture's tags
+
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let (scene, _) = temporal_gate_scene(&gpu);
+        let (width, height) = (32u32, 32u32);
+        let pixels = u64::from(width) * u64::from(height);
+        let wavefront = Wavefront::new(
+            &gpu,
+            &Kernels::embedded(),
+            4096,
+            Wavefront::DEFAULT_MAX_BOUNCES,
+            LightSampling::Mis,
+        )
+        .expect("wavefront");
+
+        let reservoir_bytes = pixels * size_of::<crate::restir::StoredPathReservoir>() as u64;
+        let gbuffer_bytes = pixels * 48;
+        let store_usage = vk::BufferUsageFlags::STORAGE_BUFFER
+            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+            | vk::BufferUsageFlags::TRANSFER_DST;
+        let buffer = |name: &str, bytes: u64| {
+            gpu.create_buffer(name, bytes, store_usage, MemoryLocation::GpuOnly)
+                .expect("buffer")
+        };
+        let cand = buffer("test.gbuf.cand", reservoir_bytes);
+        let prev = buffer("test.gbuf.prev", reservoir_bytes);
+        let curr = buffer("test.gbuf.curr", reservoir_bytes);
+        let gbuffer_prev = buffer("test.gbuf.gbuffer.prev", gbuffer_bytes);
+        let gbuffer_curr = buffer("test.gbuf.gbuffer.curr", gbuffer_bytes);
+        gpu.submit_passes(&[
+            Pass::Fill { buffer: &cand, offset: 0, size: reservoir_bytes, value: 0 },
+            Pass::Fill { buffer: &prev, offset: 0, size: reservoir_bytes, value: 0 },
+            Pass::Fill { buffer: &curr, offset: 0, size: reservoir_bytes, value: 0 },
+            Pass::Fill { buffer: &gbuffer_prev, offset: 0, size: gbuffer_bytes, value: 0 },
+            Pass::Fill { buffer: &gbuffer_curr, offset: 0, size: gbuffer_bytes, value: 0 },
+        ])
+        .expect("clear");
+        let mut reproject_buf = gpu
+            .create_buffer(
+                "test.gbuf.reproject",
+                96,
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                MemoryLocation::CpuToGpu,
+            )
+            .expect("reproject");
+        // Frame 0: no previous camera, so reprojection is off — but the
+        // temporal stage still writes this frame's G-buffer entries, which is
+        // all the fixture needs, and exactly the shipping write path.
+        let reproject = Reproject::new(
+            None,
+            gbuffer_prev.device_address(),
+            gbuffer_curr.device_address(),
+            width,
+            height,
+        );
+        reproject_buf.write(bytemuck::bytes_of(&reproject));
+        let inputs = RestirInputs {
+            reservoir: &curr,
+            temporal: Some(TemporalReuse {
+                cand: &cand,
+                prev: &prev,
+                reproject: &reproject_buf,
+                decay_frames: 0,
+                prev_same_scene: true,
+            }),
+            scratch: None,
+            debug: None,
+            debug_view: DebugView::Off,
+        };
+        let radiance = radiance_buffer(&gpu, width, height);
+        wavefront
+            .trace_then(&gpu, &scene, &radiance, width, height, 0, None, Some(&inputs), &[])
+            .expect("trace");
+
+        let spirv = crate::shaders::compile_fixture("restir_gbuffer_test")
+            .expect("compile restir_gbuffer_test");
+        let pipeline = gpu
+            .create_compute_pipeline(
+                &spirv,
+                c"restir_gbuffer_test",
+                size_of::<GbufferTestParams>() as u32,
+                Bindings::Scene,
+            )
+            .expect("pipeline");
+        // Zero-uploaded so miss pixels (never reached) read as "not evaluated".
+        let mismatch = gpu
+            .upload_buffer(
+                "test.gbuf.mismatch",
+                &vec![0u8; (pixels * 4) as usize],
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                    | vk::BufferUsageFlags::TRANSFER_SRC,
+            )
+            .expect("mismatch buffer");
+        let params = GbufferTestParams {
+            paths: wavefront.paths.addresses(),
+            hits: wavefront.queues.addresses(queue::HIT, &wavefront.queues.hit),
+            scene: scene.table().device_address(),
+            gbuffer: gbuffer_curr.device_address(),
+            mismatch: mismatch.device_address(),
+        };
+        gpu.dispatch(
+            &pipeline,
+            Some(SceneBindings {
+                tlas: scene.tlas(),
+                environment: scene.environment(),
+                textures: scene.texture_descriptors(),
+                blue_noise: &wavefront.blue_noise,
+            }),
+            bytemuck::bytes_of(&params),
+            [(width * height).div_ceil(WORKGROUP_SIZE), 1, 1],
+        )
+        .expect("dispatch");
+
+        let masks: Vec<u32> =
+            bytemuck::pod_collect_to_vec(&gpu.download_buffer(&mismatch).expect("download"));
+        let mut evaluated = 0u32;
+        for (pixel, mask) in masks.iter().enumerate() {
+            if *mask == 0 {
+                continue; // a miss pixel — the fixture never ran there
+            }
+            evaluated += 1;
+            assert_eq!(
+                *mask, GBUF_EVALUATED,
+                "pixel {pixel}: the G-buffer surface diverged from the \
+                 path-pool reconstruction (mismatch bits {:#x} — see \
+                 restir_gbuffer_test.slang for the field map)",
+                *mask & !GBUF_EVALUATED
+            );
+        }
+        // The scene fills most of the frame; a near-empty evaluation would
+        // mean the gate went vacuous, not that it passed.
+        assert!(
+            evaluated > (width * height) / 2,
+            "only {evaluated} of {} pixels evaluated — the gate is vacuous",
+            width * height
         );
     }
 
@@ -3546,8 +3784,9 @@ mod tests {
         let Some(gpu) = crate::gpu::test_context() else {
             return;
         };
+        let (scene, _) = temporal_gate_scene(&gpu);
         let (temporal, path) =
-            temporal_gate_means(&gpu, 256, Wavefront::RESTIR_TEMPORAL_DECAY_FRAMES);
+            temporal_gate_means(&gpu, &scene, 256, Wavefront::RESTIR_TEMPORAL_DECAY_FRAMES);
         let deviation = (temporal - path).abs() / path;
         assert!(
             deviation < 0.03,
@@ -3655,6 +3894,8 @@ mod tests {
                     prev: pv,
                     reproject: &reproject_buf,
                     decay_frames: window,
+                    // No edits land mid-harness: the build never changes.
+                    prev_same_scene: true,
                 }),
                 scratch: None,
                 debug: None,

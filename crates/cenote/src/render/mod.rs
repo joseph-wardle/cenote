@@ -459,6 +459,11 @@ impl Renderer {
                         // hands it the window. Held-camera handoff to spatial-only
                         // convergence (D-094, step 5d).
                         decay_frames: Wavefront::RESTIR_TEMPORAL_DECAY_FRAMES,
+                        // The epoch gate's host half: `prev` carries the build it
+                        // was rendered against (recorded at the last swap); an
+                        // edit since then bumped `Scene::epoch`, and the mismatch
+                        // tells temporal to drop indirect history this frame.
+                        prev_same_scene: film.view().prev_epoch() == scene.epoch(),
                     }),
                     scratch: self.spatial_reuse.then(|| film.view().scratch()),
                     debug: debug.then(|| film.debug()),
@@ -494,7 +499,7 @@ impl Renderer {
         // frame's candidates (the warm-start). Only in ReSTIR mode with temporal
         // reuse on; a no-op before the first ReSTIR wave built the state.
         if self.render_mode == RenderMode::Restir && self.temporal_reuse {
-            film.swap_reservoirs();
+            film.swap_reservoirs(scene.epoch());
             // Record this frame's camera as next frame's reprojection source. The
             // pinhole basis (raygen's, before any aperture scale), since
             // reprojection places the real world hit, not a focal point.
