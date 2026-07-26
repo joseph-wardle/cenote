@@ -127,23 +127,38 @@ fn restir_many_lights_matches_golden() {
     compare_with_golden("restir-many-lights", &actual);
 }
 
+/// The D-130 degenerate pin (M6 step 6a): with CV shading toggled off, the
+/// estimator must *be* the pre-6a survivor-shading `ReSTIR` — bit for bit,
+/// not perceptually. The survivor goldens are byte copies of the `ReSTIR`
+/// pins as they stood before 6a landed, so this test is each later rung's
+/// standing no-op proof: the vector-weight lane (and, from 6b, the control
+/// variate) may only ever *add* to the toggle-on image, never move the
+/// toggle-off one.
+#[test]
+fn restir_survivor_toggle_reproduces_the_pre_cv_estimator() {
+    let Some(gpu) = test_context() else {
+        return;
+    };
+    let pin = |name: &str, scene: &Scene| {
+        let mut renderer = Renderer::new(&gpu).expect("renderer");
+        renderer.set_render_mode(RenderMode::Restir);
+        renderer.set_cv_shading(false);
+        let actual = accumulate(&gpu, &renderer, scene, SIZE, ACCUM_SPP);
+        compare_bit_identical(name, &actual);
+    };
+    pin("restir-demo-survivor", &Scene::demo(&gpu).expect("demo scene"));
+    pin(
+        "restir-many-lights-survivor",
+        &Scene::many_lights(&gpu).expect("many-lights scene"),
+    );
+}
+
 /// Compare a fresh `SIZE`² render against `tests/golden/{name}.exr` — or,
 /// under `UPDATE_GOLDENS=1`, (re)write that golden and pass.
 fn compare_with_golden(name: &str, actual: &[f32]) {
-    let golden_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/golden")
-        .join(format!("{name}.exr"));
-
-    if std::env::var_os("UPDATE_GOLDENS").is_some() {
-        std::fs::create_dir_all(golden_path.parent().expect("golden path has a parent"))
-            .expect("create golden dir");
-        write_exr(&golden_path, SIZE, SIZE, actual).expect("write golden");
-        eprintln!(
-            "updated {} — inspect it in tev before committing",
-            golden_path.display()
-        );
+    let Some(golden_path) = update_or_path(name, actual) else {
         return;
-    }
+    };
 
     let (width, height, golden) = read_exr(&golden_path).unwrap_or_else(|err| {
         panic!(
@@ -186,6 +201,65 @@ fn compare_with_golden(name: &str, actual: &[f32]) {
         actual_path.display(),
         heatmap_path.display(),
     );
+}
+
+/// Compare bit-for-bit against `tests/golden/{name}.exr` — the exact-equality
+/// variant of [`compare_with_golden`], for the survivor-toggle pin alone. Its
+/// claim is that the toggle *is* the prior estimator, which the renderer's
+/// bitwise determinism makes checkable exactly; a FLIP threshold would wave
+/// through a subtly different one. The cost is the driver/compiler FP
+/// sensitivity the FLIP goldens deliberately shed (see the module header):
+/// when an update reorders float math, regenerate every golden together and
+/// the eyeball falls on the FLIP pins.
+fn compare_bit_identical(name: &str, actual: &[f32]) {
+    let Some(golden_path) = update_or_path(name, actual) else {
+        return;
+    };
+    let (width, height, golden) = read_exr(&golden_path).unwrap_or_else(|err| {
+        panic!(
+            "can't read golden {}: {err}\n\
+             if it doesn't exist yet: UPDATE_GOLDENS=1 cargo test -p cenote --test golden",
+            golden_path.display()
+        )
+    });
+    assert_eq!(
+        (width, height),
+        (SIZE, SIZE),
+        "golden has stale dimensions — regenerate with UPDATE_GOLDENS=1"
+    );
+    let differing = actual
+        .iter()
+        .zip(&golden)
+        .filter(|(a, g)| a.to_bits() != g.to_bits())
+        .count();
+    assert!(
+        differing == 0,
+        "survivor-toggle render differs from {} in {differing} of {} floats — \
+         the CV toggle no longer reproduces the survivor estimator bit for bit",
+        golden_path.display(),
+        golden.len(),
+    );
+}
+
+/// Resolve `tests/golden/{name}.exr` for a comparison — or, under
+/// `UPDATE_GOLDENS=1`, (re)write it from `actual` and return `None` so the
+/// caller passes.
+fn update_or_path(name: &str, actual: &[f32]) -> Option<std::path::PathBuf> {
+    let golden_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden")
+        .join(format!("{name}.exr"));
+
+    if std::env::var_os("UPDATE_GOLDENS").is_some() {
+        std::fs::create_dir_all(golden_path.parent().expect("golden path has a parent"))
+            .expect("create golden dir");
+        write_exr(&golden_path, SIZE, SIZE, actual).expect("write golden");
+        eprintln!(
+            "updated {} — inspect it in tev before committing",
+            golden_path.display()
+        );
+        return None;
+    }
+    Some(golden_path)
 }
 
 /// FLIP consumes 8-bit RGB: clamp to [0, 1], quantize, drop alpha (always 1

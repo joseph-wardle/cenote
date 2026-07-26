@@ -622,6 +622,25 @@ The ladder — each rung green and committable:
   unbiasedness pair green with vector shading on; toggle-off ReSTIR goldens
   bit-identical; new goldens regenerated + eyeballed; brute goldens untouched;
   per-channel relMSE deltas recorded against 6-0.*
+  **Done (2026-07-26, D-143).** Landed as designed: the NEE arms re-form their RGB
+  through the shared `evalTarget` (a `contribution` field beside the luminance it
+  was always taking), the indirect arms read the shifted F already in hand, and the
+  lane rides spatial's pass-local scratch; resolve shades `throughput·lane` under a
+  `cv_shading` toggle (bit 10 of the packed flags word), default-on. All gates
+  green: unbiasedness pair with vector shading on (many-lights ReSTIR 8/32 spp
+  0.03602/0.00652, indirect 0.08893/0.02363); toggle-off pinned **bit-exactly**
+  against the pre-6a ReSTIR goldens, kept as standing survivor pins (D-143); new
+  goldens regenerated + eyeballed — the copper bounce speckle in the demo's sphere
+  shadows visibly desaturates while the image otherwise stands (mean FLIP old→new
+  0.020, carried by that speckle); brute goldens byte-untouched. Chroma deltas vs
+  6-0 (many-lights, per-channel relMSE): 32 spp R 0.00626→0.00624, G
+  0.00618→0.00617, B 0.00726→0.00714; 8 spp B 0.04115→0.04059. The many-lights
+  level drop is small and blue-leaning, exactly as 6-0 predicted (the spread is the
+  scene's); the demo eyeball is where §6.3 shows. A found identity explains why:
+  per-pixel *luminance* is invariant between the two shadings — the survivor's
+  luminance(F)·W and the lane's luminance both reduce to weightSum — so §6.3 is
+  chroma-only by algebra, and the luminance-dominated relMSE columns barely moving
+  is correctness, not a null result.
 - **6b-i — the spatial control variate, static-proven.** Candidate-mean init in the
   lane (store stops zeroing; fixture re-pinned), temporal pass-through, the
   per-neighbour control terms with α and c = 1.6, resolve outputs the CV. Signed

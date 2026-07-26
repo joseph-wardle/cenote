@@ -3506,3 +3506,25 @@ show as a level drop or an eyeball/golden difference, not a spread collapse. *Wh
 than silently proceed:* implementing against a miscalibrated claim reproduces the
 interview-sketch error T5c had to correct after the fact; the honest-numbers precedent applies
 to the milestone's own headline.
+
+### D-143: 6a ships §6.3 vector-weight shading default-on, and the D-130 degenerate becomes a bit-exact pin
+Status: accepted (2026-07-26). Rung 6a (m6-plan §4d decisions 3–4) landed as interviewed: the
+spatial pass accumulates every merge candidate's w⃗ = w_scalar·F/luminance(F) into the
+`cvAccumulator` lane of its pass-local output, and resolve shades the lane under a default-on
+`cv_shading` toggle — survivor-only shading is the reachable degenerate. Two things the
+implementation settled beyond the interview. **(1) The degenerate is pinned bit-exactly, not
+perceptually**: the pre-6a ReSTIR goldens are kept as survivor-toggle goldens and the pin test
+asserts float-for-float equality, unlike every other golden's FLIP threshold. The toggle's
+claim is *identity* with the prior estimator — a claim bitwise determinism makes checkable and
+a perceptual threshold would let a subtly different estimator pass; the cost (driver/compiler
+FP sensitivity the FLIP goldens deliberately shed) is accepted because goldens only run on
+GPU-capable local machines and regenerate together. Each later rung re-runs this pin as its
+no-op proof (§4d decision 4). **(2) A luminance-invariance identity fell out of the algebra**:
+the survivor's shaded luminance is luminance(F)·W = weightSum, and the lane's luminance is
+Σ w_scalar·luminance(F/luminance(F)) = weightSum — identical. §6.3 therefore moves *only*
+chroma, which the 6a numbers confirm: the many-lights per-channel relMSE drops are small and
+blue-leaning (32 spp B 0.00726 → 0.00714) while the demo golden's copper bounce speckle
+visibly desaturates (mean FLIP 0.020 against the old pin, carried by that speckle). The
+constant-factor luminance-variance win D-142 recalibrated the headline toward is 6b's to
+deliver — the control variate proper — not this rung's; 6a's deliverable is the chroma fix,
+and the invariance is why measuring it needed the per-channel lens in the first place.

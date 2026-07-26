@@ -699,8 +699,13 @@ public Connection connectSampleAt(SceneTable* scene, RestirScene* restir,
 // sample the surface can't carry (below a horizon the base doesn't transmit
 // through, or a degenerate connection); `connection` and `throughSurface` carry
 // the shadow-ray geometry the visibility-aware target needs on top of it.
+// `contribution` is the RGB L·f·|cosθ| the luminance was taken of — the §6.3
+// chroma numerator (M6 step 6a): an NEE sample stores no own-domain F, so the
+// vector-weight accumulation re-forms its colour here, from the exact product
+// the scalar target already computes.
 public struct TargetEval {
     public float unshadowed;
+    public float3 contribution;  // unshadowed RGB L·f·|cosθ|; luminance(·) = unshadowed
     public Connection connection;
     public bool throughSurface;  // the light is on the far side of the surface
 };
@@ -711,6 +716,7 @@ public TargetEval evalTarget(SceneTable* scene, RestirScene* restir,
     t.connection = connectSampleAt(scene, restir, sample, s.position);
     t.throughSurface = false;
     t.unshadowed = 0.0;
+    t.contribution = float3(0.0);
     if (!t.connection.valid) {
         return t;
     }
@@ -719,8 +725,9 @@ public TargetEval evalTarget(SceneTable* scene, RestirScene* restir,
     if (wiLight.z == 0.0 || (wiLight.z < 0.0) != t.throughSurface) {
         return t;
     }
-    t.unshadowed = luminance(t.connection.radiance
-                             * evalBsdf(s.closure, wiLight, s.wo) * abs(wiLight.z));
+    t.contribution = t.connection.radiance
+                   * evalBsdf(s.closure, wiLight, s.wo) * abs(wiLight.z);
+    t.unshadowed = luminance(t.contribution);
     return t;
 }
 

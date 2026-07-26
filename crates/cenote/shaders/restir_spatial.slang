@@ -120,14 +120,28 @@ Params params;
 // stage's visibility policy (temporal's is unshadowed, D-094), not shared
 // machinery.
 
+// The chroma direction F/luminance(F) of an unshadowed RGB contribution — the
+// §6.3 vector-weight factor (M6 step 6a, m6-plan §4d decision 3): each merge
+// site accumulates w⃗ = w_scalar·F/luminance(F), the scalar resampling weight
+// already in hand (visibility, Jacobian, and pairwise m folded) times the
+// candidate's own colour direction. luminance(F) = 0 ⇔ F = 0, so the zero
+// guard loses nothing.
+float3 chromaDirection(float3 f, float lum) {
+    return lum > 0.0 ? f / lum : float3(0.0);
+}
+
 // The visibility-aware canonical target p̂_c = U_c·V of a light sample at *this*
 // surface, tracing one shadow ray. Returns p̂_c and reports the unshadowed U_c
 // through `unshadowed` — the survivor's finalize divides by U_c, folding its own
-// V into W (see the header). One inline ray, or none when the unshadowed target
-// is already zero (nothing to shade, so nothing to occlude).
-float targetVisAware(Surface s, PathSample sample, out float unshadowed) {
+// V into W (see the header) — and the unshadowed RGB the luminance was taken of
+// through `contribution`, the §6.3 chroma numerator. One inline ray, or none
+// when the unshadowed target is already zero (nothing to shade, so nothing to
+// occlude).
+float targetVisAware(Surface s, PathSample sample, out float unshadowed,
+                     out float3 contribution) {
     let t = evalTarget(params.scene, params.restir, s, sample);
     unshadowed = t.unshadowed;
+    contribution = t.contribution;
     if (!(t.unshadowed > 0.0)) {
         return 0.0; // nothing to shade, so nothing to occlude — skip the ray
     }
@@ -151,6 +165,7 @@ struct AcceptedNeighbour : IDefaultInitializable {
     float confidence;  // c_i
     float weightNumer; // b_i · p̂_c(Y_i) · W_i — the resampling weight before (1−t_c)/V
     float unshadowed;  // U_c(Y_i) — the finalize divisor if this neighbour wins
+    float3 chroma;     // F/luminance(F) in *this* domain — the §6.3 vector factor
     float accept;      // WRS acceptance draw
 };
 
@@ -183,12 +198,16 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
     // is spent.
     float ucYc = 0.0;
     float pcYc = 0.0;
+    float3 canonChroma = float3(0.0);
     if (canonicalReservoir.unbiasedWeight > 0.0) {
         if (pathKind(canonicalReservoir.sample) != PATH_KIND_NEE) {
             ucYc = luminance(canonicalReservoir.sample.F);
             pcYc = ucYc;
+            canonChroma = chromaDirection(canonicalReservoir.sample.F, ucYc);
         } else {
-            pcYc = targetVisAware(canonical, canonicalReservoir.sample, ucYc);
+            float3 rgb;
+            pcYc = targetVisAware(canonical, canonicalReservoir.sample, ucYc, rgb);
+            canonChroma = chromaDirection(rgb, ucYc);
         }
     }
 
@@ -266,6 +285,7 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
         float ucYi = 0.0;
         float pcYiShifted = 0.0; // p̂_c(shift(Y_i))·J_i, 1 ray
         float piYi = 0.0;        // p̂_i(Y_i)
+        float3 chroma = float3(0.0);
         var shifted = neighbour.sample;
         if (pathKind(neighbour.sample) != PATH_KIND_NEE) {
             let sh = shiftIntoDomain(sceneTlas, params.scene,
@@ -274,8 +294,13 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
             piYi = sh.ownTarget;
             ucYi = sh.unshadowed;
             shifted = sh.sample;
+            // The shifted integrand is this domain's F (the shift rewrote it),
+            // and `unshadowed` is its luminance — the §6.3 chroma pair.
+            chroma = chromaDirection(sh.sample.F, sh.unshadowed);
         } else {
-            pcYiShifted = targetVisAware(canonical, neighbour.sample, ucYi);
+            float3 rgb;
+            pcYiShifted = targetVisAware(canonical, neighbour.sample, ucYi, rgb);
+            chroma = chromaDirection(rgb, ucYi);
             piYi = targetUnshadowed(params.scene, params.restir,
                                     neighbourSurface, neighbour.sample);
         }
@@ -302,6 +327,7 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
         // The GRIS weight of the shifted neighbour: m_i·p̂_c(shift(Y_i))·W_i·J_i.
         a.weightNumer = mis.bi * pcYiShifted * neighbour.unbiasedWeight;
         a.unshadowed = ucYi;
+        a.chroma = chroma;
         a.accept = sample_ranked_1d(pixel, ranked,
                                     restirSpatialDimension(n, RESTIR_SPATIAL_ACCEPT));
         accepted[validCount] = a;
@@ -316,15 +342,25 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
 
     Reservoir<PathSample> merged = reservoirInit<PathSample>();
     float survivorTarget = 0.0;
+    // The §6.3 vector-weight sum (M6 step 6a): every merge candidate's
+    // w⃗ = w_scalar·F/luminance(F), accumulated beside the scalar stream. Its
+    // expectation is the same reservoir-owned term the survivor·W estimate
+    // carries — E[Σᵢ mᵢ·F(Yᵢ)·W_i·Jᵢ·Vᵢ] = ∫f by GRIS for any per-candidate
+    // integrand — but every candidate's *colour* is averaged in, where the
+    // survivor's estimate rides one sample's hue (the colour-noise fix,
+    // Enhanced §6.3). Spatial-only by design: these candidates carry
+    // uncorrelated chroma; temporal history's is correlated (footnote 7).
+    float3 cvLane = float3(0.0);
 
     // The canonical: m_c = t_c + (1−t_c)·(1/V)·Σ shares. With V=0 the sum term
     // vanishes (t_c=1) and it passes through as its sole candidate.
     let mCanon = tc + (1.0 - tc) * invV * canonShareSum;
+    let wCanon = mCanon * pcYc * canonicalReservoir.unbiasedWeight;
     let acceptCanon = sample_ranked_1d(pixel, ranked, restirSpatialCanonicalDimension());
-    if (reservoirMerge(merged, canonicalReservoir, mCanon * pcYc * canonicalReservoir.unbiasedWeight,
-                       acceptCanon)) {
+    if (reservoirMerge(merged, canonicalReservoir, wCanon, acceptCanon)) {
         survivorTarget = ucYc;
     }
+    cvLane += wCanon * canonChroma;
 
     // Each accepted neighbour: m_i = (1−t_c)·(1/V)·b_i, its resampling weight the
     // stashed b_i·p̂_c(Y_i)·W_i scaled by that. reservoirMerge inherits the
@@ -338,11 +374,18 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
         if (reservoirMerge(merged, nb, weight, a.accept)) {
             survivorTarget = a.unshadowed;
         }
+        cvLane += weight * a.chroma;
     }
 
     // Finalize by the *unshadowed* survivor target: W = weightSum/U_c folds the
     // survivor's own visibility into W (it was resampled ∝ p̂_c = U_c·V), so
     // restir_resolve shades it unshadowed with no further ray.
     reservoirFinalize(merged, survivorTarget);
-    params.reservoirsOut[pixel] = storePathReservoir(merged);
+    // The vector sum rides the CV lane of this pass's output — pass-local by
+    // construction (the scratch never persists a frame), so 6a adds no
+    // cross-frame semantics. Resolve shades from it when the host's CV toggle
+    // is on; toggle-off never reads it (the D-130 survivor-shading degenerate).
+    var stored = storePathReservoir(merged);
+    stored.cvAccumulator = cvLane;
+    params.reservoirsOut[pixel] = stored;
 }

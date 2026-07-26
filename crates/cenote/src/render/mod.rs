@@ -177,6 +177,16 @@ pub struct Renderer {
     /// back through last frame's camera and a disocclusion gate drops history the
     /// camera moved off. Preserved across [`Renderer::reload`].
     temporal_reuse: bool,
+    /// Whether `ReSTIR` shades the spatial pass's accumulated vector weights —
+    /// every merge candidate's colour at its own resampling weight — from the
+    /// reservoir's CV lane, rather than the survivor alone (Enhanced §6.3, M6
+    /// step 6a). On by default: it is the estimator's colour-noise fix and
+    /// costs no rays. Off is survivor-only shading, the zero-CV degenerate
+    /// (D-130) the A/B gates compare against; step 6b widens the same toggle
+    /// to the full control variate. Meaningful only in [`RenderMode::Restir`]
+    /// with spatial reuse on (spatial-off configs shade the survivor
+    /// regardless). Preserved across [`Renderer::reload`].
+    cv_shading: bool,
     /// Relative std-error below which the accumulate kernel counts a pixel as
     /// converged (M3 step 6b/6c) — the auto-stop metric's threshold. Defaults to
     /// [`Renderer::NOISE_THRESHOLD`]; the CLI `--noise-threshold` and the session's
@@ -262,6 +272,7 @@ impl Renderer {
             debug_view: DebugView::Off,
             spatial_reuse: true,
             temporal_reuse: true,
+            cv_shading: true,
             noise_threshold: Self::NOISE_THRESHOLD,
         })
     }
@@ -276,11 +287,12 @@ impl Renderer {
     ///
     /// Any [`crate::Error`] from pipeline or buffer creation.
     pub fn reload(&mut self, gpu: &Context, kernels: &Kernels) -> Result<()> {
-        let (render_mode, debug_view, spatial_reuse, temporal_reuse, noise_threshold) = (
+        let (render_mode, debug_view, spatial_reuse, temporal_reuse, cv_shading, noise_threshold) = (
             self.render_mode,
             self.debug_view,
             self.spatial_reuse,
             self.temporal_reuse,
+            self.cv_shading,
             self.noise_threshold,
         );
         *self = Self::from_kernels(gpu, kernels, self.max_bounces)?;
@@ -289,6 +301,7 @@ impl Renderer {
         self.debug_view = debug_view;
         self.spatial_reuse = spatial_reuse;
         self.temporal_reuse = temporal_reuse;
+        self.cv_shading = cv_shading;
         self.noise_threshold = noise_threshold;
         Ok(())
     }
@@ -348,6 +361,24 @@ impl Renderer {
     #[must_use]
     pub fn temporal_reuse(&self) -> bool {
         self.temporal_reuse
+    }
+
+    /// Toggle §6.3 vector-weight ("CV") shading (M6 step 6a): shade the spatial
+    /// pass's accumulated vector weights from the reservoir's CV lane — every
+    /// merge candidate's colour averaged — rather than the survivor alone. On
+    /// by default; off is survivor-only shading, the zero-CV degenerate (D-130)
+    /// the A/B gates flip to, and step 6b's CV-off. Meaningful only in
+    /// [`RenderMode::Restir`] with spatial reuse on; takes effect on the next
+    /// [`Renderer::accumulate`], so the caller resets its film to switch
+    /// cleanly.
+    pub fn set_cv_shading(&mut self, enabled: bool) {
+        self.cv_shading = enabled;
+    }
+
+    /// Whether CV (vector-weight) shading is on.
+    #[must_use]
+    pub fn cv_shading(&self) -> bool {
+        self.cv_shading
     }
 
     /// Set the auto-stop noise threshold (M3 step 6c): the relative estimator
@@ -466,6 +497,7 @@ impl Renderer {
                         prev_same_scene: film.view().prev_epoch() == scene.epoch(),
                     }),
                     scratch: self.spatial_reuse.then(|| film.view().scratch()),
+                    cv_shading: self.cv_shading,
                     debug: debug.then(|| film.debug()),
                     debug_view: self.debug_view,
                 })

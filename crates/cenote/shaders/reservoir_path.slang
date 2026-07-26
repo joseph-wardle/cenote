@@ -77,11 +77,16 @@
 //                     float `confidence` its reservoir primitive already carries,
 //                     so temporal decay stays fractional (reservoir.slang).]
 //   cvAccumulator/cvNormalization — the ReSTCV control-variate slot (D-127): a
-//                     per-reservoir accumulated-colour estimate. Reserved and
-//                     placed LAST so the step-6 deep-read can pin its exact
-//                     update math without moving any field before it — the whole
-//                     point of designing it in now (D-128). Zero until step 6,
-//                     where zero-CV is plain ReSTIR PT (the degenerate, D-130).
+//                     per-reservoir accumulated-colour estimate, placed LAST so
+//                     step 6 could pin its update math without moving any field
+//                     before it (D-128). Live from step 6a: the spatial pass
+//                     accumulates its merge stream's vector weights
+//                     w⃗ = w_scalar·F/luminance(F) here (§6.3 colour-noise fix)
+//                     and resolve shades from the lane — pass-local, since the
+//                     spatial scratch never persists a frame. Zero-CV shading
+//                     (the host toggle off) is plain ReSTIR PT — the
+//                     degenerate, D-130. `cvNormalization` stays reserved-zero
+//                     until 6b.
 //
 // -- The pass-local weightSum invariant carries over --------------------
 // `StoredPathReservoir` stores {sample, W, M} plus the reserved CV slot, and
