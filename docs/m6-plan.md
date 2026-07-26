@@ -202,8 +202,11 @@ compiles, clippy-clean (incl. `--features denoise`), tests pass on the GPU machi
 6. **Colour-noise fix + ReSTCV** — first the near-free vector-resampling-weight fix
    (D-133); then, *after its deep-read prerequisite* (§6), ReSTCV as the general
    control-variate form (plain ReSTIR PT = zero-CV degenerate). *Checkpoint: CV-on and
-   CV-off converge to the same image (unbiasedness); the convergence-under-reuse curves
-   show the tail flatten. The plateau fix — the headline.*
+   CV-off converge to the same image (unbiasedness); a measured constant-factor
+   accumulated-relMSE win and the chroma improvement — the honest headline; the
+   baseline floor measurement recorded either way.*
+   Expanded to a four-rung ladder in §4d (interviewed 2026-07-26; the deep-read
+   recalibrated the original "tail flatten / plateau fix" claim — §4d decision 1).
 7. **Reciprocal (paired) spatial reuse** — self-inverting per-frame pairing textures;
    ~1.63× spatial speedup and lower FLIP. *Checkpoint: equal-quality at lower wall-clock;
    the equal-time figure improves; no structured pairing artifacts (textures
@@ -560,6 +563,82 @@ its one visibility ray. Decision 3's named follow-up (the held-camera identity f
 path) stays dormant: the window is bounded by the ramp, and the converged still is
 provably free.
 
+## 4d. Step-6 plan — colour-noise fix + ReSTCV (interviewed 2026-07-26)
+
+Interviewed after step 5 closed (`73deaeb`), with the §6 research prerequisite
+discharged first: an equation-level deep-read of ReSTCV (paper + supplemental +
+the full Hercier/ReSTCV reference source — a Falcor fork of Lin's ReSTIR PT) and
+of Enhanced §6.3, plus a seam map of this codebase. Two findings reshape the step.
+**First**, ReSTCV is not the plateau fix D-127 credited it as: its stated problem is
+*colour noise* (a scalar-luminance target resamples intensity, not chroma), and its
+static-accumulation curves (paper Fig 8) show two parallel ~1/N lines — an unbiased
+**constant-factor** variance win from frame 1, not a tail-slope change; no plateau is
+exhibited or fixed. **Second**, §6.3 and ReSTCV are the same fix at two depths — §6.3
+averages chroma over this frame's spatial candidates (Rao–Blackwellizing the
+survivor-index choice); ReSTCV additionally carries the colour estimate across frames
+and neighbours as a control variate, and its reference even ships §6.3-style decoupled
+shading as its zero-CV mode. The D-127 "general form with degenerates" architecture is
+thus *more* right than its rationale: survivor-only → vector-weight shading (6a) →
+full ReSTCV (6b) is a genuine ladder where each rung is the next one's special case.
+In both, resampling — target, p̂, W, M, MIS — is **100% untouched**; the colour
+estimate is a passenger that consumes the shifted integrands, Jacobians, and pairwise
+weights the passes already compute. The residual is never resampled, so no
+negative-p̂ problem exists (pixel values may go transiently negative; accumulation
+averages them out). Seven decisions, resolved in dependency order; each rung ends
+green and committed.
+
+| # | Decision | Choice | Rationale |
+|---|---|---|---|
+| 1 | Headline | **Recalibrate the checkpoint and measure the floor.** Step 6's claim becomes what the literature supports: CV-on ≡ CV-off converged image (the hard gate), a measured constant-factor accumulated-relMSE win, and the chroma improvement. A baseline measurement (spatial-on fresh-RNG vs brute, accumulated) settles whether cenote even *has* a correlation floor in the still regime — recorded either way, the T5c honesty precedent. A decision entry corrects D-127's plateau rationale (append-only: correction, not rewrite) | The written checkpoint ("the tail flatten") is not what ReSTCV does; implementing against a miscalibrated claim reproduces the interview-sketch error T5c had to correct after the fact. cenote's own tail is likely already ~1/N on hold — the decay ramp turns temporal off and frames decorrelate (T5c: temporal-on annealed to +1.4% at 32 frames) — so the honest headline is chroma + constant factor + per-frame quality, and the floor question deserves a number, not an assumption |
+| 2 | Rung structure | **Four rungs, one commit each**: 6-0 baseline measurement + D-127 correction (no shader change); 6a §6.3 vector-weight shading; 6b-i spatial CV terms (static-testable); 6b-ii temporal CV recurrence | The baseline must be captured *before* the estimator changes or it is gone. 6a builds the accumulate-in-spatial + shade-from-lane plumbing with zero cross-frame semantics; 6b-i proves the CV math under static accumulation with no reprojection variable (the milestone's validated-ladder ethos — no motion until the math is proven); 6b-ii adds only the cross-frame carry. Three rungs would debug the α/c spatial math and the reprojection recurrence entangled |
+| 3 | 6a shape | **Spatial-only accumulation; the lane transports; resolve shades.** Only the spatial pass accumulates the vector weights — at each merge site, w⃗ = w_scalar·F/luminance(F), the chroma direction times the scalar weight already in hand (visibility, Jacobian, and defensive-pairwise m already folded) — into the CV lane of its output reservoir; the lane is pass-local (scratch never persists, so 6a has zero cross-frame semantics by construction). Resolve stays the sole film-writer: shades from the lane when spatial ran, survivor F·W when it didn't; the delta-light term is unchanged | Paper-faithful — Enhanced footnote 7: spatial neighbours carry uncorrelated chroma, temporal history doesn't, so spatial is where averaging wins. The w⃗ identity means no new visibility plumbing and no API widening (luminance(F) = 0 ⇔ F = 0, so the ratio is safe under a zero guard). Shading inside spatial would scatter the delta-light term, shadow queue, debug surface, and film wiring resolve owns |
+| 4 | Default + goldens | **Default-on at 6a; the toggle is the degenerate.** Vector shading ships as the ReSTIR path's behaviour from 6a; a renderer-level toggle (the set_temporal_reuse shape) exposes survivor-only shading — the D-130 zero-CV degenerate — for the A/B gates, and 6b reuses it as CV-on/off. ReSTIR goldens regenerate + eyeball at each estimator-changing rung; toggle-off reproduces the prior goldens bit-identical (each rung carries its own no-op proof); brute goldens never move | §6.3 costs nothing measured (17.0 → 17.0 ms in the isolated ablation, HDR-FLIP 0.376 → 0.284) and is strictly better chroma — gating what ships is stronger evidence than gating a side path. No public code ships §6.3 (DQLin/ReSTIR_PT shades survivor-only; Enhanced released no code), so cenote implements from the equations — one more reason each rung carries a bit-identical degenerate check |
+| 5 | 6b-i parameters | **Candidate-mean init; α in; c fixed at 1.6.** The candidate pass initializes the lane to the mean of all candidates' F/p (store stops zeroing it; the round-trip fixture starts pinning it); temporal passes the lane through untouched; spatial adds per-neighbour α⟨F_j⟩ + ⟨F_i − αF_j⟩ evaluated at the already-resampled samples with cenote's defensive pairwise m's, dead-shift fallbacks m→1 (backward dead) / m_c→0 (forward dead); α = per-RGB-channel primary-hit albedo ratio, NaN/Inf→1, clamped ≤2; central importance c fixed at the supplemental's closed-form 1.6; resolve outputs the CV | Defensive pairwise satisfies the partition-of-unity the unbiasedness induction needs, so cenote's own m's drop in. The α ablation (ratio MAPE 0.243 vs constant-α 0.344) says it carries real variance, so it lands with the rung — and any deterministic α is unbiased, so there is no correctness risk to isolate. The reference's live per-frame variance model for c (~5%, ad-hoc constants, cross-frame state in an otherwise static-testable rung) is deferred behind a measurement — D-043 discipline |
+| 6 | 6b-ii decay | **The CV blend uses the decayed confidence** — q_init = M_c, q_j = the same min(M_prev, cap)·decay the temporal MIS already uses; temporal α ≡ 1; the epoch gate and reprojection failure reset the CV to candidate-mean init (spatial re-enriches the same frame); prev's CV rides the existing prev reservoir buffer | On hold the temporal CV term anneals to zero within decayFrames, so the still is shaded by candidate-mean + spatial CV only — frames stay independent under fresh RNG and the converged-still contract (D-085) holds by construction. Keeping CV history alive on hold would re-introduce exactly the frame correlation T5c measured as an accumulation cost, now on the shading estimate itself. One signal, one ramp, no new constant |
+| 7 | Proof obligations | **Floors + reports + the chroma lens** (per-channel relMSE — no new metric machinery; the paper itself had only HDR-FLIP). 6-0: one `#[ignore]` report — the floor curve + per-channel baseline. 6a: existing unbiasedness gates green with vector shading on; chroma deltas recorded. 6b-i: static CV-on ≡ CV-off convergence gate; equal-frame relMSE recorded. 6b-ii: CV-on ≡ CV-off with temporal pinned live; the handoff and frame-time reports re-run | Assert correctness, report performance — the step-3c/5 precedent. Per-channel relMSE separates chroma from luminance well enough to see §6.3's effect without inventing a chromaticity metric with no literature baseline; the floor report answers decision 1's question with a ratio-vs-N curve rather than an argument |
+
+The ladder — each rung green and committable:
+
+- **6-0 — the baseline, captured before the estimator moves.** An `#[ignore]` report:
+  spatial-on fresh-RNG vs brute-force, accumulated relMSE at 8/16/32/64/128 frames on
+  the indirect-glossy scene (the ratio vs N answers "is there a floor?"), plus
+  per-channel relMSE on many-lights (the chromatic scene) as 6a's before-side.
+  The D-127-correcting decision entry appends. No shader change; suites trivially green.
+- **6a — vector-weight shading (Enhanced §6.3).** Spatial accumulates
+  Σᵢ mᵢ·F(Yᵢ)·W_{Xᵢ}·Jᵢ via the w⃗ = w·F/luminance(F) identity at every merge site
+  (canonical share, neighbours, NEE arm) into its output reservoir's `cvAccumulator`;
+  resolve shades from the lane when spatial ran and the toggle is on. *Gates: the
+  unbiasedness pair green with vector shading on; toggle-off ReSTIR goldens
+  bit-identical; new goldens regenerated + eyeballed; brute goldens untouched;
+  per-channel relMSE deltas recorded against 6-0.*
+- **6b-i — the spatial control variate, static-proven.** Candidate-mean init in the
+  lane (store stops zeroing; fixture re-pinned), temporal pass-through, the
+  per-neighbour control terms with α and c = 1.6, resolve outputs the CV. Signed
+  transients verified through accumulate/tonemap/auto-stop (the NaN/Inf guard is the
+  only sanitization — no positivity clamp, matching the reference). *Gates: static
+  CV-on ≡ CV-off — both converge to the brute reference within the existing floors;
+  survivor-toggle goldens bit-identical; goldens regenerated + eyeballed; equal-frame
+  relMSE recorded.*
+- **6b-ii — the temporal recurrence.** The M-weighted blend lands in restir_temporal
+  beside the merge it mirrors, weighted by the decayed confidence, reset by the epoch
+  gate and reprojection failure; prev's CV rides the existing buffers — no new
+  allocation, no layout change. *Gates: CV-on ≡ CV-off with temporal pinned live
+  (decay 0) on the indirect-glossy scene; the pinned-temporal kind-covering gates
+  re-run green; the decay-handoff and frame-time reports re-run and recorded here;
+  goldens regenerated + eyeballed.*
+
+Leaf defaults settled with the interview (cheap to change, not re-interviewed):
+`cvNormalization` stays reserved-zero — the reference persists only the float3
+(normalization is inline per pass, a local), and the 96 B layout and size asserts are
+untouched; no new RNG dimensions (the CV consumes draws the passes already make; α and
+c are deterministic); the guide/AOV seam is unchanged — guides resolve from the
+canonical path pre-resampling (D-133), the same seam the reference leaves un-CV'd for
+its denoiser inputs; spatial-off configs fall back to survivor shading, so the
+degenerate stays reachable by construction; cenote's own luminance() is the chroma
+denominator (the reference's Rec.601 vs 709 choice is immaterial — any fixed positive
+weighting works); step 7's reciprocal pairing must carry the CV terms through the
+paired shifts — a named seam for the step-7 interview, not this one.
+
 ## 5. Fallback seams (pre-agreed, in slip order)
 
 - **Reciprocal spatial reuse (step 7)** → plain O(M) defensive pairwise MIS (M3's, on
@@ -597,7 +676,10 @@ still bites. **Memory**: ~265 MB/view at 1080p is a win over separate reservoirs
 per-view × N-viewport multiplier (M3's substrate) still applies — watched, not a blocker.
 One **research prerequisite gates step 6**: ReSTCV is the single rung not yet read to the
 equation level; a focused deep-read of the reference implementation precedes it (it does
-not block steps 0–5, which are independent of it). Build-side, the **AOV-under-reuse
+not block steps 0–5, which are independent of it). *(Discharged 2026-07-26 with the §4d
+interview — and it earned its keep: the deep-read found ReSTCV is a colour-noise /
+constant-factor fix, not the plateau fix D-127 credited, recalibrating the step before
+any code was written.)* Build-side, the **AOV-under-reuse
 seam** (D-133) is the piece most likely to reveal a hidden assumption — resolved early by
 sourcing guides from the canonical path, not discovered late.
 
