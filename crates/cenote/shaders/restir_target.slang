@@ -1,6 +1,6 @@
 // Shared reservoir-reuse machinery: everything two or more reuse domains must
 // evaluate *identically*, kept in one module so they can never drift into a
-// silent bias (surface.slang). Three layers, top to bottom:
+// silent bias (surface.slang). Four layers, top to bottom:
 //
 //   - the reconstructed shading `Surface` at a primary hit, rebuilt from the
 //     path pool exactly as `restir_candidates` (and the path tracer) built it;
@@ -13,12 +13,19 @@
 //     domain re-forms (`reconnectionOutgoing`);
 //   - a stored sample's light connection and unshadowed target
 //     p̂ = luminance(L·f·|cosθ|) at a surface (`connectSampleAt`,
-//     `evalTarget`), the re-form the reuse stages and resolve share.
+//     `evalTarget`), the re-form the reuse stages and resolve share;
+//   - the cross-domain shift-and-target block (step 5a, §4c): the per-sample
+//     evaluations a reuse stage runs on a foreign *indirect* sample —
+//     `shiftIntoDomain` (shift it here, price it here, visibility ray and
+//     re-rooted sample included) and `targetInDomain` (a sample's unshadowed
+//     target stated in a foreign domain, no ray).
 //
-// What stays with its caller, deliberately: the *visibility-aware* target
-// `targetVisAware` lives in `restir_spatial.slang`, because it traces a shadow
-// ray against that stage's TLAS binding — a resource a module cannot own. The
-// temporal combine is unshadowed (D-094), so it needs only the pieces here.
+// What stays with its caller, deliberately: the NEE arms of the reuse
+// combines. Their visibility policy is per-stage (D-094) — spatial's
+// canonical NEE target is visibility-aware (`targetVisAware`, in
+// restir_spatial.slang), temporal's is unshadowed — a stage decision, not
+// shared machinery. Nothing here owns a TLAS binding; the shifts and the
+// block above them take the caller's as a parameter.
 
 import color;
 import lights;
@@ -724,4 +731,118 @@ public TargetEval evalTarget(SceneTable* scene, RestirScene* restir,
 public float targetUnshadowed(SceneTable* scene, RestirScene* restir,
                               Surface s, PathSample sample) {
     return evalTarget(scene, restir, s, sample).unshadowed;
+}
+
+// -- The cross-domain shift-and-target block (step 5a, §4c decision 1) -------
+// The per-sample evaluations a reuse stage runs on an *indirect* sample —
+// reconnection or replay — crossing into another pixel's (or, at step 5b,
+// another frame's) domain: the shift maps above composed with their targets,
+// visibility, and re-rooting, in the one place both stages read them. The NEE
+// arms stay with their stages (see the module header).
+
+// An indirect sample stated and priced in the destination domain: the shifted
+// target the receiving reservoir resamples by, the sample's own-domain target
+// for the pairwise ratios, the unshadowed destination target the finalize
+// divides by on a win, and the re-rooted sample to store on that win.
+// `IDefaultInitializable` so the local below can be default-constructed — a
+// struct holding a `PathSample` needs the conformance spelled out.
+public struct DomainShift : IDefaultInitializable {
+    public float target;      // p̂_dest(shift(Y))·J, visibility folded in — 1 ray
+    public float ownTarget;   // p̂_src(Y): the stored integrand (D-138/D-139)
+    public float unshadowed;  // U_dest(shift(Y)) — the finalize divisor on a win
+    public PathSample sample; // carries this domain's F (and Jacobian half) onward
+};
+
+// The forward direction (D-134/D-135/D-138/D-139): map an indirect sample
+// through its shift into the domain rooted at `s` and evaluate the receiving
+// target there. A reconnection sample maps through `shiftReconnection` —
+// prefix replay from the stored seed (k > 2), the re-derived reconnection off
+// its end, the re-shaded f_k, the geometry-term Jacobian against the cached
+// source half — with one visibility ray along the reconnection segment. A
+// replay sample maps through `shiftReplay` — the whole path replayed from the
+// seed, the terminal re-drawn from the same dims, a primary-sample-space
+// identity with Jacobian 1 — with one ray along the re-drawn NEE connection
+// (a SCATTER terminal's segments were traced concretely, so no ray is owed).
+// The own-domain target is the stored integrand (D-138): generation formed F
+// concretely in the source domain — visibility included — so it is trusted
+// and spends nothing.
+//
+// An undefined shift — a replayed lobe died, the prefix escaped, the terminal
+// shape mismatched — is the partial-shift convention (D-136): every output
+// zero while the pair still counts in the caller's V/c_tot, so the MIS
+// weights stay a fixed function of each sample. Folded into the cross-domain
+// targets so the shipped defensive pairwise MIS (restir_mis) needs no
+// kind-aware variant: it already compares c·p̂ across the pair. On a win the
+// returned sample is the one to store onward: resolve trusts F for the
+// indirect kinds, and a reconnection sample's cached half re-roots it in this
+// domain (D-138/D-139). An NEE sample is the caller's own arm (D-094); one
+// reaching here is a caller bug, answered with zero targets.
+public DomainShift shiftIntoDomain(RaytracingAccelerationStructure tlas,
+                                   SceneTable* scene, PathSample sample,
+                                   Surface s) {
+    DomainShift d;
+    d.target = 0.0;
+    d.ownTarget = 0.0;
+    d.unshadowed = 0.0;
+    d.sample = sample;
+    if (isReconnectionSample(sample)) {
+        let sh = shiftReconnection(tlas, scene, sample, s);
+        if (sh.valid && sh.jacobian > 0.0) {
+            d.unshadowed = luminance(sh.F);
+            var vis = 0.0;
+            if (d.unshadowed > 0.0) {
+                RayDesc ray;
+                ray.Origin = sh.rayOrigin;
+                ray.Direction = sh.toRc;
+                ray.TMin = 0.0;
+                ray.TMax = sh.tmax;
+                vis = shadowVisibility(tlas, scene, ray,
+                                       sample.rcVertex.instance,
+                                       sample.rcVertex.primitive);
+            }
+            d.target = d.unshadowed * vis * sh.jacobian;
+            d.ownTarget = luminance(sample.F);
+            d.sample.F = sh.F;
+            d.sample.cachedJacobian = sh.partial;
+        }
+    } else if (isReplaySample(sample)) {
+        let sh = shiftReplay(tlas, scene, sample, s);
+        if (sh.valid) {
+            d.unshadowed = luminance(sh.F);
+            var vis = 1.0; // a SCATTER terminal's value is complete
+            if (d.unshadowed > 0.0 && sh.tmax > 0.0) {
+                RayDesc ray;
+                ray.Origin = sh.rayOrigin;
+                ray.Direction = sh.direction;
+                ray.TMin = 0.0;
+                ray.TMax = sh.tmax;
+                vis = shadowVisibility(tlas, scene, ray,
+                                       sh.shadowLight, sh.shadowPrimitive);
+            }
+            d.target = d.unshadowed * vis; // J = 1: the replay is a PSS identity
+            d.ownTarget = luminance(sample.F);
+            d.sample.F = sh.F;
+        }
+    }
+    return d;
+}
+
+// The reverse direction: a sample's *unshadowed* target stated in the foreign
+// domain rooted at `s` — p̂(Y)·J through the same shift maps for the indirect
+// kinds, the plain re-form for NEE. The direction the pairwise MIS needs of
+// the canonical sample (what would this pixel's survivor be worth over
+// there?), so no visibility ray is spent: own-domain targets never are. An
+// undefined shift is the same partial-shift zero as above.
+public float targetInDomain(RaytracingAccelerationStructure tlas,
+                            SceneTable* scene, RestirScene* restir,
+                            PathSample sample, Surface s) {
+    if (isReconnectionSample(sample)) {
+        let sh = shiftReconnection(tlas, scene, sample, s);
+        return sh.valid ? luminance(sh.F) * sh.jacobian : 0.0;
+    }
+    if (isReplaySample(sample)) {
+        let sh = shiftReplay(tlas, scene, sample, s);
+        return sh.valid ? luminance(sh.F) : 0.0;
+    }
+    return targetUnshadowed(scene, restir, s, sample);
 }

@@ -111,12 +111,14 @@ struct Params {
 [vk::push_constant]
 Params params;
 
-// The reconstructed `Surface`, the light-sample `connectSampleAt`, and the
-// unshadowed target `targetUnshadowed` this stage shares with the temporal
-// combine live in `restir_target.slang` (imported above) — one copy, so the two
-// reuse stages can never drift into a silent bias. Only the visibility-aware
-// canonical target below stays here: it traces this stage's TLAS binding, a
-// resource a shared module cannot own.
+// The reconstructed `Surface`, the light-sample `connectSampleAt`, the
+// unshadowed target `targetUnshadowed`, and the cross-domain shift-and-target
+// block (`shiftIntoDomain`/`targetInDomain`) this stage shares with the
+// temporal combine live in `restir_target.slang` (imported above) — one copy,
+// so the two reuse stages can never drift into a silent bias. Only the
+// visibility-aware NEE target below stays here: shadowing the NEE arm is this
+// stage's visibility policy (temporal's is unshadowed, D-094), not shared
+// machinery.
 
 // The visibility-aware canonical target p̂_c = U_c·V of a light sample at *this*
 // surface, tracing one shadow ray. Returns p̂_c and reports the unshadowed U_c
@@ -252,107 +254,41 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
             continue;
         }
 
-        // The shifted targets (D-134/D-135/D-138/D-139). An NEE sample stores
-        // a domain-independent light point — identity shift, Jacobian 1,
-        // through the shared ray-free targets. A reconnection sample maps
-        // through `shiftReconnection`: prefix replay from the stored seed
-        // (k > 2), the re-derived reconnection off its end, the re-shaded
-        // f_k, and the geometry-term Jacobian against the sample's cached
-        // source half. A replay sample maps through `shiftReplay`: the whole
-        // path replayed from the seed, the terminal re-drawn from the same
-        // dims — a primary-sample-space identity, Jacobian 1. An undefined
-        // shift — a replayed lobe died, the prefix escaped, the terminal
-        // shape mismatched — is the partial-shift convention (D-136): target
-        // 0 while the pair still counts in V/c_tot, so the MIS weights stay
-        // a fixed function of each sample. Folded into the cross-domain
-        // targets so the shipped defensive pairwise MIS (restir_mis) needs
-        // no kind-aware variant: it already compares c·p̂ across the pair.
-        //
-        // p̂_c(Y_i) is visibility-aware — one ray along the reconnection
-        // segment or the re-drawn NEE connection (a SCATTER-terminal
-        // replay's segments were traced concretely, so no ray is owed); the
-        // own-domain p̂_i of an indirect sample is its stored integrand
-        // (D-138), and of an NEE sample the unshadowed re-form.
+        // The shifted targets (D-134/D-135/D-138/D-139). An indirect sample —
+        // reconnection or replay — crosses through the shared forward block
+        // (`shiftIntoDomain`, restir_target.slang): the shift map, its one
+        // visibility ray, the partial-shift zero for an undefined shift
+        // (D-136), and the re-rooted sample to store on a win. An NEE sample
+        // stores a domain-independent light point — identity shift, Jacobian
+        // 1 — through this stage's own arms: the visibility-aware p̂_c and
+        // the unshadowed own-domain p̂_i.
         float ucYi = 0.0;
         float pcYiShifted = 0.0; // p̂_c(shift(Y_i))·J_i, 1 ray
         float piYi = 0.0;        // p̂_i(Y_i)
         var shifted = neighbour.sample;
-        if (isReconnectionSample(neighbour.sample)) {
-            let sh = shiftReconnection(sceneTlas, params.scene,
-                                       neighbour.sample, canonical);
-            if (sh.valid && sh.jacobian > 0.0) {
-                ucYi = luminance(sh.F);
-                var vis = 0.0;
-                if (ucYi > 0.0) {
-                    RayDesc ray;
-                    ray.Origin = sh.rayOrigin;
-                    ray.Direction = sh.toRc;
-                    ray.TMin = 0.0;
-                    ray.TMax = sh.tmax;
-                    vis = shadowVisibility(sceneTlas, params.scene, ray,
-                                           neighbour.sample.rcVertex.instance,
-                                           neighbour.sample.rcVertex.primitive);
-                }
-                pcYiShifted = ucYi * vis * sh.jacobian;
-                piYi = luminance(neighbour.sample.F);
-                // If this neighbour wins, the stored sample must carry this
-                // domain's integrand and Jacobian half onward (resolve
-                // trusts F for k > 2; the cached half re-roots the sample
-                // here, D-138).
-                shifted.F = sh.F;
-                shifted.cachedJacobian = sh.partial;
-            }
-        } else if (isReplaySample(neighbour.sample)) {
-            let sh = shiftReplay(sceneTlas, params.scene,
-                                 neighbour.sample, canonical);
-            if (sh.valid) {
-                ucYi = luminance(sh.F);
-                var vis = 1.0; // a SCATTER terminal's value is complete
-                if (ucYi > 0.0 && sh.tmax > 0.0) {
-                    RayDesc ray;
-                    ray.Origin = sh.rayOrigin;
-                    ray.Direction = sh.direction;
-                    ray.TMin = 0.0;
-                    ray.TMax = sh.tmax;
-                    vis = shadowVisibility(sceneTlas, params.scene, ray,
-                                           sh.shadowLight, sh.shadowPrimitive);
-                }
-                pcYiShifted = ucYi * vis; // J = 1: the replay is a PSS identity
-                piYi = luminance(neighbour.sample.F);
-                // On a win the sample carries this domain's integrand onward
-                // (resolve trusts F for the replay kind, D-139).
-                shifted.F = sh.F;
-            }
+        if (pathKind(neighbour.sample) != PATH_KIND_NEE) {
+            let sh = shiftIntoDomain(sceneTlas, params.scene,
+                                     neighbour.sample, canonical);
+            pcYiShifted = sh.target;
+            piYi = sh.ownTarget;
+            ucYi = sh.unshadowed;
+            shifted = sh.sample;
         } else {
             pcYiShifted = targetVisAware(canonical, neighbour.sample, ucYi);
             piYi = targetUnshadowed(params.scene, params.restir,
                                     neighbourSurface, neighbour.sample);
         }
         // Symmetrically, the canonical's sample stated in the neighbour's
-        // domain: p̂_i(Y_c)·J — shifted for an indirect sample, the plain
-        // re-form for NEE, unshadowed either way (own-domain targets spend
-        // no ray). Skipped when its own-domain target is already zero (the
-        // canonical's share is zero regardless), which also spares the
-        // per-neighbour replay rays.
+        // domain: p̂_i(Y_c)·J through the shared ray-free reverse
+        // (`targetInDomain` — own-domain targets spend no ray, any kind).
+        // Skipped when its own-domain target is already zero (the canonical's
+        // share is zero regardless), which also spares the per-neighbour
+        // replay rays.
         float piYcShifted = 0.0;
         if (canonicalReservoir.unbiasedWeight > 0.0 && pcYc > 0.0) {
-            if (isReconnectionSample(canonicalReservoir.sample)) {
-                let sh = shiftReconnection(sceneTlas, params.scene,
-                                           canonicalReservoir.sample, neighbourSurface);
-                if (sh.valid) {
-                    piYcShifted = luminance(sh.F) * sh.jacobian;
-                }
-            } else if (isReplaySample(canonicalReservoir.sample)) {
-                let sh = shiftReplay(sceneTlas, params.scene,
-                                     canonicalReservoir.sample, neighbourSurface);
-                if (sh.valid) {
-                    piYcShifted = luminance(sh.F);
-                }
-            } else {
-                piYcShifted = targetUnshadowed(params.scene, params.restir,
-                                               neighbourSurface,
-                                               canonicalReservoir.sample);
-            }
+            piYcShifted = targetInDomain(sceneTlas, params.scene, params.restir,
+                                         canonicalReservoir.sample,
+                                         neighbourSurface);
         }
 
         let ci = neighbour.confidence;
