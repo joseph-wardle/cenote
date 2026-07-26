@@ -197,6 +197,8 @@ compiles, clippy-clean (incl. `--features denoise`), tests pass on the GPU machi
    temporal on; the decay-ramp handoff (temporal early → spatial-only + accumulation late)
    is measured. Spatial + temporal complete, all unbiased.*
    Expanded to a three-rung ladder in §4c (interviewed 2026-07-26).
+   **Done** (2026-07-26): T5a `66f86a1` + T5b `7245fcb` + T5c; checkpoint met —
+   §4c's measurements.
 6. **Colour-noise fix + ReSTCV** — first the near-free vector-resampling-weight fix
    (D-133); then, *after its deep-read prerequisite* (§6), ReSTCV as the general
    control-variate form (plain ReSTIR PT = zero-CV degenerate). *Checkpoint: CV-on and
@@ -504,6 +506,59 @@ F at this pixel this frame — visibility re-traced, the sample re-rooted — ex
 generation would have produced; the helpers live beside the shifts in
 restir_target.slang (one module for target + shift, as today); restir_temporal_test.slang
 is unchanged.
+
+### T5 measurements — captured at T5c
+
+Rung outcomes against the ladder: **T5a** (`66f86a1`) landed the shared shift block with
+both golden sets bit-identical — the refactor proven a no-op. **T5b** (`7245fcb`) crossed
+the frame boundary: pinned-temporal unbiasedness (decay 0, 256 frames) green on all three
+kind-covering scenes, the bitwise G-buffer-surface fixture green, the epoch plumbing
+asserted host-side, the ReSTIR goldens re-pinned (the estimator realization moves — the
+§4a decision-5 precedent) and the brute goldens proven pixel-identical. One gate moved:
+the many-lights convergence floor 1.5× → 1.3× (the step-3c gate's own floor) —
+cross-frame indirect correlation trades a little early-frame independence for the
+warm-start (8 spp relMSE 0.0331 → 0.0362, 32 spp 0.0065 → 0.0066, mean unmoved), the
+D-094 trade the decay ramp exists to anneal.
+
+Decay-handoff curve (indirect-glossy scene, 128², relMSE of the accumulated image vs a
+256-spp reference; fresh film per point, so frames-since-reset — what the ramp reads —
+equals the frame count; `restir_decay_handoff_report`):
+
+| Frames | Temporal on | Temporal off |
+|---|---|---|
+| 1 | 0.68410 | 0.68410 |
+| 2 | 0.35122 | 0.30581 |
+| 4 | 0.18766 | 0.16293 |
+| 8 | 0.08896 | 0.08372 |
+| 16 | 0.05322 | 0.05206 |
+| 32 | 0.02364 | 0.02332 |
+
+The measured shape corrects the interview's sketch ("the warm-start win early"): on a
+*held camera from a cold start* the accumulated average shows **no** early temporal win —
+history correlates the frames it folds, and correlated frames average slower (the §6
+correlation floor, in miniature). The cost sits ~15% through 4 frames, then shrinks as
+the 16-frame ramp hands off — +6% at 8, +2% at 16, +1.4% at 32 — converging to equality;
+frame 1 is equal outright (a fresh film holds no history, and the zero-history combine
+collapses to the candidate). The warm-start the stage exists for is *per-frame* quality
+during motion — there the film resets every frame, so an accumulated-average metric
+structurally cannot see it; the pinned-temporal gates hold that regime unbiased, and the
+frame-time rows below price it.
+
+Frame times (512², release, ms/frame over 64 timed frames, `restir_frame_time_report`;
+"on" pins temporal live at decay 0 — the steady-state cost while the stage works; the
+shipping ramp returns a held camera to the off row within 16 frames, and the
+decayed-zero fold then spends no shift work at all):
+
+| Scene | Temporal off | Temporal on (pinned live) |
+|---|---|---|
+| demo | 6.78 | 7.36 |
+| glossy-primary | 8.66 | 9.66 |
+| distant-glossy | 3.01 | 4.29 |
+
+The live window costs ~0.6–1.3 ms/frame — the cross-frame shift's replay segments and
+its one visibility ray. Decision 3's named follow-up (the held-camera identity fast
+path) stays dormant: the window is bounded by the ramp, and the converged still is
+provably free.
 
 ## 5. Fallback seams (pre-agreed, in slip order)
 

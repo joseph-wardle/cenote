@@ -2892,10 +2892,17 @@ mod tests {
         );
     }
 
-    /// The measurement seam of the step-4+ checkpoints (§4b) — ms/frame of
-    /// the full `ReSTIR` wave (candidates + spatial reuse) on the perf-tracked
-    /// scenes. A report, not a gate: `#[ignore]` keeps it out of the suite;
-    /// run it explicitly when a rung's checkpoint needs numbers:
+    /// The measurement seam of the step-4+ checkpoints (§4b, §4c) — ms/frame
+    /// of the full `ReSTIR` wave on the perf-tracked scenes, temporal off
+    /// (candidates + spatial, the step-4 baseline) and temporal on. The on
+    /// row pins temporal **live** (decay 0, held camera, identity
+    /// reprojection): the steady-state cost of the stage while it works. The
+    /// shipping ramp anneals a held camera back to the off row within
+    /// [`Wavefront::RESTIR_TEMPORAL_DECAY_FRAMES`], and the decayed-zero fold
+    /// then spends no shift work at all (§4c decision 3), so the live row is
+    /// the honest worst case, not the converged still's. A report, not a
+    /// gate: `#[ignore]` keeps it out of the suite; run it explicitly when a
+    /// rung's checkpoint needs numbers:
     ///
     /// ```text
     /// cargo test -p cenote --release restir_frame_time_report -- \
@@ -2905,6 +2912,12 @@ mod tests {
     /// `trace_then` blocks on its submission fence, so wall-clock around it
     /// is the frame. Step 7's reciprocal-reuse speedup claim inherits this
     /// same seam for its denominator.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the two timed configurations and the temporal four-buffer \
+                  wiring are one report — splitting them would scatter what \
+                  the numbers compare"
+    )]
     #[test]
     #[ignore = "a measurement report, not a gate — run explicitly for checkpoint numbers"]
     fn restir_frame_time_report() {
@@ -2918,19 +2931,29 @@ mod tests {
             ("glossy-primary", glossy_primary_scene(&gpu)),
             ("distant-glossy", distant_glossy_scene(&gpu)),
         ];
-        let buffer = |name: &str| {
-            gpu.create_buffer(
-                name,
-                pixels * size_of::<crate::restir::StoredPathReservoir>() as u64,
-                vk::BufferUsageFlags::STORAGE_BUFFER
-                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-                    | vk::BufferUsageFlags::TRANSFER_DST,
-                MemoryLocation::GpuOnly,
-            )
-            .expect("reservoir buffer")
+        let reservoir_bytes = pixels * size_of::<crate::restir::StoredPathReservoir>() as u64;
+        let gbuffer_bytes = pixels * 48;
+        let store_usage = vk::BufferUsageFlags::STORAGE_BUFFER
+            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+            | vk::BufferUsageFlags::TRANSFER_DST;
+        let buffer = |name: &str, bytes: u64| {
+            gpu.create_buffer(name, bytes, store_usage, MemoryLocation::GpuOnly)
+                .expect("buffer")
         };
-        let reservoir = buffer("test.time.reservoir");
-        let scratch = buffer("test.time.scratch");
+        let scratch = buffer("test.time.scratch", reservoir_bytes);
+        let cand = buffer("test.time.cand", reservoir_bytes);
+        let mut prev = buffer("test.time.prev", reservoir_bytes);
+        let mut curr = buffer("test.time.curr", reservoir_bytes);
+        let mut gbuffer_prev = buffer("test.time.gbuffer.prev", gbuffer_bytes);
+        let mut gbuffer_curr = buffer("test.time.gbuffer.curr", gbuffer_bytes);
+        let mut reproject_buf = gpu
+            .create_buffer(
+                "test.time.reproject",
+                96,
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                MemoryLocation::CpuToGpu,
+            )
+            .expect("reproject");
         let wavefront = Wavefront::new(
             &gpu,
             &Kernels::embedded(),
@@ -2939,43 +2962,89 @@ mod tests {
             LightSampling::Mis,
         )
         .expect("wavefront");
-        let inputs = RestirInputs {
-            reservoir: &reservoir,
-            temporal: None,
-            scratch: Some(&scratch),
-            debug: None,
-            debug_view: DebugView::Off,
-        };
         let radiance = radiance_buffer(&gpu, width, height);
         let (warmup, timed) = (8u32, 64u32);
         for (name, scene) in &scenes {
-            let frame = |sample: u32| {
-                wavefront
-                    .trace_then(
-                        &gpu,
-                        scene,
-                        &radiance,
+            // Temporal off: candidates + spatial — the step-4 baseline's wave.
+            let off_ms = {
+                let inputs = RestirInputs {
+                    reservoir: &curr,
+                    temporal: None,
+                    scratch: Some(&scratch),
+                    debug: None,
+                    debug_view: DebugView::Off,
+                };
+                let mut started = std::time::Instant::now();
+                for sample in 0..warmup + timed {
+                    if sample == warmup {
+                        started = std::time::Instant::now();
+                    }
+                    wavefront
+                        .trace_then(
+                            &gpu, scene, &radiance, width, height, sample, None, Some(&inputs), &[],
+                        )
+                        .expect("trace");
+                }
+                started.elapsed().as_secs_f64() * 1e3 / f64::from(timed)
+            };
+            // Temporal on, pinned live: candidates + temporal + spatial, the
+            // renderer's four-buffer routing on a held camera. `prev` and the
+            // G-buffers clear per scene — history from another scene would
+            // hold that scene's instance indices.
+            let on_ms = {
+                gpu.submit_passes(&[
+                    Pass::Fill { buffer: &prev, offset: 0, size: reservoir_bytes, value: 0 },
+                    Pass::Fill { buffer: &gbuffer_prev, offset: 0, size: gbuffer_bytes, value: 0 },
+                    Pass::Fill { buffer: &gbuffer_curr, offset: 0, size: gbuffer_bytes, value: 0 },
+                ])
+                .expect("clear");
+                let camera = *scene.camera();
+                let basis = camera.basis(width as f32 / height as f32);
+                let cam = ReprojectCamera {
+                    position: camera.position,
+                    right: basis.right,
+                    up: basis.up,
+                    forward: basis.forward,
+                };
+                let mut started = std::time::Instant::now();
+                for sample in 0..warmup + timed {
+                    if sample == warmup {
+                        started = std::time::Instant::now();
+                    }
+                    let reproject = Reproject::new(
+                        (sample > 0).then_some(cam),
+                        gbuffer_prev.device_address(),
+                        gbuffer_curr.device_address(),
                         width,
                         height,
-                        sample,
-                        None,
-                        Some(&inputs),
-                        &[],
-                    )
-                    .expect("trace");
+                    );
+                    reproject_buf.write(bytemuck::bytes_of(&reproject));
+                    let inputs = RestirInputs {
+                        reservoir: &curr,
+                        temporal: Some(TemporalReuse {
+                            cand: &cand,
+                            prev: &prev,
+                            reproject: &reproject_buf,
+                            decay_frames: 0,
+                            prev_same_scene: true,
+                        }),
+                        scratch: Some(&scratch),
+                        debug: None,
+                        debug_view: DebugView::Off,
+                    };
+                    wavefront
+                        .trace_then(
+                            &gpu, scene, &radiance, width, height, sample, None, Some(&inputs), &[],
+                        )
+                        .expect("trace");
+                    std::mem::swap(&mut prev, &mut curr);
+                    std::mem::swap(&mut gbuffer_prev, &mut gbuffer_curr);
+                }
+                started.elapsed().as_secs_f64() * 1e3 / f64::from(timed)
             };
-            for sample in 0..warmup {
-                frame(sample);
-            }
-            let started = std::time::Instant::now();
-            for sample in warmup..warmup + timed {
-                frame(sample);
-            }
-            let elapsed = started.elapsed();
             eprintln!(
-                "frame time on {name}: {:.2} ms/frame at {width}x{height} \
-                 ({timed} frames)",
-                elapsed.as_secs_f64() * 1e3 / f64::from(timed)
+                "frame time on {name}: temporal-off {off_ms:.2} ms, \
+                 temporal-on {on_ms:.2} ms/frame at {width}x{height} ({timed} frames)"
             );
         }
     }

@@ -176,10 +176,11 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
     // visibility ray — the "+1" of the k+1. An empty/degenerate canonical (rare
     // at a real hit) yields 0 and simply loses to any neighbour. An indirect
     // sample's — reconnection or replay — own-domain target is its stored
-    // integrand (D-138/D-139): generation formed F in this very domain this
-    // frame (temporal never passes a foreign indirect sample through), its
-    // path traced concretely — visibility included — so it is trusted, and no
-    // ray is spent.
+    // integrand (D-138/D-139): F was formed in this very domain this frame —
+    // by generation, or by temporal's cross-frame shift, which re-roots a
+    // winning prev sample at this pixel (prefix replayed, visibility
+    // re-traced) before storing it (step 5b) — so it is trusted, and no ray
+    // is spent.
     float ucYc = 0.0;
     float pcYc = 0.0;
     if (canonicalReservoir.unbiasedWeight > 0.0) {

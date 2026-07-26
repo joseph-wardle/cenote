@@ -180,17 +180,27 @@ built to extend but that M3 consciously does not build.
   *orthogonal* to screen-space ReSTIR — the accelerator for the vertices a screen-space
   reservoir can't see. It instantiates the same reservoir primitive; that is why the
   primitive is index-agnostic. (D-086)
-- **Reservoir path reuse — hybrid shift, splatting, CRIS** *(revisit: M6,
-  ReSTIR-PT)* — Today: M6 step 2 (D-134/D-135) landed the **reconnection shift** — full-path
-  spatial reuse with the geometry-term Jacobian — so reuse is no longer direct-only; Lo(x₂) is
-  baked direction-independent and gated to diffuse reconnection vertices (D-136). Still pending:
-  the **hybrid shift** (random-replay the near-specular prefix, un-bake f₂ so glossy vertices
-  reconnect — step 3, D-125), **temporal path reuse** (step 5 — the cross-frame shift needs the
-  Jacobian over the reprojected surface, a stable identity for the reconnection vertex's
-  instance, and a visibility re-test; until then restir_temporal zeroes a reconnection sample's
-  cross-frame targets, D-136), reservoir **splatting**, and continuous RIS. It reuses the D-086
-  primitive and the `Hit`-shaped reconnection vertex M1 chose; the DI shift built in M3 is the
-  base case the reconnection shift generalized. (D-086, D-087, D-134)
+- **Reservoir path reuse — splatting, CRIS** *(revisit: M6, ReSTIR-PT)* — Today: M6
+  steps 2–5 landed spatiotemporal path reuse whole — the **reconnection shift**
+  (D-134/D-135), the **hybrid shift** with the footprint pair criteria (D-137/D-140),
+  and **temporal path reuse** across the frame boundary through the same shared shift
+  block, epoch-gated across edits (D-141). Still pending from the family: reservoir
+  **splatting** and continuous RIS. It reuses the D-086 primitive and the `Hit`-shaped
+  reconnection vertex M1 chose; the DI shift built in M3 is the base case the
+  reconnection shift generalized. (D-086, D-087, D-134, D-141)
+- **Instance-identity registry — indirect history across scene edits** *(revisit:
+  editing-heavy interactive workflows, where losing one frame of indirect warm-start
+  per edit is felt)* — Today: temporal reuse gates indirect history on the scene build
+  (the epoch gate, D-141): a reconnection sample at rest holds a raw TLAS custom index
+  an edit may renumber, so when `prev` was rendered against an older build the pair is
+  dropped before any dereference — the neighbour simply doesn't exist that frame — while
+  NEE history keeps surviving edits through the light-id registry (M3), and camera-only
+  motion (the common temporal case, orbiting) rebuilds nothing and never trips the gate.
+  Production shape: per-instance stable ids with mesh fingerprints and an at-rest remap
+  of stored `rcVertex.instance` across builds — cross-build index composition, the
+  indirect twin of the light-id registry. It buys exactly one frame of indirect
+  warm-start across an edit that resets the film anyway, which is why it waits for a
+  workflow where that frame matters. (D-141)
 - **Stochastic opacity in the reused indirect tail** *(revisit: a lookdev scene with
   cutout/fractional-opacity geometry along an indirect bounce — beside the tail's scope
   lines, D-136)* — Today: the inline tail the candidate stage traces for a reconnection

@@ -3445,3 +3445,35 @@ reconnection, so spatial got cheaper). One scale note, from Eq 5's own arithmeti
 depths a roughness-0.05 lobe prices its acceptance at ~80 m of segment — the criterion is *strict*
 on sharp lobes, which is the point; the evidence scene's 0.12/16 m is the same physics at a
 testable scale.
+
+### D-141: Step 5 carries paths across the frame boundary — the shared shift re-roots history, and an edit gates it
+Status: accepted (2026-07-26). Temporal reuse now reuses *whole path samples* across frames. The
+spatial per-sample shift-and-target block is **factored, not copied** (§4c decision 1): a forward
+form (`shiftIntoDomain` — kind dispatch → shift → the one visibility ray → shifted target,
+own-domain target, re-rooted sample) and a ray-free reverse (`targetInDomain`) live beside the
+shifts in restir_target.slang; spatial was rewritten onto them first (T5a `66f86a1`, both golden
+sets bit-identical — the refactor proven a no-op), then temporal calls the same two with its one
+reprojected neighbour (T5b `7245fcb`), retiring the step-2 J = 0 convention (D-136). On a prev win
+the **re-rooted** sample is stored — F re-formed at this pixel through the current TLAS, prefix
+replayed, reconnection visibility re-traced, Jacobian priced — precisely what generation here
+would have produced, so spatial's canonical trust (D-138/D-139) holds across the boundary; the
+NEE arms stay per-stage and unshadowed (D-094's feed convention, not drift). `rcVertex.instance`
+across edits is answered by an **epoch gate, not an instance registry** (decision 2):
+`Scene::epoch` counts applied edits (camera moves never bump it), `ViewState` records at each
+swap which build its `prev` rendered against, and one push-constant flag drops indirect history
+before its raw TLAS index is ever dereferenced — NEE history keeps surviving edits through the
+light-id registry (M3); the registry itself went to deferrals.md (revival: editing-heavy
+interactive workflows). Cost discipline stayed **measurement-only** (decision 3) with one free
+ordering fix: the capped-and-decayed confidence folds into `prevValid` before any shift work, so
+a decayed-to-zero prev is no neighbour at all and the converged still provably spends zero shift
+rays. Evidence (§4c's T5 measurements): pinned-temporal unbiasedness (decay 0, 256 frames) green
+on the three kind-covering scenes; the temporal G-buffer surface bit-identical to the path-pool
+reconstruction; the decay-handoff curve shows the honest shape — on a cold held camera the
+accumulated average carries a correlation *cost* (~15% relMSE through 4 frames, annealing to
++1.4% at 32 as the 16-frame ramp hands off), not the interview's sketched early win, because the
+warm-start's payoff is per-frame quality during motion, which an accumulated average structurally
+cannot see; temporal live costs 0.6–1.3 ms/frame at 512² (demo 6.78 → 7.36, glossy-primary
+8.66 → 9.66, distant-glossy 3.01 → 4.29) and the decayed still none. One gate moved: the
+many-lights convergence floor 1.5× → 1.3× (the step-3c gate's own floor) — cross-frame indirect
+correlation narrowed the 8-spp margin (relMSE 0.0331 → 0.0362, mean unmoved, brute-vs-reference
+invariant), the D-094 trade the ramp exists to anneal.

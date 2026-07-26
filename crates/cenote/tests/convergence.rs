@@ -26,6 +26,7 @@
 //! without a capable GPU, so plain `cargo test` passes everywhere.
 
 use cenote::environment::Environment;
+use cenote::gpu::Context;
 use cenote::material::Material;
 use cenote::render::{RenderMode, Renderer};
 use cenote::scene::{Camera, Object, Scene, ground_plane, icosphere};
@@ -123,32 +124,19 @@ fn restir_converges_faster_than_brute_force() {
     );
 }
 
-/// The M6 step-3c "reuse is alive" gate (D-139): `ReSTIR` PT must beat plain
-/// path tracing at equal spp on a glossy *GI* scene — the one claim every
-/// unbiasedness gate is blind to, since an estimator whose every shift
-/// silently returned J = 0 would still converge to the right image, just no
-/// faster than brute force.
-///
-/// The scene is the step-3b glossy-primary set (wavefront.rs's twin, built
-/// through the public API) with its lighting turned *indirect-only*: the
-/// emitter faces the sub-floor metal panel and shows the world its dark back
-/// (emission is one-sided), and the environment is black, so every camera-
-/// visible surface is lit exclusively through the panel's glossy reflection.
-/// That is the regime path reuse exists for — per pixel the good path
-/// (surface → panel → emitter) is rare, so plain PT is starved while the
-/// reservoir keeps whichever walk found it and spatial reuse spreads it —
-/// and its samples are exactly the hybrid-shift shapes of steps 3a-3c (the
-/// panel vertex is below the pair floor, so the reuse rides seed replay).
-/// Direct-lit variants of this scene measurably do NOT clear this bar: there
-/// PT's summed per-vertex estimator is already low-variance and the
-/// one-survivor resampling costs more than 5-neighbour reuse recovers — the
-/// many-light and hard-GI regimes are where the method pays, and this gate
-/// pins the hard-GI one.
-#[test]
-fn restir_pt_beats_brute_force_on_glossy_indirect_gi() {
-    let Some(gpu) = test_context() else {
-        return;
-    };
+/// The indirect-glossy GI scene: the step-3b glossy-primary set (wavefront.rs's
+/// twin, built through the public API) with its lighting turned
+/// *indirect-only* — the emitter faces the sub-floor metal panel and shows the
+/// world its dark back (emission is one-sided), and the environment is black,
+/// so every camera-visible surface is lit exclusively through the panel's
+/// glossy reflection. That is the regime path reuse exists for — per pixel the
+/// good path (surface → panel → emitter) is rare, so plain PT is starved while
+/// the reservoir keeps whichever walk found it and reuse spreads it — and its
+/// samples are exactly the hybrid-shift shapes of steps 3a-3c (the panel
+/// vertex is below the pair floor, so the reuse rides seed replay). Shared by
+/// the step-3c gate below and the step-5 decay-handoff report, which measures
+/// the same regime over frames instead of over samples.
+fn indirect_glossy_scene(gpu: &Context) -> Scene {
     let objects = [
         Object {
             mesh: ground_plane(3.0),
@@ -182,8 +170,26 @@ fn restir_pt_beats_brute_force_on_glossy_indirect_gi() {
         vfov_degrees: 45.0,
         lens: None,
     };
-    let scene = Scene::new(&gpu, &objects, camera, &Environment::constant(Vec3::ZERO))
-        .expect("indirect glossy scene");
+    Scene::new(gpu, &objects, camera, &Environment::constant(Vec3::ZERO))
+        .expect("indirect glossy scene")
+}
+
+/// The M6 step-3c "reuse is alive" gate (D-139): `ReSTIR` PT must beat plain
+/// path tracing at equal spp on a glossy *GI* scene — the one claim every
+/// unbiasedness gate is blind to, since an estimator whose every shift
+/// silently returned J = 0 would still converge to the right image, just no
+/// faster than brute force. The scene ([`indirect_glossy_scene`]) is that
+/// regime distilled. Direct-lit variants of it measurably do NOT clear this
+/// bar: there PT's summed per-vertex estimator is already low-variance and
+/// the one-survivor resampling costs more than 5-neighbour reuse recovers —
+/// the many-light and hard-GI regimes are where the method pays, and this
+/// gate pins the hard-GI one.
+#[test]
+fn restir_pt_beats_brute_force_on_glossy_indirect_gi() {
+    let Some(gpu) = test_context() else {
+        return;
+    };
+    let scene = indirect_glossy_scene(&gpu);
 
     // Ground truth: ReSTIR far past the test budgets, exactly as the
     // many-light test above (the unbiasedness gates already pin that the two
@@ -226,6 +232,41 @@ fn restir_pt_beats_brute_force_on_glossy_indirect_gi() {
         "ReSTIR PT should beat plain PT at {HIGH_SPP} spp on indirect glossy GI: \
          ReSTIR {restir_high:.5} vs brute {brute_high:.5}"
     );
+}
+
+/// The step-5 decay-handoff curve (M6 §4c): relMSE of the accumulated image
+/// after 1/2/4/8/16/32 frames on the indirect-glossy scene, the shipping
+/// estimator (temporal on, default decay window) against temporal-off. What
+/// it shows (§4c's T5 outcomes): the held-camera *cost* of history
+/// correlation early — correlated frames average slower — annealing to
+/// equality as the decay ramp hands the still over to spatial-only
+/// accumulation (D-094); the warm-start's payoff is per-frame quality during
+/// motion, which an accumulated average cannot see. Each point accumulates
+/// into a fresh film, so frames-since-reset — what the ramp actually reads —
+/// equals the frame count. A report, not a gate (§4c decision 4): run
+/// explicitly when a checkpoint needs numbers:
+///
+/// ```text
+/// cargo test -p cenote --release --test convergence -- \
+///     --ignored --test-threads=1 --nocapture
+/// ```
+#[test]
+#[ignore = "a measurement report, not a gate — run explicitly for checkpoint numbers"]
+fn restir_decay_handoff_report() {
+    let Some(gpu) = test_context() else {
+        return;
+    };
+    let scene = indirect_glossy_scene(&gpu);
+    let mut restir = Renderer::new(&gpu).expect("renderer");
+    restir.set_render_mode(RenderMode::Restir);
+    let reference = accumulate(&gpu, &restir, &scene, SIZE, REFERENCE_SPP);
+    for frames in [1u32, 2, 4, 8, 16, 32] {
+        restir.set_temporal_reuse(true);
+        let on = rel_mse(&accumulate(&gpu, &restir, &scene, SIZE, frames), &reference);
+        restir.set_temporal_reuse(false);
+        let off = rel_mse(&accumulate(&gpu, &restir, &scene, SIZE, frames), &reference);
+        eprintln!("handoff at {frames:2} frames: temporal-on {on:.5}, temporal-off {off:.5}");
+    }
 }
 
 /// Per-channel relative MSE against `reference`: the mean over every colour
