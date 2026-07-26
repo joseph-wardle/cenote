@@ -38,6 +38,10 @@ static const uint SHIFT_BROKEN = 0x200;
 // The evaluated sample was replay-kind; bits 12..13 then carry its terminal
 // kind (RC_TERMINAL_NEE / RC_TERMINAL_SCATTER) for the host's coverage.
 static const uint SHIFT_REPLAY = 0x400;
+// A live length-2 NEE (direct-lighting) survivor: no shift to run — its
+// reconnection vertex is a light point — but the host's kind-mix report
+// (the step-4 baseline metric, §4b) needs it as the denominator's third kind.
+static const uint SHIFT_NEE = 0x800;
 
 struct Params {
     Paths paths;
@@ -104,6 +108,11 @@ void restir_shift_test(uint3 tid: SV_DispatchThreadID) {
         } else {
             outKind = SHIFT_BROKEN;
         }
+    } else if (stored.unbiasedWeight > 0.0 && pathKind(stored.sample) == PATH_KIND_NEE) {
+        // Kind bits alone can't tell a live NEE survivor from a never-won
+        // reservoir (both read PATH_KIND_NEE through zero-init), so the NEE
+        // arm gates on a live weight instead.
+        outKind = SHIFT_NEE;
     }
     params.shifted[pixel] = outF;
     params.kinds[pixel] = outKind;

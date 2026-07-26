@@ -264,14 +264,16 @@ struct WalkVertex {
 // `hit` is x₂ — already traced by the kernel, so the loop's first iteration
 // (bounce 1) skips its own trace; `drawnDir` is the *drawn* x₁→x₂ direction
 // the walk (and replay) shades by; `origin` the traced ray's start and
-// `medium` the interior that segment crossed. `floorDist` is the pair
-// criteria's scale-free segment floor; `x1FOverPdf` the drawn scatter's
-// f·cos/pdf (the prefix chain's first factor, in replay's exact form); `x1`
-// the previous-vertex shading the bounce-1 pair search reconnects off.
+// `medium` the interior that segment crossed. `rhs` is the footprint
+// criterion's per-pixel threshold — the (c/100)-scaled primary spread every
+// pair's dual footprints measure against (restir_target); `x1FOverPdf` the
+// drawn scatter's f·cos/pdf (the prefix chain's first factor, in replay's
+// exact form); `x1` the previous-vertex shading the bounce-1 pair search
+// reconnects off.
 void walkTail(inout Reservoir<PathSample> reservoir, inout float survivorTarget,
               uint pixel, uint ranked, uint seed, SceneTable* scene,
               uint maxBounces, Hit hit, float3 drawnDir, float3 origin,
-              uint medium, float floorDist, float3 x1FOverPdf, WalkVertex x1) {
+              uint medium, float rhs, float3 x1FOverPdf, WalkVertex x1) {
     // The context, unlocked: `shiftable` is the lock flag, and the re-shading
     // fields stay dead until a pair search assigns them (seeded from x₁ only
     // so every field is defined).
@@ -423,20 +425,25 @@ void walkTail(inout Reservoir<PathSample> reservoir, inout float survivorTarget,
             return;
         }
 
-        // -- The pair search (D-138): still unlocked, so test this arrival ---
-        // against the previous vertex — x₁ itself on the first iteration, so
-        // the k = 2 shape is just the general case. Both halves of the
-        // criteria, the scale-free segment floor, and an exterior segment —
-        // evaluated on the re-derived end so a lock is
-        // shiftable-by-construction. The first qualifying pair wins; the
-        // context never moves again.
+        // -- The pair search (D-138/D-140): still unlocked, so test this ------
+        // arrival against the previous vertex — x₁ itself on the first
+        // iteration, so the k = 2 shape is just the general case. The x_{k−1}
+        // roughness guard, an exterior segment, and the *forward* footprint —
+        // Eq 5's first term, whose two factors the re-derived end already
+        // computed (`reconPdf` the lobe's density, `partial` the segment's
+        // G), so the test costs nothing new. x_k itself needs no roughness:
+        // a lock here demotes below if its own scatter fails the inverse
+        // term. Evaluated on the re-derived end so a lock is
+        // shiftable-by-construction.
         var justLocked = false;
-        if (!ctx.shiftable && prev.rough && walkMedium == MEDIUM_NONE
-            && reconnectionRough(vMaterial)) {
+        var inverseG = 0.0; // G(x_k→x_{k−1}) = |⟨n_{k−1}, x̂⟩|/d², stashed at lock
+        if (!ctx.shiftable && prev.rough && walkMedium == MEDIUM_NONE) {
             let e = reconnectionEnd(scene, vHit, walkMedium == vHit.instance,
                                     prev.position, prev.closure, prev.frame,
                                     prev.wo, prev.normal);
-            if (e.valid && e.dist2 >= floorDist * floorDist) {
+            // Paper form: 1/(p·G) ≥ rhs. Multiply-form, so a grazing
+            // primary's rhs = ∞ refuses cleanly instead of dividing.
+            if (e.valid && rhs * (e.reconPdf * e.partial) <= 1.0) {
                 ctx.rc = vHit;
                 ctx.k = bounce + 1;
                 ctx.inside = walkMedium == vHit.instance;
@@ -450,6 +457,7 @@ void walkTail(inout Reservoir<PathSample> reservoir, inout float survivorTarget,
                 ctx.reconPdf = e.reconPdf;
                 ctx.cachedJacobian = e.partial;
                 suffix = float3(1.0);
+                inverseG = abs(dot(prev.normal, e.toRc)) / e.dist2;
                 justLocked = true;
             }
         }
@@ -523,6 +531,20 @@ void walkTail(inout Reservoir<PathSample> reservoir, inout float survivorTarget,
         if (!(survival > 0.0)) {
             return;
         }
+        // The inverse footprint (Eq 5's second term, D-140), testable only
+        // now that the scatter out of x_k exists. Skipped for a diffuse-
+        // dominated x_k, whose continuation pdf ignores the arrival — exact
+        // for the at-lock NEE event above, whose light draw does the same
+        // (footnote 6); it streamed with the lock and keeps its verdict. On
+        // failure the fresh lock demotes and the search re-arms at later
+        // pairs: the ctx fields are dead while unlocked, and the roulette
+        // division below already routes to `pendingSurvival` once
+        // `ctx.shiftable` drops, so the bookkeeping self-heals.
+        if (justLocked && sharpCapable(vMaterial)
+            && rhs * (vScatter.pdf * inverseG) > 1.0) {
+            ctx.shiftable = false;
+            justLocked = false;
+        }
         if (justLocked) {
             // A fresh lock's own scatter is its reconnection draw: the suffix
             // starts at 1/pdf beyond f_k, and ωₖ re-points along it.
@@ -581,8 +603,7 @@ void restir_candidates(uint3 tid: SV_DispatchThreadID) {
     let ranked = blueRank(uint2(pixel % params.width, pixel / params.width),
                           params.sampleIndex);
     Hit hit = params.paths.hit[slot];
-    let ray = params.paths.direction[slot]; // .w = camera-forward cosine (D-062)
-    let direction = ray.xyz;
+    let direction = params.paths.direction[slot].xyz;
 
     // Reconstruct the same surface and closure `shade_surface` would — the
     // reservoir must weigh candidates on the exact BSDF the path tracer shades.
@@ -598,8 +619,16 @@ void restir_candidates(uint3 tid: SV_DispatchThreadID) {
     let wo = frame.toLocal(-direction);
     // Bounce 0 is a camera ray in vacuum — never inside the surface it hits.
     let closure = resolveClosure(params.scene.bsdfTables, material, wo, false);
-    // Camera-plane depth, for the pair criteria's scale-free segment floor.
-    let depth = length(spawn.position - params.paths.origin[slot].xyz) * ray.w;
+    // The footprint criterion's per-pixel threshold (D-140, Enhanced Eq 5):
+    // a (c/100) fraction of the primary ray's spread ‖x₀−x₁‖²·4π/|⟨n₁,x̂₁x₀⟩|,
+    // the area its full sphere of directions covers at the hit — against
+    // which every candidate pair's dual footprints measure in `walkTail`.
+    // The *geometric* normal, matching the G-term cosines the footprints
+    // themselves use. A grazing primary pushes it to ∞ and simply never
+    // locks — the criterion's own behavior, not a special case.
+    let toCamera = params.paths.origin[slot].xyz - spawn.position;
+    let rhs = FOOTPRINT_C / 100.0 * dot(toCamera, toCamera) * 4.0 * PI
+            / abs(dot(spawn.normal, normalize(toCamera)));
 
     let restir = params.restir;
     let envProb = restir.envSelectProb;
@@ -783,8 +812,7 @@ void restir_candidates(uint3 tid: SV_DispatchThreadID) {
                 x1.rough = reconnectionRough(material);
                 walkTail(reservoir, survivorTarget, pixel, ranked, seed,
                          params.scene, params.maxBounces, rc, wiWorld,
-                         scatterOrigin, scatterMedium,
-                         RECONNECT_MIN_DISTANCE * depth, fOverPdf, x1);
+                         scatterOrigin, scatterMedium, rhs, fOverPdf, x1);
             } else {
                 // Escaped to the sky: an environment candidate, stored as the
                 // image point its direction maps to, so resolve reconnects it

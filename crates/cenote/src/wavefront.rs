@@ -2731,6 +2731,70 @@ mod tests {
         assert_spatial_reuse_matches_brute_force(&gpu, &scene, "an all-sharp mirror chain");
     }
 
+    /// The step-4 evidence scene (§4b): a sharp metal panel — roughness 0.12,
+    /// far below classic's 0.2 floor — standing *far* (16 m) from a diffuse
+    /// floor lit exclusively through it. The emitter card floats just in
+    /// front of the panel, facing it, so its one-sided front halfspace holds
+    /// the panel alone: no surface anywhere sees it directly, and the floor's
+    /// every path is floor → panel → card. That (floor, panel) pair is the
+    /// discriminator: classic refused it on the panel's roughness and fell to
+    /// whole-path replay; the footprint criterion accepts it on the long
+    /// segment — reconnection at k = 2, Enhanced §4's distant-glossy win.
+    /// The numbers sit where Eq 5 itself says yes: the roughness-0.12 lobe's
+    /// footprint on the floor at 16 m clears (c/100)·the primary spread with
+    /// ~2× margin, while classic's 0.2 floor refuses outright — sharper or
+    /// nearer would fail the *inverse* test too and prove nothing. The panel
+    /// fills the frame's top band, keeping the sub-floor-primary replay shape
+    /// exercised beside the win.
+    fn distant_glossy_scene(gpu: &Context) -> Scene {
+        let objects = [
+            Object {
+                mesh: ground_plane(6.0),
+                transform: Mat4::IDENTITY,
+                material: Material::matte(Vec3::splat(0.8), 0.5),
+            },
+            Object {
+                mesh: ground_plane(6.0),
+                transform: Mat4::from_translation(Vec3::new(0.0, 4.0, -16.0))
+                    * Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2),
+                material: Material::glossy(Vec3::new(0.9, 0.85, 0.7), 0.0, 0.12)
+                    .with_metalness(1.0),
+            },
+            // The one-sided card: high enough that the floor's sightlines to
+            // its mirror image pass under its own silhouette, so the hot band
+            // it paints on the panel reaches the whole camera-visible floor.
+            Object {
+                mesh: ground_plane(2.1),
+                transform: Mat4::from_translation(Vec3::new(0.0, 8.0, -13.5))
+                    * Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+                material: Material::emitter(Vec3::splat(40.0)),
+            },
+        ];
+        let camera = Camera {
+            position: Vec3::new(0.0, 3.0, 5.0),
+            look_at: Vec3::new(0.0, 0.0, -3.0),
+            up: Vec3::Y,
+            vfov_degrees: 45.0,
+            lens: None,
+        };
+        Scene::new(gpu, &objects, camera, &Environment::constant(Vec3::ZERO))
+            .expect("scene")
+    }
+
+    /// The step-4 unbiasedness checkpoint: the footprint criterion's headline
+    /// acceptance — reconnecting *through* a sharp vertex when the segment is
+    /// long — must leave the converged mean on the brute-force line. A wrong
+    /// forward test, a mis-stashed inverse factor, or demote bookkeeping
+    /// leaking into the streamed weights shifts it, which this catches.
+    #[test]
+    fn restir_reconnects_through_a_distant_sharp_panel() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let scene = distant_glossy_scene(&gpu);
+        assert_spatial_reuse_matches_brute_force(&gpu, &scene, "a distant sharp panel");
+    }
+
     /// The step-3b/3c gate proper (D-138/D-139): **same-pixel replay
     /// bit-identity** — the strongest invariant the hybrid shift offers. Run
     /// the candidate stage once, then shift every pixel's own stored survivor
@@ -2796,16 +2860,121 @@ mod tests {
                 coverage.replay_terminals
             );
         }
+        // The step-4 pin (§4b): the footprint criterion reconnects through
+        // the sharp distant panel at k = 2 — the acceptance classic's
+        // roughness floor structurally refused. Regressing toward a
+        // roughness-gated x_k would empty this and trip it.
+        let coverage = assert_same_pixel_replay_identity(
+            &gpu,
+            &distant_glossy_scene(&gpu),
+            "the distant-glossy scene",
+        );
+        assert!(
+            coverage.reconnection_ks.contains(&2),
+            "the distant sharp panel should hold k = 2 reconnection survivors \
+             under the footprint criterion, got {:?}",
+            coverage.reconnection_ks
+        );
+    }
+
+    /// The measurement seam of the step-4+ checkpoints (§4b) — ms/frame of
+    /// the full `ReSTIR` wave (candidates + spatial reuse) on the perf-tracked
+    /// scenes. A report, not a gate: `#[ignore]` keeps it out of the suite;
+    /// run it explicitly when a rung's checkpoint needs numbers:
+    ///
+    /// ```text
+    /// cargo test -p cenote --release restir_frame_time_report -- \
+    ///     --ignored --test-threads=1 --nocapture
+    /// ```
+    ///
+    /// `trace_then` blocks on its submission fence, so wall-clock around it
+    /// is the frame. Step 7's reciprocal-reuse speedup claim inherits this
+    /// same seam for its denominator.
+    #[test]
+    #[ignore = "a measurement report, not a gate — run explicitly for checkpoint numbers"]
+    fn restir_frame_time_report() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let (width, height) = (512u32, 512u32);
+        let pixels = u64::from(width) * u64::from(height);
+        let scenes = vec![
+            ("demo", Scene::demo(&gpu).expect("demo scene")),
+            ("glossy-primary", glossy_primary_scene(&gpu)),
+            ("distant-glossy", distant_glossy_scene(&gpu)),
+        ];
+        let buffer = |name: &str| {
+            gpu.create_buffer(
+                name,
+                pixels * size_of::<crate::restir::StoredPathReservoir>() as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                    | vk::BufferUsageFlags::TRANSFER_DST,
+                MemoryLocation::GpuOnly,
+            )
+            .expect("reservoir buffer")
+        };
+        let reservoir = buffer("test.time.reservoir");
+        let scratch = buffer("test.time.scratch");
+        let wavefront = Wavefront::new(
+            &gpu,
+            &Kernels::embedded(),
+            width * height,
+            Wavefront::DEFAULT_MAX_BOUNCES,
+            LightSampling::Mis,
+        )
+        .expect("wavefront");
+        let inputs = RestirInputs {
+            reservoir: &reservoir,
+            temporal: None,
+            scratch: Some(&scratch),
+            debug: None,
+            debug_view: DebugView::Off,
+        };
+        let radiance = radiance_buffer(&gpu, width, height);
+        let (warmup, timed) = (8u32, 64u32);
+        for (name, scene) in &scenes {
+            let frame = |sample: u32| {
+                wavefront
+                    .trace_then(
+                        &gpu,
+                        scene,
+                        &radiance,
+                        width,
+                        height,
+                        sample,
+                        None,
+                        Some(&inputs),
+                        &[],
+                    )
+                    .expect("trace");
+            };
+            for sample in 0..warmup {
+                frame(sample);
+            }
+            let started = std::time::Instant::now();
+            for sample in warmup..warmup + timed {
+                frame(sample);
+            }
+            let elapsed = started.elapsed();
+            eprintln!(
+                "frame time on {name}: {:.2} ms/frame at {width}x{height} \
+                 ({timed} frames)",
+                elapsed.as_secs_f64() * 1e3 / f64::from(timed)
+            );
+        }
     }
 
     /// What the bit-identity harness saw evaluated: the k of every shiftable
     /// reconnection survivor, and the terminal bounce and kind (0 = NEE
     /// redraw, 1 = scatter-found) of every replay survivor — for the callers'
-    /// coverage asserts.
+    /// coverage asserts. `nee` counts the length-2 direct-lighting survivors,
+    /// completing the kind-mix denominator the step-4 baseline reports (§4b).
     struct ShiftCoverage {
         reconnection_ks: Vec<u32>,
         replay_bounces: Vec<u32>,
         replay_terminals: Vec<u32>,
+        nee: usize,
     }
 
     /// The bit-identity harness: one candidates frame into `reservoir`, then
@@ -2827,6 +2996,7 @@ mod tests {
         const SHIFT_EVALUATED: u32 = 0x100; // mirrors the fixture's tags
         const SHIFT_BROKEN: u32 = 0x200;
         const SHIFT_REPLAY: u32 = 0x400;
+        const SHIFT_NEE: u32 = 0x800;
 
         let (width, height) = (32u32, 32u32);
         let pixels = u64::from(width) * u64::from(height);
@@ -2904,6 +3074,7 @@ mod tests {
             reconnection_ks: Vec::new(),
             replay_bounces: Vec::new(),
             replay_terminals: Vec::new(),
+            nee: 0,
         };
         for sample in 0..8 {
             wavefront
@@ -2943,6 +3114,9 @@ mod tests {
                      own-pixel shift came back invalid — generation and shift share \
                      one validity predicate, so this is a lock/shift divergence"
                 );
+                if tag & SHIFT_NEE != 0 {
+                    coverage.nee += 1;
+                }
                 if tag & SHIFT_EVALUATED == 0 {
                     continue;
                 }
@@ -2978,6 +3152,18 @@ mod tests {
                 }
             }
         }
+        // The kind mix — the step-4 checkpoint metric (§4b): footprint
+        // criteria should move survivors from replay toward reconnection.
+        let (nee, rc, rp) = (
+            coverage.nee,
+            coverage.reconnection_ks.len(),
+            coverage.replay_bounces.len(),
+        );
+        eprintln!(
+            "kind mix on {what}: {nee} NEE / {rc} reconnection / {rp} replay \
+             ({} live survivors over 8 frames)",
+            nee + rc + rp
+        );
         assert!(
             !(coverage.reconnection_ks.is_empty() && coverage.replay_bounces.is_empty()),
             "no shiftable survivor on {what} — the gate would be vacuous"

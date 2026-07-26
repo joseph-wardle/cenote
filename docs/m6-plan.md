@@ -190,6 +190,7 @@ compiles, clippy-clean (incl. `--features denoise`), tests pass on the GPU machi
 4. **Footprint reconnection criteria** — replace the classic thresholds with the dual
    area-density test (Enhanced §4). *Checkpoint: fewer dark/firefly artifacts on distant
    glossy reconnections; convergence equal-or-better; per-scene tuning gone.*
+   Expanded to a two-rung ladder in §4b (interviewed 2026-07-26).
 5. **Temporal reuse** — re-point `restir_temporal` at the path reservoir through the
    hybrid shift; reprojection + the decay ramp on paths. *Checkpoint: converges with
    temporal on; the decay-ramp handoff (temporal early → spatial-only + accumulation late)
@@ -286,7 +287,156 @@ field was kept unpacked). Resolve keeps its asymmetry deliberately: reconnection
 samples re-form at the pixel (the bit-exactness discipline), replay-kind samples trust
 the shifted F the reuse stage wrote — re-forming would mean re-tracing the replay.
 
-## 5. Fallback seams (pre-agreed, in slip order)
+## 4b. Step-4 plan — footprint reconnection criteria (interviewed 2026-07-26)
+
+Interviewed after step 3 landed (`cfd7fb8`), against the paper itself: Enhanced §4 +
+supplemental §§2–4 were re-read to the equation level for this plan (the equation *is*
+the step). Four decisions, resolved in dependency order; both rungs end green and
+committed, exactly like the milestone's steps.
+
+The criterion, in cenote's terms — Eq 5 with the supplemental's practical choices:
+
+```
+lock  (pair search, forward):   1/(e.reconPdf · e.partial)          ≥ rhs
+demote (after scatter, inverse): 1/(vScatter.pdf · cosPrev/dist2)   < rhs
+rhs   (once per pixel):         (c/100) · ‖x₀−x₁‖² · 4π / |⟨n₁, x̂₁x₀⟩|,  c = 0.02
+guard (kept, §4.2):             reconnectionRough(x_{k−1}) only — x_k needs none
+```
+
+| # | Decision | Choice | Rationale |
+|---|---|---|---|
+| 1 | Inverse-test placement | **Lock, then demote.** The pair search locks on [roughness guard at x_{k−1} + forward footprint] exactly where it locks today; the at-lock NEE event streams as-is; after the scatter out of x_k is drawn, the inverse test runs — skipped for diffuse-dominated x_k — and on failure demotes `ctx.shiftable` to false, re-arming the search at later pairs | The inverse footprint needs p_k(ω_k), which does not exist until the scatter draws ~60 lines below the lock. Demotion gives every streamed event the paper's verdict for *its own* continuation: the NEE-at-lock event's suffix is a light draw whose pdf ignores the incident direction, so skipping its inverse test is exact (footnote 6's emissive case), while deeper events ride the drawn ω_k. The alternative — reordering scatter before NEE — restructures walkTail's control flow (degenerate-scatter returns must not skip the NEE stream) and over-gates the NEE event. Demote is ~3 lines: ctx fields are dead while unlocked, prefix/suffix/roulette bookkeeping self-heals because the roll lands after the demote point |
+| 2 | Classic fate + A/B evidence | **Measure first, then delete.** Classic's numbers are captured from the step-3 HEAD before any code changes; then footprint replaces classic outright — `RECONNECT_MIN_DISTANCE` and the x_k roughness gate die, `reconnectionRough` survives single-sided. No toggle ever exists | The checkpoint needs a classic baseline, and the committed step-3 tree *is* that baseline — measuring first brackets the diff with zero scaffolding. Git is the fallback seam §5 already names; a shipped knob would violate the measurement-only discipline (D-086's named risk) |
+| 3 | Evidence scene | **One dedicated distant-glossy scene**, built in T4a's baseline phase so classic's numbers on it exist before classic dies: a sharp-glossy panel (roughness ~0.05–0.1, below classic's 0.2 floor) far from a diffuse, indirectly-lit wall — classic refuses the pair at x_k and falls to whole-path replay; footprint accepts on segment length | The existing fixtures were tuned so classic's floors *fire*; none can show the criterion's win. The scene is the discriminator and the permanent regression pin: convergence (ReSTIR ≡ brute) plus the ShiftCoverage kind mix (reconnection fraction up, replay fraction down vs classic's recorded numbers) is "earlier, cheaper reconnection" in measurable form. No FLIP golden — the assertions capture what a golden would (§4a decision 5) |
+| 4 | Rung structure | **Two rungs, one commit each.** T4a — baseline capture (incl. the new scene) + the criterion swap, every existing gate green. T4b — evidence consolidation + docs | The step is a ~15-line criterion plus plumbing; three rungs would validate an intermediate hybrid criterion the paper never describes, one rung loses the bisection point between "behavior changed" and "evidence added" |
+
+The ladder — each rung green and committable:
+
+- **T4a — baseline, scene, and the criterion swap.** First the distant-glossy scene
+  lands with classic still live, and the baseline is captured: convergence relMSE on
+  the glossy scenes + the new scene, ShiftCoverage kind mixes, frame times on demo +
+  glossy. Then the swap: the per-pixel RHS (primary footprint) replaces `floorDist`
+  through walkTail's signature; the forward test joins the pair search (both factors
+  already computed by `reconnectionEnd`); the inverse test + demote land after the
+  scatter draw; the roughness guard goes single-sided; the classic constants die.
+  *(Fixture correction from the T4a interview: the sharp-chain scene needs no re-tune —
+  every surface fails `reconnectionRough`, and the surviving single-sided guard at
+  x_{k−1} alone keeps it at zero locks; its comment updates. The fixture actually at
+  risk is **mirror-chain**: its k ≥ 5 roulette-coverage assert leaned on classic's
+  both-sided gate delaying locks to a rough-rough adjacent pair — single-sided, the
+  lock lands one vertex after the first rough arrival. Re-tuned only if it goes red.)*
+  *Gates: same-pixel bit-identity with full kind coverage; all unbiasedness scenes
+  incl. the new one; brute goldens bit-identical; ReSTIR goldens re-eyeballed
+  (criterion changes the estimator realization); clippy both variants.*
+- **T4b — evidence and docs.** Footprint's numbers on everything T4a baselined;
+  the checkpoint report (convergence equal-or-better, kind-mix shift, frame time —
+  footprint makes replay rarer, so spatial should get *cheaper*); D-140 append-only;
+  the §4 build-order entry checked off; the comment sweep — every "dies at step 4"
+  note in restir_target.slang, restir_candidates.slang, and restir.rs resolves.
+
+Leaf defaults settled with the interview (cheap to change, not re-interviewed): the RHS
+uses the *geometric* normal at x₁ (the G-term convention `e.partial` already follows)
+and is computed once per pixel in the kernel; c = 0.02 stays a named constant with the
+/100 and 4π explicit, for paper-legibility; both tests use the *marginal* (all-lobe
+mixture) pdfs — supplemental §3's practical choice, and exactly what `bsdfPdf` and
+`sampleBsdf` already return; the diffuse-dominated inverse-skip reuses
+`reconnectionRough`'s sharp-lobe-weight shape; the length-2 NEE (DI) kind and the
+pure-replay kind are untouched — footprint gates only the geometry-pair lock, since an
+NEE-sampled light point does not shift its sampling density across pixels (the Eq 4a
+ratio is ≈1 by construction, which is why the paper never gates NEE vertices); grazing
+primaries (cos → 0) push the RHS to ∞ and simply never lock, the paper's own behavior.
+
+### T4a execution notes (interviewed 2026-07-26)
+
+Five decisions from the T4a implementation interview:
+
+1. **Baseline home** — classic's numbers land as a "Classic baseline — captured at
+   cfd7fb8" table in this section, written before the swap and committed with T4a;
+   T4b's checkpoint adds footprint's column beside it.
+2. **Kind-mix scope** — the three shift-coverage scenes (glossy-primary, mirror-chain,
+   sharp-chain) plus the new distant-glossy scene, all through the existing
+   bit-identity harness: `ShiftCoverage` grows an NEE-kind/total counter so the mix has
+   a denominator, and the harness eprintlns the mix per run. The demo scene contributes
+   frame time only.
+3. **Scene pins** — the distant-glossy scene joins `assert_spatial_reuse_matches_brute_force`
+   and the bit-identity harness with a coverage assert that reconnection survivors
+   exist through the sharp panel (`reconnection_ks` non-empty) — the acceptance classic
+   structurally refused, pinned forever.
+4. **Fixture policy** — re-tune only if red (see the T4a bullet's correction: sharp-chain
+   stays guard-refused; mirror-chain's k ≥ 5 is the watched assert). No dedicated
+   refusal fixture: the forward-refusal and demote branches fire naturally on the
+   existing scenes (near-contact short segments; sharp x_k after a rough vertex), where
+   unbiasedness + bit-identity catch any bookkeeping error and the baseline-vs-after
+   mixes show them live.
+5. **Timing seam** — an `#[ignore]`-by-default GPU test (run explicitly,
+   `--test-threads=1`) accumulating N frames of demo + glossy + the new scene through
+   the ReSTIR path, eprintln'ing ms/frame; runs identically on both trees, and step 7's
+   1.63× claim inherits the same seam.
+
+Leaf implementation defaults (accepted): both tests run **multiply-form** — lock when
+`rhs · (e.reconPdf · e.partial) ≤ 1`, demote when `rhs · (vScatter.pdf · inverseG) > 1`
+— with the paper's reciprocal form in the comment (IEEE-clean at grazing: rhs = ∞ never
+locks, no per-pair division). The kernel's RHS replaces the `depth` line:
+`FOOTPRINT_C/100 · ‖x₀−x₁‖² · 4π / |⟨n_geom, x̂₁x₀⟩|` with `FOOTPRINT_C = 0.02` named in
+restir_target.slang where the dying constants lived; `floorDist` → `rhs` through
+walkTail's signature. The inverse stash is one float at lock:
+`inverseG = |⟨prev.normal, e.toRc⟩| / e.dist2` (cosine at x_{k−1} — the
+G(x_k→x_{k−1}) convention). The demote sits in the scatter block *before* the
+`justLocked` suffix assignment — on failure `ctx.shiftable = false; justLocked = false`,
+so the suffix/rcWiWorld block skips, the deeper event arms fall back to replay
+streaming, and roulette's division lands in `pendingSurvival` (never reset at lock, so
+still correct); the already-streamed at-lock NEE event keeps its exempt verdict. The
+inverse test runs only when x_k is sharp-capable —
+`max(metalness, specularWeight, transmissionWeight) ≥ 0.25 || coatWeight ≥ 0.25`,
+factored as a helper shared with `reconnectionRough`. The guard goes single-sided by
+deleting `reconnectionRough(vMaterial)` from the pair-search condition; `prev.rough`
+and its assignments stay. Execution order inside T4a's one commit: counters + mix
+report + timed test + new scene land with classic live → run, write the classic column
+here → swap → all gates serial, mirror-chain re-tuned only if red → ReSTIR goldens
+regenerated and eyeballed, brute goldens bit-identical → clippy both variants → commit.
+
+### T4a measurements — classic baseline (captured at cfd7fb8) vs footprint
+
+Kind mixes (bit-identity harness, 32×32 × 8 frames; live survivors as
+NEE / reconnection / replay):
+
+| Scene | Classic (cfd7fb8) | Footprint (T4a) |
+|---|---|---|
+| glossy-primary | 6503 / 387 / 904 | 6503 / 484 / 807 |
+| mirror-chain | 1228 / 597 / 6367 | 1228 / 881 / 6083 |
+| sharp-chain | 1898 / 0 / 6294 | 1898 / 0 / 6294 — bit-identical, guard-carried |
+| distant-glossy | 2146 / 0 / 155 | 2146 / **154** / 1 |
+
+The distant-glossy row is the headline: the discriminating floor→panel→card
+survivors flipped from whole-path replay to k = 2 reconnection nearly wholesale.
+
+Convergence relMSE (ReSTIR, 8/32 spp): glossy 0.03316 / 0.00645 → 0.03313 / 0.00645
+(equal); indirect-glossy 0.08172 / 0.02265 → 0.08572 / 0.02332, with the same-run
+brute ratio holding 2.06× → 1.99× (the reference is ReSTIR-rendered, so its noise
+floor moves with the estimator realization; the beats-PT gate's 1.3× floor clears
+with margin on both sides).
+
+Frame times (512², release, candidates + spatial, run-to-run ±0.5 ms): demo
+6.5 → ~6.8 and glossy-primary 8.3 → ~8.8 (both within noise — the criterion is
+cost-neutral where it changes nothing); distant-glossy 3.9 → ~3.2 (the predicted
+win: replay-kind reuse became reconnection, and spatial got cheaper).
+
+Outcomes against the plan above: the ReSTIR goldens came out **bit-identical** —
+the criterion consumes no random dimensions and agrees with classic on every
+golden-scene pair, so nothing regenerated; the mirror-chain k ≥ 5 assert held
+without re-tune (locks moved earlier, 597 → 881, but the corridor still locks
+deep); the demote branch is live in mirror-chain (a sharp x_k after a matte vertex
+fails the inverse term and re-arms the search). The evidence scene settled at
+roughness 0.12 / 16 m rather than the interview's 0.05–0.1 sketch: Eq 5's own
+arithmetic prices a 0.05-roughness lobe's acceptance at ~80 m for these camera
+depths, so 0.12 at 16 m is the same physics at a testable scale — still far under
+classic's 0.2 floor, which is the discriminator. The scene needed one rig insight:
+a forward-facing emitter's front halfspace inevitably direct-lights the floor, so
+the card floats just *in front of the panel*, facing it — its front halfspace holds
+the panel alone, no surface anywhere sees it directly, and the floor's light is
+purely the panel's sharp reflection.
+
+
 
 - **Reciprocal spatial reuse (step 7)** → plain O(M) defensive pairwise MIS (M3's, on
   paths). First to go: it is a perf optimization on an already-correct, already-fast

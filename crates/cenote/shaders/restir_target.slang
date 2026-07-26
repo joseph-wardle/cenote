@@ -112,37 +112,65 @@ public struct Connection {
     public float shadowTmax;
 };
 
-// -- The pair criteria: a VARIANCE guard, not a bias guard (step 3a, D-137) --
+// -- The pair criteria: a VARIANCE guard, not a bias guard (steps 3a/4) ------
 // With f₂ un-baked (the shift re-shades the closure at x₂, D-131), reusing
 // *any* reconnection vertex is unbiased — a sharp one is merely firefly-prone:
 // its re-shaded lobe can be enormous where the source pdf was tiny. So the
-// classic hybrid-shift thresholds (Lin 2022) gate quality, not correctness: a
-// pair reconnects only when BOTH endpoints are rough enough and the segment is
-// long enough. Evaluated once, at candidate generation, and stamped into the
-// sample (`reconnectionShiftable`). A path with no qualifying pair anywhere
-// streams as the pure-replay kind instead (D-139), so every stored indirect
-// sample shifts — reconnection where a pair blessed it, whole-path replay
-// where none did.
+// pair criteria gate quality, not correctness — since step 4 (D-140) as the
+// dual ray footprint test (Enhanced Eq 5), replacing the classic roughness +
+// distance floors: a pair (x_{k−1}, x_k) reconnects when the area each
+// endpoint's lobe spreads over at the other end stays above a fixed fraction
+// of the primary ray's own spread,
+//
+//   1 / (p_{k−1}(ω_{k−1}) · G(x_{k−1}→x_k)) ≥ rhs   forward — at the lock
+//   1 / (p_k(ω_k)         · G(x_k→x_{k−1})) ≥ rhs   inverse — after the
+//                                                   scatter out of x_k draws
+//   rhs = (FOOTPRINT_C/100) · ‖x₀−x₁‖² · 4π / |⟨n₁, x̂₁x₀⟩|
+//
+// A sharp lobe over a long segment still covers area — reuse it; the same
+// lobe over a short one concentrates — fireflies. Both tests run in
+// multiply-form (rhs·p·G against 1) so a grazing primary's rhs = ∞ simply
+// never locks; both use the marginal all-lobe pdfs `bsdfPdf`/`sampleBsdf`
+// already return (supplemental §3). The inverse test lives ~60 lines past
+// the lock (restir_candidates) as a *demote*, and is skipped for a
+// diffuse-dominated x_k, whose continuation pdf ignores the arrival — exact
+// for the at-lock NEE event, whose light draw does the same (footnote 6).
+// A path with no accepted pair anywhere streams as the pure-replay kind
+// (D-139), so every stored indirect sample still shifts.
 
-// The classic roughness floor: below it a specular-dominated vertex is too
-// sharp to reconnect through without fireflies.
+// Enhanced §4's c: the fraction (c/100) of the primary footprint a
+// reconnection footprint must reach. The /100 and the 4π stay explicit where
+// the rhs forms (restir_candidates), so the constant reads as the paper's.
+public static const float FOOTPRINT_C = 0.02;
+
+// The lobe weight above which a sharp-capable group (metal / dielectric
+// specular / transmission, or coat) counts as carrying the vertex — shared
+// by the surviving roughness guard and the inverse test's diffuse skip.
+public static const float SHARP_LOBE_WEIGHT = 0.25;
+
+// The roughness floor of the one *surviving* single-vertex guard, at x_{k−1}
+// only (Enhanced §4.2): the footprint test cannot see environment-segment
+// lobes, parallax, or curvature, so the vertex the segment *leaves* still
+// needs honest width. x_k needs none — reconnecting through a sharp vertex
+// far away is the criterion's headline win.
 public static const float RECONNECT_MIN_ROUGHNESS = 0.2;
 
-// The segment-distance floor, as a fraction of the primary hit's camera depth
-// (`Surface.depth` — scale-free): a shorter reconnection segment spikes the
-// 1/d² Jacobian ratio across neighbours. Both floors die at step 4, when the
-// footprint criteria replace them.
-public static const float RECONNECT_MIN_DISTANCE = 0.02;
-
-// One endpoint's half of the pair criteria: diffuse-dominated is always rough
-// enough; a vertex whose sharp-capable lobes (metal, dielectric specular,
-// transmission, coat) carry weight qualifies only at their roughness floor.
-// Metals and glass now pass at ≥0.2 roughness — vertices the T2 baked-radiance
-// guard refused outright — because the re-shade made them exact.
+// The x_{k−1} guard: diffuse-dominated is always rough enough; a vertex
+// whose sharp-capable lobes carry weight qualifies only at their roughness
+// floor.
 public bool reconnectionRough(Material m) {
     let sharp = max(max(m.metalness, m.specularWeight), m.transmissionWeight);
-    return (sharp < 0.25 || m.specularRoughness >= RECONNECT_MIN_ROUGHNESS)
-        && (m.coatWeight < 0.25 || m.coatRoughness >= RECONNECT_MIN_ROUGHNESS);
+    return (sharp < SHARP_LOBE_WEIGHT || m.specularRoughness >= RECONNECT_MIN_ROUGHNESS)
+        && (m.coatWeight < SHARP_LOBE_WEIGHT || m.coatRoughness >= RECONNECT_MIN_ROUGHNESS);
+}
+
+// The inverse test's subject: only a vertex with sharp-capable lobe weight
+// can concentrate its scatter pdf enough to fail Eq 5's second term; a
+// diffuse-dominated x_k skips the test (footnote 6's exact cases and their
+// near-diffuse neighbours alike — `reconnectionRough`'s weight shape).
+public bool sharpCapable(Material m) {
+    let sharp = max(max(m.metalness, m.specularWeight), m.transmissionWeight);
+    return sharp >= SHARP_LOBE_WEIGHT || m.coatWeight >= SHARP_LOBE_WEIGHT;
 }
 
 // -- The reconnection end (steps 3a/3b, D-137/D-138) -------------------------
