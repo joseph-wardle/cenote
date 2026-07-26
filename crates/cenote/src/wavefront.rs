@@ -2479,6 +2479,512 @@ mod tests {
         assert_spatial_reuse_matches_brute_force(&gpu, &scene, "diffuse GI");
     }
 
+    /// The step-3a checkpoint (D-137): the un-baked reconnection shift is
+    /// exact on a *direction-dependent* x₂. The bounce surface is a glossy
+    /// metal (roughness 0.3) — a vertex the T2 baked-radiance guard provably
+    /// refused outright (any metalness), because its cached Lo changed with
+    /// the viewing direction — behind a diffuse primary, so the ground is lit
+    /// substantially by the metal's reflection and the reconnection samples
+    /// that carry it now shift across pixels. The pair criteria admit it
+    /// (roughness past the 0.2 floor), so spatial reuse re-shades f₂ per
+    /// neighbour: a stale baked radiance, a wrong terminal-MIS re-evaluation,
+    /// or a mis-decoded ωₖ shifts the converged mean against the brute-force
+    /// path tracer, which this catches.
+    #[test]
+    fn restir_reuses_a_glossy_metal_reconnection_vertex() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let objects = [
+            Object {
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::Y),
+                material: Material::glossy(Vec3::new(0.9, 0.7, 0.4), 0.0, 0.3)
+                    .with_metalness(1.0),
+            },
+            Object {
+                mesh: ground_plane(4.0),
+                transform: Mat4::IDENTITY,
+                material: Material::matte(Vec3::splat(0.8), 0.5),
+            },
+            Object {
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::Y * 3.0)
+                    * Mat4::from_scale(Vec3::splat(0.7)),
+                material: Material::emitter(Vec3::splat(4.0)),
+            },
+        ];
+        let camera = Camera {
+            position: Vec3::new(0.0, 2.5, 6.0),
+            look_at: Vec3::new(0.0, 1.0, 0.0),
+            up: Vec3::Y,
+            vfov_degrees: 45.0,
+            lens: None,
+        };
+        let scene = Scene::new(&gpu, &objects, camera, &Environment::constant(Vec3::splat(0.5)))
+            .expect("scene");
+        assert_spatial_reuse_matches_brute_force(&gpu, &scene, "a glossy metal bounce");
+    }
+
+    /// The step-3b prefix scene: a glossy metal *panel* at roughness 0.12 —
+    /// below the 0.2 pair-criteria floor, so the (x₁, x₂) pair never
+    /// qualifies on its pixels — filling the camera's view, with a matte
+    /// sphere-and-ground interreflection (and an emitter) living in its
+    /// reflection. The GI the panel pixels carry reuses only through k = 3
+    /// samples: the glossy bounce replays from the stored seed and the
+    /// reconnection lands one vertex deeper, on a diffuse-diffuse pair
+    /// (D-138). The sphere sits in frame too, so the k = 2 shape lives
+    /// beside it.
+    fn glossy_primary_scene(gpu: &Context) -> Scene {
+        let objects = [
+            Object {
+                mesh: ground_plane(3.0),
+                transform: Mat4::from_translation(Vec3::new(0.0, 2.0, -1.5))
+                    * Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2),
+                material: Material::glossy(Vec3::new(0.9, 0.8, 0.6), 0.0, 0.12)
+                    .with_metalness(1.0),
+            },
+            Object {
+                mesh: ground_plane(4.0),
+                transform: Mat4::IDENTITY,
+                material: Material::matte(Vec3::splat(0.8), 0.5),
+            },
+            Object {
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::new(0.9, 1.0, 0.6)),
+                material: Material::matte(Vec3::new(0.75, 0.4, 0.35), 0.5),
+            },
+            Object {
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::new(0.0, 3.6, 1.0))
+                    * Mat4::from_scale(Vec3::splat(0.7)),
+                material: Material::emitter(Vec3::splat(4.0)),
+            },
+        ];
+        let camera = Camera {
+            position: Vec3::new(0.0, 2.0, 4.5),
+            look_at: Vec3::new(0.0, 1.8, -1.5),
+            up: Vec3::Y,
+            vfov_degrees: 45.0,
+            lens: None,
+        };
+        Scene::new(gpu, &objects, camera, &Environment::constant(Vec3::splat(0.5)))
+            .expect("scene")
+    }
+
+    /// The step-3b roulette scene: two facing near-mirror walls (roughness
+    /// 0.06, far below the pair floor) around a matte floor and back wall,
+    /// with the camera angled into the corridor so paths walk several sharp
+    /// bounces before their first diffuse pair. Locks land at k = 4 and
+    /// deeper; from k = 5 on, the reconnection draw sits at bounce 3 and the
+    /// walk's roulette *rolls on prefix bounces* — exercising the D-138 fold
+    /// (survival into the candidate weight, never into the replayed
+    /// integrand) that lets the shift replay without rolling.
+    fn mirror_chain_scene(gpu: &Context) -> Scene {
+        let mirror = Material::glossy(Vec3::new(0.85, 0.85, 0.9), 0.0, 0.06)
+            .with_metalness(1.0);
+        let objects = [
+            Object {
+                mesh: ground_plane(2.0),
+                transform: Mat4::from_translation(Vec3::new(-1.5, 1.5, 0.0))
+                    * Mat4::from_rotation_z(-std::f32::consts::FRAC_PI_2),
+                material: mirror,
+            },
+            Object {
+                mesh: ground_plane(2.0),
+                transform: Mat4::from_translation(Vec3::new(1.5, 1.5, 0.0))
+                    * Mat4::from_rotation_z(std::f32::consts::FRAC_PI_2),
+                material: mirror,
+            },
+            Object {
+                mesh: ground_plane(4.0),
+                transform: Mat4::IDENTITY,
+                material: Material::matte(Vec3::splat(0.8), 0.5),
+            },
+            Object {
+                mesh: ground_plane(2.0),
+                transform: Mat4::from_translation(Vec3::new(0.0, 1.5, -2.0))
+                    * Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2),
+                material: Material::matte(Vec3::new(0.7, 0.75, 0.6), 0.5),
+            },
+            Object {
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::new(0.0, 3.0, 0.0))
+                    * Mat4::from_scale(Vec3::splat(0.5)),
+                material: Material::emitter(Vec3::splat(6.0)),
+            },
+        ];
+        let camera = Camera {
+            position: Vec3::new(1.2, 1.5, 0.8),
+            look_at: Vec3::new(-1.5, 1.3, 0.3),
+            up: Vec3::Y,
+            vfov_degrees: 45.0,
+            lens: None,
+        };
+        Scene::new(gpu, &objects, camera, &Environment::constant(Vec3::splat(0.3)))
+            .expect("scene")
+    }
+
+    /// The step-3b unbiasedness checkpoint on the replayed prefix (D-138):
+    /// a sub-floor glossy primary forces every reusable GI sample through the
+    /// k = 3 shape — seed-replayed first bounce, reconnection one vertex
+    /// deeper. A wrong replay draw, a prefix accumulated in the wrong
+    /// measure, or a stale cached Jacobian half shifts the converged mean
+    /// against the brute-force path tracer, which this catches.
+    #[test]
+    fn restir_replays_the_prefix_behind_a_glossy_primary() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let scene = glossy_primary_scene(&gpu);
+        assert_spatial_reuse_matches_brute_force(&gpu, &scene, "a glossy primary's replayed prefix");
+    }
+
+    /// The step-3b roulette checkpoint (D-138): deep sharp chains lock at
+    /// k ≥ 5, where generation's roulette rolls on prefix bounces. The fold —
+    /// survival probabilities into the candidate weight, never into the
+    /// stored integrand — is what keeps a survived base path from becoming a
+    /// killed shifted path (§6's RR-replay trap). Folding on the wrong side,
+    /// or replaying a roll, shifts the converged mean against brute force.
+    #[test]
+    fn restir_folds_roulette_out_of_the_replayed_prefix() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let scene = mirror_chain_scene(&gpu);
+        assert_spatial_reuse_matches_brute_force(&gpu, &scene, "a roulette-deep mirror chain");
+    }
+
+    /// The step-3c scene: the mirror corridor with *every* surface — floor,
+    /// back wall, and the emitter itself — a metal below the 0.2 roughness
+    /// floor, so the pair criteria never pass anywhere and no reconnection
+    /// lock ever forms. Everything the reservoir carries past the primary hit
+    /// is a pure-replay sample (D-139): whole-path seed replay, the terminal
+    /// re-drawn from the stored dims. The emitter is metal-based (emission
+    /// rides any base) precisely so its surface fails the roughness half too
+    /// — a matte emitter would hand the walk a lockable pair.
+    fn sharp_chain_scene(gpu: &Context) -> Scene {
+        let mirror = Material::glossy(Vec3::new(0.85, 0.85, 0.9), 0.0, 0.06)
+            .with_metalness(1.0);
+        let objects = [
+            Object {
+                mesh: ground_plane(2.0),
+                transform: Mat4::from_translation(Vec3::new(-1.5, 1.5, 0.0))
+                    * Mat4::from_rotation_z(-std::f32::consts::FRAC_PI_2),
+                material: mirror,
+            },
+            Object {
+                mesh: ground_plane(2.0),
+                transform: Mat4::from_translation(Vec3::new(1.5, 1.5, 0.0))
+                    * Mat4::from_rotation_z(std::f32::consts::FRAC_PI_2),
+                material: mirror,
+            },
+            Object {
+                mesh: ground_plane(4.0),
+                transform: Mat4::IDENTITY,
+                material: Material::glossy(Vec3::splat(0.8), 0.0, 0.12).with_metalness(1.0),
+            },
+            Object {
+                mesh: ground_plane(2.0),
+                transform: Mat4::from_translation(Vec3::new(0.0, 1.5, -2.0))
+                    * Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2),
+                material: Material::glossy(Vec3::new(0.7, 0.75, 0.6), 0.0, 0.15)
+                    .with_metalness(1.0),
+            },
+            Object {
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::new(0.0, 3.0, 0.0))
+                    * Mat4::from_scale(Vec3::splat(0.5)),
+                material: Material {
+                    emission: Vec3::splat(6.0),
+                    ..Material::glossy(Vec3::splat(0.9), 0.0, 0.05).with_metalness(1.0)
+                },
+            },
+        ];
+        let camera = Camera {
+            position: Vec3::new(1.2, 1.5, 0.8),
+            look_at: Vec3::new(-1.5, 1.3, 0.3),
+            up: Vec3::Y,
+            vfov_degrees: 45.0,
+            lens: None,
+        };
+        Scene::new(gpu, &objects, camera, &Environment::constant(Vec3::splat(0.3)))
+            .expect("scene")
+    }
+
+    /// The step-3c unbiasedness checkpoint (D-139): with reconnection gated
+    /// away everywhere, the whole reusable signal rides the pure-replay kind
+    /// — whole-path seed replay across pixels, the terminal event re-drawn
+    /// from the stored dims at each destination. A wrong replayed draw, a
+    /// terminal re-formed in the wrong shape, a survival folded on the wrong
+    /// side, or a Jacobian applied where the PSS identity owes none shifts
+    /// the converged mean against the brute-force path tracer, which this
+    /// catches. (That no lock ever forms here is pinned by the bit-identity
+    /// gate's coverage assert, so this can't silently degenerate into a
+    /// reconnection test.)
+    #[test]
+    fn restir_replays_whole_paths_on_a_sharp_chain() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let scene = sharp_chain_scene(&gpu);
+        assert_spatial_reuse_matches_brute_force(&gpu, &scene, "an all-sharp mirror chain");
+    }
+
+    /// The step-3b/3c gate proper (D-138/D-139): **same-pixel replay
+    /// bit-identity** — the strongest invariant the hybrid shift offers. Run
+    /// the candidate stage once, then shift every pixel's own stored survivor
+    /// into its own domain through the *shipping* shift — `shiftReconnection`
+    /// or `shiftReplay` by the stored kind: the replayed integrand must equal
+    /// the stored F **bit for bit**, and the Jacobian must be 1 to the ulp
+    /// (a reconnection's squared-distance ratio's last bit belongs to
+    /// per-kernel fma contraction; a replay's is 1 by construction). A single
+    /// mis-associated multiply, a draw keyed off the wrong stream, a roulette
+    /// division leaking into the replayed chain, or a re-shade context
+    /// drifting from generation's breaks the equality outright — silent-bias
+    /// classes a convergence gate would smear into plausible noise. Asserted
+    /// on all three shift scenes so the k = 2 degenerate, the k = 3
+    /// single-hop replay, the k ≥ 5 roulette-crossed replay, and the
+    /// pure-replay kind's two terminal shapes are each pinned live.
+    #[test]
+    fn restir_same_pixel_replay_is_bit_identical() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let coverage = assert_same_pixel_replay_identity(
+            &gpu,
+            &glossy_primary_scene(&gpu),
+            "the glossy-primary scene",
+        );
+        assert!(
+            coverage.reconnection_ks.contains(&2),
+            "the matte sphere should hold k = 2 survivors"
+        );
+        assert!(
+            coverage.reconnection_ks.iter().any(|&k| k > 2),
+            "the glossy ground should hold replay-prefixed (k > 2) survivors"
+        );
+        let coverage = assert_same_pixel_replay_identity(
+            &gpu,
+            &mirror_chain_scene(&gpu),
+            "the mirror-chain scene",
+        );
+        assert!(
+            coverage.reconnection_ks.iter().any(|&k| k >= 5),
+            "the mirror corridor should hold roulette-deep (k ≥ 5) survivors, got {:?}",
+            coverage.reconnection_ks
+        );
+        let coverage = assert_same_pixel_replay_identity(
+            &gpu,
+            &sharp_chain_scene(&gpu),
+            "the sharp-chain scene",
+        );
+        assert!(
+            coverage.reconnection_ks.is_empty(),
+            "no pair on the all-sharp chain should ever lock, got k {:?}",
+            coverage.reconnection_ks
+        );
+        assert!(
+            coverage.replay_bounces.iter().any(|&b| b >= 2),
+            "the sharp corridor should hold multi-bounce replay survivors, got {:?}",
+            coverage.replay_bounces
+        );
+        for (terminal, name) in [(0, "NEE-redraw"), (1, "scatter-found")] {
+            assert!(
+                coverage.replay_terminals.contains(&terminal),
+                "the sharp chain should hold {name} replay survivors, got {:?}",
+                coverage.replay_terminals
+            );
+        }
+    }
+
+    /// What the bit-identity harness saw evaluated: the k of every shiftable
+    /// reconnection survivor, and the terminal bounce and kind (0 = NEE
+    /// redraw, 1 = scatter-found) of every replay survivor — for the callers'
+    /// coverage asserts.
+    struct ShiftCoverage {
+        reconnection_ks: Vec<u32>,
+        replay_bounces: Vec<u32>,
+        replay_terminals: Vec<u32>,
+    }
+
+    /// The bit-identity harness: one candidates frame into `reservoir`, then
+    /// the `restir_shift_test` fixture shifts each pixel's stored survivor at
+    /// its own pixel and the host compares bitwise.
+    #[allow(clippy::too_many_lines, reason = "one linear frame-then-verify sequence")]
+    fn assert_same_pixel_replay_identity(gpu: &Context, scene: &Scene, what: &str) -> ShiftCoverage {
+        /// Mirrors `struct Params` in `shaders/restir_shift_test.slang`.
+        #[repr(C)]
+        #[derive(Clone, Copy, Pod, Zeroable)]
+        struct ShiftTestParams {
+            paths: PathsAddrs,
+            hits: QueueAddrs,
+            scene: vk::DeviceAddress,
+            reservoirs: vk::DeviceAddress,
+            shifted: vk::DeviceAddress,
+            kinds: vk::DeviceAddress,
+        }
+        const SHIFT_EVALUATED: u32 = 0x100; // mirrors the fixture's tags
+        const SHIFT_BROKEN: u32 = 0x200;
+        const SHIFT_REPLAY: u32 = 0x400;
+
+        let (width, height) = (32u32, 32u32);
+        let pixels = u64::from(width) * u64::from(height);
+        let reservoir = gpu
+            .create_buffer(
+                "test.shift.reservoir",
+                pixels * size_of::<crate::restir::StoredPathReservoir>() as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                    | vk::BufferUsageFlags::TRANSFER_SRC
+                    | vk::BufferUsageFlags::TRANSFER_DST,
+                MemoryLocation::GpuOnly,
+            )
+            .expect("reservoir buffer");
+        let wavefront = Wavefront::new(
+            gpu,
+            &Kernels::embedded(),
+            4096,
+            Wavefront::DEFAULT_MAX_BOUNCES,
+            LightSampling::Mis,
+        )
+        .expect("wavefront");
+        // Candidates only (no temporal, no spatial): `reservoir` holds the
+        // candidate stage's own-pixel survivors, exactly what generation
+        // stored.
+        let inputs = RestirInputs {
+            reservoir: &reservoir,
+            temporal: None,
+            scratch: None,
+            debug: None,
+            debug_view: DebugView::Off,
+        };
+        let radiance = radiance_buffer(gpu, width, height);
+        let spirv =
+            crate::shaders::compile_fixture("restir_shift_test").expect("compile restir_shift_test");
+        let pipeline = gpu
+            .create_compute_pipeline(
+                &spirv,
+                c"restir_shift_test",
+                size_of::<ShiftTestParams>() as u32,
+                Bindings::Scene,
+            )
+            .expect("pipeline");
+        // Zero-uploaded outputs: pixels the fixture never reaches (misses)
+        // must read as "not evaluated", not as stale VRAM.
+        let out_usage = vk::BufferUsageFlags::STORAGE_BUFFER
+            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+            | vk::BufferUsageFlags::TRANSFER_SRC;
+        let shifted = gpu
+            .upload_buffer("test.shift.f", &vec![0u8; (pixels * 16) as usize], out_usage)
+            .expect("shifted buffer");
+        let kinds = gpu
+            .upload_buffer("test.shift.kinds", &vec![0u8; (pixels * 4) as usize], out_usage)
+            .expect("kinds buffer");
+        let params = ShiftTestParams {
+            paths: wavefront.paths.addresses(),
+            hits: wavefront.queues.addresses(queue::HIT, &wavefront.queues.hit),
+            scene: scene.table().device_address(),
+            reservoirs: reservoir.device_address(),
+            shifted: shifted.device_address(),
+            kinds: kinds.device_address(),
+        };
+        let bindings = SceneBindings {
+            tlas: scene.tlas(),
+            environment: scene.environment(),
+            textures: scene.texture_descriptors(),
+            blue_noise: &wavefront.blue_noise,
+        };
+
+        // A handful of candidate frames: each pixel keeps one survivor per
+        // frame, so sweeping a few sample indices unions enough shiftable
+        // winners to pin every shape the callers assert on. Bitwise
+        // deterministic, like everything upstream — the coverage cannot flake.
+        let mut coverage = ShiftCoverage {
+            reconnection_ks: Vec::new(),
+            replay_bounces: Vec::new(),
+            replay_terminals: Vec::new(),
+        };
+        for sample in 0..8 {
+            wavefront
+                .trace_then(
+                    gpu,
+                    scene,
+                    &radiance,
+                    width,
+                    height,
+                    sample,
+                    None,
+                    Some(&inputs),
+                    &[],
+                )
+                .expect("trace");
+            gpu.dispatch(
+                &pipeline,
+                Some(bindings),
+                bytemuck::bytes_of(&params),
+                [(width * height).div_ceil(WORKGROUP_SIZE), 1, 1],
+            )
+            .expect("dispatch");
+
+            let stored: Vec<crate::restir::StoredPathReservoir> =
+                bytemuck::pod_collect_to_vec(&gpu.download_buffer(&reservoir).expect("download"));
+            let results: Vec<[f32; 4]> =
+                bytemuck::pod_collect_to_vec(&gpu.download_buffer(&shifted).expect("download"));
+            let tags: Vec<u32> =
+                bytemuck::pod_collect_to_vec(&gpu.download_buffer(&kinds).expect("download"));
+
+            for pixel in 0..(width * height) as usize {
+                let tag = tags[pixel];
+                assert_eq!(
+                    tag & SHIFT_BROKEN,
+                    0,
+                    "pixel {pixel} sample {sample} on {what}: a shiftable survivor's \
+                     own-pixel shift came back invalid — generation and shift share \
+                     one validity predicate, so this is a lock/shift divergence"
+                );
+                if tag & SHIFT_EVALUATED == 0 {
+                    continue;
+                }
+                let k = tag & 0xff; // reconnection k, or the replay terminal bounce
+                let f = stored[pixel].sample.f;
+                let got = results[pixel];
+                assert!(
+                    f[0].to_bits() == got[0].to_bits()
+                        && f[1].to_bits() == got[1].to_bits()
+                        && f[2].to_bits() == got[2].to_bits(),
+                    "pixel {pixel} sample {sample} on {what} (k/bounce = {k}): the \
+                     same-pixel replay must reproduce the stored integrand bit \
+                     for bit: stored {f:?}, replayed {:?}",
+                    &got[..3]
+                );
+                // The reconnection Jacobian ratio rides a squared segment
+                // length whose last-place bit belongs to each kernel's fma
+                // contraction, so "exactly 1" is pinned to within one ulp
+                // (the replay kind reports a constructed 1.0); any real
+                // divergence — a stale cached half, a wrong vertex or surface
+                // — is orders of magnitude larger.
+                assert!(
+                    (got[3] - 1.0).abs() <= f32::EPSILON,
+                    "pixel {pixel} sample {sample} on {what} (k/bounce = {k}): the \
+                     same-pixel Jacobian must be 1 to the ulp, got {}",
+                    got[3]
+                );
+                if tag & SHIFT_REPLAY != 0 {
+                    coverage.replay_bounces.push(k);
+                    coverage.replay_terminals.push((tag >> 12) & 0x3);
+                } else {
+                    coverage.reconnection_ks.push(k);
+                }
+            }
+        }
+        assert!(
+            !(coverage.reconnection_ks.is_empty() && coverage.replay_bounces.is_empty()),
+            "no shiftable survivor on {what} — the gate would be vacuous"
+        );
+        coverage
+    }
+
     /// Emitters reflect too: the reflected component of an emissive *and*
     /// reflective surface — light bouncing off a glowing object onto its
     /// surroundings — rides the BSDF draw's continuation-tail candidate, a

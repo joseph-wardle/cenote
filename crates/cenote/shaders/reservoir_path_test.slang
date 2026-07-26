@@ -17,6 +17,7 @@ struct Params {
     StoredPathReservoir* input;   // host-written records, distinctive per field
     StoredPathReservoir* output;  // load → per-field transform → store
     float* loadedWeightSum;       // the live reservoir's weightSum after load
+    float* octAgreement;          // dot(v, unpack(pack(v))) per thread's direction
     uint count;
     uint pad0;
     uint pad1;
@@ -58,4 +59,15 @@ void reservoir_path_test(uint3 tid: SV_DispatchThreadID) {
     // come back zero, which pins both that those lanes exist and that the step-6
     // slots start clean.
     params.output[tid.x] = storePathReservoir(r);
+
+    // The ωₖ packing round-trips: a hashed unit direction per thread — both
+    // hemispheres, the octahedron's folds included — must decode back to
+    // within the 16-bit quantization cone. A broken fold or a swapped
+    // component lands a direction degrees away, far below the bound.
+    let h = tid.x * 2654435761u;
+    let azimuth = float(h & 0xffff) * (6.28318530718 / 65536.0);
+    let z = float(h >> 16) * (2.0 / 65536.0) - 1.0;
+    let s = sqrt(max(0.0, 1.0 - z * z));
+    let v = float3(s * cos(azimuth), s * sin(azimuth), z);
+    params.octAgreement[tid.x] = dot(v, unpackUnitDirection(packUnitDirection(v)));
 }

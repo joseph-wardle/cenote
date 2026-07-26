@@ -62,22 +62,19 @@ public uint restirCandidateDimension(uint candidate, uint slot) {
     return RESTIR_BASE + candidate * RESTIR_SLOTS + slot;
 }
 
-// The one internalized BSDF-sampled candidate (D-088). It draws a scattered
-// direction from the closure and reconnects to whatever light that direction
-// reaches, so it needs a lobe pick, a 2D direction, and its own reservoir
-// acceptance — its own dedicated slots, distinct from both the bounce-0
-// continuation scatter (or it would just re-trace the same ray) and every light
-// candidate above. Fixed base, clear of the M-candidate block for M up to 64,
-// so growing M never shifts it.
+// The one internalized BSDF-sampled candidate's reservoir acceptance (D-088).
+// The draw itself — the lobe pick and 2D direction that used to occupy slots
+// 0..2 — moved to the per-path replay stream at step 3b (D-138): the scatter
+// at x₁ is the first bounce a k>2 shift replays, so its uniforms must be a
+// function of the stored seed, not of this pixel's ranked stream. Only the
+// acceptance (a reservoir-local decision, never replayed) stays here, at its
+// original slot so the delta term after it never shifts.
 public static const uint RESTIR_BSDF_BASE = 512;
-public static const uint RESTIR_BSDF_LOBE = 0;   // which technique scatters
-public static const uint RESTIR_BSDF_DIR = 1;    // scattered direction (2D: slots 1,2)
 public static const uint RESTIR_BSDF_ACCEPT = 3; // reservoir stream acceptance
-// The continuation tail's own acceptance (D-134): the BSDF draw yields up to
-// two candidates — the light its ray reached, and the indirect tail past the
-// hit — and each streams under its own draw. Slot 4 was already claimed by the
-// delta term below, so the tail takes 5.
-public static const uint RESTIR_BSDF_TAIL_ACCEPT = 5;
+// Slots 0..2 were the T2/T3a lobe + direction draws (now seeded, D-138);
+// slot 4 is the delta term below; slot 5 was the T2 aggregate tail's
+// acceptance, retired when step 3a streamed the tail per event (the walk's
+// acceptances live in the RESTIR_TAIL block below).
 
 public uint restirBsdfDimension(uint slot) {
     return RESTIR_BSDF_BASE + slot;
@@ -133,6 +130,23 @@ public static const uint RESTIR_TEMPORAL_PREV = 1;      // `prev`'s merge accept
 
 public uint restirTemporalDimension(uint slot) {
     return RESTIR_TEMPORAL_BASE + slot;
+}
+
+// ReSTIR tail-event acceptances (step 3a, D-137). The candidate walk streams
+// every lighting event past the primary scatter as its own reservoir
+// candidate, so each walk bounce needs two acceptance draws: the vertex's NEE
+// connection, and the scatter-found event (an emission hit, or the sky)
+// discovered arriving at it — mutually exclusive per bounce, so they share a
+// slot. The walk's *sampling* draws stay in the per-bounce path block
+// (`bounceDimension`), untouched, exactly as the T2 tail drew them — this
+// block adds only the reservoir acceptances, clear of every other family.
+public static const uint RESTIR_TAIL_BASE = 1536;
+static const uint RESTIR_TAIL_SLOTS = 4; // 2 named + 2 reserved
+public static const uint RESTIR_TAIL_NEE_ACCEPT = 0;     // the vertex's NEE event
+public static const uint RESTIR_TAIL_SCATTER_ACCEPT = 1; // emission hit / sky escape
+
+public uint restirTailDimension(uint bounce, uint slot) {
+    return RESTIR_TAIL_BASE + bounce * RESTIR_TAIL_SLOTS + slot;
 }
 
 // -- Implementation ----------------------------------------------------
@@ -257,6 +271,36 @@ public float sample_1d(uint pixel, uint sampleIndex, uint dimension) {
     let seed = lowbias32(pixel ^ lowbias32(dimension));
     let index = nestedUniformScramble(sampleIndex, lowbias32(seed ^ 0xbff95bfeu));
     return scrambledPoint1d(pixel, index, dimension);
+}
+
+// -- The per-path replay re-key (step 3b, D-138) -----------------------
+// The candidate walk's *sampling* draws — the scatter at x₁ and every tail
+// vertex's NEE/lobe/direction/roulette decision — are keyed by a per-path
+// seed instead of (pixel, sampleIndex), because a k>2 shift replays the
+// prefix bounces at a *different* pixel and must reproduce the source's
+// draws bit for bit: generation and replay call the same pure function of
+// (seed, dimension), so they cannot diverge. The seed rides the sample
+// (`PathSample.initRandomSeed`). Dimension numbering keeps the per-bounce
+// path registry (`bounceDimension`) — only the keying changes. The walk's
+// reservoir *acceptances* are pixel-local decisions, never replayed, and
+// stay on the ranked stream. The price is per-sample stratification on the
+// walk (each path's draws are hash-independent, not a progressive Sobol
+// point) — the resampling machine, not tail stratification, carries the
+// convergence, exactly as the reference ReSTIR PT implementations accept.
+
+public uint pathReplaySeed(uint pixel, uint sampleIndex) {
+    return lowbias32(pixel ^ lowbias32(sampleIndex ^ 0x7f4a7c15u));
+}
+
+// A seeded draw: the Owen-scrambled point of the seed's dimension stream at
+// index 0 — a pure hash of (seed, dimension), replayable from the stored
+// seed alone.
+public float2 replay_2d(uint seed, uint dimension) {
+    return scrambledPoint2d(seed, 0, dimension);
+}
+
+public float replay_1d(uint seed, uint dimension) {
+    return scrambledPoint1d(seed, 0, dimension);
 }
 
 // -- Blue-noise sample-index ranking (D-095) ---------------------------

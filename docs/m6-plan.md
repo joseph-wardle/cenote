@@ -186,6 +186,7 @@ compiles, clippy-clean (incl. `--features denoise`), tests pass on the GPU machi
 3. **Hybrid shift (classic thresholds)** — random-replay the early specular segments +
    gated reconnection; handle the RR-replay trap (D-133). *Checkpoint: converges to brute
    force on a **glossy** GI scene — lookdev materials render right. Core ReSTIR PT.*
+   Expanded to a three-rung ladder in §4a (interviewed 2026-07-25).
 4. **Footprint reconnection criteria** — replace the classic thresholds with the dual
    area-density test (Enhanced §4). *Checkpoint: fewer dark/firefly artifacts on distant
    glossy reconnections; convergence equal-or-better; per-scene tuning gone.*
@@ -208,6 +209,82 @@ compiles, clippy-clean (incl. `--features denoise`), tests pass on the GPU machi
    brute force converge to the same golden; the curves are the poster.*
 9. **Polish** — goldens regenerated and eyeballed, module headers and the reservoir
    Rosetta block current, README flagship section, decisions.md current. *M6 done.*
+
+## 4a. Step-3 plan — the hybrid shift (interviewed 2026-07-25)
+
+Step 3 was interviewed to the decision level after step 2 landed. Five decisions,
+resolved in dependency order; each rung below ends green (compiles, clippy-clean incl.
+`--features denoise`, GPU tests serial, committed), exactly like the milestone's steps.
+
+| # | Decision | Choice | Rationale |
+|---|---|---|---|
+| 1 | Candidate granularity | **Per-path streamed candidates** (the Lin 2022 / Enhanced shape). `traceTail`'s aggregate retires: every lighting event along the candidate walk — the NEE connection at each vertex, each emission hit — streams into the reservoir as its own candidate with its own F, rcVertex, and MIS fold. The stored winner is one concrete path | The T2 aggregate is sound only while every component shifts through the *same* reconnection at x₂. A movable reconnection vertex breaks that: a path terminating at x₂ cannot ride a reconnection at x₃. Streaming is the shape the target paper's Alg 1 assumes (steps 4–7 plug in rather than fight), bounds the per-shift cost (replay rays + one reconnection ray, never per-prefix-vertex shadow rays), and deletes a cenote-only divergence — including the T2 two-candidate MIS special case, which dissolves into the uniform per-depth NEE/BSDF fold. RIS over the streamed candidates recovers the variance the aggregate bought |
+| 2 | Un-baking f₂ | **By construction, not as a feature.** A streamed candidate stores the *incident* radiance at its reconnection vertex plus `rcVertexWi`; f_k re-evaluates at shift time from the D-131 re-shade | Baked Lo(x₂) has no single wi — un-baking is only expressible per-path, so it falls out of decision 1. Reconnection eligibility reinterprets from bias guard to **variance guard**: a sharp vertex is now unbiased to reuse, merely firefly-prone, so the classic thresholds gate quality, not correctness |
+| 3 | Support coverage | **Pure replay is in.** A path with no eligible pair anywhere stores only its seed; a shift replays the whole path — every bounce re-traced with the source's RNG keys, the terminal event re-drawn from the same dims. **Temporal holds at J = 0 for replay-kind and k>2 samples until step 5**; k=2 reconnections keep shifting temporally exactly as today | The replay walker must exist for the prefix anyway; run-to-termination is the same walker without a stopping pair — uniformity is the smaller code. Excluding it would forfeit reuse precisely on the sharp chains the milestone names as the point. Temporal-at-step-5 preserves the plan's sequencing: spatial proves the walker against a live, unbiased temporal baseline |
+| 4 | Cost discipline | **Measurement-only, no knob.** Cheap rejection gates (neighbour acceptance, zero-W, eligibility) always run before any replay ray; each rung's checkpoint reports measured frame time on the demo + glossy scenes against the T2 baseline | Bidirectional pairwise MIS makes replay-kind shifts trace rays both ways per neighbour — the known price of hybrid, already bounded by `maxBounces`, with both legitimate reducers scheduled (footprint step 4 makes replay rarer; reciprocal step 7 halves the evaluations). A pre-measurement cap is speculative tuning surface (D-086's named risk); if numbers demand one, an unbiased J=0-over-depth knob is a five-line addition. The measurement gives step 7's 1.63× claim a real denominator |
+| 5 | Proof obligations | Per-rung gates as listed below; **no FLIP goldens for gate-only scenes**; ReSTIR goldens regenerate at T3a (a different candidate stream is a different estimator realization — bit-stability with T2 is impossible); brute goldens stay bit-identical; D-137+ land append-only with their rungs' commits | The brute-force comparison anchors correctness; per-scene goldens would be maintenance weight without information. The convergence gate (below) exists because every unbiasedness gate here would also pass with reuse silently dead |
+
+The ladder — each rung green and committable:
+
+- **T3a — the streaming restructure, reconnection pinned at k=2.** Candidates stream
+  per-path; the aggregate, the baked-radiance eligibility, and the two-candidate MIS
+  special case are deleted; an ineligible (x₁,x₂) pair stays J=0; no replay, no seeds.
+  *Gates: the existing diffuse unbiasedness scene AND a new glossy-x₂ scene (a glossy
+  metal bounce surface at roughness 0.3 behind a diffuse primary — a vertex T2 provably
+  refused; note the roughness sits **above** the 0.2 pair-criteria floor, or the gate
+  would be vacuous at J=0 — sub-floor vertices are T3c's sharp-chain scene) both pass
+  `assert_spatial_reuse_matches_brute_force`; same-pixel Jacobian-1 invariant; estimator
+  microtests updated; ReSTIR goldens regenerated and eyeballed; brute goldens
+  bit-identical; frame time ≈ T2 (the restructure should be roughly cost-neutral).*
+  **Landed 2026-07-25 (D-137).**
+- **T3b — the replay walker and the movable vertex.** Seeds light up (the stateless-RNG
+  re-key: tail dims drawn from a per-path hash so generation and replay are the same
+  draws); prefix replay (bounces 1…k−1) lands in the spatial shift; k chosen during the
+  candidate walk by the classic pair criteria; the RR fold (walker never rolls — path
+  length stored, survival probabilities stay folded into W). No-eligible-pair paths
+  remain J=0 for one more rung. *Gates: **same-pixel replay bit-identity** (a GPU
+  microtest: replaying a stored seed at its own pixel reproduces the exact path,
+  bit-for-bit — the strongest invariant the hybrid offers, catching silent bias a
+  convergence gate would smear); an RR-fold scene deep enough that roulette fires;
+  the glossy-primary GI unbiasedness scene; frame time reported.*
+  **Landed 2026-07-25 (D-138).** Gate refinements from the implementation: the
+  replayed integrand F holds bit-for-bit; the *Jacobian* is pinned to 1 within one
+  ulp, not bit-exact — its squared-distance ratio's last bit belongs to per-kernel
+  fma contraction, which no source-level discipline controls. The glossy-primary
+  scene is a sub-floor metal *panel* with the matte sphere-and-ground world in its
+  reflection (a glossy ground alone leaves no diffuse-diffuse pair to lock, and the
+  k = 3 gate would be vacuous); the RR-fold scene is a two-mirror corridor whose
+  locks land at k ≥ 5, where the reconnection draw itself crosses a roulette roll.
+- **T3c — the pure-replay kind.** The walker runs to termination; the terminal event
+  re-draws from stored dims (an NEE redraw + shadow ray, or the replayed ray re-hitting
+  its emitter). *Gates: a sharp-chain scene (all roughness below the 0.2 floor, so
+  reconnection never fires) through the unbiasedness gate; the convergence harness
+  extended to the glossy scene asserting ReSTIR beats plain PT at equal spp — the one
+  test that proves reuse works rather than merely not lying; docs, D-entries, README
+  row, frame time reported.*
+  **Landed 2026-07-25 (D-139).** Refinements from the implementation: the generation
+  walk unified (the x₂ preamble became the loop's first iteration and the T3a/T3b
+  pinned-unshiftable context died — every pre-lock event is now a replay sample, so
+  nothing waits on a re-derived x₂ segment); the same-pixel bit-identity gate covers
+  the replay kind (F bit-for-bit, both terminal shapes, and a zero-locks coverage
+  assert on the sharp scene); and the beats-plain-PT gate runs on an *indirect-only*
+  variant of the glossy scene (one-sided emitter facing the panel, black environment
+  — measured ≈2× at 8 spp). The direct-lit variant does not clear that bar: PT's
+  summed per-vertex estimator is already low-variance there and the one-survivor
+  resampling costs more than the default 5-neighbour reuse recovers — the hard-GI and
+  many-light regimes are where reuse pays, which is the honest shape of the claim.
+
+Leaf defaults settled with the interview (cheap to change, not re-interviewed): the
+classic pair criteria are *both* endpoints past the 0.2 roughness floor (the existing
+`reconnectionEligible` shape, now a variance guard) plus a segment-distance floor
+relative to the primary hit's camera depth (`Surface.depth` — scale-free, and it dies at
+step 4 when footprint criteria replace it). The stored sample packs k, path length,
+terminal-event kind, and path kind into the reserved/flags words — no re-layout, as
+designed (D-128). At shift time the path MIS weight re-evaluates in the destination
+domain using the unpacked `neeLightPdf` against the re-shaded BSDF pdf (the reason that
+field was kept unpacked). Resolve keeps its asymmetry deliberately: reconnection-kind
+samples re-form at the pixel (the bit-exactness discipline), replay-kind samples trust
+the shifted F the reuse stage wrote — re-forming would mean re-tracing the replay.
 
 ## 5. Fallback seams (pre-agreed, in slip order)
 

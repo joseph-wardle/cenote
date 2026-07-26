@@ -55,25 +55,41 @@ pub(crate) struct ReconnectionVertex {
 pub(crate) struct PathSample {
     /// xₖ — the reconnection vertex.
     pub rc_vertex: ReconnectionVertex,
-    /// Lₖ — radiance cached beyond the reconnection vertex (the sub-path tail),
-    /// so the reconnection shift recomputes the contribution without re-tracing.
+    /// Lₖ — the incident-side suffix cached beyond the reconnection vertex
+    /// (fₖ·|cosθₖ| excluded), so the shift re-shades the contribution without
+    /// re-tracing the tail (D-137).
     pub rc_vertex_radiance: [f32; 3],
     /// ωₖ — oct-encoded outgoing direction at the reconnection vertex.
     pub rc_vertex_wi: u32,
     /// F — the RGB path integrand in this pixel's domain; p̂ = luminance(F).
+    /// Live from step 3b on, for every indirect kind (D-138/D-139):
+    /// generation stores the own-domain value, a winning spatial shift
+    /// rewrites it with the destination's, and it is trusted wherever
+    /// re-forming would re-trace a replay (own-domain targets; resolve for
+    /// k > 2 and replay-kind samples).
     pub f: [f32; 3],
     /// The NEE light pdf, kept unpacked — it feeds the path MIS at resolve.
     pub nee_light_pdf: f32,
-    /// The initial-sample RNG seed: the random-replay key for the early
-    /// segments (and the deferred duplication-map hash key).
+    /// The per-path replay seed (live from step 3b, D-138): the walk's
+    /// sampling draws are a pure function of (seed, dimension), so a shift
+    /// replays a k > 2 sample's prefix bounces — or a replay-kind sample's
+    /// whole path, terminal redraw included (D-139) — with exactly the
+    /// source's draws. Doubles as the deferred duplication-map hash key.
     pub init_random_seed: u32,
-    /// The RNG seed replayed from the reconnection vertex onward.
+    /// Reserved (D-128 headroom): designed for a per-segment reseed, but the
+    /// per-path seed above covers the terminal redraw too — dimensions are
+    /// per-bounce — so it stays zero (D-139).
     pub rc_vertex_random_seed: u32,
-    /// The shift Jacobian terms pre-multiplied into one float (same-pixel = 1).
+    /// The source half of the shift Jacobian, |cosθₖ|/d² where the sample was
+    /// drawn (live from step 3b, D-138): the shift divides its own half by
+    /// it, so a same-pixel shift is 1 to the last-place bit.
     pub cached_jacobian: f32,
-    /// Bit 0: the path kind — 0 a length-2 NEE sample, 1 a length-≥3
-    /// reconnection sample (`PATH_KIND_*` in `restir_scene.slang`); the rest
-    /// reserved.
+    /// Bits 0..1: the path kind — 0 a length-2 NEE sample, 1 a length-≥3
+    /// reconnection sample, 2 a pure-replay sample. Bits 2..3: the
+    /// terminal-event kind, bit 4: the inside-the-instance re-shade flag,
+    /// bit 5: the pair criteria verdict, bits 6..13: k, the reconnection
+    /// vertex's path index — or a replay sample's terminal bounce
+    /// (`restir_scene.slang`, D-137/D-138/D-139); the rest reserved.
     pub reserved: u32,
 }
 
@@ -773,6 +789,7 @@ mod tests {
             input: vk::DeviceAddress,
             output: vk::DeviceAddress,
             loaded_weight_sum: vk::DeviceAddress,
+            oct_agreement: vk::DeviceAddress,
             count: u32,
             _pad0: u32,
             _pad1: u32,
@@ -850,11 +867,20 @@ mod tests {
                 MemoryLocation::GpuOnly,
             )
             .expect("weight-sum buffer");
+        let oct_buffer = gpu
+            .create_buffer(
+                "test.reservoir.path.oct",
+                u64::from(COUNT) * 4,
+                io_usage,
+                MemoryLocation::GpuOnly,
+            )
+            .expect("oct buffer");
 
         let params = PathRoundTripParams {
             input: input_buffer.device_address(),
             output: output_buffer.device_address(),
             loaded_weight_sum: weight_sum_buffer.device_address(),
+            oct_agreement: oct_buffer.device_address(),
             count: COUNT,
             _pad0: 0,
             _pad1: 0,
@@ -941,6 +967,18 @@ mod tests {
         assert!(
             weight_sum.iter().all(|&w| w == 0.0),
             "loadPathReservoir left a non-zero weightSum"
+        );
+
+        // The ωₖ octahedral packing round-trips within its quantization cone
+        // over a sphere of hashed directions (step 3a, D-137): a broken
+        // hemisphere fold or swapped component decodes a direction degrees
+        // away, far below this bound.
+        let oct: Vec<f32> =
+            bytemuck::pod_collect_to_vec(&gpu.download_buffer(&oct_buffer).expect("download"));
+        assert!(
+            oct.iter().all(|&d| d > 0.999_99),
+            "packUnitDirection does not round-trip: worst dot {}",
+            oct.iter().copied().fold(f32::INFINITY, f32::min)
         );
     }
 }

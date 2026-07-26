@@ -242,14 +242,33 @@ void restir_resolve(uint3 tid: SV_DispatchThreadID) {
         params.debug[pixel] = float4(debugColor(debugView, reservoir, confidenceScale), 1.0);
     }
 
+    // -- The replay-carried survivor (k > 2, D-138; replay kind, D-139) ------
+    // Its integrand was formed in *this* pixel's domain by whichever stage
+    // last held it — generation at this pixel, or the spatial shift's replay —
+    // and re-forming it here would re-trace that replay (m6-plan §4a), so
+    // resolve trusts the stored F. No visibility is owed either: the own-pixel
+    // walk traced every segment concretely, and a foreign survivor only
+    // arrives through spatial, whose target spent the connection ray and
+    // whose replay rays are their own geometry tests. Pixel-owned add, like
+    // the delta term above.
+    if (isReplaySample(sample)
+        || (isReconnectionSample(sample) && reconnectionK(sample) > 2)) {
+        let deep = throughput * sample.F * reservoir.unbiasedWeight;
+        if (any(deep > 0.0)) {
+            params.radiance[pixel] += float4(deep, 0.0);
+        }
+        return;
+    }
+
     // Reconstruct the survivor's connection through the shared `connectSampleAt`
     // (restir_target.slang — the same reconstruction every reuse target ran, so
     // resolve can never drift from what was resampled), whichever kind survived:
     // a light point re-derived exactly (the environment re-samples its stored
     // coordinate, a triangle re-connects its stored point), or a reconnection
-    // vertex x₂ re-formed at the cached Lo(x₂) (D-134) — the reconnection shift,
-    // but to the resolving pixel itself; re-forming in *this* domain (rather
-    // than reading a stored F) is what keeps a reused survivor's colour local.
+    // vertex x₂ re-shaded against its cached suffix (D-134, D-137) — the
+    // reconnection shift, but to the resolving pixel itself; re-forming in
+    // *this* domain (rather than reading a stored F) is what keeps a reused
+    // survivor's colour local.
     // A dropped light or a degenerate connection (behind the emitter, a pole)
     // is invalid and adds nothing; W already carries the Jacobian and MIS
     // weighting, so validity is the only gate here.

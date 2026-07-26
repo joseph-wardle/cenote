@@ -69,6 +69,7 @@
 // holds (M3 plan §2).
 
 import bluenoise;
+import color;
 import openpbr;
 import pathstate;
 import reservoir;
@@ -171,11 +172,21 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
 
     // p̂_c(Y_c) and U_c(Y_c): the canonical sample re-targeted here, with its one
     // visibility ray — the "+1" of the k+1. An empty/degenerate canonical (rare
-    // at a real hit) yields 0 and simply loses to any neighbour.
+    // at a real hit) yields 0 and simply loses to any neighbour. An indirect
+    // sample's — reconnection or replay — own-domain target is its stored
+    // integrand (D-138/D-139): generation formed F in this very domain this
+    // frame (temporal never passes a foreign indirect sample through), its
+    // path traced concretely — visibility included — so it is trusted, and no
+    // ray is spent.
     float ucYc = 0.0;
     float pcYc = 0.0;
     if (canonicalReservoir.unbiasedWeight > 0.0) {
-        pcYc = targetVisAware(canonical, canonicalReservoir.sample, ucYc);
+        if (pathKind(canonicalReservoir.sample) != PATH_KIND_NEE) {
+            ucYc = luminance(canonicalReservoir.sample.F);
+            pcYc = ucYc;
+        } else {
+            pcYc = targetVisAware(canonical, canonicalReservoir.sample, ucYc);
+        }
     }
 
     let px = int(pixel % params.width);
@@ -241,53 +252,115 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
             continue;
         }
 
-        // The reconnection-shift Jacobians (D-134/D-135), through the shared
-        // `reconnectionShiftJacobian`: 1 for an NEE sample (identity shift), the
-        // geometry-term ratio for an eligible reconnection sample, and 0 where
-        // the shift is undefined (a too-glossy x₂, D-136) — the partial-shift
-        // convention, so the pair still counts in V/c_tot and the MIS weights
-        // stay a fixed function of each sample. `jShift` maps neighbour i's
-        // sample into this (canonical) surface; `jCanon` maps the canonical's
-        // sample into neighbour i's. Folded into the cross-domain targets so
-        // the shipped defensive pairwise MIS (restir_mis) needs no
-        // reconnection-aware variant: it already compares c·p̂ across the pair.
-        let jShift = reconnectionShiftJacobian(params.scene, neighbour.sample,
-                                               neighbourSurface.position,
-                                               canonical.position);
-        let jCanon = reconnectionShiftJacobian(params.scene, canonicalReservoir.sample,
-                                               canonical.position,
-                                               neighbourSurface.position);
-
-        // The three targets the pairwise ratios need. p̂_c(Y_i) is visibility-aware
-        // (one ray, at this surface); the two own-domain p̂_i are unshadowed. A
-        // neighbour whose shift is undefined (jShift 0) contributes nothing, so
-        // its own targets — and the canonical's ray for it — are skipped.
+        // The shifted targets (D-134/D-135/D-138/D-139). An NEE sample stores
+        // a domain-independent light point — identity shift, Jacobian 1,
+        // through the shared ray-free targets. A reconnection sample maps
+        // through `shiftReconnection`: prefix replay from the stored seed
+        // (k > 2), the re-derived reconnection off its end, the re-shaded
+        // f_k, and the geometry-term Jacobian against the sample's cached
+        // source half. A replay sample maps through `shiftReplay`: the whole
+        // path replayed from the seed, the terminal re-drawn from the same
+        // dims — a primary-sample-space identity, Jacobian 1. An undefined
+        // shift — a replayed lobe died, the prefix escaped, the terminal
+        // shape mismatched — is the partial-shift convention (D-136): target
+        // 0 while the pair still counts in V/c_tot, so the MIS weights stay
+        // a fixed function of each sample. Folded into the cross-domain
+        // targets so the shipped defensive pairwise MIS (restir_mis) needs
+        // no kind-aware variant: it already compares c·p̂ across the pair.
+        //
+        // p̂_c(Y_i) is visibility-aware — one ray along the reconnection
+        // segment or the re-drawn NEE connection (a SCATTER-terminal
+        // replay's segments were traced concretely, so no ray is owed); the
+        // own-domain p̂_i of an indirect sample is its stored integrand
+        // (D-138), and of an NEE sample the unshadowed re-form.
         float ucYi = 0.0;
-        float pcYi = 0.0; // p̂_c(Y_i), 1 ray
-        float piYi = 0.0; // p̂_i(Y_i)
-        if (jShift > 0.0) {
-            pcYi = targetVisAware(canonical, neighbour.sample, ucYi);
+        float pcYiShifted = 0.0; // p̂_c(shift(Y_i))·J_i, 1 ray
+        float piYi = 0.0;        // p̂_i(Y_i)
+        var shifted = neighbour.sample;
+        if (isReconnectionSample(neighbour.sample)) {
+            let sh = shiftReconnection(sceneTlas, params.scene,
+                                       neighbour.sample, canonical);
+            if (sh.valid && sh.jacobian > 0.0) {
+                ucYi = luminance(sh.F);
+                var vis = 0.0;
+                if (ucYi > 0.0) {
+                    RayDesc ray;
+                    ray.Origin = sh.rayOrigin;
+                    ray.Direction = sh.toRc;
+                    ray.TMin = 0.0;
+                    ray.TMax = sh.tmax;
+                    vis = shadowVisibility(sceneTlas, params.scene, ray,
+                                           neighbour.sample.rcVertex.instance,
+                                           neighbour.sample.rcVertex.primitive);
+                }
+                pcYiShifted = ucYi * vis * sh.jacobian;
+                piYi = luminance(neighbour.sample.F);
+                // If this neighbour wins, the stored sample must carry this
+                // domain's integrand and Jacobian half onward (resolve
+                // trusts F for k > 2; the cached half re-roots the sample
+                // here, D-138).
+                shifted.F = sh.F;
+                shifted.cachedJacobian = sh.partial;
+            }
+        } else if (isReplaySample(neighbour.sample)) {
+            let sh = shiftReplay(sceneTlas, params.scene,
+                                 neighbour.sample, canonical);
+            if (sh.valid) {
+                ucYi = luminance(sh.F);
+                var vis = 1.0; // a SCATTER terminal's value is complete
+                if (ucYi > 0.0 && sh.tmax > 0.0) {
+                    RayDesc ray;
+                    ray.Origin = sh.rayOrigin;
+                    ray.Direction = sh.direction;
+                    ray.TMin = 0.0;
+                    ray.TMax = sh.tmax;
+                    vis = shadowVisibility(sceneTlas, params.scene, ray,
+                                           sh.shadowLight, sh.shadowPrimitive);
+                }
+                pcYiShifted = ucYi * vis; // J = 1: the replay is a PSS identity
+                piYi = luminance(neighbour.sample.F);
+                // On a win the sample carries this domain's integrand onward
+                // (resolve trusts F for the replay kind, D-139).
+                shifted.F = sh.F;
+            }
+        } else {
+            pcYiShifted = targetVisAware(canonical, neighbour.sample, ucYi);
             piYi = targetUnshadowed(params.scene, params.restir,
                                     neighbourSurface, neighbour.sample);
         }
-        // Symmetrically, a canonical whose shift into the neighbour's domain
-        // is undefined (jCanon 0) scores zero there — skip its evaluation too.
-        let piYc = jCanon > 0.0 && canonicalReservoir.unbiasedWeight > 0.0
-            ? targetUnshadowed(params.scene, params.restir,
-                               neighbourSurface, canonicalReservoir.sample) // p̂_i(Y_c)
-            : 0.0;
-
-        // p̂_c(Y_i) and p̂_i(Y_c) are the *shifted* targets: scale each by its
-        // shift's Jacobian to state it in the comparison's measure.
-        let pcYiShifted = pcYi * jShift;
-        let piYcShifted = piYc * jCanon;
+        // Symmetrically, the canonical's sample stated in the neighbour's
+        // domain: p̂_i(Y_c)·J — shifted for an indirect sample, the plain
+        // re-form for NEE, unshadowed either way (own-domain targets spend
+        // no ray). Skipped when its own-domain target is already zero (the
+        // canonical's share is zero regardless), which also spares the
+        // per-neighbour replay rays.
+        float piYcShifted = 0.0;
+        if (canonicalReservoir.unbiasedWeight > 0.0 && pcYc > 0.0) {
+            if (isReconnectionSample(canonicalReservoir.sample)) {
+                let sh = shiftReconnection(sceneTlas, params.scene,
+                                           canonicalReservoir.sample, neighbourSurface);
+                if (sh.valid) {
+                    piYcShifted = luminance(sh.F) * sh.jacobian;
+                }
+            } else if (isReplaySample(canonicalReservoir.sample)) {
+                let sh = shiftReplay(sceneTlas, params.scene,
+                                     canonicalReservoir.sample, neighbourSurface);
+                if (sh.valid) {
+                    piYcShifted = luminance(sh.F);
+                }
+            } else {
+                piYcShifted = targetUnshadowed(params.scene, params.restir,
+                                               neighbourSurface,
+                                               canonicalReservoir.sample);
+            }
+        }
 
         let ci = neighbour.confidence;
         // b_i at Y_i, and the canonical's share of this pair at Y_c.
         let mis = pairwiseMis(ci, piYi, piYcShifted, cCanon, pcYiShifted, pcYc);
 
         AcceptedNeighbour a;
-        a.sample = neighbour.sample;
+        a.sample = shifted;
         a.confidence = ci;
         // The GRIS weight of the shifted neighbour: m_i·p̂_c(shift(Y_i))·W_i·J_i.
         a.weightNumer = mis.bi * pcYiShifted * neighbour.unbiasedWeight;

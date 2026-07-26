@@ -67,6 +67,7 @@
 // `cand` at its own pixel and `prev` (+ its G-buffer) at the reprojected pixel.
 
 import bluenoise;
+import color;
 import pathstate;
 import reservoir;
 import reservoir_path;
@@ -175,26 +176,32 @@ void restir_temporal(uint3 tid: SV_DispatchThreadID) {
     // p̂_c(Y_c): the canonical (this frame's candidate) sample's unshadowed target
     // on this surface. Re-evaluated rather than trusting the stored W, exactly as
     // spatial re-targets its canonical. Zero for an empty/degenerate candidate.
+    // An indirect candidate's — reconnection or replay — own-domain target is
+    // its stored integrand (D-138/D-139): candidates formed F at this very
+    // pixel this frame, and re-forming it here would re-trace its replay.
     float pcYc = 0.0;
     if (cand.unbiasedWeight > 0.0) {
-        pcYc = targetUnshadowed(params.scene, params.restir, surface, cand.sample);
+        pcYc = pathKind(cand.sample) != PATH_KIND_NEE
+            ? luminance(cand.sample.F)
+            : targetUnshadowed(params.scene, params.restir, surface, cand.sample);
     }
 
-    // Step-2 scope (D-134/D-136): a length-≥3 reconnection sample does not
-    // cross the frame boundary — its *temporal* shift is not defined until
-    // step 5, which owes it three things at once: the reconnection Jacobian
-    // across the reprojected surface, a stable identity for `rcVertex.instance`
-    // (a raw TLAS index today, which a scene edit renumbers — the very hazard
-    // the light-id registry solves for NEE samples), and a re-test of the
-    // x₁→x₂ visibility resolve deliberately skips. As with an ineligible
-    // spatial shift, the treatment is the partial-shift convention: the
-    // cross-frame target is zero while the pair still counts, so the MIS stays
-    // a fixed function of each sample (unbiased — history just carries no GI
-    // until step 5; this frame's candidate passes through with full weight).
-    // Guarding *before* any target of prev's sample is evaluated also keeps a
-    // stale instance index from ever being dereferenced.
-    let prevShiftable = !isReconnectionSample(prev.sample);
-    let candShiftable = !isReconnectionSample(cand.sample);
+    // Step-2 scope (D-134/D-136): an indirect sample — reconnection or replay
+    // — does not cross the frame boundary; its *temporal* shift is not
+    // defined until step 5, which owes it three things at once: the shift
+    // across the reprojected surface, a stable identity for
+    // `rcVertex.instance` (a raw TLAS index today, which a scene edit
+    // renumbers — the very hazard the light-id registry solves for NEE
+    // samples), and a re-test of the visibility resolve deliberately skips.
+    // As with an undefined spatial shift, the treatment is the partial-shift
+    // convention: the cross-frame target is zero while the pair still counts,
+    // so the MIS stays a fixed function of each sample (unbiased — history
+    // just carries no GI until step 5; this frame's candidate passes through
+    // with full weight). Guarding *before* any target of prev's sample is
+    // evaluated also keeps a stale instance index from ever being
+    // dereferenced.
+    let prevIsNee = pathKind(prev.sample) == PATH_KIND_NEE;
+    let candIsNee = pathKind(cand.sample) == PATH_KIND_NEE;
 
     let ci = prevValid ? prev.confidence : 0.0;
     let cTot = cCanon + ci;
@@ -210,12 +217,12 @@ void restir_temporal(uint3 tid: SV_DispatchThreadID) {
     float canonShare = 0.0;
     if (prevValid) {
         float piYi = 0.0;
-        if (prevShiftable) {
+        if (prevIsNee) {
             pcYi = targetUnshadowed(params.scene, params.restir, surface, prev.sample);
             // p̂_i — prev's own-domain target — on the reconstructed previous surface.
             piYi = targetUnshadowed(params.scene, params.restir, prevSurface, prev.sample);
         }
-        let piYc = candShiftable && cand.unbiasedWeight > 0.0
+        let piYc = candIsNee && cand.unbiasedWeight > 0.0
             ? targetUnshadowed(params.scene, params.restir, prevSurface, cand.sample)
             : 0.0;
         let mis = pairwiseMis(ci, piYi, piYc, cCanon, pcYi, pcYc);

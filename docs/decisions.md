@@ -3300,3 +3300,115 @@ crossings as **opaque** (stochastic opacity in the reused tail is out, with volu
 checkpoint scenes carry none), and a **distance criterion** on the reconnection (the footprint
 criteria, step 4) is not yet applied, so a very short reconnection can still spike the 1/d²
 Jacobian — watched, not yet a firefly source at checkpoint spp.
+
+### D-137: Step 3a streams candidates per path and un-bakes f₂; eligibility becomes a variance guard
+Status: accepted (2026-07-25). The T2 aggregate retires: `traceTail`'s one baked Lo(x₂) candidate
+becomes a **per-path streamed walk** (`walkTail`, the Lin 2022 / Enhanced Alg 1 shape) — every
+lighting event along the BSDF draw's continuation (the NEE connection at each vertex, each
+emission hit, the sky) enters the reservoir as its **own candidate** with its own suffix, MIS
+fold, and acceptance draw, and the stored winner is one concrete path. The sample now holds the
+**incident-side** suffix (`rcVertexRadiance`, with f₂·|cosθ₂| deliberately excluded) plus the
+live `rcVertexWi`, so every domain re-forms Lo by **re-shading f₂ at the stored Hit**
+(`reconnectionOutgoing`, one shared formula for generation, both reuse targets, and resolve —
+D-131's re-shade made structural). The one MIS weight that involves x₂'s closure re-evaluates
+per domain against the **unpacked `neeLightPdf`**, discriminated by a packed terminal kind
+(NEE at x₂ / x₂'s scatter found the light / deeper-or-delta = baked); an inside-the-instance
+bit reproduces the interior-IOR closure the walk resolved. With f₂ re-shaded, reusing any
+vertex is **unbiased** — so the baked-radiance eligibility (D-136's material guard) is deleted
+and replaced by the classic **pair criteria as a variance guard**: both endpoints past the 0.2
+roughness floor (`reconnectionRough` — metals and rough glass now pass, vertices T2 refused
+outright), the segment past a scale-free floor (`RECONNECT_MIN_DISTANCE` × camera depth, dies
+at step 4's footprint criteria), and no interior medium on the reconnection segment (its
+Beer–Lambert is baked from the source segment; media reuse is deferred with volumes). The
+verdict is evaluated **once, at generation**, and stamped into the sample
+(`reconnectionShiftable`), so the shift needs no material lookups and the MIS weights stay a
+fixed function of each sample — a failing pair shifts with Jacobian 0 (D-136's partial-shift
+convention) until T3b/T3c's replay kinds cover it. The walk keeps the path tracer's exact
+dynamics: `rcFactor` folds the source-domain f₂·cosθ₂ back in for every termination and
+roulette decision, so support and survival match `shade_surface` bounce for bounce while the
+stored suffix stays f₂-free. ωₖ packs to 16-bit octahedral; the walk evaluates its own targets
+through the **decoded** direction, so generation weighs exactly the sample every re-shading
+domain sees (the ~1e-4 rad quantization is the industry-standard concession, negligible at the
+≥0.2-roughness lobes the criteria admit). Reconnection pinned at k = 2 this rung; no replay, no
+seeds — T3b moves the vertex, T3c adds the pure-replay kind (m6-plan §4a).
+
+### D-138: Step 3b moves the reconnection vertex; the prefix replays from a per-path seed and roulette folds into the weight
+Status: accepted (2026-07-25). The reconnection vertex k is no longer pinned at x₂: the candidate
+walk carries a **reconnection context** — pinned at x₂ on entry, exactly D-137's shape — and moves
+it once, to the **first pair along the walk that passes the variance criteria** (both endpoints
+rough, the segment past the scale-free floor, exterior). From the lock on, events stream as k > 2
+samples: the bounces before x_{k−1} become a **replayable prefix**, and the shift re-traces them at
+the destination before reconnecting (`shiftReconnection`, restir_target.slang). Three mechanisms
+land together, none separable. (1) **The seed re-key**: every walk sampling draw — the x₁ scatter
+included, since it is the first replayed bounce — moves off the pixel-ranked stream onto a pure
+function of (per-path seed, dimension) (`pathReplaySeed`/`replay_*`, rng.slang); the seed rides the
+sample (`initRandomSeed` lights up), so generation and any domain's replay are *the same draws by
+construction*. Reservoir acceptances stay ranked (pixel-local, never replayed). The price is
+per-sample stratification on the walk — hash-independent draws, the reference-implementation trade;
+resampling, not tail stratification, carries convergence. (2) **The roulette fold** (§6's RR-replay
+trap, closed): generation's walk still rolls exactly as the path tracer (survival read off the true
+running throughput), but a roll's division lands by where it sits relative to the context — into
+the baked suffix always (a value, never replayed), and into a **pending survival** that a future
+lock folds into its candidate weight's denominator (w = p̂ / (reconPdf · Πs)). The replayed prefix
+therefore carries no 1/s, and **the replay walker never rolls**: a survived base path can never
+become a killed shifted path. The prefix accumulator is kept roulette-free and
+transmittance-inclusive, in replay's exact multiplication order. (3) **The cached Jacobian half**:
+a k > 2 sample's x_{k−1} is a replayed point no reusing domain can recompute, so the source half
+|cosθₖ|/d² is stamped at generation (`cachedJacobian` lights up) and the shift divides its own half
+by it; the replayed prefix is an identity map in primary-sample space (uniforms copied), so only
+the reconnection segment carries measure change. `F` lights up too: generation stores the
+own-domain integrand, a winning spatial shift rewrites it with the destination's, and it is trusted
+wherever re-forming would re-trace the replay — own-domain reuse targets (spatial's p̂_c(Y_c)/p̂_i(Y_i),
+temporal's canonical), and **resolve at k > 2** (k = 2 keeps the D-134 own-pixel re-form; the
+resolve asymmetry m6-plan §4a names). The walk itself now runs entirely on its *drawn* directions —
+the chain replay reproduces — while the context re-derives its ends direction-free through one
+shared seam (`reconnectionEnd`: re-derived segment, guards, f·|cos|, density, Jacobian half,
+re-shaded x_k), used identically by generation's lock and the shift — the bit-identity discipline
+made structural, and pinned by the new gate: **same-pixel replay reproduces the stored F bit for
+bit** and Jacobian 1 to the ulp (the squared-distance's last bit belongs to per-kernel fma
+contraction — the one honesty note on "exactly 1"). Scope holds the interviewed line: a path whose
+terminal fires before its first qualifying pair — including an emitter that would itself be the
+reconnection vertex, and every NEE-terminated no-pair path — stays J = 0 (own-pixel exact) until
+T3c's pure-replay kind re-draws terminals from the stored dims. Temporal still holds reconnection
+samples at J = 0 across frames until step 5. Storage: k packs into `reserved` bits 5..12 — no
+re-layout, D-128's headroom.
+
+### D-139: Step 3c adds the pure-replay kind; the walk unifies and every streamed event shifts
+Status: accepted (2026-07-25). A path with no qualifying reconnection pair anywhere now stores a
+**pure-replay sample**: its per-path seed, its shape — the terminal kind (an NEE connection, or a
+scatter that found a light) and the walk bounce it fired at — and its own-domain integrand F.
+Nothing else: the reconnection fields stay zero. The shift (`shiftReplay`, restir_target.slang)
+replays every scatter from the seed at the destination's surfaces and re-forms the terminal in its
+stored shape — an NEE terminal re-draws the connection from the *same dims* (light choice, point,
+MIS, delta-ness all re-form locally; one shadow ray handed to the caller), a SCATTER terminal's
+last segment finds its own light concretely (an emitter's front face, or the sky — no ray owed).
+The whole map is a primary-sample-space identity — every uniform copied — so its Jacobian is
+exactly 1; the source's roulette survivals live in its candidate weight (the D-138 fold), so the
+replay never rolls and the path exists exactly as far as the stored shape says. A structural
+mismatch (a dead lobe, a mid-chain escape, a non-emitter where the emitter stood) is the D-136
+partial-shift convention: target zero, the sample still counts. **The generation walk unifies**:
+the T3b x₂ preamble folds into the loop as its first iteration, the pinned-unshiftable context is
+deleted — the context now starts unlocked and locks at the first qualifying pair, (x₁, x₂)
+included — and every pre-lock event streams replay-kind with weight p̂/Πs (F carries the
+roulette-free chain with every pdf divided in; only the survivals stay outside). The T3b
+entry-invalid whole-walk drop disappears with the pinned context: no event now depends on a
+re-derived x₂ segment existing. The `reserved` word re-lays out once: a 2-bit kind
+(NEE/RECONNECTION/REPLAY — a replay sample must not be readable as either other kind), terminal at
+bits 2..3, inside/shiftable at 4/5, and k *or* the replay terminal bounce at bits 6..13. The
+replay walker is one shared seam (`ReplayWalker`/`replayStep`): the reconnection shift's prefix
+and the pure-replay shift advance through the same code the generation walk mirrors
+multiplication-for-multiplication — pinned by the same-pixel gate, now covering both kinds
+(replay F bit-for-bit, Jacobian exactly the constructed 1). Reuse stages route by kind: spatial
+shifts replay neighbours through `shiftReplay` at J = 1 (own-domain targets stay the stored
+luminance(F)); resolve trusts F for every replay-carried sample (k > 2 and replay-kind alike);
+temporal holds ALL indirect kinds at J = 0 until step 5. `rcVertexRandomSeed` stays reserved: the
+per-path seed covers the terminal redraw, because dimensions are per-bounce. Gates: the sharp-chain
+scene (every surface below the roughness floor, the emitter metal-based so no pair can ever lock —
+the coverage assert proves zero locks) through the unbiasedness gate; and the convergence harness
+extended with the **reuse-is-alive** gate — ReSTIR PT must *beat* plain PT at equal spp on an
+indirect-only glossy GI scene (a one-sided emitter facing the sub-floor panel, black environment:
+the good path is rare, the regime reuse exists for; measured ≈ 2× at 8 spp, 1.7× at 32 spp,
+asserted at a 1.3× floor). The direct-lit variant measurably does NOT clear that bar — PT's summed
+per-vertex estimator is already low-variance there and the one-survivor resampling costs more than
+5-neighbour reuse recovers; the honest scope note, recorded so nobody re-litigates it from the
+convergence curves alone.
