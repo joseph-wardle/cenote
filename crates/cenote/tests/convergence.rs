@@ -269,22 +269,140 @@ fn restir_decay_handoff_report() {
     }
 }
 
-/// Per-channel relative MSE against `reference`: the mean over every colour
-/// channel of `(estimate − reference)² / (reference² + ε)`. Relative, so it
-/// weights a 10% error in shadow the same as in highlight instead of letting
-/// the bright emitters dominate; the ε floor keeps a near-black reference
-/// pixel from exploding the ratio, and the truly-black sky (0 in both) drops
-/// out at zero.
+/// The step-6-0 baseline (M6 §4d decision 1), captured before the estimator
+/// moves — two measurements the later rungs are read against.
+///
+/// **The floor curve.** Does the converged-still configuration — spatial-only,
+/// fresh RNG per frame (D-085) — actually accumulate at brute force's ~1/N
+/// rate, or does within-frame reuse correlation leave a floor? D-127 originally
+/// credited `ReSTCV` as the fix for a convergence plateau; the step-6 deep-read
+/// found it is a constant-factor fix (D-142), which leaves the floor question
+/// to a measurement: accumulated relMSE at 8…128 frames for both estimators on
+/// the indirect-glossy scene. Read the floor off `ReSTIR`'s own ×N column — a
+/// ~1/N estimator holds it flat, a floor makes it climb without end. The
+/// brute column rides along for scale, but its ratio to `ReSTIR` is not the
+/// lens: brute accumulation walks each pixel's Owen-scrambled Sobol sequence
+/// in order, a quasi-Monte Carlo estimator that can dip mildly *below* 1/N,
+/// while resampling forfeits that low-discrepancy structure — so the ratio
+/// drifts brute-ward with N even with no floor anywhere (the measured 6-0
+/// shape, recorded in M6 §4d).
+///
+/// Each estimator is measured against a deep reference built from the *other*
+/// one. Accumulation replays the exact sample sequence, so an estimate shares
+/// its frames with any deeper reference from the same estimator, and the
+/// overlap deflates the measured tail — `E[(mean_N − mean_R)²]` falls to
+/// `v·(1/N − 1/R)`, half the true error at N = R/2 — exactly where a floor would
+/// show. Cross-referencing keeps the samples independent; the residual each
+/// reference adds inflates both curves' last points by a symmetric few
+/// percent, which the ratio mostly cancels.
+///
+/// **The chroma baseline.** Per-channel relMSE on many-lights (the chromatic
+/// scene — 256 randomly-hued emitters), the shipping estimator under the
+/// suite's own protocol (ReSTIR-at-256 reference, matched budgets), as the
+/// before-side of step 6a's vector-shading delta. Brute force at the high
+/// budget rides along as the mechanism check: its per-channel spread is what
+/// the scene itself induces, so the gap between the spreads is the part the
+/// scalar-luminance target owns. Like the decay-handoff report: a report, not
+/// a gate — run explicitly when a checkpoint needs numbers:
+///
+/// ```text
+/// cargo test -p cenote --release --test convergence -- \
+///     --ignored --test-threads=1 --nocapture
+/// ```
+#[test]
+#[ignore = "a measurement report, not a gate — run explicitly for checkpoint numbers"]
+fn restir_floor_and_chroma_report() {
+    // Floor-curve references deep enough that their residual sits well under
+    // the smallest error measured against them: ReSTIR's 128-frame error is
+    // ~v_r/128 and the brute reference's residual ~2·v_r/4096, a ~+6%
+    // inflation on the last point; the ReSTIR reference at 1024 independent
+    // frames does the same for brute's side.
+    const FLOOR_FRAMES: [u32; 5] = [8, 16, 32, 64, 128];
+    const RESTIR_REFERENCE_FRAMES: u32 = 1024;
+    const BRUTE_REFERENCE_FRAMES: u32 = 4096;
+
+    let Some(gpu) = test_context() else {
+        return;
+    };
+
+    let scene = indirect_glossy_scene(&gpu);
+    let mut restir = Renderer::new(&gpu).expect("renderer");
+    restir.set_render_mode(RenderMode::Restir);
+    restir.set_temporal_reuse(false);
+    let brute = Renderer::new(&gpu).expect("renderer");
+
+    let restir_reference = accumulate(&gpu, &restir, &scene, SIZE, RESTIR_REFERENCE_FRAMES);
+    let brute_reference = accumulate(&gpu, &brute, &scene, SIZE, BRUTE_REFERENCE_FRAMES);
+    for frames in FLOOR_FRAMES {
+        let restir_err = rel_mse(
+            &accumulate(&gpu, &restir, &scene, SIZE, frames),
+            &brute_reference,
+        );
+        let brute_err = rel_mse(
+            &accumulate(&gpu, &brute, &scene, SIZE, frames),
+            &restir_reference,
+        );
+        let n = frames as f32;
+        eprintln!(
+            "floor at {frames:3} frames: ReSTIR {restir_err:.6} (×N {:.3}), \
+             brute {brute_err:.6} (×N {:.3}), ratio {:.3}",
+            restir_err * n,
+            brute_err * n,
+            restir_err / brute_err
+        );
+    }
+
+    // The chroma baseline: the shipping estimator (defaults untouched), the
+    // suite's reference protocol. The reference shares the estimate's frames,
+    // deflating these numbers by a protocol-constant factor — fine for the
+    // 6a delta, which re-runs the identical protocol on both sides.
+    let scene = Scene::many_lights(&gpu).expect("many-lights scene");
+    let mut restir = Renderer::new(&gpu).expect("renderer");
+    restir.set_render_mode(RenderMode::Restir);
+    let reference = accumulate(&gpu, &restir, &scene, SIZE, REFERENCE_SPP);
+    for spp in [LOW_SPP, HIGH_SPP] {
+        let [r, g, b] = rel_mse_channels(
+            &accumulate(&gpu, &restir, &scene, SIZE, spp),
+            &reference,
+        );
+        eprintln!("chroma ReSTIR {spp:2} spp per-channel relMSE: R {r:.5}, G {g:.5}, B {b:.5}");
+    }
+    let brute = Renderer::new(&gpu).expect("renderer");
+    let [r, g, b] = rel_mse_channels(
+        &accumulate(&gpu, &brute, &scene, SIZE, HIGH_SPP),
+        &reference,
+    );
+    eprintln!("chroma brute  {HIGH_SPP:2} spp per-channel relMSE: R {r:.5}, G {g:.5}, B {b:.5}");
+}
+
+/// Relative MSE against `reference`: the mean over every colour channel of
+/// `(estimate − reference)² / (reference² + ε)`. Relative, so it weights a
+/// 10% error in shadow the same as in highlight instead of letting the
+/// bright emitters dominate; the ε floor keeps a near-black reference pixel
+/// from exploding the ratio, and the truly-black sky (0 in both) drops out
+/// at zero.
 fn rel_mse(estimate: &[f32], reference: &[f32]) -> f32 {
+    let [r, g, b] = rel_mse_channels(estimate, reference);
+    (r + g + b) / 3.0
+}
+
+/// [`rel_mse`] split per colour channel — the chroma lens (M6 §4d decision
+/// 7): a scalar-luminance resampling target selects survivors by intensity
+/// and leaves their *hue* to luck, so its error should sit unevenly across
+/// R/G/B where a brute-force estimator's sits evenly. No new metric — the
+/// same relative squared error, just not averaged across the one axis the
+/// colour-noise fix acts on.
+fn rel_mse_channels(estimate: &[f32], reference: &[f32]) -> [f32; 3] {
     const EPS: f32 = 1e-3;
-    let mut sum = 0.0_f64;
+    let mut sums = [0.0_f64; 3];
     let mut count = 0.0_f64;
     for (est, refr) in estimate.chunks_exact(4).zip(reference.chunks_exact(4)) {
         for channel in 0..3 {
             let difference = est[channel] - refr[channel];
-            sum += f64::from(difference * difference / (refr[channel] * refr[channel] + EPS));
-            count += 1.0;
+            sums[channel] +=
+                f64::from(difference * difference / (refr[channel] * refr[channel] + EPS));
         }
+        count += 1.0;
     }
-    (sum / count) as f32
+    sums.map(|sum| (sum / count) as f32)
 }

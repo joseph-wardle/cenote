@@ -3477,3 +3477,32 @@ cannot see; temporal live costs 0.6–1.3 ms/frame at 512² (demo 6.78 → 7.36,
 many-lights convergence floor 1.5× → 1.3× (the step-3c gate's own floor) — cross-frame indirect
 correlation narrowed the 8-spp margin (relMSE 0.0331 → 0.0362, mean unmoved, brute-vs-reference
 invariant), the D-094 trade the ramp exists to anneal.
+
+### D-142: The deep-read corrects D-127 — ReSTCV is a colour-noise fix, and the still tail is already ~1/N
+Status: accepted (2026-07-26); corrects D-127's *rationale* (append-only — the architecture
+stands, the claim moves). The step-6 deep-read (paper + supplemental + the full Hercier/ReSTCV
+reference source; m6-plan.md §4d) found ReSTCV is **not** the convergence-plateau fix D-127
+credited: its stated problem is *colour noise* — a scalar-luminance target resamples intensity
+and leaves chroma to luck — and its static-accumulation curves (paper Fig 8) are two parallel
+~1/N lines, an unbiased **constant-factor** variance win from frame 1, not a tail-slope change;
+the paper never claims a plateau fix and concedes covariance-blind combination weights as future
+work. D-127's architecture survives *better* than its rationale: Enhanced §6.3 and ReSTCV are
+the same fix at two depths (the reference ships §6.3-style decoupled shading as its zero-CV
+mode), so survivor-only → vector-weight shading → full ReSTCV is a genuine ladder of special
+cases — exactly the "general form with degenerates" D-127 asked for. Step 6's checkpoint
+recalibrates accordingly (§4d decision 1): CV-on ≡ CV-off unbiasedness, a measured
+constant-factor accumulated-relMSE win, and the chroma improvement — not "the tail flatten."
+The floor question D-127 assumed answered got a number instead (the 6-0 baseline,
+`restir_floor_and_chroma_report`, cross-referenced so shared deterministic frames cannot
+deflate the tail): the converged-still configuration (spatial-only, fresh RNG, D-085) holds
+N·relMSE flat at ~1.02–1.15 over 16–128 frames on indirect-glossy — **~1/N, no floor** — while
+brute force's ×N drifts mildly *below* one (1.25 → 0.94), because per-pixel accumulation walks
+the Owen-scrambled Sobol sequence in order (a QMC estimator) and resampling forfeits that
+low-discrepancy structure; the equal-frame ratio therefore drifts brute-ward (0.65 → 1.23 by
+128 frames) with no floor anywhere. The chroma before-side (many-lights, per-channel relMSE):
+ReSTIR R 0.00626 / G 0.00618 / B 0.00726 at 32 spp vs brute R 0.01039 / G 0.01063 / B 0.01235 —
+the +16% blue excess is the *scene's*, carried identically by both estimators, so 6a's win must
+show as a level drop or an eyeball/golden difference, not a spread collapse. *Why correct rather
+than silently proceed:* implementing against a miscalibrated claim reproduces the
+interview-sketch error T5c had to correct after the fact; the honest-numbers precedent applies
+to the milestone's own headline.

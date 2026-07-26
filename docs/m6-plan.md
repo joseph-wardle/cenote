@@ -604,6 +604,17 @@ The ladder — each rung green and committable:
   the indirect-glossy scene (the ratio vs N answers "is there a floor?"), plus
   per-channel relMSE on many-lights (the chromatic scene) as 6a's before-side.
   The D-127-correcting decision entry appends. No shader change; suites trivially green.
+  **Done (2026-07-26, D-142).** `restir_floor_and_chroma_report`: **no floor** — the
+  converged-still configuration holds N·relMSE flat at ~1.02–1.15 over 16–128 frames.
+  The interview's ratio lens turned out to be the wrong one: brute's per-pixel
+  accumulation walks the Owen-scrambled Sobol sequence in order (a QMC estimator) and
+  drifts mildly *below* 1/N (×N 1.25 → 0.94), a structure resampling forfeits, so the
+  equal-frame ratio drifts brute-ward (0.65 → 1.23 by 128) with no floor anywhere — the
+  report reads the floor off ReSTIR's own ×N column. Chroma before-side (32 spp,
+  per-channel relMSE): ReSTIR R 0.00626 / G 0.00618 / B 0.00726, brute R 0.01039 /
+  G 0.01063 / B 0.01235 — the +16% blue excess is the scene's, carried identically by
+  both estimators, so 6a's win must show as a level drop or in the eyeball, not as a
+  spread collapse.
 - **6a — vector-weight shading (Enhanced §6.3).** Spatial accumulates
   Σᵢ mᵢ·F(Yᵢ)·W_{Xᵢ}·Jᵢ via the w⃗ = w·F/luminance(F) identity at every merge site
   (canonical share, neighbours, NEE arm) into its output reservoir's `cvAccumulator`;
