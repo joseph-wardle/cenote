@@ -3474,17 +3474,22 @@ mod tests {
         (scene, camera)
     }
 
-    /// Run the step-5 temporal pipeline (held camera, spatial off) and the
-    /// matching path-tracer reference on `scene`, both to `samples` spp, and
-    /// return `(temporal_mean, path_mean)`. `decay_frames` is the ramp window
+    /// Run the temporal pipeline (held camera) and the matching path-tracer
+    /// reference on `scene`, both to `samples` spp, and return
+    /// `(temporal_mean, path_mean)`. `decay_frames` is the ramp window
     /// forwarded to `restir_temporal` (`0` disables it —
     /// [`Wavefront::RESTIR_TEMPORAL_DECAY_FRAMES`]); the convergence gates
     /// below differ in that argument and in the scene — sample-kind coverage
-    /// is the caller's scene choice (§4c decision 4). Factored out so the
-    /// wiring — the four-buffer routing, the per-frame reprojection block, and
-    /// the frame-end prev/curr + G-buffer swap — is written and audited once.
-    /// On the held camera reprojection is the identity pixel, the disocclusion
-    /// gate passes, and the G-buffer is written, swapped, and read every frame
+    /// is the caller's scene choice (§4c decision 4). `spatial_cv` selects the
+    /// wave past temporal: `None` is the step-5 shape (spatial off — the
+    /// kind-covering gates isolate the temporal combine), `Some(cv)` appends
+    /// spatial reuse and resolves with control-variate shading on or off —
+    /// the 6b-ii gate's full pipeline, where the temporal lane blend feeds
+    /// spatial's CV combination. Factored out so the wiring — the four-buffer
+    /// routing, the per-frame reprojection block, and the frame-end swap of
+    /// prev/curr and the G-buffers — is written and audited once. On the held
+    /// camera reprojection is the identity pixel, the disocclusion gate
+    /// passes, and the G-buffer is written, swapped, and read every frame
     /// while history compounds under the M-cap.
     #[expect(
         clippy::too_many_lines,
@@ -3496,6 +3501,7 @@ mod tests {
         scene: &Scene,
         samples: u32,
         decay_frames: u32,
+        spatial_cv: Option<bool>,
     ) -> (f64, f64) {
         let camera = *scene.camera();
         let kernels = Kernels::embedded();
@@ -3544,11 +3550,12 @@ mod tests {
         };
         assert!(path > 0.01, "the scene should be lit, got mean {path}");
 
-        // Temporal reuse, held camera, spatial off — the full step-5 pipeline.
+        // Temporal reuse, held camera; spatial and CV shading per `spatial_cv`.
         let temporal = {
             let cand = reservoir("test.temporal.cand");
             let mut prev = reservoir("test.temporal.prev");
             let mut curr = reservoir("test.temporal.curr");
+            let scratch = spatial_cv.map(|_| reservoir("test.temporal.scratch"));
             let mut gbuffer_prev = gbuffer("test.temporal.gbuffer.prev");
             let mut gbuffer_curr = gbuffer("test.temporal.gbuffer.curr");
             // Empty reservoirs / G-buffers to start (frame 0 reads `prev` before
@@ -3603,8 +3610,8 @@ mod tests {
                         // same scene build, as the renderer would report.
                         prev_same_scene: true,
                     }),
-                    scratch: None,
-                    cv_shading: true,
+                    scratch: scratch.as_ref(),
+                    cv_shading: spatial_cv.unwrap_or(true),
                     debug: None,
                     debug_view: DebugView::Off,
                 };
@@ -3649,7 +3656,7 @@ mod tests {
         // `RESTIR_TEMPORAL_DECAY_FRAMES`, silently turning this into a
         // candidate-only convergence check, blind to a temporal bias (D-094).
         let (scene, _) = temporal_gate_scene(&gpu);
-        let (temporal, path) = temporal_gate_means(&gpu, &scene, 256, 0);
+        let (temporal, path) = temporal_gate_means(&gpu, &scene, 256, 0, None);
         let deviation = (temporal - path).abs() / path;
         assert!(
             deviation < 0.03,
@@ -3671,7 +3678,7 @@ mod tests {
             return;
         };
         let scene = glossy_primary_scene(&gpu);
-        let (temporal, path) = temporal_gate_means(&gpu, &scene, 256, 0);
+        let (temporal, path) = temporal_gate_means(&gpu, &scene, 256, 0, None);
         let deviation = (temporal - path).abs() / path;
         assert!(
             deviation < 0.03,
@@ -3694,12 +3701,95 @@ mod tests {
             return;
         };
         let scene = sharp_chain_scene(&gpu);
-        let (temporal, path) = temporal_gate_means(&gpu, &scene, 256, 0);
+        let (temporal, path) = temporal_gate_means(&gpu, &scene, 256, 0, None);
         let deviation = (temporal - path).abs() / path;
         assert!(
             deviation < 0.03,
             "temporal reuse disagrees with the path tracer on an all-sharp \
              chain: {temporal} vs {path} ({deviation:.4} relative)"
+        );
+    }
+
+    /// [`glossy_primary_scene`] with its lighting turned indirect-only — the
+    /// convergence suite's indirect-glossy regime (its builder there rides the
+    /// public API; this is the same set through the internal one): the emitter
+    /// becomes a one-sided plane facing the sub-floor metal panel, showing the
+    /// world its dark back, and the environment goes black, so every
+    /// camera-visible surface is lit exclusively through the panel's glossy
+    /// reflection. Per pixel the good path is rare, so the reservoir carries
+    /// most of the image and the CV lane carries most of its colour — the
+    /// regime that makes the 6b-ii gate below bite.
+    fn indirect_glossy_scene(gpu: &Context) -> Scene {
+        let objects = [
+            Object {
+                mesh: ground_plane(3.0),
+                transform: Mat4::from_translation(Vec3::new(0.0, 2.0, -1.5))
+                    * Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2),
+                material: Material::glossy(Vec3::new(0.9, 0.8, 0.6), 0.0, 0.12)
+                    .with_metalness(1.0),
+            },
+            Object {
+                mesh: ground_plane(4.0),
+                transform: Mat4::IDENTITY,
+                material: Material::matte(Vec3::splat(0.8), 0.5),
+            },
+            Object {
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::new(0.9, 1.0, 0.6)),
+                material: Material::matte(Vec3::new(0.75, 0.4, 0.35), 0.5),
+            },
+            Object {
+                mesh: ground_plane(1.0),
+                transform: Mat4::from_translation(Vec3::new(0.0, 2.5, 2.5))
+                    * Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+                material: Material::emitter(Vec3::splat(12.0)),
+            },
+        ];
+        let camera = Camera {
+            position: Vec3::new(0.0, 2.0, 4.5),
+            look_at: Vec3::new(0.0, 1.8, -1.5),
+            up: Vec3::Y,
+            vfov_degrees: 45.0,
+            lens: None,
+        };
+        Scene::new(gpu, &objects, camera, &Environment::constant(Vec3::ZERO))
+            .expect("indirect glossy scene")
+    }
+
+    /// The 6b-ii pinned-live CV gate (M6 §4d): the **full** pipeline —
+    /// temporal held live to convergence (decay off), spatial reuse, the
+    /// control-variate resolve — on the indirect-glossy scene, against its
+    /// own zero-CV degenerate and the path tracer. With the ramp disabled the
+    /// lane blend compounds history across all 256 frames, so a broken
+    /// recurrence — blend weights inconsistent with the capped confidence,
+    /// F-semantics leaking into the G-lane across the frame boundary, a
+    /// reset path that kept stale history — shifts the converged CV mean
+    /// away from the survivor mean the same samples produce. The shipping
+    /// ramp would anneal the blend off by frame 16 and dilute exactly the
+    /// bias this pins (the same blindness D-094 named for resampling).
+    #[test]
+    fn temporal_cv_recurrence_matches_survivor_shading_pinned_live() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let scene = indirect_glossy_scene(&gpu);
+        let (cv_on, path) = temporal_gate_means(&gpu, &scene, 256, 0, Some(true));
+        let (cv_off, _) = temporal_gate_means(&gpu, &scene, 256, 0, Some(false));
+        let on_vs_off = (cv_on - cv_off).abs() / cv_off;
+        let on_vs_path = (cv_on - path).abs() / path;
+        eprintln!(
+            "pinned-live CV means: cv-on {cv_on:.5}, cv-off {cv_off:.5}, path {path:.5} \
+             (on-vs-off {on_vs_off:.4}, on-vs-path {on_vs_path:.4} relative)"
+        );
+        assert!(
+            on_vs_off < 0.03,
+            "CV shading disagrees with survivor shading under live temporal \
+             history: {cv_on} vs {cv_off} ({on_vs_off:.4} relative)"
+        );
+        assert!(
+            on_vs_path < 0.03,
+            "the temporal CV recurrence disagrees with the path tracer: \
+             {cv_on} vs {path} ({on_vs_path:.4} relative)"
         );
     }
 
@@ -3887,7 +3977,7 @@ mod tests {
         };
         let (scene, _) = temporal_gate_scene(&gpu);
         let (temporal, path) =
-            temporal_gate_means(&gpu, &scene, 256, Wavefront::RESTIR_TEMPORAL_DECAY_FRAMES);
+            temporal_gate_means(&gpu, &scene, 256, Wavefront::RESTIR_TEMPORAL_DECAY_FRAMES, None);
         let deviation = (temporal - path).abs() / path;
         assert!(
             deviation < 0.03,
@@ -4046,6 +4136,15 @@ mod tests {
                 "pixel {i}: decay-0 temporal changed W: {} vs {}",
                 u.unbiased_weight,
                 c.unbiased_weight
+            );
+            // The CV lane obeys the same endpoint (6b-ii): a zeroed decay
+            // folds history out before the blend, so the candidate mean
+            // passes through bit-for-bit and converged-still frames stay
+            // independent on the shading estimate too (D-145).
+            assert_eq!(
+                u.cv_accumulator, c.cv_accumulator,
+                "pixel {i}: decay-0 temporal changed the CV lane — history \
+                 leaked into the blend past the ramp"
             );
         }
     }

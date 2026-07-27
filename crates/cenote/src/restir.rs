@@ -114,9 +114,13 @@ pub(crate) struct StoredPathReservoir {
     pub pad0: u32,
     /// `ReSTCV` accumulated colour — the per-reservoir control variate (D-127),
     /// live from 6b-i (D-144): candidate mean out of the candidate stage,
-    /// passed through temporal, the CV combination out of spatial.
+    /// blended with prev's persisted lane on the decayed history confidence
+    /// out of temporal (6b-ii, D-145), the CV combination out of spatial.
     pub cv_accumulator: [f32; 3],
-    /// `ReSTCV` running weight; reserved-zero until 6b-ii claims or retires it.
+    /// `ReSTCV` running weight; reserved-zero — 6b-ii closed the lane's
+    /// design without claiming it (the blend weights are the confidences the
+    /// reservoir already stores), so it pads the 96 B layout until something
+    /// next needs a carrier.
     pub cv_normalization: f32,
 }
 

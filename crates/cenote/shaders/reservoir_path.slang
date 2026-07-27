@@ -83,14 +83,21 @@
 //                     every store site names its lane: the candidate stage
 //                     writes the mean of its whole stream's contributions
 //                     Σ m·F/q (the unshadowed-NEE + concrete-indirect estimate,
-//                     the lane's transported semantics), temporal passes it
-//                     through untouched (the 6b-ii recurrence will blend here),
-//                     and spatial replaces it with the per-neighbour
+//                     the lane's transported semantics), temporal blends it
+//                     with prev's persisted lane on the same capped, decayed
+//                     confidence its merge folds (the 6b-ii recurrence, D-145
+//                     — still a G-estimate, deterministic weights), and
+//                     spatial replaces it with the per-neighbour
 //                     control-variate combination — visibility repaid at the
 //                     samples whose rays that pass traces — which resolve
-//                     shades. Zero-CV shading (the host toggle off) is plain
-//                     ReSTIR PT — the degenerate, D-130. `cvNormalization`
-//                     stays reserved-zero until 6b-ii claims or retires it.
+//                     shades. Only temporal's output crosses a frame;
+//                     spatial's combination dies in scratch. Zero-CV shading
+//                     (the host toggle off) is plain ReSTIR PT — the
+//                     degenerate, D-130. `cvNormalization` stayed unclaimed
+//                     through 6b-ii — the recurrence carries no separate
+//                     normalization (the blend weights are the confidences
+//                     already stored) — so it is reserved-zero, kept for the
+//                     96 B layout and whatever claims it next.
 //
 // -- The pass-local weightSum invariant carries over --------------------
 // `StoredPathReservoir` stores {sample, W, M} plus the reserved CV slot, and

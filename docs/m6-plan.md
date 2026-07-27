@@ -680,6 +680,27 @@ The ladder — each rung green and committable:
   (decay 0) on the indirect-glossy scene; the pinned-temporal kind-covering gates
   re-run green; the decay-handoff and frame-time reports re-run and recorded here;
   goldens regenerated + eyeballed.*
+  **Done (2026-07-26, D-145).** One blend at the temporal store site on the same
+  capped, decayed confidence the merge folds; α_temporal ≡ 1; every reset path falls
+  back to the candidate mean. D-144's seam resolved in the cheap direction: prev's
+  persisted lane is a G-estimate, so G blends against G with no unshadowed-fraction
+  carrier — `cvNormalization` closes the step unclaimed — and deterministic blend
+  weights keep E[lane] = G at any history depth. The epoch gate binds the lane even
+  when an NEE survivor rides on; the decay-noop endpoint now pins the lane
+  bit-for-bit at decay 0. Gates green: the new pinned-live gate (full pipeline,
+  decay 0, 256 frames, indirect-glossy) agrees CV-on vs CV-off to 0.57% and vs the
+  path tracer to 0.28%; kind-covering pinned gates, survivor pin (bit-exact), and
+  the full suite pass; goldens regenerated + eyeballed (demo mean FLIP 0.045 carried
+  by 34 glint fireflies — bulk channel means agree to 0.01–0.10%); brute goldens
+  byte-untouched. Recorded costs: held-camera warm-window accumulation rises
+  (unbiasedness pair 8 spp: many-lights 0.03378 → 0.04084, indirect
+  0.09164 → 0.10470; annealed to +3–6% by 32 spp; handoff +7.7%/+5.0% at 16/32
+  frames vs step 5's +1.4%) — the decision-6 trade, bounded by the ramp, zero past
+  the window; the many-lights 8-spp gate margin narrows to 1.31× against its 1.3×
+  floor (deterministic, but the suite's thinnest — first to re-examine on any
+  driver move). Frame time unchanged within noise (demo 7.28 vs 7.36 ms recorded
+  at step 5; the blend is a handful of ALU). Step 6 closes; step 7's reciprocal
+  pairing inherits the carry-CV-through-paired-shifts seam.
 
 Leaf defaults settled with the interview (cheap to change, not re-interviewed):
 `cvNormalization` stays reserved-zero — the reference persists only the float3

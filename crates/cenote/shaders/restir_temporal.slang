@@ -83,6 +83,18 @@
 // gate forces temporal live to convergence, where the ordinary converge-to-
 // reference test would otherwise go blind to a temporal bias (D-094).
 //
+// -- The CV lane (step 6b-ii) ------------------------------------------------
+// The control-variate lane crosses the frame boundary here, in one M-weighted
+// blend: lane_out = (c_c·candMean + c_prev·lane_prev)/(c_c + c_prev), with
+// c_prev the same capped, *decayed* confidence the pair above folds — so
+// history enriches the colour estimate exactly as far as it enriches the
+// resampling, and the same ramp anneals both away on a held camera. Prev's
+// lane is this store's own last output — a running blend of candidate means,
+// a G-estimate (D-144) with deterministic weights, so the recurrence is
+// unbiased by induction and spatial's residual bracket keeps its zero mean.
+// Reprojection failure, the disocclusion gate, zero decayed confidence, and
+// the epoch gate all reset the lane to this frame's candidate mean (D-145).
+//
 // Runs at bounce 0 only, dispatched from the hit queue it reads but never
 // consumes. Writes `curr` and this frame's G-buffer at its own pixel; reads
 // `cand` at its own pixel and `prev` (+ its G-buffer) at the reprojected pixel.
@@ -171,13 +183,20 @@ void restir_temporal(uint3 tid: SV_DispatchThreadID) {
     // live), and the reprojected surface still matches this one (the gate).
     bool prevValid = false;
     Reservoir<PathSample> prev = reservoirInit<PathSample>();
+    // Prev's persisted CV lane (6b-ii): the running blend of candidate means
+    // this same store site committed last frame, read beside the reservoir it
+    // rides in. Zero until reprojection lands and only blended under the
+    // gates below.
+    float3 prevLane = float3(0.0);
     // Defaulted to this surface so it is definitely assigned; only ever read once
     // reprojection has overwritten it with the real previous surface (guarded by
     // `prevValid`).
     Surface prevSurface = surface;
     uint prevPixel;
     if (reprojectPixel(reproject, surface.position, prevPixel)) {
-        prev = loadPathReservoir(params.reservoirsPrev[prevPixel]);
+        StoredPathReservoir prevStored = params.reservoirsPrev[prevPixel];
+        prev = loadPathReservoir(prevStored);
+        prevLane = prevStored.cvAccumulator;
         // The epoch gate (see the header): across a scene edit an indirect
         // prev sample's `rcVertex.instance` is a raw TLAS custom index the
         // rebuild may have renumbered — nothing may dereference it, so the
@@ -324,9 +343,36 @@ void restir_temporal(uint3 tid: SV_DispatchThreadID) {
     // winner's shift visibility was 1), so its stored F/W pair reads
     // downstream exactly as generation's would (D-138/D-139).
     reservoirFinalize(merged, survivorTarget);
-    // The CV lane passes through untouched (6b-i): the candidate mean rides to
-    // the spatial combine exactly as the candidate stage formed it. The 6b-ii
-    // temporal recurrence — the decayed-M blend against prev's lane — lands
-    // here, beside the merge it mirrors, when that rung opens.
-    params.reservoirsOut[pixel] = storePathReservoir(merged, candStored.cvAccumulator);
+
+    // The CV lane's temporal recurrence (6b-ii, D-145) — the blend beside the
+    // merge it mirrors. Prev's lane is the running blend of candidate means
+    // this same store committed last frame (spatial's combined CV lives in the
+    // dead-end scratch and never crosses a frame), so both blend inputs
+    // estimate G — the pre-visibility integral the candidate stream prices
+    // (D-144) — and the blend stays a G-estimate by induction: the weights
+    // are deterministic (confidence compounds by addition whatever the
+    // acceptance coins do; cap and decay read only frame indices), so the
+    // downstream spatial bracket keeps its zero mean. Weighted exactly as the
+    // resampling weighs the same two sources — q_c = c_c, q_prev = the
+    // *capped, decayed* history confidence — one signal, one ramp: on a held
+    // camera the blend anneals off with the pair itself, so the converged
+    // still keeps its independent frames (D-085), and temporal α ≡ 1 (the
+    // disocclusion gate already vouches this is the same surface; a
+    // same-surface albedo ratio is 1). Reset — reprojection failure, the
+    // gate, decayed-to-zero history (all folded in `prevValid`), or the epoch
+    // gate — falls back to the candidate mean and spatial re-enriches the
+    // same frame. The epoch gate binds the *lane* even when an NEE survivor
+    // flows on through resampling: the lane aggregates the whole pixel's
+    // estimate, indirect terms priced against the old build included.
+    var cvLane = candStored.cvAccumulator;
+    if (prevValid && params.prevSameScene != 0) {
+        let blended = (cCanon * cvLane + prev.confidence * prevLane)
+                    / (cCanon + prev.confidence);
+        // The lane policy everywhere: a non-finite estimate is dropped, never
+        // stored (here: history abandoned for the candidate mean).
+        if (all(isfinite(blended))) {
+            cvLane = blended;
+        }
+    }
+    params.reservoirsOut[pixel] = storePathReservoir(merged, cvLane);
 }

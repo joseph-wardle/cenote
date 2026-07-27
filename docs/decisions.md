@@ -3563,3 +3563,41 @@ but toggle-off's arithmetic did not. Named seam for 6b-ii: prev's persisted lane
 candidate mean (spatial's scratch never survives a frame), so the temporal recurrence must
 either blend against that or persist the combined CV — and the unshadowed fraction of whatever
 it blends must ride with it (cvNormalization is the natural carrier if one is needed).
+
+### D-145: 6b-ii closes the ladder — the CV lane crosses the frame boundary on the decayed confidence, and G-semantics makes the carrier free
+Status: accepted (2026-07-26). Rung 6b-ii (m6-plan §4d decision 6) lands the temporal
+recurrence as interviewed: one M-weighted blend at restir_temporal's store site,
+lane_out = (c_c·candMean + c_prev·lane_prev)/(c_c + c_prev), with c_prev the same
+min(M_prev, 20·c_c)·decay confidence the pair's MIS and merge already fold — one signal, one
+ramp, no new constant — temporal α ≡ 1 (the disocclusion gate already vouches the reprojected
+surface is this surface), and every reset path (reprojection failure, the gate, decayed-to-zero
+history, the epoch gate) falling back to this frame's candidate mean, which spatial re-enriches
+the same frame. The implementation settled D-144's named seam in the cheap direction: **prev's
+persisted lane is the candidate mean — a G-estimate — so blending G against G needs no
+unshadowed-fraction carrier at all**; the recurrence stays a G-estimate by induction (the blend
+weights are deterministic — confidence compounds by addition whatever the acceptance coins do,
+and the cap and decay read only frame indices — so E[lane] = G survives any depth of history),
+the spatial residual bracket keeps its zero mean unconditionally, and `cvNormalization` closes
+the step **unclaimed and reserved-zero**. Two details beyond the interview: the epoch gate binds
+the *lane* even when an NEE survivor rides on through resampling — the lane aggregates the whole
+pixel's estimate, indirect terms priced against the old build included — and the decay-noop
+endpoint now pins the lane too (at decay 0 the candidate mean passes through bit-for-bit, so the
+converged still keeps independent frames on the shading estimate as well as the resampling,
+D-085). The proof is the new pinned-live gate: the full pipeline — temporal live at decay 0,
+spatial, CV resolve — held 256 frames on the indirect-glossy scene agrees with its zero-CV
+degenerate to 0.57% and the path tracer to 0.28%, under maximal history compounding. The honest
+numbers price the warm window: on a *held* camera the blend correlates the shading estimate the
+way step 5 correlated resampling, so accumulated error inside the 16-frame window rises
+(unbiasedness pair, temporal-on defaults: many-lights 8 spp 0.03378 → 0.04084, indirect
+0.09164 → 0.10470; by 32 spp the gap anneals to +3–6%; the decay-handoff curve reads
++7.7%/+5.0% over temporal-off at 16/32 frames, where step 5 alone read +1.4%) — the cost
+decision 6 accepted in exchange for warm-start per-frame colour under motion, bounded by the
+same ramp that bounds resampling history and *zero* past the window. Named consequence: the
+many-lights 8-spp convergence-gate margin narrows to 1.31× against its 1.3× floor —
+deterministic (the suite replays exact sample sequences), but the thinnest margin in the suite,
+and the first candidate to re-examine if a driver update ever moves it. Frame time is unchanged
+within noise (demo 7.28 ms temporal-on vs 7.36 recorded at step 5); the demo golden moved
+mean FLIP 0.045 carried almost entirely by 34 glint-firefly pixels (excluding 66 of 65536
+pixels, channel means agree to 0.01–0.10%); the survivor pin re-ran bit-exact. With this rung
+ReSTCV is whole: candidate mean → temporal blend → spatial combination → resolve, every stage
+naming its lane, and step 7's reciprocal pairing inherits the one remaining named seam.
