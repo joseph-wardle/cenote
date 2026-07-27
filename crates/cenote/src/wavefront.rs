@@ -2919,8 +2919,10 @@ mod tests {
     }
 
     /// The measurement seam of the step-4+ checkpoints (§4b, §4c) — ms/frame
-    /// of the full `ReSTIR` wave on the perf-tracked scenes, temporal off
-    /// (candidates + spatial, the step-4 baseline) and temporal on. The on
+    /// of the full `ReSTIR` wave on the perf-tracked scenes, spatial off
+    /// (candidates alone — subtracting it from the next row prices the
+    /// spatial stage, step 7's denominator, §4e), temporal off (candidates +
+    /// spatial, the step-4 baseline), and temporal on. The on
     /// row pins temporal **live** (decay 0, held camera, identity
     /// reprojection): the steady-state cost of the stage while it works. The
     /// shipping ramp anneals a held camera back to the off row within
@@ -2936,8 +2938,7 @@ mod tests {
     /// ```
     ///
     /// `trace_then` blocks on its submission fence, so wall-clock around it
-    /// is the frame. Step 7's reciprocal-reuse speedup claim inherits this
-    /// same seam for its denominator.
+    /// is the frame.
     #[expect(
         clippy::too_many_lines,
         reason = "the two timed configurations and the temporal four-buffer \
@@ -2991,12 +2992,14 @@ mod tests {
         let radiance = radiance_buffer(&gpu, width, height);
         let (warmup, timed) = (8u32, 64u32);
         for (name, scene) in &scenes {
-            // Temporal off: candidates + spatial — the step-4 baseline's wave.
-            let off_ms = {
+            // No temporal: candidates alone, then candidates + spatial (the
+            // step-4 baseline's wave) — the subtraction prices the spatial
+            // stage itself, the denominator of step 7's sharing claim (§4e).
+            let wave_ms = |spatial: Option<&Buffer>| {
                 let inputs = RestirInputs {
                     reservoir: &curr,
                     temporal: None,
-                    scratch: Some(&scratch),
+                    scratch: spatial,
                     cv_shading: true,
                     debug: None,
                     debug_view: DebugView::Off,
@@ -3014,6 +3017,8 @@ mod tests {
                 }
                 started.elapsed().as_secs_f64() * 1e3 / f64::from(timed)
             };
+            let alone_ms = wave_ms(None);
+            let off_ms = wave_ms(Some(&scratch));
             // Temporal on, pinned live: candidates + temporal + spatial, the
             // renderer's four-buffer routing on a held camera. `prev` and the
             // G-buffers clear per scene — history from another scene would
@@ -3071,8 +3076,9 @@ mod tests {
                 started.elapsed().as_secs_f64() * 1e3 / f64::from(timed)
             };
             eprintln!(
-                "frame time on {name}: temporal-off {off_ms:.2} ms, \
-                 temporal-on {on_ms:.2} ms/frame at {width}x{height} ({timed} frames)"
+                "frame time on {name}: spatial-off {alone_ms:.2} ms, \
+                 temporal-off {off_ms:.2} ms, temporal-on {on_ms:.2} ms/frame \
+                 at {width}x{height} ({timed} frames)"
             );
         }
     }

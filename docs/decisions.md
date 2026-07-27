@@ -3601,3 +3601,24 @@ mean FLIP 0.045 carried almost entirely by 34 glint-firefly pixels (excluding 66
 pixels, channel means agree to 0.01–0.10%); the survivor pin re-ran bit-exact. With this rung
 ReSTCV is whole: candidate mean → temporal blend → spatial combination → resolve, every stage
 naming its lane, and step 7's reciprocal pairing inherits the one remaining named seam.
+
+### D-146: 7-0 weighs the backshift — two thirds of the spatial pass, and 7b is go
+Status: accepted (2026-07-26). Rung 7-0 (m6-plan.md §4e decisions 2–3) gave step 7's sharing
+claim its denominator before any machinery: the frame-time report grew a **spatial-off** row
+(candidates alone — the toggle already existed as `RestirInputs::scratch = None`), and the
+backshift share came from an uncommitted, timing-only stub (a const-false around the spatial
+kernel's backshift block, so the compiler deletes `targetInDomain`/`evalTarget` and their
+replay machinery — the §4b precedent: numbers land, measurement hacks don't). The denominator
+(temporal-off − spatial-off, 512², 64 timed frames): demo 6.51 − 2.92 = **3.59 ms**,
+glossy-primary 8.70 − 2.32 = **6.38 ms**, distant-glossy 3.06 − 1.44 = **1.62 ms** of spatial
+pass. The backshift (baseline − stubbed): **2.34 / 4.14 / 0.95 ms — 65% / 65% / 59%** of the
+pass. The interview's caution inverted: cenote's backshift spends no *visibility* rays, but the
+replay rays and closure re-evaluations it does spend are the majority of the pass — a
+replay-kind canonical replays its whole suffix at each of five neighbours, and the glossy
+scenes are replay-heavy, so the "cheap direction" is the expensive one. Decision 3's pre-agreed
+rule (skip 7b under ~20% on the worst scene) reads ≥ ~20% everywhere by three-fold: **7b is
+go**. The honest bound: the stub also lets dead-code elimination fold the downstream constant
+arithmetic (`pairwiseMis` with a zero cross term, the NEE canonical's fBack path), and 7b buys
+its deletion back with record traffic and a second dispatch — so 65% is the ceiling on 7b's
+realized win, not the promise; the rung's own before/after is the number that counts. Nothing
+renders differently: the committed change is report-only, and the stub is reverted.

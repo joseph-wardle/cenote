@@ -714,6 +714,84 @@ denominator (the reference's Rec.601 vs 709 choice is immaterial — any fixed p
 weighting works); step 7's reciprocal pairing must carry the CV terms through the
 paired shifts — a named seam for the step-7 interview, not this one.
 
+## 4e. Step-7 plan — reciprocal (paired) spatial reuse (interviewed 2026-07-26)
+
+Interviewed after step 6 closed (`db2ac5d`), grounded in a re-read of Enhanced §3 +
+§7.2 (paper + supplemental in hand). The mechanism: pairwise MIS makes A's reuse of B
+need both shifts — B's sample into A's domain and A's into B's — and if selection is
+*reciprocal* (B picks A ⟺ A picks B), those are exactly the two evaluations B needs
+too, so each is computed once and shared. Reciprocity comes from self-inverting
+pairing textures (tileable 2-channel offset images built by n_σ tiled 2×2 shuffles of
+a link-index image, Eq 3; deltas come out Gaussian), one per neighbour at
+near-coprime sizes, re-randomized per frame by flip/mirror/transpose/translate of the
+same textures. The paper ships it as a two-pass split (pre-pass shifts, second pass
+resamples): 1.63× on spatial *and* lower FLIP (Gaussian concentration → more
+compatible neighbours), "not fully halved" due to the split's overhead. **Mapped onto
+cenote the win is smaller than the paper's**: our forward `shiftIntoDomain` already
+computes the backshift value the partner needs as a byproduct (`luminance(sh.F)·J`
+from the same shift call; for NEE, `targetVisAware` runs `evalTarget` internally, rgb
+included), and what sharing deletes — today's per-neighbour `targetInDomain` /
+`evalTarget` backshift — spends **no visibility rays** in cenote (replay rays and
+closure re-evals only). So the cost half of the claim needs a measured denominator
+before the machinery is built; the quality half (Gaussian selection) stands alone.
+Eight decisions, resolved in dependency order; each rung ends green and committed.
+
+| # | Decision | Choice | Rationale |
+|---|---|---|---|
+| 1 | Rung structure | **Three rungs, one commit each**: 7-0 measurement (backshift share of spatial cost — no estimator change); 7a pairing textures as the neighbour selection (the one estimator-changing rung); 7b the two-pass split that shares the evaluations (pure restructure) | The two halves of Enhanced §3 are separable: selection changes the estimator (goldens move, FLIP win), sharing changes only where values are computed. Splitting them lets 7b land against a bit-identical checkpoint — the survivor-pin discipline applied to a perf rung — and a regression bisects between them |
+| 2 | 7-0 method | **Uncommitted stub, committed numbers.** The committed piece extends the frame-time report to time spatial on/off (the toggle exists) — the pass-level denominator, permanent. The backshift share comes from a local, uncommitted kernel edit (`targetInDomain` → 0, biased, timing-only) run on the three timing scenes; the numbers land here and in the D-entry, the hack never lands | §4b precedent (classic baseline captured at `cfd7fb8`): measurements are recorded, measurement-only code paths don't ship. A permanent push-constant flag that one report sets is dead weight in the hot kernel |
+| 3 | 7b go/no-go | **Pre-agreed rule**: if the measured backshift share (worst of the three timing scenes; glossy-primary expected highest) is under ~20% of the spatial pass, 7b converts to "record the numbers, skip the rung" with a D-entry, and 7a stands alone | cenote's backshift is its cheap direction (no vis rays), so the paper's 1.63× does not transfer; NEE-heavy scenes (many-lights) barely backshift at all. Deciding the rule now makes the call mechanical when the numbers land — the §5 seam ("step 7 first to go") sharpened to its separable half |
+| 4 | 7a shape | **Pairing selection replaces the disk draw outright; k stays 5; gates symmetrized.** Five host-built textures (paper's shuffle algorithm, fixed seed, at wavefront init; distinct even sizes avoiding near-periods within 512 px — proposed 254/230/210/190/178, final set checked by the near-period heuristic; 2×i8 deltas in one storage buffer), σ = √(8/(9π))·R = 16.0 matching the disk's mean sample distance (the paper's own R=30 default). Per frame: flip/mirror/transpose/translate per texture from a `sampleIndex` hash via push constants. Involution (`partner(partner(p)) == p`, no fixed points), σ, and transform-invariance pinned by Rust unit tests (the bluenoise.rs precedent: CPU mirror of the shader lookup). The depth gate becomes `\|dA−dB\| ≤ τ·min(dA,dB)` (the normal gate is already symmetric); the disk draw and its RNG offset dims are deleted | One selection path (the step's cleanliness goal); spatial-off remains the reachable degenerate, so no toggle is owed. k=5 keeps 7a a one-variable change — the A/B vs the pre-7a commit attributes any movement to the distribution alone. min-depth is the strictly conservative symmetrization: it accepts only pairs both of today's one-sided tests would accept (D-093 posture — stricter is the default). Correctness lives host-side where it is cheap to test |
+| 5 | Margin policy | **Stop and diagnose; re-baseline only with cause.** If 7a moves a suite threshold — the many-lights 8-spp gate sits at 1.31× vs its 1.3× floor — the failure is a finding: distinguish the expected distributional shift (matched mean, different shape) from a defect (involution, gate, wrap). Thresholds move only with the cause understood and recorded | The margin flag exists to detect exactly this; pre-widening the floor would blind the suite's most sensitive instrument during an estimator change. The 6b-ii honesty precedent |
+| 6 | 7b shape | **Gather pre-pass + compact records; ray-free main pass.** Pre-pass: each hit pixel loops its 5 partners exactly as today's gather — gates, forward shift with the vis ray at its own surface — plus its own p̂_c(Y_c) evaluation, writing per-(pixel,slot) records of only the shift-dependent values (~32 B: F/rgb, partial Jacobian, vis target, unshadowed, cross-MIS value; ≈42 MB at 512²·k=5) and a per-pixel self-record (pcYc, ucYc, rgb). Main pass: reads its own records for forward terms and its partner's record for the backshift — the sharing; today's backshift calls are deleted — reconstitutes winning samples by patching a fresh `reservoirsIn` read (a shifted sample differs from the stored one only in F and cachedJacobian), and streams the merge + CV exactly as today | Same functions, same inputs, same evaluation order ⇒ bit-identity is achievable. Vis rays stay at the receiving pixel (today's semantics). Full-reservoir records would triple the buffer duplicating what `reservoirsIn` holds; thread-per-pair is a dead end at k>1 (5 pairs must combine in one merge per pixel) |
+| 7 | CV through the pair (the named 6b seam) | **The records carry it all; the combination stays in the main pass; the lane is untouched.** chroma re-derives from a record's F/unshadowed; an NEE partner's fOwn is the rgb of its own self-evaluation (in its self-record); an NEE canonical's fBack is the rgb byproduct of the partner's forward evaluation of this pixel's sample (the partner's record's F field). estF/estG/α/centre compute in the main pass — b_i needs the partner's cross value, which exists only after the pre-pass dispatch — in today's order. 7a doesn't touch CV at all | The D-144 G-semantics partition survives verbatim: every crossing quantity is already a G-estimate, so pairing adds no new carrier — the seam closes the same cheap way 6b-ii's did. Bit-identity then makes every existing CV gate (pinned-live, decay-noop, survivor pins) re-prove the seam for free; a dedicated new gate would be redundant machinery |
+| 8 | 7b pin | **Bit-identical first; bounded fallback.** The checkpoint demands bit-identity with 7a (regular + survivor goldens byte-compared, full suite untouched). If it fails: diagnose — an ordering change in cenote's code is a bug, not an acceptance. Only a residue provably down to cross-kernel codegen (identical source, different instructions) relaxes the pin to ulp-scale `oiiotool` diffs + unbiasedness pair + convergence + FLIP unchanged, goldens regenerated once, cause named in the D-entry | Bitwise determinism across runs (cenote's invariant) is weaker than across kernels, so the compiler can in principle deny the ideal; the fallback evidence is genuinely sufficient for a restructure whose math is reviewed as unchanged — but it is never a silent threshold |
+
+The ladder — each rung green and committable:
+
+- **7-0 — the denominator, before any machinery.** Extend the frame-time report with
+  spatial on/off on the three timing scenes; measure the backshift share with the
+  uncommitted stub; record both here and in the decision entry. Apply decision 3's
+  rule to 7b. *Checkpoint: nothing renders differently (bit-exact suite); the
+  halving claim has a real denominator.*
+  **Done (2026-07-26, D-146).** The report grew its spatial-off row; the stub
+  (const-false around the backshift block, letting the compiler delete it) ran the
+  three scenes. The denominator (temporal-off − spatial-off): demo 6.51 − 2.92 =
+  3.59 ms, glossy-primary 8.70 − 2.32 = 6.38 ms, distant-glossy 3.06 − 1.44 =
+  1.62 ms of spatial pass. The backshift (baseline − stubbed frame): demo 2.34 ms,
+  glossy-primary 4.14 ms, distant-glossy 0.95 ms — shares **65% / 65% / 59%** of
+  the spatial pass. The interview's caution inverted: "no visibility rays" did not
+  mean cheap — the replay rays and closure re-evals the backshift does spend are
+  the *majority* of the pass (glossy scenes replay whole suffixes at five
+  neighbours). Decision 3's rule reads ≥ ~20% everywhere by three-fold:
+  **7b is GO**, with a frame-level upper bound of 6.51 → 4.17 ms (demo) and
+  8.70 → 4.56 ms (glossy-primary) — upper bound because the stub's dead-code
+  elimination also folds the downstream constant arithmetic, and 7b buys its
+  deletion back with record traffic and a second dispatch.
+- **7a — Gaussian reciprocal selection.** The pairing module (host build + unit
+  tests + shader lookup), the symmetric depth gate, the disk draw deleted. ReSTIR +
+  survivor goldens regenerate and are eyeballed; brute goldens untouched. Measured
+  vs the pre-7a commit: FLIP (expect equal-or-better — the paper's quality claim),
+  convergence suite (decision 5 policy on any threshold movement), unbiasedness
+  pair, determinism test, frame time. *Checkpoint: selection is reciprocal and
+  Gaussian; quality equal-or-better; no structured artifacts under the per-frame
+  transforms (eyeball at 1 spp); all gates green.*
+- **7b — the split, if decision 3 says go.** The pre-pass/main-pass split with
+  compact records; backshift calls deleted; CV terms crossing per decision 7.
+  *Checkpoint: bit-identical to 7a (decision 8's fallback if codegen denies it) at
+  measured lower spatial cost; the frame-time report before/after is the rung's
+  number.*
+
+Leaf defaults settled with the interview (cheap to change, not re-interviewed):
+partners that are off-screen, out of the wavefront range, or misses drop
+symmetrically (both sides see the same fact; V counts down — the range-seam
+unbiasedness argument); texture sizes stay ≤254 so wrapped deltas fit i8; the
+per-frame transform must preserve involution and is asserted under arbitrary
+transforms in the unit tests; the accept/canonical RNG dims are unchanged (only the
+offset dims die); the temporal pass, the recurrence, and the pinned-live harness are
+untouched at both rungs; the §5 fallback seam for step 7 now means "skip 7b" — 7a's
+quality win is not on the seam.
+
 ## 5. Fallback seams (pre-agreed, in slip order)
 
 - **Reciprocal spatial reuse (step 7)** → plain O(M) defensive pairwise MIS (M3's, on
