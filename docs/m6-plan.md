@@ -878,6 +878,15 @@ The ladder — each rung green and committable:
   `--no-cv` CLI flag beside `--no-spatial`/`--no-temporal`. *Checkpoint: full suite
   green with the new assert; no golden movement (no estimator change anywhere in
   step 8); the three CLI toggles compose.*
+  **Done (2026-07-29, D-150).** `assert_reuse_gate` owns the shared protocol
+  (reference + four measurements + every assert), parameterized by scene, label,
+  and the absolute bound; the indirect-glossy gate gains that bound — 0.15, ~4×
+  over the measured 0.038, the many-lights construction (0.05 over 0.011) — closing
+  the slow-bias hole decision 5 named. `--no-cv` lands and the three toggles
+  compose: it moves the shipping image (relMSE 0.056 on brass-room at 8 spp), is
+  bit-identical under `--no-spatial` (spatial-off shades the survivor regardless),
+  and all three together run clean. §7's unbiasedness bullet re-worded to relMSE.
+  No estimator change; goldens untouched.
 - **8b — the figures.** Extend the hook with the flagship montage (decision 3, as
   re-scoped by the 8-0 calibration — equal-sample, see below) and the layered
   curves (decision 4) under their own content-keyed cache; the new README section
@@ -965,8 +974,9 @@ sourcing guides from the canonical path, not discovered late.
 ## 7. Definition of done
 
 - A GI-heavy scene rendered with ReSTIR PT and with reuse disabled converge to the same
-  image (FLIP under threshold) — the unbiasedness gate, on indirect paths, in CI on the
-  GPU machine.
+  image (relMSE under a measured absolute bound — §4f decision 5 amended this bullet from
+  "FLIP", which stays the perceptual golden metric) — the unbiasedness gate, on indirect
+  paths, in CI on the GPU machine.
 - The Jacobian-1 same-pixel invariant and the re-shade-equality check hold as always-on
   tripwires (the two silent-bias classes the shift can introduce), and CV-on vs CV-off
   converge to the same image (ReSTCV unbiasedness).

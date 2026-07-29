@@ -7,7 +7,11 @@
 //! a matched sample budget `ReSTIR`'s resampling must get there with less
 //! error. That gap is the whole reason the method exists: a single
 //! next-event draw among 256 lights is mostly wasted, while `ReSTIR`
-//! resamples the good candidates and borrows its neighbours'.
+//! resamples the good candidates and borrows its neighbours'. The
+//! indirect-glossy GI gate below makes the same claims on the other regime
+//! the method exists for — hard indirect light — through the same protocol,
+//! so one helper ([`assert_reuse_gate`]) owns it and the two gates cannot
+//! drift on what "the gate" means (M6 §4f decision 7).
 //!
 //! Ground truth is `ReSTIR` at a high budget, not brute force. On this scene
 //! `ReSTIR`'s variance is so much lower that brute force would need thousands
@@ -52,76 +56,91 @@ const LOW_SPP: u32 = 8;
 /// should roughly quarter its mean-squared error getting here.
 const HIGH_SPP: u32 = 32;
 
+/// The shared gate protocol (M6 §4f decision 7): a deep `ReSTIR` reference,
+/// both estimators measured at the two matched budgets, and every claim a
+/// reuse gate makes, asserted in one place so the two scenes below cannot
+/// drift on what the gate means. `agreement_bound` is the absolute
+/// unbiasedness threshold, measured per scene (M6 §4f decision 5) — the
+/// noise floors differ, so no one constant is a margin on both.
+fn assert_reuse_gate(gpu: &Context, scene: &Scene, label: &str, agreement_bound: f32) {
+    // Ground truth: ReSTIR far past the test budgets, its noise floor well
+    // below the errors below.
+    let mut restir = Renderer::new(gpu).expect("renderer");
+    restir.set_render_mode(RenderMode::Restir);
+    let reference = accumulate(gpu, &restir, scene, SIZE, REFERENCE_SPP);
+
+    // Brute force measured cleanly against that reference — a different
+    // estimator, so no shared samples tilt its numbers.
+    let brute = Renderer::new(gpu).expect("renderer");
+    let brute_low = rel_mse(&accumulate(gpu, &brute, scene, SIZE, LOW_SPP), &reference);
+    let brute_high = rel_mse(&accumulate(gpu, &brute, scene, SIZE, HIGH_SPP), &reference);
+
+    let restir_low = rel_mse(&accumulate(gpu, &restir, scene, SIZE, LOW_SPP), &reference);
+    let restir_high = rel_mse(&accumulate(gpu, &restir, scene, SIZE, HIGH_SPP), &reference);
+
+    eprintln!("{label} relMSE brute:  {LOW_SPP} spp {brute_low:.5}, {HIGH_SPP} spp {brute_high:.5}");
+    eprintln!("{label} relMSE ReSTIR: {LOW_SPP} spp {restir_low:.5}, {HIGH_SPP} spp {restir_high:.5}");
+
+    // Both estimators converge: 4× the samples, distinctly less error.
+    assert!(
+        brute_high < brute_low,
+        "{label}: brute force didn't converge: \
+         {LOW_SPP} spp {brute_low:.5} → {HIGH_SPP} spp {brute_high:.5}"
+    );
+    assert!(
+        restir_high < restir_low,
+        "{label}: ReSTIR didn't converge: \
+         {LOW_SPP} spp {restir_low:.5} → {HIGH_SPP} spp {restir_high:.5}"
+    );
+
+    // Brute force converges *toward the ReSTIR reference* — the two agree,
+    // so its error against that image is already small at the high budget.
+    // This is the unbiasedness thesis read off the path tracer's clean
+    // numbers rather than off the reference privileging its own answer — and
+    // it is the assert a *slow* bias needs: a shift whose bias shrank error
+    // more slowly without stopping it would still pass the trend asserts
+    // above, but not an absolute bound set from the honest numbers.
+    assert!(
+        brute_high < agreement_bound,
+        "{label}: brute force should be closing on the ReSTIR image \
+         by {HIGH_SPP} spp: {brute_high:.5} (bound {agreement_bound})"
+    );
+
+    // The headline: at a matched budget ReSTIR carries clearly less error,
+    // by a real margin — not the sliver a near-tie could fake. A 1.3× floor
+    // asserts the real win without pinning an exact factor that estimator
+    // evolution (the D-094/step-5b warm-start correlation) or a driver's
+    // floating-point reordering could nudge. Read off brute force's clean
+    // numbers, so the win isn't an artifact of the reference sharing
+    // samples with ReSTIR.
+    assert!(
+        restir_low * 1.3 < brute_low,
+        "{label}: ReSTIR should carry clearly less error at {LOW_SPP} spp: \
+         ReSTIR {restir_low:.5} vs brute {brute_low:.5}"
+    );
+    assert!(
+        restir_high * 1.3 < brute_high,
+        "{label}: ReSTIR should carry clearly less error at {HIGH_SPP} spp: \
+         ReSTIR {restir_high:.5} vs brute {brute_high:.5}"
+    );
+}
+
 /// Both estimators drive the many-light scene's error toward zero, and at a
 /// matched budget `ReSTIR` gets there with less of it — the variance
 /// reduction the method exists for, measured rather than asserted by faith.
+/// Since M6 step 2 (D-134) the reservoir owns the *whole* path integral at
+/// the primary hit — direct light plus the reconnection-reused indirect — so
+/// the win compounds the resampling of both; step 5b's warm-start narrowed
+/// the measured 8-spp margin from ~1.6× to ~1.5× (32 spp: ~1.7×), which is
+/// why the gate asserts the shared 1.3× floor rather than a pinned factor.
+/// The agreement bound is the 32-spp measurement (~0.011) with a ~5× margin.
 #[test]
 fn restir_converges_faster_than_brute_force() {
     let Some(gpu) = test_context() else {
         return;
     };
     let scene = Scene::many_lights(&gpu).expect("many-lights scene");
-
-    // Ground truth: ReSTIR far past the test budgets, its noise floor well
-    // below the errors below.
-    let mut restir = Renderer::new(&gpu).expect("renderer");
-    restir.set_render_mode(RenderMode::Restir);
-    let reference = accumulate(&gpu, &restir, &scene, SIZE, REFERENCE_SPP);
-
-    // Brute force measured cleanly against that reference — a different
-    // estimator, so no shared samples tilt its numbers.
-    let brute = Renderer::new(&gpu).expect("renderer");
-    let brute_low = rel_mse(&accumulate(&gpu, &brute, &scene, SIZE, LOW_SPP), &reference);
-    let brute_high = rel_mse(&accumulate(&gpu, &brute, &scene, SIZE, HIGH_SPP), &reference);
-
-    let restir_low = rel_mse(&accumulate(&gpu, &restir, &scene, SIZE, LOW_SPP), &reference);
-    let restir_high = rel_mse(&accumulate(&gpu, &restir, &scene, SIZE, HIGH_SPP), &reference);
-
-    eprintln!("relMSE brute:  {LOW_SPP} spp {brute_low:.5}, {HIGH_SPP} spp {brute_high:.5}");
-    eprintln!("relMSE ReSTIR: {LOW_SPP} spp {restir_low:.5}, {HIGH_SPP} spp {restir_high:.5}");
-
-    // Both estimators converge: 4× the samples, distinctly less error.
-    assert!(
-        brute_high < brute_low,
-        "brute force didn't converge: {LOW_SPP} spp {brute_low:.5} → {HIGH_SPP} spp {brute_high:.5}"
-    );
-    assert!(
-        restir_high < restir_low,
-        "ReSTIR didn't converge: {LOW_SPP} spp {restir_low:.5} → {HIGH_SPP} spp {restir_high:.5}"
-    );
-
-    // Brute force converges *toward the ReSTIR reference* — the two agree,
-    // so its error against that image is already small at the high budget.
-    // This is the unbiasedness thesis read off the path tracer's clean
-    // numbers rather than off the reference privileging its own answer.
-    assert!(
-        brute_high < 0.05,
-        "brute force should be closing on the ReSTIR image by {HIGH_SPP} spp: {brute_high:.5}"
-    );
-
-    // The headline: at a matched budget ReSTIR carries clearly less error,
-    // by a real margin — not the sliver a near-tie could fake. Since M6 step 2
-    // (D-134) the reservoir owns the *whole* path integral at the primary hit —
-    // direct light plus the reconnection-reused indirect — so the win compounds
-    // the resampling of both. Step 5b (indirect samples crossing the frame
-    // boundary) moved the measured factor: the first frames trade a little
-    // sample independence for the warm-start — the correlation the decay ramp
-    // exists to anneal away (D-094) — narrowing the 8-spp margin from ~1.6×
-    // to ~1.5× (32 spp: ~1.7×). A 1.3× floor — the same one the step-3c
-    // indirect-GI gate below uses — asserts the real win without pinning a
-    // factor that now sits on the old assert's edge. Read off brute force's
-    // clean numbers, so the win isn't an artifact of the reference sharing
-    // samples with ReSTIR.
-    assert!(
-        restir_low * 1.3 < brute_low,
-        "ReSTIR should carry clearly less error at {LOW_SPP} spp: \
-         ReSTIR {restir_low:.5} vs brute {brute_low:.5}"
-    );
-    assert!(
-        restir_high * 1.3 < brute_high,
-        "ReSTIR should carry clearly less error at {HIGH_SPP} spp: \
-         ReSTIR {restir_high:.5} vs brute {brute_high:.5}"
-    );
+    assert_reuse_gate(&gpu, &scene, "many-lights", 0.05);
 }
 
 /// The indirect-glossy GI scene: the step-3b glossy-primary set (wavefront.rs's
@@ -183,55 +202,18 @@ fn indirect_glossy_scene(gpu: &Context) -> Scene {
 /// bar: there PT's summed per-vertex estimator is already low-variance and
 /// the one-survivor resampling costs more than 5-neighbour reuse recovers —
 /// the many-light and hard-GI regimes are where the method pays, and this
-/// gate pins the hard-GI one.
+/// gate pins the hard-GI one. The measured reuse margin sits near 2×; the
+/// agreement bound (added at M6 step 8a, closing the slow-bias hole this
+/// gate alone had) is the 32-spp measurement (~0.038) with a ~4× margin —
+/// wider in absolute terms than many-lights' because per pixel the good
+/// path is rare, so brute force is simply noisier here at every budget.
 #[test]
 fn restir_pt_beats_brute_force_on_glossy_indirect_gi() {
     let Some(gpu) = test_context() else {
         return;
     };
     let scene = indirect_glossy_scene(&gpu);
-
-    // Ground truth: ReSTIR far past the test budgets, exactly as the
-    // many-light test above (the unbiasedness gates already pin that the two
-    // estimators agree in the mean, so the reference privileges neither's
-    // answer — only its noise floor).
-    let mut restir = Renderer::new(&gpu).expect("renderer");
-    restir.set_render_mode(RenderMode::Restir);
-    let reference = accumulate(&gpu, &restir, &scene, SIZE, REFERENCE_SPP);
-
-    let brute = Renderer::new(&gpu).expect("renderer");
-    let brute_low = rel_mse(&accumulate(&gpu, &brute, &scene, SIZE, LOW_SPP), &reference);
-    let brute_high = rel_mse(&accumulate(&gpu, &brute, &scene, SIZE, HIGH_SPP), &reference);
-    let restir_low = rel_mse(&accumulate(&gpu, &restir, &scene, SIZE, LOW_SPP), &reference);
-    let restir_high = rel_mse(&accumulate(&gpu, &restir, &scene, SIZE, HIGH_SPP), &reference);
-
-    eprintln!("indirect relMSE brute:  {LOW_SPP} spp {brute_low:.5}, {HIGH_SPP} spp {brute_high:.5}");
-    eprintln!("indirect relMSE ReSTIR: {LOW_SPP} spp {restir_low:.5}, {HIGH_SPP} spp {restir_high:.5}");
-
-    // Both converge — the sanity floor under the headline claim.
-    assert!(
-        restir_high < restir_low,
-        "ReSTIR PT didn't converge: {LOW_SPP} spp {restir_low:.5} → {HIGH_SPP} spp {restir_high:.5}"
-    );
-    assert!(
-        brute_high < brute_low,
-        "brute force didn't converge: {LOW_SPP} spp {brute_low:.5} → {HIGH_SPP} spp {brute_high:.5}"
-    );
-
-    // The gate: reuse must actually move error, not merely not lie. The
-    // measured margin sits near 2×; a 1.3× floor asserts a real win without
-    // pinning the exact factor a driver's floating-point reordering could
-    // nudge.
-    assert!(
-        restir_low * 1.3 < brute_low,
-        "ReSTIR PT should beat plain PT at {LOW_SPP} spp on indirect glossy GI: \
-         ReSTIR {restir_low:.5} vs brute {brute_low:.5}"
-    );
-    assert!(
-        restir_high * 1.3 < brute_high,
-        "ReSTIR PT should beat plain PT at {HIGH_SPP} spp on indirect glossy GI: \
-         ReSTIR {restir_high:.5} vs brute {brute_high:.5}"
-    );
+    assert_reuse_gate(&gpu, &scene, "indirect-glossy", 0.15);
 }
 
 /// The step-5 decay-handoff curve (M6 §4c): relMSE of the accumulated image

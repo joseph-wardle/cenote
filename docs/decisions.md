@@ -3729,3 +3729,28 @@ the relMSE numbers are deterministic and load-independent. Viewer verify-and-rep
 render, and live-reload verified from the session log; the orbit warm-start and the
 8192-frame park (M3 6c's backstop, untouched this step) need a quiet desktop and a hand on the
 mouse — deferred to the user, no defect found or suspected.
+
+### D-150: 8a arms the gate — one protocol for two scenes, and a bound the slow bias cannot slip
+Status: accepted (2026-07-29). The harness rung (§4f decisions 5 and 7) lands in three strokes,
+none of them an estimator change. **One helper owns the gate.** The many-lights and
+indirect-glossy convergence gates were the same protocol written twice — a deep ReSTIR
+reference, both estimators at 8 and 32 spp, the trend asserts, the 1.3× reuse floor —
+differing only in scene, log label, and which of them carried an absolute bound;
+`assert_reuse_gate` now holds the whole thing, parameterized by exactly those three, so the
+two gates cannot drift on what "the gate" means and convergence.rs shrinks while gaining an
+assert. **The slow-bias hole closes.** The indirect-glossy gate asserted convergence trends
+and the reuse win but never absolute agreement, so a shift bias that merely *slowed*
+convergence without stopping it would have passed. Brute force must now land under relMSE
+0.15 against the ReSTIR reference at 32 spp — the measured 0.038 with a ~4× margin, the same
+measured-margin construction as many-lights' standing 0.05 over its measured 0.011. The GI
+bound is wider in absolute terms because per pixel the good path is rare, so brute force is
+simply noisier there at every budget; both thresholds are margins on deterministic replay,
+not statistics on noisy numbers. §7's definition-of-done bullet re-words its "FLIP under
+threshold" to this relMSE bound per decision 5 — FLIP stays the perceptual golden metric.
+**`--no-cv` completes the toggle row.** The CLI grows the flag beside
+`--no-spatial`/`--no-temporal`, driving the `set_cv_shading` toggle 6b-i shipped, and the
+three compose as the checkpoint demands, verified on brass-room at 8 spp: `--no-cv` alone
+moves the shipping image (relMSE 0.056 against the default), under `--no-spatial` it is
+bit-identical (spatial-off shades the survivor regardless, by design), and all three together
+run clean. Full suite green serially (272 tests); goldens byte-identical — nothing in the
+rung touches a kernel.

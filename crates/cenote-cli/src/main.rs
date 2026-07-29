@@ -89,6 +89,13 @@ struct RenderArgs {
     #[arg(long)]
     no_temporal: bool,
 
+    /// Drop `ReSTIR`'s control-variate shading (`ReSTCV`), shading each
+    /// pixel's surviving path alone — the zero-CV degenerate (D-130). Only
+    /// meaningful with --restir and spatial reuse on; the layer the
+    /// colour-noise fix is measured against.
+    #[arg(long)]
+    no_cv: bool,
+
     /// Re-render whenever a shader source is edited (hot reload).
     /// Compiles kernels from the source checkout; a broken edit prints
     /// the compiler's diagnostics and keeps the last good image.
@@ -184,6 +191,7 @@ fn render(args: &RenderArgs) -> anyhow::Result<()> {
     });
     renderer.set_spatial_reuse(!args.no_spatial);
     renderer.set_temporal_reuse(!args.no_temporal);
+    renderer.set_cv_shading(!args.no_cv);
     if let Some(threshold) = args.noise_threshold {
         renderer.set_noise_threshold(threshold);
     }
