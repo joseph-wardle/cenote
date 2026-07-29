@@ -407,35 +407,65 @@ struct RestirResolveParams {
     sample_index: u32,
 }
 
-/// Push constants for the `ReSTIR` spatial-reuse stage
-/// (`shaders/restir_spatial.slang`). Runs at bounce 0 only, between candidates
-/// and resolve; reads the candidate reservoirs (self + neighbours), writes the
-/// merged survivors to the scratch buffer. Sits at Vulkan's guaranteed 128
-/// push-constant bytes — four of them explicit tail padding since 7a retired
-/// the gather radius (the pairing textures ride binding 4, not this struct).
+/// Push constants for the `ReSTIR` spatial gather pre-pass (M6 step 7b,
+/// `shaders/restir_spatial_gather.slang`). Runs at bounce 0 only, right before
+/// the combine; reads the candidate reservoirs, runs every pixel's forward
+/// shift evaluations (gates and all of the stage's visibility rays), and
+/// writes the pair/self records the combine reads. Sits at Vulkan's
+/// guaranteed 128 push-constant bytes exactly — which is why the target
+/// dimensions share one packed word.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct RestirSpatialParams {
+struct RestirSpatialGatherParams {
     paths: PathsAddrs,
     hits: QueueAddrs,
     scene: vk::DeviceAddress,
     restir: vk::DeviceAddress,
-    /// The candidate stage's output — read for the pixel and its neighbours.
+    /// The candidate stage's output — read for the pixel and its partners.
     reservoirs_in: vk::DeviceAddress,
-    /// The merged survivor's destination — the buffer resolve then reads.
-    reservoirs_out: vk::DeviceAddress,
+    /// The forward records, k per path slot — written.
+    pairs: vk::DeviceAddress,
+    /// The self records, one per path slot — written.
+    selfs: vk::DeviceAddress,
     sample_index: u32,
-    width: u32,
-    height: u32,
-    /// Path-pool capacity: a neighbour's path slot must be below it (the range
-    /// guard that keeps neighbour geometry reads in the live pool).
+    /// `width | height << 16` — packed so the struct holds 128 B exactly
+    /// (each dimension is bounded far below 2¹⁶; asserted where this is
+    /// built).
+    dims: u32,
+    /// Path-pool capacity: a partner's path slot must be below it (the range
+    /// guard that keeps partner geometry reads in the live pool).
     capacity: u32,
-    /// k — spatial neighbours gathered.
+    /// k — spatial partners gathered.
     neighbours: u32,
     /// Reuse gate: `dot(n_center, n_neighbour)` must exceed this.
     normal_threshold: f32,
     /// Reuse gate: relative camera-depth difference cap.
     depth_threshold: f32,
+}
+
+/// Push constants for the `ReSTIR` spatial-reuse combine
+/// (`shaders/restir_spatial.slang`). Runs at bounce 0 only, between the gather
+/// pre-pass and resolve; ray-free since 7b — it reads the candidate
+/// reservoirs and the pre-pass's records (its own for the forward terms, its
+/// reciprocal partner's for the backshift) and writes the merged survivors to
+/// the scratch buffer.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct RestirSpatialParams {
+    paths: PathsAddrs,
+    hits: QueueAddrs,
+    /// The candidate stage's output — read for the pixel and its partners.
+    reservoirs_in: vk::DeviceAddress,
+    /// The merged survivor's destination — the buffer resolve then reads.
+    reservoirs_out: vk::DeviceAddress,
+    /// The gather pre-pass's forward records — read.
+    pairs: vk::DeviceAddress,
+    /// Its self records — read.
+    selfs: vk::DeviceAddress,
+    sample_index: u32,
+    width: u32,
+    /// k — spatial partners gathered.
+    neighbours: u32,
     /// Tail padding, explicit — the device addresses align the struct to 8,
     /// and `Pod` forbids the implicit kind.
     _pad: u32,
@@ -835,8 +865,13 @@ pub struct Wavefront {
     /// M3 temporal reuse: folds last frame's `prev` reservoir into this frame's
     /// `cand`. Built alongside the rest; used only when temporal reuse is on.
     restir_temporal: ComputePipeline,
-    /// M3 spatial reuse: folds k neighbours' reservoirs into each pixel's.
-    /// Built alongside the rest; used only when spatial reuse is on.
+    /// M6 step-7b gather pre-pass: every pixel's forward shift evaluations and
+    /// visibility rays, recorded for the combine. Built alongside the rest;
+    /// used only when spatial reuse is on.
+    restir_spatial_gather: ComputePipeline,
+    /// M3 spatial reuse: folds k neighbours' reservoirs into each pixel's —
+    /// the ray-free combine since 7b. Built alongside the rest; used only when
+    /// spatial reuse is on.
     restir_spatial: ComputePipeline,
     /// M3 resolve: shades the surviving light sample and queues its shadow ray.
     restir_resolve: ComputePipeline,
@@ -856,6 +891,17 @@ pub struct Wavefront {
     /// (`src/pairing.rs`), uploaded once and bound at set 0 binding 4 — the
     /// blue-noise mask's model, for the same renderer-global reason.
     pairing: Buffer,
+    /// The spatial gather pre-pass's forward records (M6 step 7b): k per path
+    /// slot (`PairRecord` in `shaders/restir_pair.slang`), written by
+    /// `restir_spatial_gather` and read back — own and reciprocal partner's —
+    /// by the combine. Slot-indexed, so capacity-sized here rather than
+    /// target-sized by the caller, and never cleared: the combine reads only
+    /// records its own pre-pass thread or an accepted (hence fresh) partner
+    /// wrote this dispatch.
+    spatial_pairs: Buffer,
+    /// Its self records, one per path slot (`SelfRecord`, same module): the
+    /// pixel's own-sample evaluation, its albedo, and the accept mask.
+    spatial_selfs: Buffer,
     capacity: u32,
     max_bounces: u32,
     light_sampling: LightSampling,
@@ -937,6 +983,16 @@ impl Wavefront {
         Self::RESTIR_SPATIAL_NEIGHBOURS as usize <= crate::pairing::COUNT,
         "RESTIR_SPATIAL_NEIGHBOURS exceeds the pairing textures"
     );
+
+    /// Byte size of one gather pre-pass pair record — `PairRecord` in
+    /// `shaders/restir_pair.slang` (std430: one float3-led 16-byte lane plus
+    /// four scalars). The host only allocates; both the writer and the reader
+    /// compile from the one shader-side definition.
+    const RESTIR_PAIR_RECORD_BYTES: u64 = 32;
+
+    /// Byte size of one self record — `SelfRecord` in the same module (three
+    /// 16-byte lanes).
+    const RESTIR_SELF_RECORD_BYTES: u64 = 48;
 
     // Support-coverage guard (M3 plan §2, §6): the reservoir's *unshadowed*
     // target makes RIS unbiased only if some candidate covers the whole support
@@ -1027,6 +1083,13 @@ impl Wavefront {
             )?,
             // Also binds the scene set: the k+1 visibility rays trace the TLAS,
             // and the target eval reads the environment and textured emitters.
+            restir_spatial_gather: pipeline(
+                &kernels.restir_spatial_gather,
+                size_of::<RestirSpatialGatherParams>(),
+                Bindings::Scene,
+            )?,
+            // Ray-free since 7b, but still on the scene set: the blue-noise
+            // mask (binding 3) and the pairing textures (binding 4) ride it.
             restir_spatial: pipeline(
                 &kernels.restir_spatial,
                 size_of::<RestirSpatialParams>(),
@@ -1057,6 +1120,20 @@ impl Wavefront {
                 "wavefront.pairing",
                 bytemuck::cast_slice(crate::pairing::textures()),
                 vk::BufferUsageFlags::STORAGE_BUFFER,
+            )?,
+            spatial_pairs: gpu.create_buffer(
+                "wavefront.spatial.pairs",
+                u64::from(capacity)
+                    * u64::from(Self::RESTIR_SPATIAL_NEIGHBOURS)
+                    * Self::RESTIR_PAIR_RECORD_BYTES,
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                MemoryLocation::GpuOnly,
+            )?,
+            spatial_selfs: gpu.create_buffer(
+                "wavefront.spatial.selfs",
+                u64::from(capacity) * Self::RESTIR_SELF_RECORD_BYTES,
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                MemoryLocation::GpuOnly,
             )?,
             capacity,
             max_bounces,
@@ -1297,6 +1374,7 @@ impl Wavefront {
     /// off, resolve reads `curr` directly and owes the survivor its own shadow
     /// ray. Resolve also carries the debug target and view, so it can
     /// false-colour the survivor (D-092).
+    #[allow(clippy::too_many_lines, reason = "one struct literal per stage — the wiring is the map")]
     fn restir_wave_params(
         &self,
         scene: &Scene,
@@ -1335,26 +1413,48 @@ impl Wavefront {
             prev_same_scene: u32::from(t.prev_same_scene),
         });
 
-        // Spatial reuse on: build its params, and route resolve at the scratch
-        // its survivor lands in. The visibility-in-weight bit
-        // (DebugView::VISIBILITY_IN_WEIGHT, mirrored in restir_resolve.slang)
-        // rides in the packed `flags` word — it tells resolve the survivor's
-        // visibility is already in W, so shade unshadowed.
-        let spatial = restir.scratch.map(|scratch| RestirSpatialParams {
-            paths,
-            hits,
-            scene: scene_table,
-            restir: restir_table,
-            reservoirs_in: reservoirs,
-            reservoirs_out: scratch.device_address(),
-            sample_index: sample,
-            width,
-            height,
-            capacity: self.capacity,
-            neighbours: Self::RESTIR_SPATIAL_NEIGHBOURS,
-            normal_threshold: Self::RESTIR_NORMAL_THRESHOLD,
-            depth_threshold: Self::RESTIR_DEPTH_THRESHOLD,
-            _pad: 0,
+        // Spatial reuse on: build the pre-pass + combine pair (7b), and route
+        // resolve at the scratch the survivor lands in. The
+        // visibility-in-weight bit (DebugView::VISIBILITY_IN_WEIGHT, mirrored
+        // in restir_resolve.slang) rides in the packed `flags` word — it tells
+        // resolve the survivor's visibility is already in W, so shade
+        // unshadowed.
+        let spatial = restir.scratch.map(|scratch| {
+            // The gather params pack both target dimensions into one word to
+            // hold the 128 B push-constant budget.
+            assert!(
+                width < (1 << 16) && height < (1 << 16),
+                "target dimension overflows the gather pre-pass's packed dims word"
+            );
+            (
+                RestirSpatialGatherParams {
+                    paths,
+                    hits,
+                    scene: scene_table,
+                    restir: restir_table,
+                    reservoirs_in: reservoirs,
+                    pairs: self.spatial_pairs.device_address(),
+                    selfs: self.spatial_selfs.device_address(),
+                    sample_index: sample,
+                    dims: width | (height << 16),
+                    capacity: self.capacity,
+                    neighbours: Self::RESTIR_SPATIAL_NEIGHBOURS,
+                    normal_threshold: Self::RESTIR_NORMAL_THRESHOLD,
+                    depth_threshold: Self::RESTIR_DEPTH_THRESHOLD,
+                },
+                RestirSpatialParams {
+                    paths,
+                    hits,
+                    reservoirs_in: reservoirs,
+                    reservoirs_out: scratch.device_address(),
+                    pairs: self.spatial_pairs.device_address(),
+                    selfs: self.spatial_selfs.device_address(),
+                    sample_index: sample,
+                    width,
+                    neighbours: Self::RESTIR_SPATIAL_NEIGHBOURS,
+                    _pad: 0,
+                },
+            )
         });
         let (resolve_reservoirs, visibility_in_weight) = match restir.scratch {
             Some(scratch) => (scratch.device_address(), DebugView::VISIBILITY_IN_WEIGHT),
@@ -1568,7 +1668,15 @@ impl Wavefront {
                             queue::HIT,
                         ));
                     }
-                    if let Some(spatial) = restir.spatial.as_ref() {
+                    if let Some((gather, spatial)) = restir.spatial.as_ref() {
+                        // The pre-pass writes the pair/self records; the full
+                        // inter-pass barrier orders them for the combine's
+                        // cross-pixel reads.
+                        passes.push(indirect(
+                            &self.restir_spatial_gather,
+                            bytemuck::bytes_of(gather),
+                            queue::HIT,
+                        ));
                         passes.push(indirect(
                             &self.restir_spatial,
                             bytemuck::bytes_of(spatial),
@@ -1621,9 +1729,10 @@ struct RestirWaveParams {
     /// The temporal stage, present only when temporal reuse is on
     /// (`RestirInputs::temporal` was `Some`).
     temporal: Option<RestirTemporalParams>,
-    /// The spatial stage, present only when spatial reuse is on
+    /// The spatial stage — gather pre-pass then combine, dispatched
+    /// back-to-back — present only when spatial reuse is on
     /// (`RestirInputs::scratch` was `Some`).
-    spatial: Option<RestirSpatialParams>,
+    spatial: Option<(RestirSpatialGatherParams, RestirSpatialParams)>,
     resolve: RestirResolveParams,
 }
 

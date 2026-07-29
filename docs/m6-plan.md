@@ -803,6 +803,24 @@ The ladder — each rung green and committable:
   *Checkpoint: bit-identical to 7a (decision 8's fallback if codegen denies it) at
   measured lower spatial cost; the frame-time report before/after is the rung's
   number.*
+  **Done (2026-07-29, D-148).** `restir_spatial_gather.slang` runs every
+  pixel's forward evaluations — gates, shifts, all k+1 rays, the own-sample
+  self-evaluation — into 32 B pair + 48 B self records (`restir_pair.slang`,
+  slot-indexed, capacity-sized, never cleared: symmetric acceptance proves a
+  partner's records fresh); the combine is ray-free, its backshift the
+  partner's recorded `DomainShift.backTarget` — `targetInDomain`'s exact
+  value as a byproduct of the shift the partner already ran. Winners
+  reconstitute by patching F/cachedJacobian onto a fresh `reservoirsIn`
+  read; the CV terms cross per decision 7 (an NEE partner's own-target/fOwn
+  ride its self record's raw fields, each pixel re-applying its own W
+  guard). Checkpoint met at decision 8's ideal: all seven goldens
+  pixel-exact at zero tolerance vs the 7a commit (`idiff -fail 0`) — no
+  codegen fallback — with the full suite green. The number: spatial pass
+  demo ≈4.6 → ≈1.5 ms (3.1×), glossy-primary ≈6.5 → ≈2.5 ms (2.6×),
+  distant-glossy ≈1.7 → ≈1.3 ms; the glossy scenes beat the paper's 1.63×
+  (cenote's backshift share was larger), the savings match D-146's stub
+  ceiling scaled to 7a's acceptance, and the cheapest scene shows the
+  split's own overhead. Step 7 closes.
 
 Leaf defaults settled with the interview (cheap to change, not re-interviewed):
 partners that are off-screen, out of the wavefront range, or misses drop

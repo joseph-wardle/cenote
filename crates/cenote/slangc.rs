@@ -8,10 +8,10 @@
 /// `rng.slang`, `bluenoise.slang`, `color.slang`, `openpbr.slang`, `lights.slang`,
 /// `nee.slang`, `environment.slang`, `scene.slang`, `surface.slang`,
 /// `reservoir.slang`, `reservoir_path.slang`, `restir_scene.slang`,
-/// `restir_mis.slang`, `restir_target.slang`, `restir_reproject.slang`) compile
-/// into their importers, and test-only fixtures (`rng_test.slang`) compile at
-/// test time.
-pub const KERNELS: [&str; 12] = [
+/// `restir_mis.slang`, `restir_target.slang`, `restir_pair.slang`,
+/// `restir_reproject.slang`) compile into their importers, and test-only
+/// fixtures (`rng_test.slang`) compile at test time.
+pub const KERNELS: [&str; 13] = [
     "raygen",
     "intersect",
     "shade_miss",
@@ -19,6 +19,7 @@ pub const KERNELS: [&str; 12] = [
     "trace_shadow",
     "restir_candidates",
     "restir_temporal",
+    "restir_spatial_gather",
     "restir_spatial",
     "restir_resolve",
     "accumulate",

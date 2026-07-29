@@ -58,8 +58,13 @@ pub struct Kernels {
     /// `ReSTIR` temporal reuse: fold last frame's `prev` reservoir into this
     /// frame's `cand` at the same pixel, M-capped, under defensive pairwise MIS.
     pub restir_temporal: Kernel,
+    /// `ReSTIR` spatial gather pre-pass (M6 step 7b): every pixel's forward
+    /// shift evaluations and visibility rays, written to the pair records the
+    /// combine reads.
+    pub restir_spatial_gather: Kernel,
     /// `ReSTIR` spatial reuse: fold k screen-space neighbours' reservoirs into
-    /// each pixel's under defensive pairwise MIS.
+    /// each pixel's under defensive pairwise MIS — ray-free since 7b, reading
+    /// the gather pre-pass's records.
     pub restir_spatial: Kernel,
     /// `ReSTIR` resolve: shade the surviving light sample and queue its
     /// visibility ray.
@@ -95,6 +100,10 @@ impl Kernels {
             trace_shadow: kernel(spirv!("trace_shadow"), c"trace_shadow"),
             restir_candidates: kernel(spirv!("restir_candidates"), c"restir_candidates"),
             restir_temporal: kernel(spirv!("restir_temporal"), c"restir_temporal"),
+            restir_spatial_gather: kernel(
+                spirv!("restir_spatial_gather"),
+                c"restir_spatial_gather",
+            ),
             restir_spatial: kernel(spirv!("restir_spatial"), c"restir_spatial"),
             restir_resolve: kernel(spirv!("restir_resolve"), c"restir_resolve"),
             accumulate: kernel(spirv!("accumulate"), c"accumulate"),
@@ -127,6 +136,7 @@ impl Kernels {
             trace_shadow,
             restir_candidates,
             restir_temporal,
+            restir_spatial_gather,
             restir_spatial,
             restir_resolve,
             accumulate,
@@ -167,6 +177,10 @@ impl Kernels {
             restir_temporal: Kernel {
                 spirv: restir_temporal?,
                 entry: c"restir_temporal",
+            },
+            restir_spatial_gather: Kernel {
+                spirv: restir_spatial_gather?,
+                entry: c"restir_spatial_gather",
             },
             restir_spatial: Kernel {
                 spirv: restir_spatial?,
@@ -307,7 +321,7 @@ mod tests {
         u32::from_le_bytes(bytes[..4].try_into().unwrap()) == 0x0723_0203
     }
 
-    fn all(kernels: &Kernels) -> [&Kernel; 12] {
+    fn all(kernels: &Kernels) -> [&Kernel; 13] {
         [
             &kernels.raygen,
             &kernels.intersect,
@@ -316,6 +330,7 @@ mod tests {
             &kernels.trace_shadow,
             &kernels.restir_candidates,
             &kernels.restir_temporal,
+            &kernels.restir_spatial_gather,
             &kernels.restir_spatial,
             &kernels.restir_resolve,
             &kernels.accumulate,

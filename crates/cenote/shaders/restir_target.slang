@@ -757,6 +757,10 @@ public struct DomainShift : IDefaultInitializable {
     public float target;      // p̂_dest(shift(Y))·J, visibility folded in — 1 ray
     public float ownTarget;   // p̂_src(Y): the stored integrand (D-138/D-139)
     public float unshadowed;  // U_dest(shift(Y)) — the finalize divisor on a win
+    public float backTarget;  // exactly what `targetInDomain(sample, s)` returns —
+                              //   the same shift's unshadowed p̂·J, exposed so the
+                              //   paired spatial split (step 7b) hands it to the
+                              //   reciprocal partner instead of re-running the shift
     public PathSample sample; // carries this domain's F (and Jacobian half) onward
 };
 
@@ -791,6 +795,7 @@ public DomainShift shiftIntoDomain(RaytracingAccelerationStructure tlas,
     d.target = 0.0;
     d.ownTarget = 0.0;
     d.unshadowed = 0.0;
+    d.backTarget = 0.0;
     d.sample = sample;
     if (isReconnectionSample(sample)) {
         let sh = shiftReconnection(tlas, scene, sample, s);
@@ -812,6 +817,11 @@ public DomainShift shiftIntoDomain(RaytracingAccelerationStructure tlas,
             d.sample.F = sh.F;
             d.sample.cachedJacobian = sh.partial;
         }
+        // `targetInDomain`'s value from the shift already run: it guards only
+        // on `valid` (no jacobian floor), so mirror that exactly.
+        if (sh.valid) {
+            d.backTarget = luminance(sh.F) * sh.jacobian;
+        }
     } else if (isReplaySample(sample)) {
         let sh = shiftReplay(tlas, scene, sample, s);
         if (sh.valid) {
@@ -830,6 +840,9 @@ public DomainShift shiftIntoDomain(RaytracingAccelerationStructure tlas,
             d.ownTarget = luminance(sample.F);
             d.sample.F = sh.F;
         }
+        // `targetInDomain`'s value: with J = 1 it is the unshadowed target
+        // itself (zero when the shift is undefined, same as the field's init).
+        d.backTarget = d.unshadowed;
     }
     return d;
 }

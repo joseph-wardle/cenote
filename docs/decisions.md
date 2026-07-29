@@ -3661,3 +3661,36 @@ acceptance, not selection: the Gaussian's heavier near mass passes the depth/nor
 often where the disk's far draws failed them, and each extra accepted neighbour is a replayed
 suffix. That is the same mechanism as the quality gain, and it re-baselines 7b's denominator at
 ≈ 4.6 / 6.5 / 1.7 ms — the backshift share 7b deletes from grew, not shrank.
+
+### D-148: 7b splits the pass — the backshift is read, not re-run, and the spatial cost drops to a third
+Status: accepted (2026-07-29). Rung 7b (m6-plan.md §4e decisions 6–8) split the spatial stage in
+two: a gather pre-pass (`restir_spatial_gather.slang`) runs every pixel's *forward* evaluations —
+the reuse gates, the shifts, all k+1 visibility rays, and the pixel's own-sample evaluation — and
+records the shift-dependent values; the combine (`restir_spatial.slang`) is ray-free, reading its
+own records for the forward terms and its reciprocal partner's slot-n record for the backshift —
+the `targetInDomain` re-run that D-146 weighed at 59–65% of the pass, now a 4-byte read. The
+records (`restir_pair.slang`) are a 32 B pair record (F, cachedJacobian, vis target, unshadowed,
+own-domain target, backshift value) and a 48 B self record (raw own-sample rgb/target, guarded
+p̂_c, albedo for the CV's α, and the accept mask) — slot-indexed so the buffers are
+capacity-sized at wavefront init, and never cleared: acceptance is symmetric in the pair (7a's
+gates, by construction), so an accepted partner provably ran, accepted back, and wrote fresh
+records this dispatch. The sharing key is a new `DomainShift.backTarget` byproduct — exactly
+`targetInDomain`'s value formed from the same shift call the forward evaluation already ran (for
+NEE, the unshadowed forward evaluation doubles as the partner's backshift; an NEE partner's
+own-domain target and fOwn ride its self record's *unguarded* raw fields, with each pixel
+re-applying its own W guard — the one place the pre-split guards had to be teased apart to keep
+every consumer's value bit-exact). The gather packs width|height into one push-constant word to
+hold Vulkan's guaranteed 128 B. The checkpoint is decision 8's ideal, met outright: all four
+ReSTIR/survivor goldens and the three brute pins are **pixel-exact at zero tolerance** against
+the 7a commit (`idiff -fail 0 -warn 0`) — same estimator, same bits, different schedule — so
+every existing gate (unbiasedness, convergence, determinism, the pinned-live CV suite, 213 lib
+tests) re-proves the seam for free, and no cross-kernel-codegen fallback was needed. The number:
+the spatial pass (temporal-off − spatial-off) falls from 7a's ≈4.6 → ≈1.5 ms on demo (3.1×),
+≈6.5 → ≈2.5 ms on glossy-primary (2.6×), and ≈1.7 → ≈1.3 ms on distant-glossy — the glossy
+scenes beat the paper's 1.63× because cenote's backshift share was larger than the paper's, and
+the savings match D-146's stub ceiling scaled to 7a's acceptance (predicted ≈3.0/4.2/1.0 ms,
+realized 3.1/4.0/0.4 — the cheapest scene is where the split's own overhead, record traffic and
+a second dispatch, shows). Frame-level, temporal-off lands at ≈4.7/5.0/2.8 ms (was
+7.5/8.8/3.1). Measured best-of-three with ~18% ambient compositor load (visible as a ~0.1–0.3 ms
+lift on the untouched spatial-off control row, which the pass-level delta cancels); if anything
+the quiet-GPU numbers are slightly better. Step 7 closes with this rung.
