@@ -893,6 +893,18 @@ The ladder — each rung green and committable:
   plus the DI-wording touch-up (decision 6). *Checkpoint: the figures regenerate
   deterministically from the committed scene; the README section reads; the
   headline numbers in the D-entry. Step 8 closes.*
+  **Done (2026-07-29, D-151).** The hook grows a brass-room section under its own
+  content-keyed cache: the equal-sample montage (8 spp, 512², aces) and the
+  three-layer curve (frames 1…128 at 256², cross-referenced deep references
+  brute-4096 / `ReSTIR`-4096, mutual agreement relMSE 0.00447). The honest curve:
+  path reuse is a constant factor (1.26× at 128 frames), and the `ReSTCV` line
+  *rides* the CV-off line rather than dropping below it — the D-143
+  luminance-invariance identity made visible; its early gap is D-145's temporal
+  warm-up, annealing +12% → +2% over the sweep. README gains "Paths, resampled"
+  beside the many-lights section, economics stated plainly; the old section's
+  `ReSTIR`-DI wording touched up (one figure legend re-rendered). All six figures
+  reproduce byte-for-byte on a warm cache. §7's poster bullet re-worded to
+  equal-sample per D-149. Step 8 closes.
 
 Leaf defaults settled with the interview (cheap to change, not re-interviewed): the
 curve sweep is frames 1, 2, 4, …, 128 at 256², references cross-estimator per the
@@ -983,7 +995,9 @@ sourcing guides from the canonical path, not discovered late.
 - Viewer: open a GI-heavy scene, orbit — the preview warm-starts through the move via
   temporal reuse and re-converges on hold via spatial-only + ReSTCV; the frame stops
   pinning the GPU once settled.
-- The equal-time figure (PT vs ReSTIR PT, matched seconds) and the convergence-under-reuse
+- The equal-sample figure (PT vs ReSTIR PT at a matched 8-spp budget — D-149 amended this
+  bullet from "matched seconds", where stratified brute PT wins still-frame accumulation;
+  the cost economics are stated plainly beside the figure) and the convergence-under-reuse
   curves (mean-error vs reference, layered PT → decay-ramp → ReSTCV) regenerate from the
   flagship scene — the poster.
 - CI: existing demo and corpus FLIP goldens stay green — at converged spp ReSTIR PT ≡

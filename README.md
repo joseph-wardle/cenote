@@ -96,11 +96,14 @@ ReSTIR is cenote's theoretical core, and the many-light scene is the case it
 exists for: 256 small emitters raining light onto a cluster of matte occluders
 under a black sky. The M2 path tracer meets it by next-event estimation — one
 of the 256 lights drawn per sample and shadowed. A single draw among that many
-is mostly wasted, so the image arrives as a storm of shadow grain. ReSTIR-DI
+is mostly wasted, so the image arrives as a storm of shadow grain. ReSTIR
 resamples instead: each pixel keeps a running reservoir of the good light
 samples it and its neighbours have found, spends one shadow ray confirming the
 survivor, and reuses the rest. Same integrator, same lights, one shadow ray at
 the primary hit either way — the samples just land where they carry the image.
+(M3 shipped this as ReSTIR-DI, a reservoir of light samples; since M6 the same
+`--restir` runs the unified path estimator, for which a light sample is the
+length-2 case — the figures below are its DI regime, re-rendered by it.)
 
 ![Brute force and ReSTIR on the 256-light scene, both at 8 samples per pixel — the brute-force half a storm of shadow grain, the ReSTIR half nearly settled](docs/restir-equal-sample.png)
 
@@ -109,7 +112,7 @@ path tracer's lone next-event draw among 256 lights; right, ReSTIR resampling
 and borrowing its neighbours'. Same budget, and the grain on the right is
 plainly the finer.*
 
-![Log-log relative-MSE curves on the 256-light scene: brute force and ReSTIR-DI both fall toward the reference as near-parallel lines, ReSTIR consistently below](docs/restir-convergence.png)
+![Log-log relative-MSE curves on the 256-light scene: brute force and ReSTIR both fall toward the reference as near-parallel lines, ReSTIR consistently below](docs/restir-convergence.png)
 
 *The convergence behind that image: relative MSE against a converged reference,
 both estimators on the same scene. Both fall — ReSTIR is unbiased, so it
@@ -124,6 +127,56 @@ inspectable data, so the comparison reproduces:
 
 ```sh
 cargo run --release -p cenote-cli -- render scenes/many-lights.ron --restir --spp 256 --out many-lights.exr
+```
+
+## Paths, resampled
+
+M6 grows the reservoir from a light sample to a whole path — **ReSTIR PT**.
+The flagship scene is the case direct lighting cannot cover: a closed room
+whose one warm lamp hangs under a dark iron shade, so nearly everything the
+camera sees is lit by the bounce off a rough brass panel. A path tracer must
+stumble onto lamp → panel → surface by luck, every pixel, every frame; ReSTIR
+PT keeps the lucky paths in the same per-pixel reservoirs, carries them to
+neighbouring pixels through a hybrid shift (reconnect where the geometry is
+forgiving, replay the path where it is not), and hands them forward across
+frames. The good path found once gets spent many times.
+
+![Two renders of a dim room lit off a brass panel, both at 8 samples per pixel — grainy on the left, visibly finer on the right](docs/restir-pt-equal-sample.png)
+
+*Equal samples — 8 spp each, cenote's own display transform. Light in this
+room is one bounce deep at minimum, so both sides are still noisy this early —
+but the ReSTIR side carries 1.375× less relative error (measured at this
+budget, each estimator against the other's converged reference), and the wash
+on the panel and floor is already legible.*
+
+![Log-log relative-MSE curves on the brass room: path tracing, ReSTIR PT with the control variate off, and shipping ReSTCV — three near-parallel lines, the two ReSTIR lines riding together below the path tracer](docs/restir-pt-layers.png)
+
+*The layered curve: each line adds one mechanism, and the references are
+cross-estimator so shared samples can't flatter the tail. Path reuse buys a
+constant factor over the path tracer at every budget. The shipping control
+variate (ReSTCV) rides the reuse line rather than dropping below it — by
+construction it leaves per-pixel luminance untouched and repairs colour
+noise, which a scalar error metric cannot see; its temporal warm-up costs a
+few percent early and anneals to ~2% by 128 frames.*
+
+The economics, stated plainly: a ReSTIR PT frame costs about 4.7× a
+brute-force sample on this scene (10.9 ms against 2.3 ms per spp at 512² —
+the candidate stream and the path walk are real work), so at matched
+*seconds* on a still frame, the plain path tracer currently wins: its
+stratified sampler converges super-linearly as accumulation walks the sample
+sequence in order, while resampling trades that structure away for reuse.
+Reuse pays per *sample* — and per *frame* in the interactive regime the
+viewer lives in, where a warm-started reservoir survives the camera motion
+that resets accumulation. That trade is the bet the renderer makes, and the
+numbers above are what it costs on a tripod.
+
+The regime is pinned in CI by the same protocol as the many-light gate
+(`crates/cenote/tests/convergence.rs`), and every mechanism in the curve is
+a CLI toggle (`--no-spatial`, `--no-temporal`, `--no-cv`), so the comparison
+reproduces:
+
+```sh
+cargo run --release -p cenote-cli -- render scenes/brass-room.ron --restir --spp 8 --out brass-room.exr
 ```
 
 ## Quickstart

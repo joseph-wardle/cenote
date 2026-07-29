@@ -3754,3 +3754,32 @@ moves the shipping image (relMSE 0.056 against the default), under `--no-spatial
 bit-identical (spatial-off shades the survivor regardless, by design), and all three together
 run clean. Full suite green serially (272 tests); goldens byte-identical — nothing in the
 rung touches a kernel.
+
+### D-151: 8b hangs the poster — the brass room gets its figures, and the curve tells the truth twice
+Status: accepted (2026-07-29). The figures rung (§4f decisions 3, 4, and 6, as D-149 re-scoped
+them) lands, and step 8 closes with it. **The hook grows a flagship section** under its own
+content-keyed cache (renderer + tm + script + plotter + scene): the equal-sample montage —
+path tracing vs shipping ReSTIR PT on brass-room at 8 spp, 512², the aces look, the D-149
+calibrated 1.375× — and the three-layer convergence curve, frames 1…128 at 256², each layer
+adding one mechanism (plain PT → `--restir --no-cv` → shipping ReSTCV, both ReSTIR layers
+temporal-on). References are cross-estimator per the floor-report protocol — PT against
+ReSTIR-4096, both ReSTIR layers against brute-4096, mutual agreement relMSE 0.00447, ~12× under
+the smallest measured point (the first run used ReSTIR-1024, whose ~0.0065 residual was 9% of
+the PT tail; deepening it was three seconds of rendering). **The curve tells the truth twice.**
+Path reuse is the constant factor the story promised: 1.41× over PT at 8 frames, 1.26× at 128
+(no-cv line; the shipping line reads 1.21×/1.24×). And the ReSTCV line *rides* the CV-off line
+rather than dropping below it — at 128 frames 0.05346 vs 0.05229, +2.2% — which is not a
+regression but the decision log made visible: D-143's luminance-invariance identity says the
+CV moves only chroma, so a scalar relMSE cannot see its win, and the early gap (+12% at 8
+frames, +8.2%/+5.6% at 16/32, matching D-145's measured +7.7%/+5.0% decay-handoff cost)
+anneals as the warm window amortizes. The figure's title says so plainly rather than implying
+a second drop. **README gains "Paths, resampled"** beside the many-lights section: the montage,
+the layered curve, and the economics stated plainly per D-149 — a ReSTIR frame costs 4.7× a
+brute spp, matched seconds on a tripod go to the stratified path tracer, reuse pays per sample
+and per frame under motion. The old section's stale ReSTIR-DI wording is touched up (M3's
+reservoir of light samples is now the unified estimator's length-2 case), which re-renders one
+committed figure — restir-convergence.png moves by exactly its legend text, the .dat re-measured
+identical. §7's poster bullet re-worded from equal-time to equal-sample (the D-149 amendment,
+now in the definition of done). All six docs figures reproduce byte-for-byte on a warm-cache
+re-run; no Rust, no shader, no golden, no test is touched by the rung. Step 8 — the scene, the
+harness, the figures — is complete.
