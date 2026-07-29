@@ -411,7 +411,8 @@ struct RestirResolveParams {
 /// (`shaders/restir_spatial.slang`). Runs at bounce 0 only, between candidates
 /// and resolve; reads the candidate reservoirs (self + neighbours), writes the
 /// merged survivors to the scratch buffer. Sits at Vulkan's guaranteed 128
-/// push-constant bytes exactly.
+/// push-constant bytes — four of them explicit tail padding since 7a retired
+/// the gather radius (the pairing textures ride binding 4, not this struct).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct RestirSpatialParams {
@@ -431,12 +432,13 @@ struct RestirSpatialParams {
     capacity: u32,
     /// k — spatial neighbours gathered.
     neighbours: u32,
-    /// Gather radius, pixels.
-    radius: f32,
     /// Reuse gate: `dot(n_center, n_neighbour)` must exceed this.
     normal_threshold: f32,
     /// Reuse gate: relative camera-depth difference cap.
     depth_threshold: f32,
+    /// Tail padding, explicit — the device addresses align the struct to 8,
+    /// and `Pod` forbids the implicit kind.
+    _pad: u32,
 }
 
 /// Push constants for the shadow-ray kernel (`shaders/trace_shadow.slang`).
@@ -849,6 +851,11 @@ pub struct Wavefront {
     /// bound at set 0 binding 3. Owned here — scene-independent, renderer
     /// lifetime — and handed to every [`SceneBindings`].
     blue_noise: Buffer,
+    /// The pairing textures (M6 step 7a): the self-inverting Gaussian delta
+    /// images the spatial stage draws its reciprocal neighbours from
+    /// (`src/pairing.rs`), uploaded once and bound at set 0 binding 4 — the
+    /// blue-noise mask's model, for the same renderer-global reason.
+    pairing: Buffer,
     capacity: u32,
     max_bounces: u32,
     light_sampling: LightSampling,
@@ -875,15 +882,14 @@ impl Wavefront {
     /// Spatial neighbours gathered per pixel (D-088: ~5). The estimator is
     /// unbiased at any k ≥ 0 — this trades variance (more reuse) for cost (a
     /// visibility ray each) — so it is tuned in validation, not load-bearing.
+    /// Since 7a each slot draws from its own pairing texture, so raising k
+    /// past `pairing::COUNT` means adding textures.
     pub const RESTIR_SPATIAL_NEIGHBOURS: u32 = 5;
 
     /// Compile-time cap on k, mirrored by `MAX_SPATIAL_NEIGHBOURS` in
     /// `shaders/restir_spatial.slang` (the shader's per-thread accepted-neighbour
     /// store is a fixed array of this size). Raising it means raising both.
     pub const RESTIR_MAX_SPATIAL_NEIGHBOURS: u32 = 8;
-
-    /// Spatial gather radius, pixels (RTXDI's default is 32; ~30 here).
-    pub const RESTIR_SPATIAL_RADIUS: f32 = 30.0;
 
     /// Reuse gate — the neighbour's geometric normal must satisfy
     /// `dot(n_center, n_neighbour) > this`. 0.9 (≈26°) is deliberately stricter
@@ -922,6 +928,14 @@ impl Wavefront {
     const _SPATIAL_FITS: () = assert!(
         Self::RESTIR_SPATIAL_NEIGHBOURS <= Self::RESTIR_MAX_SPATIAL_NEIGHBOURS,
         "RESTIR_SPATIAL_NEIGHBOURS exceeds the shader's MAX_SPATIAL_NEIGHBOURS store"
+    );
+
+    // ... and every slot must have a pairing texture (7a) — the shader also
+    // caps k at PAIRING_TEXTURES, so outgrowing this would silently gather
+    // fewer neighbours than asked.
+    const _SPATIAL_PAIRED: () = assert!(
+        Self::RESTIR_SPATIAL_NEIGHBOURS as usize <= crate::pairing::COUNT,
+        "RESTIR_SPATIAL_NEIGHBOURS exceeds the pairing textures"
     );
 
     // Support-coverage guard (M3 plan §2, §6): the reservoir's *unshadowed*
@@ -1035,6 +1049,13 @@ impl Wavefront {
             blue_noise: gpu.upload_buffer(
                 "wavefront.bluenoise",
                 bytemuck::cast_slice(crate::bluenoise::mask().as_slice()),
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+            )?,
+            // The pairing textures: read through the descriptor (binding 4),
+            // like the blue-noise mask above.
+            pairing: gpu.upload_buffer(
+                "wavefront.pairing",
+                bytemuck::cast_slice(crate::pairing::textures()),
                 vk::BufferUsageFlags::STORAGE_BUFFER,
             )?,
             capacity,
@@ -1331,9 +1352,9 @@ impl Wavefront {
             height,
             capacity: self.capacity,
             neighbours: Self::RESTIR_SPATIAL_NEIGHBOURS,
-            radius: Self::RESTIR_SPATIAL_RADIUS,
             normal_threshold: Self::RESTIR_NORMAL_THRESHOLD,
             depth_threshold: Self::RESTIR_DEPTH_THRESHOLD,
+            _pad: 0,
         });
         let (resolve_reservoirs, visibility_in_weight) = match restir.scratch {
             Some(scratch) => (scratch.device_address(), DebugView::VISIBILITY_IN_WEIGHT),
@@ -1416,6 +1437,7 @@ impl Wavefront {
             environment: scene.environment(),
             textures: scene.texture_descriptors(),
             blue_noise: &self.blue_noise,
+            pairing: &self.pairing,
         };
         // An indirect stage: workgroup counts read from its queue's header,
         // which the producing stage maintained.
@@ -3183,6 +3205,7 @@ mod tests {
             environment: scene.environment(),
             textures: scene.texture_descriptors(),
             blue_noise: &wavefront.blue_noise,
+            pairing: &wavefront.pairing,
         };
 
         // A handful of candidate frames: each pixel keeps one survivor per
@@ -3936,6 +3959,7 @@ mod tests {
                 environment: scene.environment(),
                 textures: scene.texture_descriptors(),
                 blue_noise: &wavefront.blue_noise,
+                pairing: &wavefront.pairing,
             }),
             bytemuck::bytes_of(&params),
             [(width * height).div_ceil(WORKGROUP_SIZE), 1, 1],

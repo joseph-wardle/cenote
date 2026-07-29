@@ -3622,3 +3622,42 @@ arithmetic (`pairwiseMis` with a zero cross term, the NEE canonical's fBack path
 its deletion back with record traffic and a second dispatch — so 65% is the ceiling on 7b's
 realized win, not the promise; the rung's own before/after is the number that counts. Nothing
 renders differently: the committed change is report-only, and the stub is reverted.
+
+### D-147: 7a pairs the pixels — five self-inverting weaves replace the disk, and quality moves the right way
+Status: accepted (2026-07-26). Rung 7a (m6-plan.md §4e decision 4) replaced the spatial stage's
+uniform-disk neighbour draw with the Enhanced §3 pairing textures: five host-built self-inverting
+delta images (`src/pairing.rs`, fixed seed, sizes 254/230/210/190/178 — even, i8-fitting,
+near-period-free within a frame, guarded by test), built exactly as the paper says — consecutive
+link indices, n_σ = 128 tiled 2×2 shuffles (Eq 3 at σ = 16.0, the mean partner distance of the
+old R = 30 disk), texels holding indices 2k and 2k+1 paired. Involution and fixed-point-freeness
+hold *exactly* by construction; measured per-axis σ lands within 5% of target. Per frame each
+texture is conjugated by a hash-derived D4 symmetry + toroidal translation (lowbias32 of the
+(sampleIndex, texture) key) — an isometry, so both invariants survive, asserted for every
+transform by the unit tests. Selection is now reciprocal — A gathers B on slot n exactly when B
+gathers A — which changes no estimator math but is the precondition 7b's sharing stands on; the
+depth gate symmetrized to `|dA−dB| ≤ τ·min(dA,dB)` (strictly conservative, D-093 posture) so
+both sides of a pair agree on acceptance. The disk draw and its two RNG offset dimensions are
+deleted (the slots stay vacant, so the acceptance dimensions never moved); the textures ride
+set 0 binding 4, the blue-noise mask's binding model. The shader lookup is pinned texel-for-texel
+against the CPU mirror by a `pairing_test` GPU fixture — which earned its keep immediately by
+catching Slang lowering a negative-operand `%` to *unsigned* modulo when the divisor loads from
+a struct field; the wrap now shifts its operand positive before the `%`, where every modulo
+semantics agrees. A selection bug of that class renders plausibly (in-bounds, merely
+non-reciprocal and non-Gaussian) and would have been blessed by a golden regen — exactly why the
+fixture exists. Gates: ReSTIR + survivor goldens regenerated and eyeballed (FLIP vs the pre-7a
+pins: demo 0.070, many-lights 0.013 — a changed noise realization at the prior estimator rungs'
+scale), brute goldens byte-identical, 1-spp renders clean of structure under the per-frame
+transforms, determinism and the pinned-live CV gates green. The headline is the quality
+direction: 8-spp relMSE many-lights 0.04084 → 0.03816 and indirect-glossy 0.10470 → 0.09782
+(both −6.6%) against unchanged brute floors — the paper's "equal or better" landed better — and
+the convergence margins widened from 1.31× to 1.41× (many-lights) and to 1.75× (indirect): the
+suite's thinnest gate, the one decision 5 was written to watch, moved away from its floor.
+Frame time (quiet GPU, held across a repeat run): the spatial-off rows are unchanged from D-146
+(demo 2.92, glossy-primary 2.30, distant-glossy 1.49 ms) and the spatial pass costs
+temporal-off − spatial-off = demo ≈ 4.6 ms (was 3.59 — the one real mover, ~+28%),
+glossy-primary ≈ 6.5 ms (was 6.38, flat) and distant-glossy ≈ 1.7 ms (was 1.62, within noise).
+Selection itself is a texture fetch — cheaper than the disk's sincos — so the demo growth is
+acceptance, not selection: the Gaussian's heavier near mass passes the depth/normal gates more
+often where the disk's far draws failed them, and each extra accepted neighbour is a replayed
+suffix. That is the same mechanism as the quality gain, and it re-baselines 7b's denominator at
+≈ 4.6 / 6.5 / 1.7 ms — the backshift share 7b deletes from grew, not shrank.

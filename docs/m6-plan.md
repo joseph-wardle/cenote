@@ -776,6 +776,28 @@ The ladder — each rung green and committable:
   pair, determinism test, frame time. *Checkpoint: selection is reciprocal and
   Gaussian; quality equal-or-better; no structured artifacts under the per-frame
   transforms (eyeball at 1 spp); all gates green.*
+  **Done (2026-07-26, D-147).** `src/pairing.rs` builds the five textures by the
+  paper's construction (consecutive link indices, n_σ = 128 tiled 2×2 shuffles by
+  Eq 3 for σ = 16, indices 2k↔2k+1 paired) — involution and no-fixed-points hold
+  *exactly* by construction, measured per-axis σ within 5% of target, all pinned
+  by unit tests over every D4-transform and by a `pairing_test` GPU fixture that
+  matches the shader lookup texel for texel against the CPU mirror. The one
+  implementation finding: Slang lowers a negative-operand `%` to *unsigned*
+  modulo when the divisor loads from a struct field — the wrap now shifts its
+  operand positive first (every modulo semantics agrees there), and the fixture
+  is what caught it. The textures ride set 0 binding 4 (the blue-noise model);
+  the freed radius makes the spatial push constants 4 B under their old exactly-
+  128. Quality landed *better*, not just equal: 8-spp relMSE many-lights
+  0.04084 → 0.03816 and indirect-glossy 0.10470 → 0.09782 (both −6.6%), margins
+  over brute 1.31× → 1.41× and 1.75× — the suite's thinnest gate (decision 5's
+  watch) moved *away* from its floor. Golden FLIP vs the pre-7a pins: demo
+  0.070, many-lights 0.013 (changed noise realization, the prior rungs' scale);
+  1-spp eyeball clean of structure under the per-frame transforms. Frame time
+  (quiet GPU, repeated): spatial-off rows unchanged; the spatial pass now costs
+  demo ≈ 4.6 ms (was 3.59 — the Gaussian's near mass passes the gates more often,
+  and each accepted neighbour is a replayed suffix; the quality gain's mechanism),
+  glossy-primary ≈ 6.5 ms and distant-glossy ≈ 1.7 ms (both flat). 7b's
+  denominator re-baselines to those numbers.
 - **7b — the split, if decision 3 says go.** The pre-pass/main-pass split with
   compact records; backshift calls deleted; CV terms crossing per decision 7.
   *Checkpoint: bit-identical to 7a (decision 8's fallback if codegen denies it) at

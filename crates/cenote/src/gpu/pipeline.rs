@@ -9,7 +9,8 @@
 //! declares [`Bindings::Scene`] and carries set 0 — binding 0 the TLAS,
 //! binding 1 the environment, binding 2 the bindless material-texture
 //! array (partially bound: a scene binds only as many as it holds), and
-//! binding 3 the renderer-global blue-noise mask (D-095) — written at
+//! binding 3 the renderer-global blue-noise mask (D-095), and binding 4
+//! the renderer-global pairing textures (M6 step 7a) — written at
 //! submission time. Kernels that only chew buffers
 //! ([`Bindings::None`]) have no descriptors at all.
 //!
@@ -62,6 +63,11 @@ pub struct SceneBindings<'a> {
     /// data — it rides this set only because it is the binding model's home for
     /// the read-only sampling resources those stages share.
     pub blue_noise: &'a Buffer,
+    /// The pairing textures (binding 4): the renderer-global self-inverting
+    /// delta images the spatial stage draws its reciprocal neighbours from
+    /// (M6 step 7a, `src/pairing.rs`). The blue-noise mask's binding model,
+    /// for the same reason.
+    pub pairing: &'a Buffer,
 }
 
 /// A compute pipeline plus its layout and (for scene-resource kernels) its
@@ -204,11 +210,16 @@ impl Context {
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .descriptor_count(MAX_SCENE_TEXTURES)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            // The blue-noise mask (D-095): a small renderer-global storage
-            // buffer the reservoir stages read, always written, so no
-            // partially-bound flag.
+            // The blue-noise mask (D-095) and the pairing textures (M6 step
+            // 7a): small renderer-global storage buffers the reservoir stages
+            // read, always written, so no partially-bound flag.
             vk::DescriptorSetLayoutBinding::default()
                 .binding(3)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(4)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
@@ -217,6 +228,7 @@ impl Context {
             vk::DescriptorBindingFlags::empty(),
             vk::DescriptorBindingFlags::empty(),
             vk::DescriptorBindingFlags::PARTIALLY_BOUND,
+            vk::DescriptorBindingFlags::empty(),
             vk::DescriptorBindingFlags::empty(),
         ];
         let mut flags_info =
@@ -235,7 +247,7 @@ impl Context {
                 .descriptor_count(1 + MAX_SCENE_TEXTURES),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1),
+                .descriptor_count(2),
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(1)

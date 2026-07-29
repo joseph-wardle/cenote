@@ -49,6 +49,20 @@
 // spent here. Equivalent to the textbook "shade with a resolve-time shadow ray"
 // but one ray cheaper (D-093).
 //
+// -- Neighbour selection: reciprocal Gaussian pairing (M6 step 7a) -----------
+// Which k pixels are the neighbours comes from the self-inverting pairing
+// textures (pairing.slang, Enhanced §3): slot n's texture names each pixel one
+// partner — Gaussian around it (σ 16 px, the mean partner distance of the
+// R = 30 uniform-disk draw this replaced), never itself, and *reciprocal*:
+// A gathers B on slot n exactly when B gathers A. Any sample-independent
+// selection is unbiased, so no estimator math changes; the Gaussian
+// concentration picks more shift-compatible neighbours (the paper's quality
+// claim), and reciprocity is what lets step 7b compute each pair's two shift
+// evaluations once and share them — today they are computed twice. The reuse
+// gates below are symmetric for the same reason: both sides of a pair must
+// agree on acceptance, so the depth test compares against the *smaller* depth
+// (strictly conservative against the old one-sided test — D-093 posture).
+//
 // -- Neighbour geometry, and the range guard ---------------------------------
 // A neighbour's own target p̂_i needs its surface (position, frame, closure),
 // reconstructed from the path pool at slot `neighbourPixel − base`, where the
@@ -71,6 +85,7 @@
 import bluenoise;
 import color;
 import openpbr;
+import pairing;
 import pathstate;
 import reservoir;
 import reservoir_path;
@@ -103,7 +118,6 @@ struct Params {
     uint height;
     uint capacity;               // path-pool capacity — a neighbour slot must be < this
     uint neighbours;             // k
-    float radius;                // gather radius, pixels
     float normalThreshold;       // reuse gate: dot(n_c, n_i) must exceed this
     float depthThreshold;        // reuse gate: relative camera-depth difference cap
 };
@@ -299,22 +313,16 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
     float canonShareSum = 0.0;       // Σ_i c_c·p̂_c(Y_c)/(c_i·p̂_i(Y_c) + c_c·p̂_c(Y_c))
     float3 cvPairSum = float3(0.0);  // Σ_j ⟨F_c⟩_{←j} — the per-neighbour CV terms
 
-    let k = min(params.neighbours, MAX_SPATIAL_NEIGHBOURS);
+    // k is capped by the pairing textures — one per slot, and fewer than the
+    // accepted store's MAX_SPATIAL_NEIGHBOURS bound.
+    let k = min(params.neighbours, PAIRING_TEXTURES);
     for (uint n = 0; n < k; n++) {
-        let uOffset = sample_ranked_2d(pixel, ranked,
-                                       restirSpatialDimension(n, RESTIR_SPATIAL_OFFSET));
-        // A uniform point on the gather disk (√u for area-uniform radius), rounded
-        // to a pixel offset. The self pixel (zero offset) is the canonical — never
-        // reused as its own neighbour, or it would double-count.
-        let r = params.radius * sqrt(uOffset.x);
-        let theta = 6.28318530718 * uOffset.y;
-        let dx = int(round(r * cos(theta)));
-        let dy = int(round(r * sin(theta)));
-        if (dx == 0 && dy == 0) {
-            continue;
-        }
-        let nx = px + dx;
-        let ny = py + dy;
+        // Slot n's reciprocal partner this frame (module header). Never the
+        // self pixel — the textures have no fixed points — so the canonical
+        // can't be gathered as its own neighbour and double-count.
+        let d = pairingOffset(n, int2(px, py), params.sampleIndex);
+        let nx = px + d.x;
+        let ny = py + d.y;
         if (nx < 0 || ny < 0 || nx >= int(params.width) || ny >= int(params.height)) {
             continue;
         }
@@ -340,12 +348,15 @@ void restir_spatial(uint3 tid: SV_DispatchThreadID) {
         // The reuse gate: neighbours must share this surface's orientation and
         // camera depth, or their light samples describe a different shading
         // context (D-093, stricter than RTXDI's 0.5/0.1 on the normal — the
-        // conservative choice, and the first knob to loosen if convergence lags).
+        // conservative choice, and the first knob to loosen if convergence
+        // lags). Both tests are symmetric in the pair (7a, module header):
+        // the depth difference is measured against the smaller depth, which
+        // accepts only pairs the old one-sided test accepted from both ends.
         if (dot(canonical.normal, neighbourSurface.normal) <= params.normalThreshold) {
             continue;
         }
         if (abs(canonical.depth - neighbourSurface.depth)
-            > params.depthThreshold * canonical.depth) {
+            > params.depthThreshold * min(canonical.depth, neighbourSurface.depth)) {
             continue;
         }
 

@@ -54,6 +54,7 @@ pub mod gpu;
 pub mod lights;
 pub mod material;
 pub mod output;
+mod pairing;
 mod ply;
 pub mod render;
 mod restir;

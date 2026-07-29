@@ -95,14 +95,15 @@ public uint restirDeltaDimension() {
 // ReSTIR spatial-reuse dimensions (M3 step 4). The spatial stage gathers k
 // neighbours around the primary hit and streams each — plus the pixel's own
 // canonical reservoir — through a fresh reservoir under defensive pairwise MIS.
-// Each neighbour needs a 2D disk offset (which pixel) and a 1D reservoir-merge
-// acceptance; the canonical needs one acceptance of its own. A dedicated high
-// block, clear of the initial-RIS candidate (256) and BSDF (512) blocks, so the
-// spatial draws never correlate with the candidates that built the reservoirs
-// being reused. Neighbour n's slot s is `restirSpatialDimension(n, s)`.
+// Each neighbour needs a 1D reservoir-merge acceptance; the canonical needs one
+// acceptance of its own. A dedicated high block, clear of the initial-RIS
+// candidate (256) and BSDF (512) blocks, so the spatial draws never correlate
+// with the candidates that built the reservoirs being reused. Neighbour n's
+// slot s is `restirSpatialDimension(n, s)`. Slots 0-1 held the disk-offset 2D
+// draw until the pairing textures replaced the selection (M6 step 7a,
+// pairing.slang); they stay vacant so the acceptance dimensions never moved.
 public static const uint RESTIR_SPATIAL_BASE = 768;
-static const uint RESTIR_SPATIAL_SLOTS = 4;      // 3 named + 1 reserved
-public static const uint RESTIR_SPATIAL_OFFSET = 0; // disk offset on the neighbour (2D: slots 0,1)
+static const uint RESTIR_SPATIAL_SLOTS = 4;      // 1 named + slots 0-1 retired + 1 reserved
 public static const uint RESTIR_SPATIAL_ACCEPT = 2; // reservoir-merge acceptance
 
 public uint restirSpatialDimension(uint neighbor, uint slot) {
@@ -168,7 +169,9 @@ static const uint SOBOL_DIM1[32] = {
 
 // lowbias32 (the Hash Prospector search): a fast, well-mixed 32-bit hash.
 // Derives the mutually independent seeds each (pixel, dimension) key needs.
-uint lowbias32(uint x) {
+// Public: the pairing textures (pairing.slang) key their per-frame transforms
+// on it too, mirrored bit for bit in `src/pairing.rs`.
+public uint lowbias32(uint x) {
     x ^= x >> 16;
     x *= 0x21f0aaadu;
     x ^= x >> 15;
