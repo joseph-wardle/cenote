@@ -3694,3 +3694,38 @@ a second dispatch, shows). Frame-level, temporal-off lands at ≈4.7/5.0/2.8 ms 
 7.5/8.8/3.1). Measured best-of-three with ~18% ambient compositor load (visible as a ~0.1–0.3 ms
 lift on the untouched spatial-off control row, which the pass-level delta cancels); if anything
 the quiet-GPU numbers are slightly better. Step 7 closes with this rung.
+
+### D-149: 8-0 dresses the room — brass-room clears the sample bar, and the clock sides with brute force
+Status: accepted (2026-07-29). The flagship scene lands: `scenes/brass-room.ron`, a closed
+4.8×4.8×3 m room whose one warm lamp hangs above and behind the camera under a dark iron shade,
+so the only light the room receives has bounced off the 0.2-roughness brass panel standing
+against the back wall — D-139's gate physics, dressed. Terracotta and teal half-walls flank the
+panel (their seam hidden behind it), a checkered floor and clay/porcelain spheres sit in its
+wash, the environment is black, and the icosphere is the one many-lights.ron already carries;
+everything is viewer-editable, and the viewer's file-watch reloads the 2,780-line scene cleanly.
+Two authoring iterations were physics, not taste: the shade (direct floor spill let brute's
+per-vertex NEE compete — the gate's own direct-lit caveat) and brass roughness 0.12 → 0.2 (at
+512² the tighter lobe pushed the hybrid shift into replay across the panel's third of the
+frame; the sample bar failed at 1.25× and 1.29× until both landed). **The decision-2 bar,
+8-spp half: cleared at 1.375×** (cross-referenced relMSE, ReSTIR 0.760 vs brute 1.045; each
+estimator measured against the *other's* deep reference — brute-4096 / ReSTIR-1024, whose
+mutual agreement, relMSE 0.0071, is the informal unbiasedness sanity). **The equal-time half
+fails structurally, and the failure amends D-129's artifact 2.** A ReSTIR frame costs 10.9 ms
+against 2.3 ms per brute spp at 512² (4.7×; the candidate pass alone is 5.7 ms — the M=16
+stream plus the path walk), so 1.375× per-sample quality loses matched seconds 2.9× on the
+flagship; on many-lights, the estimator's best regime (cost ratio 1.48×, 8-spp margin 1.97×),
+the 1/N projection says win 1.33× but the measured 0.5 s pair says **lose 1.23×** — brute's
+stratified sampler converges super-linearly (measured ≈ N^-1.26 at 512²) while resampling's
+chain randomness holds ReSTIR near 1/N. Equal-*sample*, ReSTIR wins every scene at every depth
+tested (many-lights 128-frame margin narrows to 0.00151 vs 0.00164). Resolution (user,
+2026-07-29, the D-142 correct-the-claim precedent): **artifact 2 becomes an equal-sample
+montage at 8 spp plus the cost economics stated plainly** in the README — at matched seconds,
+stratified brute PT currently wins still-frame accumulation; reuse pays per sample, and per
+frame in the warm-started interactive regime that still accumulation cannot measure (a
+motion-based equal-time harness is the truest future form; deferral, not this step). All
+timings were taken beside a running game holding the GPU near 90% — both estimators contended
+equally, so the ratios are contention-fair and the verdict's direction would need a 3.4× flip;
+the relMSE numbers are deterministic and load-independent. Viewer verify-and-report: load,
+render, and live-reload verified from the session log; the orbit warm-start and the
+8192-frame park (M3 6c's backstop, untouched this step) need a quiet desktop and a hand on the
+mouse — deferred to the user, no defect found or suspected.

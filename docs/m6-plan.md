@@ -215,6 +215,7 @@ compiles, clippy-clean (incl. `--features denoise`), tests pass on the GPU machi
    unbiasedness gate, the equal-time PT-vs-ReSTIR-PT figure, the layered
    convergence-under-reuse curves (PT → decay-ramp → ReSTCV). *Checkpoint: ReSTIR PT and
    brute force converge to the same golden; the curves are the poster.*
+   Expanded to a three-rung ladder in §4f (interviewed 2026-07-29).
 9. **Polish** — goldens regenerated and eyeballed, module headers and the reservoir
    Rosetta block current, README flagship section, decisions.md current. *M6 done.*
 
@@ -831,6 +832,91 @@ transforms in the unit tests; the accept/canonical RNG dims are unchanged (only 
 offset dims die); the temporal pass, the recurrence, and the pinned-live harness are
 untouched at both rungs; the §5 fallback seam for step 7 now means "skip 7b" — 7a's
 quality win is not on the seam.
+
+## 4f. Step-8 plan — validation harness + flagship demo (interviewed 2026-07-29)
+
+Interviewed after step 7 closed (`84f1cef`), grounded in an inventory of what the
+earlier milestones already built. The finding that shapes the step: **most of the
+harness exists.** Artifact 1 (the unbiasedness gate) substantially lives in
+`tests/convergence.rs` — deterministic relMSE gates on many-lights and the
+indirect-glossy GI scene, in CI on the GPU machine — with one real hole: the GI gate
+asserts convergence trends and the 1.3× reuse win but never *absolute* agreement
+with the reference (many-lights has its `< 0.05` bound; indirect-glossy has none).
+The figure pipeline exists in the untracked `.git/demo/generate.sh` pre-commit hook
+(cenote-cli + the `tm` metric/tonemap tool + matplotlib, content-keyed caching), but
+its ReSTIR figures are M3-era: many-lights (a DI showcase), equal-*sample* crops, a
+convergence-vs-spp curve — no equal-time figure, no layered curve, no GI scene.
+Every estimator toggle the curves need already exists on `Renderer`
+(mode/spatial/temporal/`set_cv_shading`); the CLI exposes all but the CV toggle.
+And there is **no flagship scene** — `scenes/` holds example + many-lights, the
+indirect-glossy scene is Rust-test-only, and D-129's poster needs a subject. So
+step 8 is: author the scene, close the gate's hole, and point the existing pipeline
+at the finished estimator. Seven decisions, resolved in dependency order.
+
+| # | Decision | Choice | Rationale |
+|---|---|---|---|
+| 1 | Flagship scene | **Author a new hand-written `.ron` — a dressed room on the proven indirect-glossy physics.** A small room lit almost entirely indirectly: a one-sided warm emitter facing a glossy/coated panel, checker or wood-toned floor, two coloured walls for visible bleed, a sphere or two, black-to-dim environment. ~12–20 ops like example.ron, reusing the existing checker texture and primitives; no new asset files; viewer-editable | The physics must match the regime with the measured ~2× win (occluded emitter driving glossy transport) or the poster demos the wrong claim; the test scene itself is visually a panel and a sphere — a weak poster. The RON format already expresses everything needed (inline meshes, textures, full OpenPBR, emissive instances), so authoring is cheap and the scene doubles as the viewer's demo subject. pbrt imports stay branded as the pbrt-comparison figures; many-lights stays the DI story |
+| 2 | Scene acceptance bar | **Measured bar, no new CI gate.** During authoring, an uncommitted calibration sweep: ReSTIR PT at shipping defaults must beat plain PT by ≥1.3× relMSE at 8 spp on the committed scene, and the equal-time comparison must show a win at matched seconds. Numbers recorded in the D-entry. CI gates stay on the existing tuned scenes | The flagship is a figure/demo substrate, not a third gate — the indirect-glossy gate already pins the same regime, so a flagship gate would grow GPU-CI minutes without new information. But an eyeball-only scene risks discovering a muted win after the figure pipeline is built on it; the bar is cheap insurance run once |
+| 3 | Equal-time figure | **The pbrt-figure precedent: one matched budget of pure rendering.** ~0.25–0.5 s each (tuned in calibration so plain PT is still visibly noisy), startup excluded, spp calibrated per machine and hardcoded in the hook with the recalibration comment; shipping ReSTIR PT vs plain PT, 512², cenote's aces look (both sides cenote — the product's output), side-by-side montage labelled with each side's achieved spp. relMSE numbers go in the D-entry, not the image | The protocol is already designed, documented, and trusted in the same script — reusing it keeps the hook one idiom. A second long-budget pair would dilute the poster with a near-identical pair; a timed relMSE curve is artifact 3's job. Labels carry the honest asymmetry: equal seconds means *fewer* ReSTIR frames, and the image still wins |
+| 4 | Curve layers | **Three configs, each adding one mechanism: plain PT → ReSTIR PT with CV off (the zero-CV survivor degenerate, D-130) → shipping ReSTCV.** Both ReSTIR layers temporal-on (the decay ramp is part of the mechanism being shown). Accumulated-frames sweep on the flagship, log-log relMSE, cross-referenced deep references per the floor-report protocol so shared samples don't deflate the tail. Needs `--no-cv` added to cenote-cli (the Renderer toggle exists) | Matches D-129's layered wording exactly, and each gap in the plot is attributable to one mechanism. The honest post-deep-read story (D-142) is parallel ~1/N lines with constant-factor gaps, not a tail rescue — the figure shows that plainly. A fourth spatial-only layer would busy the plot and add a deep reference for a distinction the handoff report already measures |
+| 5 | Unbiasedness gate | **Add the missing absolute agreement bound to the indirect-glossy gate; relMSE stands in for the definition-of-done's "FLIP".** Brute's high-budget relMSE against the ReSTIR reference under a measured-margin threshold (the many-lights 0.05 precedent, threshold set from observed numbers). Definition-of-done wording amended; FLIP remains the perceptual golden metric | Zero new renders — the measurement already runs, only the assert is missing — and it closes the real hole: a shift bias that slowed convergence without stopping it currently passes. A literal FLIP gate would need deep accumulations in CI for a claim the relMSE bound pins more interpretably |
+| 6 | README | **New sibling section beside "Many lights, resampled".** The flagship section carries the equal-time montage and the layered curves; the M3 section stays (it motivates resampling itself and its figures remain true) with its stale "ReSTIR-DI" wording touched up, since `--restir` now runs the unified path estimator | Two sections, two distinct claims: the many-light DI regime and the path-reuse GI regime. Replacing would orphan the clearest didactic case for resampling; merging would tangle two stories in one heavy section |
+| 7 | Rungs & simplification | **Three rungs, one commit each; touch-what-you-change simplification.** 8-0 the scene (author + calibrate + viewer verification); 8a the harness (agreement bound + `--no-cv`); 8b the figures (hook extension + README). Simplify only inside the step's own diff: factor the two convergence gates' near-identical protocol (reference + four measurements + convergence asserts) into one shared helper when adding the bound; hook additions flow through its existing helpers; no refactors outside the diff | Each rung ends green and self-contained (the step-3…7 ladder style), and a gate regression can't hide in a docs-flavoured diff. Step 9 (polish) is the licensed broad pass, so nothing is lost by deferring wider simplification — and convergence.rs genuinely shrinks here while gaining an assert |
+
+The ladder — each rung green and committable:
+
+- **8-0 — the flagship scene.** Author `scenes/<name>.ron` (descriptive name chosen
+  at authoring) to decision 1's brief; run the uncommitted calibration sweep to
+  decision 2's bar, iterating the scene until it clears; verify the
+  definition-of-done viewer bullet on it (orbit warm-starts through the move,
+  re-converges on hold, the frame stops pinning the GPU once settled) — a
+  verify-and-report item: trivial fixes land in-rung, anything larger is surfaced
+  as its own decision. *Checkpoint: the committed scene clears the bar; calibration
+  numbers and the viewer verdict in the D-entry.*
+- **8a — the harness.** The absolute agreement bound on the indirect-glossy gate,
+  with the two gates' shared protocol factored into one helper (decision 7); the
+  `--no-cv` CLI flag beside `--no-spatial`/`--no-temporal`. *Checkpoint: full suite
+  green with the new assert; no golden movement (no estimator change anywhere in
+  step 8); the three CLI toggles compose.*
+- **8b — the figures.** Extend the hook with the flagship montage (decision 3, as
+  re-scoped by the 8-0 calibration — equal-sample, see below) and the layered
+  curves (decision 4) under their own content-keyed cache; the new README section
+  plus the DI-wording touch-up (decision 6). *Checkpoint: the figures regenerate
+  deterministically from the committed scene; the README section reads; the
+  headline numbers in the D-entry. Step 8 closes.*
+
+Leaf defaults settled with the interview (cheap to change, not re-interviewed): the
+curve sweep is frames 1, 2, 4, …, 128 at 256², references cross-estimator per the
+floor-report protocol (the ReSTIR layers measured against a deep brute reference,
+PT against a deep ReSTIR one, depths chosen so the reference residual sits well
+under the smallest measured point); the equal-time budget is fixed during
+calibration and hardcoded like the pbrt spp; new figures land beside the existing
+ones in `docs/` and the hook keeps its degrade-gracefully posture (missing tools
+skip, the commit proceeds); the flagship renders take the aces look throughout
+(`neutral` stays pbrt-figure-only); no new Rust dependencies (the plot rides the
+existing matplotlib script pattern); goldens are untouched by the whole step;
+temporal/spatial/CV defaults in the figures are the shipping ones except where a
+layer explicitly turns one off.
+
+**Calibration outcome (8-0, 2026-07-29) — decisions 2 and 3 re-scoped.** The scene
+(`scenes/brass-room.ron`) clears the 8-spp half of the bar at **1.375×** (after two
+iterations: a dark shade under the lamp killing direct floor spill, and brass
+roughness 0.12 → 0.20 — at 512² the tighter lobe pushed the hybrid shift into
+replay across the panel's third of the frame). Deep cross-agreement
+brute-4096 vs `ReSTIR`-1024: relMSE 0.0071. The **equal-time half of the bar fails
+structurally, not per-scene**: a `ReSTIR` frame costs 10.9 ms vs 2.3 ms per brute
+spp at 512² (4.7×; candidates alone 5.7 ms — the M=16 stream plus the path walk),
+so 1.375× per-sample quality loses matched seconds 2.9×; on many-lights (cost
+ratio 1.48×, 8-spp margin 1.97×) the projection says win but the measurement says
+lose 1.23×, because brute's stratified sampler converges super-linearly (measured
+≈ N^-1.26) while resampling breaks stratification. Equal-*sample*, `ReSTIR` wins
+every scene at every depth tested. Interviewed resolution (user, 2026-07-29):
+**artifact 2 becomes an equal-sample montage at 8 spp plus the honest cost
+economics stated plainly** in the D-entry and README — at matched seconds,
+stratified brute PT currently wins; reuse pays per sample, and per frame in the
+interactive regime (warm-started motion) that still-frame accumulation cannot
+measure. The 8-0 D-entry amends D-129's artifact 2 with the numbers (the D-142
+precedent: correct the claim to what is true).
 
 ## 5. Fallback seams (pre-agreed, in slip order)
 
