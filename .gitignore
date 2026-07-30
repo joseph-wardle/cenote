@@ -9,9 +9,6 @@
 # Texture-prep caches, written beside their source images
 *.dds
 
-# Tier-2 showcase scenes, pulled by tests/scenes/fetch-showcase.sh
-/tests/scenes/showcase/
-
 # Research-corpus sources (scenes/corpus/fetch.sh) and the derived assets
 # import writes beside the curated RONs — only the RONs, README.md, and
 # fetch.sh are tracked there

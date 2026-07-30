@@ -1,0 +1,2480 @@
+// BMW M6 — "tyrant monkey"'s Blend Swap model (CC0, obj2pbrt-converted),
+// distributed in pbrt-v4-scenes; the repo vendors the Blend Swap license
+// note beside the scene (BLENDSWAP_LICENSE.txt). A white M6 coupe on a
+// dark studio floor, lit by one equal-area sunflower-field sky — the
+// showcase car-paint scene: smooth coated diffuse paint, aluminum trim,
+// dielectric head/tail-light glass.
+//
+// Fetch:     scenes/corpus/fetch.sh bmw-m6   (pbrt-v4-scenes @ 30cf4a0)
+// Bootstrap: cenote-cli import sources/pbrt-v4-scenes/bmw-m6/bmw-m6.pbrt
+//            (re-imports go to scratch for diffing — this file is curated
+//            by hand and is the source of truth)
+// Oracle:    pbrt-v4 volpath maxdepth 8, halton (native header; compared
+//            at 2048 spp — the scene ships asking for 65536). Native film
+//            is plain "rgb" at iso 100, pbrt's default, so the native
+//            render compares directly — no film-stripping needed.
+//
+// Import fidelity (7 warnings at bootstrap):
+// - Eighth-res RMSE vs native pbrt: 0.077 raw / 0.029 display-clamped
+//   (cenote 4096 spp vs pbrt 2048). The raw excess is uncorrelated
+//   firefly energy on both sides — see the regularize note — not shading
+//   bias, so raw is spike-dominated and unstable; clamped is the signal
+//   (pbrt's own 512-vs-2048 clamped self-distance is 0.009). Clamped
+//   residual = coat-Fresnel class (ajar/bathroom family) + the LEATHER
+//   approximation + spectral-vs-RGB aluminum. Curating LEATHER is worth
+//   2x: the defaults' 0.8-grey cabin scores 0.059 clamped.
+// - The interior LEATHER is pbrt's `mix` material (unsupported): amount
+//   0.2 with pbrt-v4 semantics (P(second) = amount) = 80% black diffuse
+//   0.01 + 20% white coated 0.8. Curated below into one material — base
+//   0.168, the white's coat at 0.2 weight — replacing the OpenPBR
+//   defaults the importer emits. Approximation, not exact: pbrt picks one
+//   constituent stochastically per shading point; unlock = mix material.
+// - `regularize true` is dropped: pbrt tames the dielectric headlight
+//   caustic spikes, cenote keeps its fireflies at equal spp. Convergence
+//   class, not bias.
+// - Both anisotropic-roughness warnings are equal-axis (carbonfibre,
+//   floor) — averaging is exact, effectively clean.
+// - Film "iso 100" dropped = pbrt's default, a no-op.
+(
+    version: 2,
+    ops: [
+        Settings((
+            name: "main",
+            resolution: Some((1400, 1000)),
+            spp: Some(65536),
+            max_bounces: Some(8),
+            seed: None,
+        )),
+        Camera((
+            name: "main",
+            position: Some((-10.999999, 0.7999998, -5.0)),
+            look_at: Some((-10.132728, 0.6747273, -4.5181828)),
+            up: Some((0.10950784, 0.9921223, 0.06083769)),
+            vfov_degrees: Some(30.0),
+            focus_distance: None,
+            aperture_radius: Some(0.0),
+        )),
+        Environment((
+            name: "sky",
+            path: Some(Some("bmw-m6-sky.exr")),
+            tint: None,
+            transform: None,
+        )),
+        Material((
+            name: "CarPaint",
+            base_color: Some(Constant((0.7, 0.7, 0.7))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: Some(1.0),
+            coat_color: None,
+            coat_roughness: Some(0.0),
+            coat_ior: Some(1.5),
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "HeadLight",
+            base_color: Some(Constant((0.64, 0.64, 0.64))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: Some(1.0),
+            coat_color: None,
+            coat_roughness: Some(0.31940508),
+            coat_ior: Some(1.5),
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "HeadLightGlass",
+            base_color: None,
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: None,
+            specular_roughness: Some(Constant(0.0)),
+            specular_ior: Some(1.5),
+            transmission_weight: Some(1.0),
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "HeadLightGlass01",
+            base_color: None,
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: None,
+            specular_roughness: Some(Constant(0.0)),
+            specular_ior: Some(1.5),
+            transmission_weight: Some(1.0),
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "LEATHER-white",
+            base_color: Some(Constant((0.8, 0.8, 0.8))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: Some(1.0),
+            coat_color: None,
+            coat_roughness: Some(0.31622776),
+            coat_ior: Some(1.5),
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "LEATHER-black",
+            base_color: Some(Constant((0.01, 0.01, 0.01))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        // Curated: pbrt's `mix` material is unsupported (imported as OpenPBR
+        // defaults). pbrt-v4 mix semantics (materials.h ChooseMaterial:
+        // P(second) = amount) make this 0.8 x LEATHER-black + 0.2 x
+        // LEATHER-white; the stochastic selection is approximated as one
+        // material — blended base color, and the white constituent's coat
+        // carried at 0.2 weight.
+        Material((
+            name: "LEATHER",
+            base_color: Some(Constant((0.168, 0.168, 0.168))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: Some(0.2),
+            coat_color: None,
+            coat_roughness: Some(0.31622776),
+            coat_ior: Some(1.5),
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "LightGlass",
+            base_color: None,
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: None,
+            specular_roughness: Some(Constant(0.0)),
+            specular_ior: Some(1.5),
+            transmission_weight: Some(1.0),
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "LogoAzure",
+            base_color: Some(Constant((0.157092, 0.390301, 0.641521))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "LogoBlack",
+            base_color: Some(Constant((0.064, 0.064, 0.064))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "LogoBlue",
+            base_color: Some(Constant((0.191944, 0.515774, 0.616524))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "LogoRed",
+            base_color: Some(Constant((0.673442, 0.105791, 0.105791))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "LogoSilver",
+            base_color: Some(Constant((0.913, 0.921, 0.925))),
+            base_diffuse_roughness: None,
+            base_metalness: Some(Constant(1.0)),
+            specular_weight: None,
+            specular_roughness: Some(Constant(0.0)),
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "LogoWhite",
+            base_color: Some(Constant((0.773397, 0.773397, 0.773397))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "None",
+            base_color: Some(Constant((0.8, 0.8, 0.8))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: Some(1.0),
+            coat_color: None,
+            coat_roughness: Some(0.56234133),
+            coat_ior: Some(1.5),
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "Seal",
+            base_color: Some(Constant((0.073077, 0.072906, 0.072906))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: Some(1.0),
+            coat_color: None,
+            coat_roughness: Some(0.31940508),
+            coat_ior: Some(1.5),
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "WheelRim",
+            base_color: Some(Constant((0.913, 0.921, 0.925))),
+            base_diffuse_roughness: None,
+            base_metalness: Some(Constant(1.0)),
+            specular_weight: None,
+            specular_roughness: Some(Constant(0.4728708)),
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: Some(1.0),
+            coat_color: None,
+            coat_roughness: Some(0.0),
+            coat_ior: Some(1.5),
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "WindowSeal",
+            base_color: Some(Constant((0.030770008, 0.029060025, 0.029060025))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: Some(1.0),
+            coat_color: None,
+            coat_roughness: Some(0.31940508),
+            coat_ior: Some(1.5),
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "WindscreenGlass",
+            base_color: None,
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: None,
+            specular_roughness: Some(Constant(0.0)),
+            specular_ior: Some(1.5),
+            transmission_weight: Some(1.0),
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "brakeDisc",
+            base_color: Some(Constant((0.594118, 0.58856, 0.58856))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: Some(1.0),
+            coat_color: None,
+            coat_roughness: Some(0.31940508),
+            coat_ior: Some(1.5),
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "brake_clipper",
+            base_color: Some(Constant((0.492676, 0.132439, 0.132439))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: Some(1.0),
+            coat_color: None,
+            coat_roughness: Some(0.31940508),
+            coat_ior: Some(1.5),
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "carbonfibre",
+            base_color: Some(Constant((0.034283, 0.032314, 0.032314))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: Some(1.0),
+            coat_color: None,
+            coat_roughness: Some(0.31622776),
+            coat_ior: Some(1.5),
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "floor",
+            base_color: Some(Constant((0.0442848, 0.0442848, 0.0442848))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: Some(1.0),
+            coat_color: None,
+            coat_roughness: Some(0.31940508),
+            coat_ior: Some(1.5),
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "grillmetal",
+            base_color: Some(Constant((0.913, 0.921, 0.925))),
+            base_diffuse_roughness: None,
+            base_metalness: Some(Constant(1.0)),
+            specular_weight: None,
+            specular_roughness: Some(Constant(0.0)),
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "mattefloor",
+            base_color: Some(Constant((0.095488, 0.071542, 0.030397))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "shinychrome",
+            base_color: Some(Constant((0.913, 0.921, 0.925))),
+            base_diffuse_roughness: None,
+            base_metalness: Some(Constant(1.0)),
+            specular_weight: None,
+            specular_roughness: Some(Constant(0.31622776)),
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "tire",
+            base_color: Some(Constant((0.06394, 0.06235, 0.06235))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: Some(1.0),
+            coat_color: None,
+            coat_roughness: Some(0.5679915),
+            coat_ior: Some(1.5),
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "tiresidewall",
+            base_color: Some(Constant((0.06394, 0.06235, 0.06235))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: Some(1.0),
+            coat_color: None,
+            coat_roughness: Some(0.5679915),
+            coat_ior: Some(1.5),
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Mesh((
+            name: "mesh_00001-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00001.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00001-0",
+            mesh: Some("mesh_00001-0"),
+            material: Some("LightGlass"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00002-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00002.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00002-0",
+            mesh: Some("mesh_00002-0"),
+            material: Some("CarPaint"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00003-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00003.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00003-0",
+            mesh: Some("mesh_00003-0"),
+            material: Some("carbonfibre"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00004-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00004.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00004-0",
+            mesh: Some("mesh_00004-0"),
+            material: Some("CarPaint"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00005-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00005.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00005-0",
+            mesh: Some("mesh_00005-0"),
+            material: Some("CarPaint"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00006-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00006.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00006-0",
+            mesh: Some("mesh_00006-0"),
+            material: Some("CarPaint"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00007-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00007.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00007-0",
+            mesh: Some("mesh_00007-0"),
+            material: Some("shinychrome"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00008-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00008.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00008-0",
+            mesh: Some("mesh_00008-0"),
+            material: Some("shinychrome"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00009-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00009.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00009-0",
+            mesh: Some("mesh_00009-0"),
+            material: Some("CarPaint"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00010-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00010.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00010-0",
+            mesh: Some("mesh_00010-0"),
+            material: Some("LightGlass"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00011-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00011.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00011-0",
+            mesh: Some("mesh_00011-0"),
+            material: Some("shinychrome"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00012-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00012.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00012-0",
+            mesh: Some("mesh_00012-0"),
+            material: Some("HeadLight"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00013-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00013.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00013-0",
+            mesh: Some("mesh_00013-0"),
+            material: Some("None"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00014-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00014.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00014-0",
+            mesh: Some("mesh_00014-0"),
+            material: Some("LEATHER"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00015-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00015.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00015-0",
+            mesh: Some("mesh_00015-0"),
+            material: Some("brakeDisc"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00016-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00016.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00016-0",
+            mesh: Some("mesh_00016-0"),
+            material: Some("mattefloor"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00017-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00017.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00017-0",
+            mesh: Some("mesh_00017-0"),
+            material: Some("Seal"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00018-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00018.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00018-0",
+            mesh: Some("mesh_00018-0"),
+            material: Some("None"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00019-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00019.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00019-0",
+            mesh: Some("mesh_00019-0"),
+            material: Some("CarPaint"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00020-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00020.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00020-0",
+            mesh: Some("mesh_00020-0"),
+            material: Some("shinychrome"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00021-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00021.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00021-0",
+            mesh: Some("mesh_00021-0"),
+            material: Some("HeadLight"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00022-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00022.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00022-0",
+            mesh: Some("mesh_00022-0"),
+            material: Some("LogoBlack"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00023-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00023.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00023-0",
+            mesh: Some("mesh_00023-0"),
+            material: Some("LogoBlue"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00024-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00024.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00024-0",
+            mesh: Some("mesh_00024-0"),
+            material: Some("LogoSilver"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00025-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00025.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00025-0",
+            mesh: Some("mesh_00025-0"),
+            material: Some("LogoWhite"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00026-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00026.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00026-0",
+            mesh: Some("mesh_00026-0"),
+            material: Some("LogoBlack"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00027-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00027.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00027-0",
+            mesh: Some("mesh_00027-0"),
+            material: Some("LogoBlue"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00028-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00028.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00028-0",
+            mesh: Some("mesh_00028-0"),
+            material: Some("LogoSilver"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00029-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00029.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00029-0",
+            mesh: Some("mesh_00029-0"),
+            material: Some("LogoWhite"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00030-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00030.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00030-0",
+            mesh: Some("mesh_00030-0"),
+            material: Some("shinychrome"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00031-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00031.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00031-0",
+            mesh: Some("mesh_00031-0"),
+            material: Some("shinychrome"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00032-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00032.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00032-0",
+            mesh: Some("mesh_00032-0"),
+            material: Some("CarPaint"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00033-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00033.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00033-0",
+            mesh: Some("mesh_00033-0"),
+            material: Some("shinychrome"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00034-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00034.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00034-0",
+            mesh: Some("mesh_00034-0"),
+            material: Some("tiresidewall"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00035-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00035.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00035-0",
+            mesh: Some("mesh_00035-0"),
+            material: Some("tire"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00036-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00036.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00036-0",
+            mesh: Some("mesh_00036-0"),
+            material: Some("tire"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00037-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00037.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00037-0",
+            mesh: Some("mesh_00037-0"),
+            material: Some("tiresidewall"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00038-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00038.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00038-0",
+            mesh: Some("mesh_00038-0"),
+            material: Some("tiresidewall"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00039-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00039.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00039-0",
+            mesh: Some("mesh_00039-0"),
+            material: Some("tire"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00040-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00040.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00040-0",
+            mesh: Some("mesh_00040-0"),
+            material: Some("WheelRim"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00041-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00041.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00041-0",
+            mesh: Some("mesh_00041-0"),
+            material: Some("WheelRim"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00042-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00042.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00042-0",
+            mesh: Some("mesh_00042-0"),
+            material: Some("tire"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00043-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00043.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00043-0",
+            mesh: Some("mesh_00043-0"),
+            material: Some("tiresidewall"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00044-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00044.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00044-0",
+            mesh: Some("mesh_00044-0"),
+            material: Some("brake_clipper"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00045-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00045.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00045-0",
+            mesh: Some("mesh_00045-0"),
+            material: Some("WheelRim"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00046-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00046.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00046-0",
+            mesh: Some("mesh_00046-0"),
+            material: Some("LogoAzure"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00047-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00047.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00047-0",
+            mesh: Some("mesh_00047-0"),
+            material: Some("LogoBlack"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00048-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00048.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00048-0",
+            mesh: Some("mesh_00048-0"),
+            material: Some("LogoBlue"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00049-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00049.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00049-0",
+            mesh: Some("mesh_00049-0"),
+            material: Some("LogoRed"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00050-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00050.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00050-0",
+            mesh: Some("mesh_00050-0"),
+            material: Some("LogoSilver"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00051-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00051.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00051-0",
+            mesh: Some("mesh_00051-0"),
+            material: Some("CarPaint"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00052-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00052.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00052-0",
+            mesh: Some("mesh_00052-0"),
+            material: Some("LogoBlack"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00053-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00053.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00053-0",
+            mesh: Some("mesh_00053-0"),
+            material: Some("LogoBlue"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00054-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00054.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00054-0",
+            mesh: Some("mesh_00054-0"),
+            material: Some("LogoSilver"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00055-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00055.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00055-0",
+            mesh: Some("mesh_00055-0"),
+            material: Some("LogoWhite"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00056-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00056.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00056-0",
+            mesh: Some("mesh_00056-0"),
+            material: Some("LogoBlack"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00057-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00057.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00057-0",
+            mesh: Some("mesh_00057-0"),
+            material: Some("LogoBlue"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00058-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00058.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00058-0",
+            mesh: Some("mesh_00058-0"),
+            material: Some("LogoSilver"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00059-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00059.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00059-0",
+            mesh: Some("mesh_00059-0"),
+            material: Some("LogoWhite"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00060-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00060.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00060-0",
+            mesh: Some("mesh_00060-0"),
+            material: Some("LogoBlack"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00061-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00061.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00061-0",
+            mesh: Some("mesh_00061-0"),
+            material: Some("LogoBlue"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00062-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00062.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00062-0",
+            mesh: Some("mesh_00062-0"),
+            material: Some("LogoSilver"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00063-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00063.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00063-0",
+            mesh: Some("mesh_00063-0"),
+            material: Some("LogoWhite"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00064-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00064.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00064-0",
+            mesh: Some("mesh_00064-0"),
+            material: Some("LogoBlack"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00065-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00065.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00065-0",
+            mesh: Some("mesh_00065-0"),
+            material: Some("LogoBlue"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00066-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00066.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00066-0",
+            mesh: Some("mesh_00066-0"),
+            material: Some("LogoSilver"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00067-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00067.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00067-0",
+            mesh: Some("mesh_00067-0"),
+            material: Some("LogoWhite"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00068-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00068.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00068-0",
+            mesh: Some("mesh_00068-0"),
+            material: Some("None"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00069-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00069.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00069-0",
+            mesh: Some("mesh_00069-0"),
+            material: Some("LEATHER"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00070-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00070.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00070-0",
+            mesh: Some("mesh_00070-0"),
+            material: Some("LEATHER"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00071-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00071.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00071-0",
+            mesh: Some("mesh_00071-0"),
+            material: Some("CarPaint"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00072-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00072.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00072-0",
+            mesh: Some("mesh_00072-0"),
+            material: Some("shinychrome"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00073-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00073.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00073-0",
+            mesh: Some("mesh_00073-0"),
+            material: Some("shinychrome"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00074-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00074.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00074-0",
+            mesh: Some("mesh_00074-0"),
+            material: Some("mattefloor"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00075-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00075.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00075-0",
+            mesh: Some("mesh_00075-0"),
+            material: Some("grillmetal"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00076-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00076.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00076-0",
+            mesh: Some("mesh_00076-0"),
+            material: Some("WindowSeal"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00077-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00077.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00077-0",
+            mesh: Some("mesh_00077-0"),
+            material: Some("WindowSeal"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00078-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00078.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00078-0",
+            mesh: Some("mesh_00078-0"),
+            material: Some("CarPaint"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00079-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00079.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00079-0",
+            mesh: Some("mesh_00079-0"),
+            material: Some("HeadLightGlass"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00080-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00080.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00080-0",
+            mesh: Some("mesh_00080-0"),
+            material: Some("WindowSeal"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00081-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00081.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00081-0",
+            mesh: Some("mesh_00081-0"),
+            material: Some("CarPaint"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00082-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00082.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00082-0",
+            mesh: Some("mesh_00082-0"),
+            material: Some("mattefloor"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00083-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00083.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00083-0",
+            mesh: Some("mesh_00083-0"),
+            material: Some("CarPaint"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00084-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00084.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00084-0",
+            mesh: Some("mesh_00084-0"),
+            material: Some("None"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00085-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00085.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00085-0",
+            mesh: Some("mesh_00085-0"),
+            material: Some("None"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00086-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00086.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00086-0",
+            mesh: Some("mesh_00086-0"),
+            material: Some("WindowSeal"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00087-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00087.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00087-0",
+            mesh: Some("mesh_00087-0"),
+            material: Some("WindowSeal"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00088-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00088.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00088-0",
+            mesh: Some("mesh_00088-0"),
+            material: Some("WindowSeal"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00089-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00089.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00089-0",
+            mesh: Some("mesh_00089-0"),
+            material: Some("WheelRim"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00090-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00090.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00090-0",
+            mesh: Some("mesh_00090-0"),
+            material: Some("WheelRim"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00091-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00091.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00091-0",
+            mesh: Some("mesh_00091-0"),
+            material: Some("WheelRim"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00092-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00092.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00092-0",
+            mesh: Some("mesh_00092-0"),
+            material: Some("CarPaint"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00093-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00093.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00093-0",
+            mesh: Some("mesh_00093-0"),
+            material: Some("CarPaint"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00094-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00094.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00094-0",
+            mesh: Some("mesh_00094-0"),
+            material: Some("CarPaint"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00095-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00095.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00095-0",
+            mesh: Some("mesh_00095-0"),
+            material: Some("HeadLightGlass"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00096-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00096.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00096-0",
+            mesh: Some("mesh_00096-0"),
+            material: Some("WindscreenGlass"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00097-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00097.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00097-0",
+            mesh: Some("mesh_00097-0"),
+            material: Some("WindscreenGlass"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00098-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00098.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00098-0",
+            mesh: Some("mesh_00098-0"),
+            material: Some("WindowSeal"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00099-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00099.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00099-0",
+            mesh: Some("mesh_00099-0"),
+            material: Some("WindowSeal"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00100-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00100.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00100-0",
+            mesh: Some("mesh_00100-0"),
+            material: Some("WindscreenGlass"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00101-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00101.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00101-0",
+            mesh: Some("mesh_00101-0"),
+            material: Some("LEATHER"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00102-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00102.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00102-0",
+            mesh: Some("mesh_00102-0"),
+            material: Some("WindowSeal"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00103-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00103.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00103-0",
+            mesh: Some("mesh_00103-0"),
+            material: Some("WindowSeal"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00104-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00104.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00104-0",
+            mesh: Some("mesh_00104-0"),
+            material: Some("carbonfibre"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00105-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00105.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00105-0",
+            mesh: Some("mesh_00105-0"),
+            material: Some("WindscreenGlass"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00106-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00106.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00106-0",
+            mesh: Some("mesh_00106-0"),
+            material: Some("floor"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00107-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00107.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00107-0",
+            mesh: Some("mesh_00107-0"),
+            material: Some("WindowSeal"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00108-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00108.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00108-0",
+            mesh: Some("mesh_00108-0"),
+            material: Some("LEATHER"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00109-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00109.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00109-0",
+            mesh: Some("mesh_00109-0"),
+            material: Some("brakeDisc"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00110-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00110.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00110-0",
+            mesh: Some("mesh_00110-0"),
+            material: Some("HeadLightGlass"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00111-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00111.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00111-0",
+            mesh: Some("mesh_00111-0"),
+            material: Some("HeadLightGlass01"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00112-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00112.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00112-0",
+            mesh: Some("mesh_00112-0"),
+            material: Some("CarPaint"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00113-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00113.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00113-0",
+            mesh: Some("mesh_00113-0"),
+            material: Some("shinychrome"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "mesh_00114-0",
+            source: Some(Ply(
+                path: "sources/pbrt-v4-scenes/bmw-m6/geometry/mesh_00114.ply",
+            )),
+        )),
+        Instance((
+            name: "mesh_00114-0",
+            mesh: Some("mesh_00114-0"),
+            material: Some("LEATHER"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+    ],
+)

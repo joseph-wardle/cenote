@@ -54,8 +54,7 @@ matching pixel values.
 
 ## Tier 2: showcase scenes
 
-Heavier scenes stay out of the repo. `fetch-showcase.sh` pulls the
-BMW M6 (CC0, ~72 MB with its sky) from
-[pbrt-v4-scenes](https://github.com/mmp/pbrt-v4-scenes) at a pinned
-commit — git's content addressing is the checksum — into
-`tests/scenes/showcase/`, which is gitignored.
+Heavier scenes live in the research-scene corpus now —
+`scenes/corpus/` holds the curated RONs (the BMW M6 among them) and
+`scenes/corpus/fetch.sh` pulls their sources at the same pinned commit
+this tier's `fetch-showcase.sh` used before the corpus absorbed it.

@@ -270,7 +270,7 @@ cargo test --workspace   # on the GPU machine — includes the goldens
 | `crates/cenote-wire/` | The render server's wire: explicit change-set mirror types, MessagePack framing, the shm layout — and the byte-exact cross-language drift guard |
 | `hydra/` | The C++ half of M4 — the `hdCenote` scene-index-native Hydra render delegate, its transport client, and the C++ wire mirror with the drift-guard corpus test (see its README) |
 | `scenes/` | Hand-written example scene — the scene model in one readable `.ron` file |
-| `tests/scenes/` | The vendored CC0 pbrt corpus (see its README for provenance) and the showcase fetch script |
+| `tests/scenes/` | The vendored CC0 pbrt corpus (see its README for provenance) |
 | `docs/charter.md` | Project charter: vision, locked decisions, milestone roadmap |
 | `docs/decisions.md` | Append-only log of every design decision and its rationale |
 | `docs/m0-plan.md` | The M0 implementation plan |

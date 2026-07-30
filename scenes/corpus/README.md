@@ -38,7 +38,7 @@ mv /tmp/<name>-sky.exr scenes/corpus/
 | bathroom | Bitterli | CC0 (Mareck) | landed (rung 3) | Floor/Foam displacement dropped — grazing window light makes this the dominant divergence (foam ~1.9×); rug's alpha cutout renders solid (shape-alpha, bistro rung); equal-axis aniso exact |
 | kitchen | Bitterli | CC BY 3.0 (Jay-Artist) | landed (rung 3) | window Blinds' diffuse transmission flattened to opaque; Cushion/BreadBin displacement — together the whole divergence (0.053→0.015 with pbrt degraded to match); equal-axis aniso exact |
 | zero-day | pbrt-v4-scenes | Beeple's release | landed (rung 4) | Film sensor/whitebalance/ISO dropped — native 0.495 is tone, 0.035 against a film-stripped reference; ×0.01 roughness-scale + coat-roughness textures flattened on the 30 RustMixed metals; BASE ROOM displacement; the rung found and fixed the mirrored-emitter renderer bug |
-| bmw-m6 | pbrt-v4-scenes | CC0 | pending (rung 5) | near-clean |
+| bmw-m6 | pbrt-v4-scenes | CC0 (tyrant monkey) | landed (rung 5) | interior LEATHER `mix` curated to a hand-blend (80/20 per pbrt-v4 mix semantics); `regularize` dropped — cenote keeps its dielectric-glass fireflies (convergence, not bias); equal-axis aniso exact |
 | crown | pbrt-v4-scenes | per repo README | pending (rung 6) | dispersion → 1.5; gem media (M8) |
 | bistro | pbrt-v4-scenes | CC-BY 4.0 | pending (rung 7) | shape-alpha foliage (importer-debt decision) |
 | kroken | pbrt-v4-scenes | CC-BY-**ND** 2.0 | pending (rung 8) | UV transforms; procedural textures; ND commit decision |

@@ -193,11 +193,37 @@ emissive PLYs wind with their authored normals (a future
 disagreeing-mesh scene would follow winding — cenote's rule — where
 pbrt follows authored normals; documented, adversarial-only so far).
 
+**Rung-5 notes.** bmw-m6 landed, no code changes — the recon's
+"near-clean" held. The one real gap is the interior LEATHER, pbrt's
+`mix` material (unsupported → OpenPBR defaults at import): pbrt-v4's
+semantics put `amount` on the *second* material (materials.h
+`ChooseMaterial`: P(second) = amount), so amount 0.2 over
+[black, white] is 80% black diffuse 0.01 + 20% white coated 0.8 — dark
+seats. Curated to one blended material (base 0.168, the white's coat at
+0.2 weight); worth 2× on the score — the defaults' bright cabin glows
+through every window (0.059 → 0.029 clamped). Eighth-res RMSE vs native
+pbrt: 0.077 raw / 0.029 display-clamped (cenote 4096 spp, pbrt 2048).
+The raw-vs-clamped gap is uncorrelated firefly energy on *both* sides —
+pbrt's `regularize true` is dropped at import and even its reference
+speckles its glossy floor — so raw RMSE is spike-dominated and unstable
+(cenote 1024→4096 spp moved raw 0.069→0.075 while clamped improved
+0.035→0.030; pbrt's own 512-vs-2048 clamped self-distance is 0.009);
+the clamped number is the signal. Clamped
+residual = coat-Fresnel (ajar/bathroom family) + LEATHER approximation
++ spectral-vs-RGB aluminum rims. Both aniso warnings equal-axis (exact);
+`iso 100` is pbrt's default (no-op) — so no film-stripping needed,
+unlike zero-day. The ladder's fold happened: `tests/scenes/showcase/`
+(the old tier-2 BMW fetch) is retired — fetch-showcase.sh deleted, its
+gitignore entry dropped, tests/scenes/README.md tier-2 section now
+points at the corpus, which uses the same commit pin.
+
 **Documented-only renderer gaps** (unlock noted in each RON header when
 its rung lands): anisotropic roughness, displacement, diffuse-transmission
 lobe, textured coat roughness, dispersion (all unassigned material-depth
 work); film/sensor response (sensor, white balance, ISO — zero-day);
-participating media (M8).
+mix materials (bmw-m6 LEATHER, curated to a hand-blend);
+firefly regularization (integrator `regularize` — convergence class,
+not bias; bmw-m6); participating media (M8).
 
 ## 4. The ladder
 
@@ -212,7 +238,8 @@ build (`~/Documents/pbrt-v4/build/pbrt`, the README-figure one).
 | 2 | **Done**: glass-of-water, coffee, spaceship, teapot-full, water-caustic; the PFM reader, output-stem sky naming, and teapot's curated checker landed with it |
 | 3 | **Done**: bathroom, kitchen — no code changes; the recon's gap map held exactly (rung-3 notes below) |
 | 4 | **Done**: zero-day — the emission-side eyeball found and fixed the mirrored-emitter renderer bug; film response documented as a new gap class (rung-4 notes below) |
-| 5–10 | Heavies, one each: bmw-m6 (consider folding tests/scenes/showcase into the corpus here), crown, bistro (shape-alpha decision), kroken (ND decision), watercolor (ND), sanmiguel (redefinition fix) |
+| 5 | **Done**: bmw-m6 — no code changes; LEATHER mix curated to a hand-blend, tests/scenes/showcase folded into the corpus (rung-5 notes below) |
+| 6–10 | Heavies, one each: crown, bistro (shape-alpha decision), kroken (ND decision), watercolor (ND), sanmiguel (redefinition fix) |
 | 11 | Swap rung — **gated on M6 closed** (viewer checklist → D-152 addendum): measure veach-ajar and zero-day against brass-room/many-lights on the reuse gate + convergence harness; if they clear, migrate gates, goldens, README figures; either way the numbers land in the D-entry |
 | 12 | Close: README final, full-corpus contact sheet, deferrals pointer, closing D-entry |
 

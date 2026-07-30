@@ -9,9 +9,8 @@
 # Two sources, one recipe each. Bitterli's zips download whole (a few MB
 # to ~40 MB, each carrying its own license text). pbrt-v4-scenes comes as
 # one sparse partial clone at a pinned commit — git verifies every blob
-# against the commit hash, so the pin is the checksum (the same pin as
-# tests/scenes/fetch-showcase.sh) — and each scene fetch just widens the
-# sparse cone. Both are idempotent: a scene that already materialized is
+# against the commit hash, so the pin is the checksum — and each scene
+# fetch just widens the sparse cone. Both are idempotent: a scene that already materialized is
 # skipped, so re-running after adding a name is cheap.
 set -eu
 
