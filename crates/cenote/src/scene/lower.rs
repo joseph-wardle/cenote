@@ -1023,7 +1023,8 @@ mod tests {
         assert_eq!(mesh.triangles.len(), 2);
         // No authored normals: derived, and this quad's winding faces +Z.
         assert!(mesh.normals.iter().all(|n| n.abs_diff_eq(Vec3::Z, 1e-6)));
-        assert_eq!(mesh.uvs[2], Vec2::new(1.0, 1.0));
+        // Authored (1, 1); the reader flips v into sampler storage order.
+        assert_eq!(mesh.uvs[2], Vec2::new(1.0, 0.0));
         assert_eq!(host.triangle_lights.len(), 2);
 
         // A file that exists but isn't PLY is a host-phase rejection that

@@ -1,0 +1,439 @@
+// 'Veach, Bidir Room' — Benedikt Bitterli (CC0, public domain; crediting
+// the artist encouraged). The bidirectional-transport room: both bulbs
+// hide inside their fixtures — a torchiere floor lamp throwing the room's
+// light off the ceiling, a shaded tube spot on the wall — so almost all
+// light arrives indirectly, past a glass egg for good measure. pbrt's own
+// oracle integrator for it is bdpt; cenote renders it with a
+// unidirectional path tracer, which converges to the same image but earns
+// its noise here by design.
+// Official pbrt-v4 export from https://benedikt-bitterli.me/resources/ —
+// `scenes/corpus/fetch.sh veach-bidir` materializes the source; this RON
+// was bootstrapped once by `cenote-cli import
+// sources/bitterli/veach-bidir/scene-v4.pbrt` and is the source of truth
+// — re-imports diff into scratch, never over it.
+//
+// Import fidelity: exact in effect — one equal-axis roughness pair
+// averaged to itself.
+(
+    version: 2,
+    ops: [
+        Settings((
+            name: "main",
+            resolution: Some((1024, 1024)),
+            spp: Some(64),
+            max_bounces: Some(7),
+            seed: None,
+        )),
+        Camera((
+            name: "main",
+            position: Some((16.215494, 4.051672, 0.011486382)),
+            look_at: Some((15.215518, 4.047002, 0.006461745)),
+            up: Some((-0.00467005, 0.9999893, -0.00002346586)),
+            vfov_degrees: Some(35.0),
+            focus_distance: None,
+            aperture_radius: Some(0.0),
+        )),
+        Material((
+            name: "Diffuse",
+            base_color: Some(Constant((0.5, 0.5, 0.5))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "Glass",
+            base_color: None,
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: None,
+            specular_roughness: Some(Constant(0.0)),
+            specular_ior: Some(1.5),
+            transmission_weight: Some(1.0),
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "Lamp",
+            base_color: Some(Constant((0.5251278, 0.39264864, 0.31059048))),
+            base_diffuse_roughness: None,
+            base_metalness: Some(Constant(1.0)),
+            specular_weight: None,
+            specular_roughness: Some(Constant(0.5)),
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "Wood",
+            base_color: Some(Constant((0.32963, 0.257976, 0.150292))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Mesh((
+            name: "Mesh007-0",
+            source: Some(Ply(
+                path: "sources/bitterli/veach-bidir/models/Mesh007.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh007-0",
+            mesh: Some("Mesh007-0"),
+            material: Some("Lamp"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh004-0",
+            source: Some(Ply(
+                path: "sources/bitterli/veach-bidir/models/Mesh004.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh004-0",
+            mesh: Some("Mesh004-0"),
+            material: Some("Diffuse"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "trianglemesh-0",
+            source: Some(Inline(
+                positions: [
+                    (-2.75736, 6.0, 2.31365),
+                    (-2.75736, 6.0, 2.86515),
+                    (-2.20586, 6.0, 2.86515),
+                    (-2.20586, 6.0, 2.31365),
+                ],
+                normals: Some([
+                    (0.000000158516, 1.0, 0.00000000000000692894),
+                    (0.000000158516, 1.0, 0.00000000000000692894),
+                    (0.000000158516, 1.0, 0.00000000000000692894),
+                    (0.000000158516, 1.0, 0.00000000000000692894),
+                ]),
+                uvs: Some([
+                    (0.0, 1.0),
+                    (1.0, 1.0),
+                    (1.0, 0.0),
+                    (0.0, 0.0),
+                ]),
+                triangles: [
+                    (0, 1, 2),
+                    (0, 2, 3),
+                ],
+            )),
+        )),
+        Material((
+            name: "Diffuse-glow-0",
+            base_color: Some(Constant((0.5, 0.5, 0.5))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: Some(1.0),
+            emission_color: Some(Constant((523.2578, 523.2578, 523.2578))),
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Instance((
+            name: "trianglemesh-0",
+            mesh: Some("trianglemesh-0"),
+            material: Some("Diffuse-glow-0"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "trianglemesh-1",
+            source: Some(Inline(
+                positions: [
+                    (-2.74778, 5.17227, -3.73363),
+                    (-2.768, 5.05027, -3.7902),
+                    (-2.63386, 5.03607, -3.80751),
+                    (-2.61364, 5.15807, -3.75094),
+                ],
+                normals: Some([
+                    (0.070781, -0.429239, 0.900413),
+                    (0.070781, -0.429239, 0.900413),
+                    (0.070781, -0.429239, 0.900413),
+                    (0.070781, -0.429239, 0.900413),
+                ]),
+                uvs: Some([
+                    (0.0, 1.0),
+                    (1.0, 1.0),
+                    (1.0, 0.0),
+                    (0.0, 0.0),
+                ]),
+                triangles: [
+                    (0, 1, 2),
+                    (0, 2, 3),
+                ],
+            )),
+        )),
+        Material((
+            name: "Diffuse-glow-1",
+            base_color: Some(Constant((0.5, 0.5, 0.5))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: Some(1.0),
+            emission_color: Some(Constant((12048.179, 8605.842, 6196.206))),
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Instance((
+            name: "trianglemesh-1",
+            mesh: Some("trianglemesh-1"),
+            material: Some("Diffuse-glow-1"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh001-0",
+            source: Some(Ply(
+                path: "sources/bitterli/veach-bidir/models/Mesh001.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh001-0",
+            mesh: Some("Mesh001-0"),
+            material: Some("Lamp"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh005-0",
+            source: Some(Ply(
+                path: "sources/bitterli/veach-bidir/models/Mesh005.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh005-0",
+            mesh: Some("Mesh005-0"),
+            material: Some("Lamp"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh008-0",
+            source: Some(Ply(
+                path: "sources/bitterli/veach-bidir/models/Mesh008.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh008-0",
+            mesh: Some("Mesh008-0"),
+            material: Some("Diffuse"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh002-0",
+            source: Some(Ply(
+                path: "sources/bitterli/veach-bidir/models/Mesh002.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh002-0",
+            mesh: Some("Mesh002-0"),
+            material: Some("Glass"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh011-0",
+            source: Some(Ply(
+                path: "sources/bitterli/veach-bidir/models/Mesh011.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh011-0",
+            mesh: Some("Mesh011-0"),
+            material: Some("Diffuse"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh003-0",
+            source: Some(Ply(
+                path: "sources/bitterli/veach-bidir/models/Mesh003.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh003-0",
+            mesh: Some("Mesh003-0"),
+            material: Some("Diffuse"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh009-0",
+            source: Some(Ply(
+                path: "sources/bitterli/veach-bidir/models/Mesh009.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh009-0",
+            mesh: Some("Mesh009-0"),
+            material: Some("Diffuse"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh006-0",
+            source: Some(Ply(
+                path: "sources/bitterli/veach-bidir/models/Mesh006.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh006-0",
+            mesh: Some("Mesh006-0"),
+            material: Some("Diffuse"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh000-0",
+            source: Some(Ply(
+                path: "sources/bitterli/veach-bidir/models/Mesh000.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh000-0",
+            mesh: Some("Mesh000-0"),
+            material: Some("Wood"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh010-0",
+            source: Some(Ply(
+                path: "sources/bitterli/veach-bidir/models/Mesh010.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh010-0",
+            mesh: Some("Mesh010-0"),
+            material: Some("Diffuse"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+    ],
+)

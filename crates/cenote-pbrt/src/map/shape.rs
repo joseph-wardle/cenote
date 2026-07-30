@@ -8,10 +8,20 @@ use glam::Vec3;
 
 use crate::parse::Directive;
 
-/// A `trianglemesh` shape's streams, verbatim in object space. `flip`
-/// (trap 4's XOR) negates authored normals and reverses winding —
-/// winding also drives derived normals, so orientation survives either
-/// way.
+/// pbrt inverts `t` at every image-texture lookup (`st[1] = 1 - st[1]`
+/// against top-row-first image memory); cenote samples `v` as stored,
+/// texel row 0 at `v = 0`. Storing `1 - v` at import makes every
+/// downstream lookup read the texel pbrt would.
+fn flip_v(uvs: &mut [[f32; 2]]) {
+    for uv in uvs {
+        uv[1] = 1.0 - uv[1];
+    }
+}
+
+/// A `trianglemesh` shape's streams, verbatim in object space — except
+/// `v`, which lands pre-flipped (see `flip_v`). `flip` (trap 4's XOR)
+/// negates authored normals and reverses winding — winding also drives
+/// derived normals, so orientation survives either way.
 pub(super) fn trianglemesh(directive: &Directive, flip: bool) -> Result<MeshSource> {
     let params = &directive.params;
     let triples = |name: &str, types: &[&str]| -> Result<Option<Vec<[f32; 3]>>> {
@@ -53,12 +63,12 @@ pub(super) fn trianglemesh(directive: &Directive, flip: bool) -> Result<MeshSour
                     param.location
                 )));
             }
-            Some(
-                floats
-                    .chunks_exact(2)
-                    .map(|pair| [pair[0] as f32, pair[1] as f32])
-                    .collect(),
-            )
+            let mut uvs: Vec<[f32; 2]> = floats
+                .chunks_exact(2)
+                .map(|pair| [pair[0] as f32, pair[1] as f32])
+                .collect();
+            flip_v(&mut uvs);
+            Some(uvs)
         }
         None => None,
     };
@@ -132,6 +142,7 @@ pub(super) fn sphere_mesh(radius: f32) -> MeshSource {
             uvs.push([u, v]);
         }
     }
+    flip_v(&mut uvs);
     let mut triangles = Vec::new();
     let row = SEGMENTS + 1;
     for ring in 0..RINGS {
@@ -168,6 +179,7 @@ pub(super) fn disk_mesh(radius: f32, height: f32) -> MeshSource {
         positions.push([radius * phi.cos(), radius * phi.sin(), height]);
         uvs.push([u, 0.0]);
     }
+    flip_v(&mut uvs);
     let triangles = (0..SEGMENTS)
         .map(|segment| [0, segment + 1, segment + 2])
         .collect();

@@ -13,10 +13,10 @@ clone renders any landed scene after `./fetch.sh <name>`.
 
 | Scene | Source | License | Status | Gaps (unlock) |
 |---|---|---|---|---|
-| cornell-box | Bitterli | CC0 | pending (rung 1) | none |
-| veach-mis | Bitterli | CC0 | pending (rung 1) | none (equal-axis aniso averages exactly) |
-| veach-ajar | Bitterli | CC0 | pending (rung 1) | TGA decode (fix proposed); aniso averaged |
-| veach-bidir | Bitterli | CC0 | pending (rung 1) | aniso averaged |
+| cornell-box | Bitterli | CC0 | landed (rung 1) | none |
+| veach-mis | Bitterli | CC0 | landed (rung 1) | none — equal-axis aniso averages exactly |
+| veach-ajar | Bitterli | CC0 | landed (rung 1) | none — TGA decode + the UV v-flip landed with this rung; equal-axis aniso exact |
+| veach-bidir | Bitterli | CC0 | landed (rung 1) | none — equal-axis aniso exact; native oracle is bdpt |
 | glass-of-water | Bitterli | CC0 | pending (rung 2) | aniso averaged |
 | coffee | Bitterli | CC BY 3.0 (cekuhnen) | pending (rung 2) | aniso averaged |
 | spaceship | Bitterli | CC0 (thecali) | pending (rung 2) | aniso averaged |

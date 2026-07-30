@@ -91,10 +91,30 @@ decision 8):
 
 | Fix | Class | Where | Unblocks |
 |---|---|---|---|
-| TGA decode (extension-hinted + `tga` feature) | core, small | classics rung | veach-ajar renders; kitchen, bathroom, and others texture correctly |
+| TGA decode (extension-hinted + `tga` feature) | core, small | **landed, rung 1** | veach-ajar renders; kitchen, bathroom, and others texture correctly |
+| V-flip imported/PLY UVs to sampler storage order | importer + core, small | **landed, rung 1** (found by decision 7's side-by-side) | every textured import; see below |
 | PFM read for infinite-light images | importer, small | objects rung | teapot-full imports |
 | Texture redefinition tolerated (last wins + warning) | importer, small | sanmiguel rung | sanmiguel imports |
 | Shape `alpha` texture → material opacity | importer, medium | bistro rung (decide there) | bistro/sanmiguel foliage; bathroom's one shape |
+
+**Rung-1 discovery — the UV convention gap.** veach-ajar's landscape
+painting rendered upside-down, and the side-by-side bar (decision 7) ran
+it to ground: pbrt inverts `t` at every image-texture lookup
+(`textures.cpp`: "texture coordinates are (0,0) in the lower left
+corner, but image coordinates are (0,0) in the upper left") — the
+interchange convention PLY exporters share — while cenote samples
+storage order, `v = 0` at the top row. Every textured import diverged.
+Two one-line flips close it: the importer stores `1 - v` for authored,
+sphere, and disk UVs (`cenote-pbrt/src/map/shape.rs`), and the PLY
+reader flips `v` at the convention boundary (`cenote/src/ply.rs`). Fallout
+worth knowing: the vendored teapot-full's checker floor had been
+phase-inverted against pbrt since the CI trio landed — RMSE to the pbrt
+reference improves from 0.250 to 0.133 (the rest is the tea medium, an
+M8 gap) — so the importer golden and the README comparison figures
+regenerate with this rung. Open question parked, not fixed: the Hydra
+delegate passes USD `st` (also v-up interchange) verbatim, invisible
+today because its only textured fixture is a symmetric checker — decide
+at the next Hydra rung.
 
 **Documented-only renderer gaps** (unlock noted in each RON header when
 its rung lands): anisotropic roughness, displacement, diffuse-transmission
@@ -109,8 +129,8 @@ build (`~/Documents/pbrt-v4/build/pbrt`, the README-figure one).
 
 | Rung | Content |
 |---|---|
-| 0 | **This commit**: fetch.sh, sources recon, this plan, README skeleton, gitignore |
-| 1 | Classics: cornell-box, veach-mis, veach-ajar, veach-bidir (+ TGA fix proposal) |
+| 0 | **Done** (`0eb7560`): fetch.sh, sources recon, this plan, README skeleton, gitignore |
+| 1 | **Done**: cornell-box, veach-mis, veach-ajar, veach-bidir; TGA decode + the UV v-flip landed with it |
 | 2 | Objects: glass-of-water, coffee, spaceship, teapot-full (+ PFM proposal), water-caustic; volumetric-caustic placeholder row |
 | 3 | Interiors: bathroom, kitchen |
 | 4 | zero-day (the ReSTIR showcase; emission-side eyeball is the rung's crux) |

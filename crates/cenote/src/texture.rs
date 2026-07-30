@@ -253,12 +253,26 @@ fn decode(path: &Path, bytes: &[u8]) -> Result<Source> {
             height,
         });
     }
-    let image = image::load_from_memory(bytes).map_err(|error| {
-        Error::Scene(format!(
-            "texture \"{}\": doesn't decode: {error}",
-            path.display()
-        ))
-    })?;
+    let image = image::load_from_memory(bytes)
+        .or_else(|sniff_error| {
+            // TGA carries no magic bytes, so sniffing can't recognize it;
+            // when the content doesn't identify itself, the extension gets
+            // a say before the sniff error stands.
+            match path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .and_then(image::ImageFormat::from_extension)
+            {
+                Some(format) => image::load_from_memory_with_format(bytes, format),
+                None => Err(sniff_error),
+            }
+        })
+        .map_err(|error| {
+            Error::Scene(format!(
+                "texture \"{}\": doesn't decode: {error}",
+                path.display()
+            ))
+        })?;
     let rgba = image.to_rgba8();
     let (width, height) = rgba.dimensions();
     Ok(Source::Bytes {
@@ -809,6 +823,34 @@ mod tests {
         ] {
             assert_eq!(half_bits(value), bits, "half({value})");
         }
+    }
+
+    /// TGA is the one source format with no magic bytes: decode must fall
+    /// back to the extension hint, and must read the format's BGR order.
+    #[test]
+    fn tga_decodes_via_the_extension_hint() {
+        // Uncompressed 24-bit truecolor, 1×1, one pure-red texel (BGR).
+        let mut tga = vec![0u8; 18];
+        tga[2] = 2; // image type: uncompressed truecolor
+        tga[12] = 1; // width
+        tga[14] = 1; // height
+        tga[16] = 24; // bits per pixel
+        tga.extend_from_slice(&[0, 0, 255]);
+
+        let Source::Bytes {
+            rgba,
+            width,
+            height,
+        } = decode(Path::new("texel.tga"), &tga).expect("TGA decodes")
+        else {
+            panic!("byte source expected");
+        };
+        assert_eq!((width, height), (1, 1));
+        assert_eq!(rgba, [255, 0, 0, 255]);
+
+        // Without the extension there is nothing to hint with — the sniff
+        // error must survive untouched.
+        assert!(decode(Path::new("texel"), &tga).is_err());
     }
 
     #[test]

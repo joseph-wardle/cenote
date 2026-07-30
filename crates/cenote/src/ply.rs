@@ -6,8 +6,10 @@
 //! order, ASCII or binary.
 //!
 //! Read here: `vertex` positions (required), normals and UVs when
-//! present, and `face` index lists, fan-triangulated so quad-dominant
-//! exports work. Everything else — extra properties (vertex colors,
+//! present — `v` flipped from the interchange convention (0 at the
+//! bottom row, what exporters and pbrt write) to sampler storage order
+//! (0 at the top row) — and `face` index lists, fan-triangulated so
+//! quad-dominant exports work. Everything else — extra properties (vertex colors,
 //! confidence), whole unknown elements — parses and drops, because a
 //! reader that only *skips bytes it understands* can still walk to the
 //! data it wants. ASCII and binary little-endian cover every file in
@@ -354,7 +356,11 @@ fn read_vertices(element: &Element, data: &mut Data<'_>, mesh: &mut Ply) -> Resu
             normals.push(Vec3::new(at(nx), at(ny), at(nz)));
         }
         if let (Some(uvs), Some([u, v])) = (uvs.as_mut(), uv) {
-            uvs.push(Vec2::new(at(u), at(v)));
+            // PLY UVs follow the interchange convention every exporter
+            // and pbrt share: v = 0 at the image's bottom row. cenote
+            // samples storage order — v = 0 at the top — so the flip
+            // happens here, once, where the convention boundary is.
+            uvs.push(Vec2::new(at(u), 1.0 - at(v)));
         }
     }
     mesh.normals = normals;
@@ -457,7 +463,8 @@ end_header
         assert_eq!(mesh.positions[2], Vec3::new(1.0, 0.0, 1.0));
         assert_eq!(mesh.normals.as_deref(), Some(&[Vec3::Y; 4][..]));
         let uvs = mesh.uvs.expect("s/t read as UVs");
-        assert_eq!(uvs[2], Vec2::new(1.0, 1.0));
+        // Authored (1, 1); v lands flipped into sampler storage order.
+        assert_eq!(uvs[2], Vec2::new(1.0, 0.0));
         assert_eq!(mesh.triangles, vec![[0, 1, 2], [0, 2, 3]]);
     }
 

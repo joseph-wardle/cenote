@@ -1802,6 +1802,32 @@ Translate 1 0 0
         });
     }
 
+    /// pbrt inverts `t` at every image-texture lookup; cenote samples `v`
+    /// as stored. Authored UVs must land flipped, so both renderers fetch
+    /// the same texel for the same hit.
+    #[test]
+    fn authored_uvs_flip_v_to_pbrt_lookup_convention() {
+        let world = r#"Shape "trianglemesh"
+            "point3 P" [0 0 0  1 0 0  0 1 0]
+            "integer indices" [0 1 2]
+            "point2 uv" [0 0  1 0  1 0.25]"#;
+        import_world("uv-flip", world, |set, _| {
+            let uvs = set
+                .ops
+                .iter()
+                .find_map(|op| match op {
+                    Op::Mesh(patch) => patch.source.as_ref(),
+                    _ => None,
+                })
+                .and_then(|source| match source {
+                    MeshSource::Inline { uvs, .. } => uvs.clone(),
+                    MeshSource::Ply { .. } => unreachable!(),
+                })
+                .expect("authored uvs");
+            assert_eq!(uvs, [[0.0, 1.0], [1.0, 1.0], [1.0, 0.75]]);
+        });
+    }
+
     /// Trap 4's XOR: `ReverseOrientation` flips authored normals and
     /// winding; a mirroring transform flips them back.
     #[test]
