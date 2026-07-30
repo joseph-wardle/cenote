@@ -217,11 +217,40 @@ unlike zero-day. The ladder's fold happened: `tests/scenes/showcase/`
 gitignore entry dropped, tests/scenes/README.md tier-2 section now
 points at the corpus, which uses the same commit pin.
 
+**Rung-6 notes.** crown landed, no code changes. The film-response
+class returns (iso 150, canon_eos_5d_mkiv sensor), so the honest number
+rides a film-stripped reference: eighth-res RMSE 0.304 raw / 0.093
+display-clamped (cenote 2048 spp, pbrt GPU 2048; pbrt's 512-vs-2048
+self-distance is 0.003 — the reference is converged, unlike bmw the raw
+excess is not both-sides speckle). Against native film: 0.133 clamped =
+tone. The kitchen-style degradation experiment pinned the residual:
+with crown's four displacement textures removed from pbrt (sapphire
+bump, mitra bands), the score collapses to 0.072 raw / 0.048 clamped —
+displacement is the dominant divergence (pbrt's sapphire dark and
+faceted, cenote's smooth clear glass), now the third scene where it
+leads (bathroom, kitchen). Three curations: (1) the ruby/sapphire
+absorption media (MakeNamedMedium/MediumInterface, dropped at import)
+carried onto their materials as Beer-Lambert transmission tint — exact,
+not approximate, since sigma_s = 0 and cenote's transmission model *is*
+Beer-Lambert; every binding of those materials carries the medium.
+(2) Dispersive gem etas (3.5@200nm–3.3@900nm) import as the 1.5
+fallback; curated to the visible-range mean 3.4. (3) Two texture-amount
+`mix` materials (enamel-on-gold masks — a new mix flavor vs bmw's
+constant amount) curated as *textured metalness*: the mask drives
+metal-vs-diffuse per texel (P(second) = amount, white = gold), one
+constant carries the mask-mean color blend (means 0.69 and 0.94 via
+`magick identify`). Curations worth 1.5× against the degraded reference
+(0.071 → 0.048 clamped). Remaining documented drops: textured-roughness
+remap caveat ×2, dropped texture scale factors (0.62/1.5 reflectance,
+0.1 roughness), one equal-axis aniso (exact). pbrt's `--gpu` build ran
+all references (512 spp ≈ 4 min at 1000×1400, maxdepth 100).
+
 **Documented-only renderer gaps** (unlock noted in each RON header when
 its rung lands): anisotropic roughness, displacement, diffuse-transmission
 lobe, textured coat roughness, dispersion (all unassigned material-depth
 work); film/sensor response (sensor, white balance, ISO — zero-day);
-mix materials (bmw-m6 LEATHER, curated to a hand-blend);
+mix materials (bmw-m6 LEATHER, curated to a hand-blend; crown's
+texture-amount masks, curated to textured metalness);
 firefly regularization (integrator `regularize` — convergence class,
 not bias; bmw-m6); participating media (M8).
 
@@ -239,7 +268,8 @@ build (`~/Documents/pbrt-v4/build/pbrt`, the README-figure one).
 | 3 | **Done**: bathroom, kitchen — no code changes; the recon's gap map held exactly (rung-3 notes below) |
 | 4 | **Done**: zero-day — the emission-side eyeball found and fixed the mirrored-emitter renderer bug; film response documented as a new gap class (rung-4 notes below) |
 | 5 | **Done**: bmw-m6 — no code changes; LEATHER mix curated to a hand-blend, tests/scenes/showcase folded into the corpus (rung-5 notes below) |
-| 6–10 | Heavies, one each: crown, bistro (shape-alpha decision), kroken (ND decision), watercolor (ND), sanmiguel (redefinition fix) |
+| 6 | **Done**: crown — no code changes; gem media curated as exact Beer–Lambert tint, dispersion at the mean IOR, mask mixes as textured metalness; displacement proven dominant by degradation (rung-6 notes below) |
+| 7–10 | Heavies, one each: bistro (shape-alpha decision), kroken (ND decision), watercolor (ND), sanmiguel (redefinition fix) |
 | 11 | Swap rung — **gated on M6 closed** (viewer checklist → D-152 addendum): measure veach-ajar and zero-day against brass-room/many-lights on the reuse gate + convergence harness; if they clear, migrate gates, goldens, README figures; either way the numbers land in the D-entry |
 | 12 | Close: README final, full-corpus contact sheet, deferrals pointer, closing D-entry |
 
