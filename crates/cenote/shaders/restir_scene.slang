@@ -16,7 +16,7 @@ import reservoir_path;
 
 // -- The unified reservoir's three path kinds --------------------------------
 // M6's unified reservoir (D-124) holds three shapes of sample, discriminated
-// by the low two bits of `PathSample.reserved` — zero by default, so a
+// by the low two bits of `PathSample.pathFlags` — zero by default, so a
 // zero-initialized sample reads as the NEE base case:
 //
 //   PATH_KIND_NEE (step 1, D-124) — a length-2 direct-lighting path whose
@@ -52,7 +52,7 @@ public static const uint PATH_KIND_RECONNECTION = 1; // length-≥3 indirect: rc
 public static const uint PATH_KIND_REPLAY = 2;       // length-≥3 indirect: seed replay only
 
 public uint pathKind(PathSample sample) {
-    return sample.reserved & 0x3;
+    return sample.pathFlags & 0x3;
 }
 
 // A length-≥3 indirect sample: `rcVertex` is a geometry vertex, `rcVertexRadiance`
@@ -72,7 +72,7 @@ public bool isReplaySample(PathSample sample) {
 
 // -- The indirect samples' packed flags (steps 3a-3c, D-137/D-138/D-139) -----
 // Beyond the kind bits, an indirect sample packs its walk's facts into
-// `reserved` — no re-layout, exactly the headroom D-128 designed in:
+// `pathFlags` — no re-layout, exactly the headroom D-128 designed in:
 //
 //   bits 2..3 — the TERMINAL kind: which suffix event ended the path *at* the
 //     reconnection vertex, and so which MIS weight must re-evaluate against
@@ -118,23 +118,23 @@ public static const uint RC_TERMINAL_SCATTER = 1; // x_k's scatter found the lig
 public static const uint RC_TERMINAL_BAKED = 2;   // deeper (or delta): MIS folded
 
 public uint reconnectionTerminal(PathSample sample) {
-    return (sample.reserved >> 2) & 0x3;
+    return (sample.pathFlags >> 2) & 0x3;
 }
 
 public bool reconnectionInside(PathSample sample) {
-    return (sample.reserved & 0x10) != 0;
+    return (sample.pathFlags & 0x10) != 0;
 }
 
 public bool reconnectionShiftable(PathSample sample) {
-    return (sample.reserved & 0x20) != 0;
+    return (sample.pathFlags & 0x20) != 0;
 }
 
 // k — the reconnection vertex's index along the path (x₂ is k = 2).
 public uint reconnectionK(PathSample sample) {
-    return (sample.reserved >> 6) & 0xff;
+    return (sample.pathFlags >> 6) & 0xff;
 }
 
-// The packed `reserved` word of a reconnection sample. k caps at the 8-bit
+// The packed `pathFlags` word of a reconnection sample. k caps at the 8-bit
 // field — beyond any real path depth (max_bounces itself is byte-bounded).
 public uint reconnectionFlags(uint terminal, bool inside, bool shiftable, uint k) {
     return PATH_KIND_RECONNECTION | (terminal << 2)
@@ -144,14 +144,14 @@ public uint reconnectionFlags(uint terminal, bool inside, bool shiftable, uint k
 // A replay sample's readings of the shared fields (D-139): the terminal
 // redraw kind, and the walk bounce it fired at.
 public uint replayTerminal(PathSample sample) {
-    return (sample.reserved >> 2) & 0x3;
+    return (sample.pathFlags >> 2) & 0x3;
 }
 
 public uint replayTerminalBounce(PathSample sample) {
-    return (sample.reserved >> 6) & 0xff;
+    return (sample.pathFlags >> 6) & 0xff;
 }
 
-// The packed `reserved` word of a pure-replay sample.
+// The packed `pathFlags` word of a pure-replay sample.
 public uint replayFlags(uint terminal, uint bounce) {
     return PATH_KIND_REPLAY | (terminal << 2) | (min(bounce, 255) << 6);
 }

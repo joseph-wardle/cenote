@@ -90,7 +90,7 @@ pub(crate) struct PathSample {
     /// bit 5: the pair criteria verdict, bits 6..13: k, the reconnection
     /// vertex's path index — or a replay sample's terminal bounce
     /// (`restir_scene.slang`, D-137/D-138/D-139); the rest reserved.
-    pub reserved: u32,
+    pub path_flags: u32,
 }
 
 /// The persistent per-pixel path reservoir record — the host mirror of
@@ -826,7 +826,7 @@ mod tests {
                         init_random_seed: i * 19 + 7,
                         rc_vertex_random_seed: i * 23 + 9,
                         cached_jacobian: f * 0.001 + 2.0,
-                        reserved: i * 29 + 11,
+                        path_flags: i * 29 + 11,
                     },
                     unbiased_weight: f * 0.5 + 1.0,
                     confidence: f * 0.25 + 2.0,
@@ -952,7 +952,7 @@ mod tests {
                 "rcSeed[{i}]"
             );
             near(got.sample.cached_jacobian, src.sample.cached_jacobian * 3.0, "jacobian");
-            assert_eq!(got.sample.reserved, src.sample.reserved + 7, "reserved[{i}]");
+            assert_eq!(got.sample.path_flags, src.sample.path_flags + 7, "path_flags[{i}]");
             near(got.unbiased_weight, src.unbiased_weight * 2.0, "W");
             near(got.confidence, src.confidence + 100.0, "M");
 

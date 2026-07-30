@@ -197,7 +197,7 @@ void streamTailEvent(inout Reservoir<PathSample> reservoir, inout float3 cvLane,
     sample.neeLightPdf = neeLightPdf;
     sample.initRandomSeed = ctx.seed;
     sample.cachedJacobian = ctx.cachedJacobian;
-    sample.reserved = reconnectionFlags(terminal, ctx.inside, ctx.shiftable, ctx.k);
+    sample.pathFlags = reconnectionFlags(terminal, ctx.inside, ctx.shiftable, ctx.k);
     let wi = ctx.frame.toLocal(unpackUnitDirection(sample.rcVertexWi));
     let lo = reconnectionOutgoing(ctx.closure, wi, ctx.wo, suffix, neeLightPdf, terminal);
     // The own-domain integrand, stored on the sample (D-138). The association
@@ -238,7 +238,7 @@ void streamReplayEvent(inout Reservoir<PathSample> reservoir, inout float3 cvLan
     PathSample sample = PathSample();
     sample.F = F;
     sample.initRandomSeed = seed;
-    sample.reserved = replayFlags(terminal, bounce);
+    sample.pathFlags = replayFlags(terminal, bounce);
     if (reservoirUpdate(reservoir, sample, target / survival, uAccept)) {
         survivorTarget = target;
     }

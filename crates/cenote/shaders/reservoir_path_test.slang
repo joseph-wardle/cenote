@@ -52,7 +52,7 @@ void reservoir_path_test(uint3 tid: SV_DispatchThreadID) {
     r.sample.initRandomSeed += 5;
     r.sample.rcVertexRandomSeed += 6;
     r.sample.cachedJacobian *= 3.0;
-    r.sample.reserved += 7;
+    r.sample.pathFlags += 7;
     r.unbiasedWeight *= 2.0;
     r.confidence += 100.0;
 

@@ -121,8 +121,8 @@ public struct PathSample : IDefaultInitializable {
     public float neeLightPdf;        // 44..48 the NEE light pdf, kept unpacked
     public uint initRandomSeed;      // 48..52 replay/dup-map key for early segments
     public uint rcVertexRandomSeed;  // 52..56 reserved — stays zero (D-128 headroom)
-    public float cachedJacobian;     // 56..60 shift Jacobian terms, pre-multiplied
-    public uint reserved;            // 60..64 the path-kind/terminal/shiftable
+    public float cachedJacobian;     // 56..60 source half of the shift Jacobian
+    public uint pathFlags;           // 60..64 the path-kind/terminal/shiftable
                                      //   bits (restir_scene.slang); rest reserved
 };
 
