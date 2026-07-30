@@ -319,7 +319,14 @@ fn render_frame(
 fn import(args: &ImportArgs) -> anyhow::Result<()> {
     let out = std::path::absolute(&args.out)?;
     let out_dir = out.parent().context("--out has no parent directory")?;
-    let imported = cenote_pbrt::import(&args.scene, out_dir)
+    // Derived assets (a resampled sky) are named after --out — they
+    // belong to the RON that references them, not to the input file
+    // (every Bitterli scene is a `scene-v4.pbrt`).
+    let stem = out
+        .file_stem()
+        .context("--out has no file name")?
+        .to_string_lossy();
+    let imported = cenote_pbrt::import_as(&args.scene, out_dir, &stem)
         .with_context(|| format!("importing {}", args.scene.display()))?;
     for warning in &imported.warnings {
         eprintln!("warning: {warning}");

@@ -1,7 +1,7 @@
 //! Environment image conversion. pbrt-v4 infinite lights use *square
 //! equal-area octahedral* images (Clarberg's mapping — the whole sphere
-//! unfolded onto a square, +z at the center); cenote's environment is an
-//! equirectangular EXR. The importer resamples one into the other at
+//! unfolded onto a square, +z at the center), shipped as EXR or PFM;
+//! cenote's environment is an equirectangular EXR. The importer resamples one into the other at
 //! import time, baking in what cenote's environment object can't carry:
 //! the light's world orientation and its photometric scale. Sampling
 //! wraps across the octahedron's seams exactly as pbrt's own
@@ -39,9 +39,17 @@ pub(crate) fn resample_octahedral(
     scale: f32,
     out: &Path,
 ) -> Result<()> {
-    let (width, height, texels) = cenote::output::read_exr(source).map_err(|error| {
+    let is_pfm = source
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pfm"));
+    let (width, height, texels) = if is_pfm {
+        read_pfm(source)
+    } else {
+        cenote::output::read_exr(source)
+    }
+    .map_err(|error| {
         Error::Scene(format!(
-            "infinite light image \"{}\": {error} (only EXR images import)",
+            "infinite light image \"{}\": {error} (EXR and PFM images import)",
             source.display()
         ))
     })?;
@@ -87,6 +95,85 @@ pub(crate) fn write_constant(radiance: [f32; 3], out: &Path) -> Result<()> {
     let texel = [radiance[0], radiance[1], radiance[2], 1.0];
     let pixels: Vec<f32> = texel.repeat(2);
     cenote::output::write_exr(out, 2, 1, &pixels)
+}
+
+/// Read a PFM (portable float map) into the `(width, height, RGBA
+/// top-down)` shape [`cenote::output::read_exr`] returns, so the
+/// resampler doesn't care which format the sky arrived in. The format is
+/// three words of header (`PF`/`Pf`, dimensions, scale) and raw `f32`s:
+/// the scale's *sign* is the byte order (negative = little-endian), its
+/// magnitude multiplies every value, and file rows run bottom-to-top —
+/// all exactly as pbrt's own `ReadPFM` treats them. `Pf` grayscale
+/// replicates into RGB. Values are linear `Rec.709`, same as EXR.
+fn read_pfm(path: &Path) -> Result<(u32, u32, Vec<f32>)> {
+    /// The next whitespace-delimited header word. Each word ends at a
+    /// *single* whitespace byte, and after the last one (the scale) the
+    /// raster starts immediately — so the cursor always steps exactly
+    /// one past the word, never over a run.
+    fn next_word<'bytes>(bytes: &'bytes [u8], cursor: &mut usize) -> Option<&'bytes str> {
+        while bytes.get(*cursor).is_some_and(u8::is_ascii_whitespace) {
+            *cursor += 1;
+        }
+        let start = *cursor;
+        while bytes.get(*cursor).is_some_and(|byte| !byte.is_ascii_whitespace()) {
+            *cursor += 1;
+        }
+        let word = std::str::from_utf8(&bytes[start..*cursor]).ok();
+        *cursor += 1;
+        word
+    }
+
+    let bytes = std::fs::read(path)?;
+    let malformed = |what: &str| Error::Scene(format!("PFM: {what}"));
+    let mut cursor = 0;
+    let channels: usize = match next_word(&bytes, &mut cursor) {
+        Some("PF") => 3,
+        Some("Pf") => 1,
+        other => {
+            return Err(malformed(&format!(
+                "\"{}\" isn't a PFM tag",
+                other.unwrap_or("<binary>")
+            )));
+        }
+    };
+    let width: u32 = next_word(&bytes, &mut cursor)
+        .and_then(|word| word.parse().ok())
+        .ok_or_else(|| malformed("bad width"))?;
+    let height: u32 = next_word(&bytes, &mut cursor)
+        .and_then(|word| word.parse().ok())
+        .ok_or_else(|| malformed("bad height"))?;
+    let scale: f32 = next_word(&bytes, &mut cursor)
+        .and_then(|word| word.parse().ok())
+        .ok_or_else(|| malformed("bad scale"))?;
+    let raster = bytes.get(cursor.min(bytes.len())..).unwrap_or(&[]);
+    let texels = width as usize * height as usize;
+    if raster.len() < texels * channels * 4 {
+        return Err(malformed("raster is shorter than the header promises"));
+    }
+    let value = |index: usize| {
+        let float = raster[index * 4..index * 4 + 4].try_into().expect("4 bytes");
+        if scale < 0.0 {
+            f32::from_le_bytes(float) * -scale
+        } else {
+            f32::from_be_bytes(float) * scale
+        }
+    };
+    let mut pixels = vec![0.0_f32; texels * 4];
+    for file_row in 0..height as usize {
+        // PFM rasters run bottom-to-top; the top-down shape flips them.
+        let image_row = height as usize - 1 - file_row;
+        // Grayscale replicates: a step of 0 reads the one channel thrice.
+        let step = usize::from(channels > 1);
+        for x in 0..width as usize {
+            let source = (file_row * width as usize + x) * channels;
+            let out = (image_row * width as usize + x) * 4;
+            pixels[out] = value(source);
+            pixels[out + 1] = value(source + step);
+            pixels[out + 2] = value(source + 2 * step);
+            pixels[out + 3] = 1.0;
+        }
+    }
+    Ok((width, height, pixels))
 }
 
 /// The direction a cenote equirect texel looks along — the inverse of the
@@ -311,6 +398,51 @@ mod tests {
         let bad = dir.join("sky-equirect.exr");
         let error = resample_octahedral(&bad, Mat3::IDENTITY, 1.0, &dir.join("x.exr")).unwrap_err();
         assert!(error.to_string().contains("square"), "{error}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A hand-built 2×2 PFM pins every convention the reader carries:
+    /// bottom-to-top file rows flipped to top-down, negative scale read
+    /// little-endian with its magnitude baked, grayscale replicated, and
+    /// a truncated raster refused.
+    #[test]
+    fn pfm_reads_with_pbrt_conventions() {
+        let dir = std::env::temp_dir().join(format!("cenote-pbrt-pfm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+
+        // File rows bottom-to-top: the raster's first row is the image's
+        // bottom. Scale −2 → little-endian, values doubled.
+        let mut color = b"PF\n2 2\n-2.0\n".to_vec();
+        let bottom = [[1.0_f32, 2.0, 3.0], [4.0, 5.0, 6.0]];
+        let top = [[7.0_f32, 8.0, 9.0], [10.0, 11.0, 12.0]];
+        for texel in bottom.iter().chain(&top) {
+            for channel in texel {
+                color.extend_from_slice(&channel.to_le_bytes());
+            }
+        }
+        let path = dir.join("color.pfm");
+        std::fs::write(&path, &color).expect("writes");
+        let (width, height, pixels) = read_pfm(&path).expect("reads");
+        assert_eq!((width, height), (2, 2));
+        // Top-down output: the file's *second* row comes first, doubled,
+        // alpha filled in.
+        assert_eq!(&pixels[..8], &[14.0, 16.0, 18.0, 1.0, 20.0, 22.0, 24.0, 1.0]);
+        assert_eq!(&pixels[8..], &[2.0, 4.0, 6.0, 1.0, 8.0, 10.0, 12.0, 1.0]);
+
+        // Grayscale replicates; positive scale reads big-endian.
+        let mut gray = b"Pf\n1 1\n1.0\n".to_vec();
+        gray.extend_from_slice(&0.5_f32.to_be_bytes());
+        let path = dir.join("gray.pfm");
+        std::fs::write(&path, &gray).expect("writes");
+        let (_, _, pixels) = read_pfm(&path).expect("reads");
+        assert_eq!(pixels, vec![0.5, 0.5, 0.5, 1.0]);
+
+        // A raster shorter than the header promises is refused.
+        let path = dir.join("short.pfm");
+        std::fs::write(&path, &color[..color.len() - 4]).expect("writes");
+        let error = read_pfm(&path).unwrap_err();
+        assert!(error.to_string().contains("shorter"), "{error}");
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -93,7 +93,7 @@ decision 8):
 |---|---|---|---|
 | TGA decode (extension-hinted + `tga` feature) | core, small | **landed, rung 1** | veach-ajar renders; kitchen, bathroom, and others texture correctly |
 | V-flip imported/PLY UVs to sampler storage order | importer + core, small | **landed, rung 1** (found by decision 7's side-by-side) | every textured import; see below |
-| PFM read for infinite-light images | importer, small | objects rung | teapot-full imports |
+| PFM read for infinite-light images | importer, small | **landed, rung 2** | teapot-full imports |
 | Texture redefinition tolerated (last wins + warning) | importer, small | sanmiguel rung | sanmiguel imports |
 | Shape `alpha` texture → material opacity | importer, medium | bistro rung (decide there) | bistro/sanmiguel foliage; bathroom's one shape |
 
@@ -116,6 +116,21 @@ delegate passes USD `st` (also v-up interchange) verbatim, invisible
 today because its only textured fixture is a symmetric checker — decide
 at the next Hydra rung.
 
+**Rung-2 discoveries.** Two the recon's import failure had masked (its
+warning harvest never ran for teapot-full). First, teapot-full's floor
+is a *procedural checkerboard* texture, which imports mid-gray; rather
+than grow a procedural-texture baker mid-rung, the RON is curated to the
+identical 20×20 checker the CI corpus already bakes to a committed PNG
+(`tests/scenes/teapot-full/textures/checker.png`) — a checkerboard bake
+stays a parked importer candidate for kroken/watercolor's rungs. Second,
+derived skies were named after the *input* file stem, and every Bitterli
+scene is a `scene-v4.pbrt` — spaceship's and teapot-full's skies
+collided on `scene-v4-sky.exr` (the recon's one-sky-per-run imports
+couldn't see it). The CLI now names derived assets after `--out`
+(`cenote_pbrt::import_as`), which is also what §3's "`<name>-sky.exr`
+lands beside the RON" always claimed; the corpus README's derived-sky
+recipe covers regeneration.
+
 **Documented-only renderer gaps** (unlock noted in each RON header when
 its rung lands): anisotropic roughness, displacement, diffuse-transmission
 lobe, textured coat roughness, dispersion (all unassigned material-depth
@@ -131,7 +146,7 @@ build (`~/Documents/pbrt-v4/build/pbrt`, the README-figure one).
 |---|---|
 | 0 | **Done** (`0eb7560`): fetch.sh, sources recon, this plan, README skeleton, gitignore |
 | 1 | **Done**: cornell-box, veach-mis, veach-ajar, veach-bidir; TGA decode + the UV v-flip landed with it |
-| 2 | Objects: glass-of-water, coffee, spaceship, teapot-full (+ PFM proposal), water-caustic; volumetric-caustic placeholder row |
+| 2 | **Done**: glass-of-water, coffee, spaceship, teapot-full, water-caustic; the PFM reader, output-stem sky naming, and teapot's curated checker landed with it |
 | 3 | Interiors: bathroom, kitchen |
 | 4 | zero-day (the ReSTIR showcase; emission-side eyeball is the rung's crux) |
 | 5–10 | Heavies, one each: bmw-m6 (consider folding tests/scenes/showcase into the corpus here), crown, bistro (shape-alpha decision), kroken (ND decision), watercolor (ND), sanmiguel (redefinition fix) |

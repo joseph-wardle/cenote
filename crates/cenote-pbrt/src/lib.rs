@@ -57,13 +57,26 @@ pub struct Import {
 /// be built. Unsupported-but-well-formed content is a warning, not an
 /// error.
 pub fn import(scene: &Path, generated: &Path) -> Result<Import> {
-    std::fs::create_dir_all(generated)?;
-    let parser = parse::Parser::open(scene)?;
     let stem = scene.file_stem().map_or_else(
         || "scene".to_owned(),
         |stem| stem.to_string_lossy().into_owned(),
     );
-    let (set, warnings) = map::Mapper::new(parser, generated, stem).run()?;
+    import_as(scene, generated, &stem)
+}
+
+/// [`import`], with derived assets named `<stem>-…` instead of after the
+/// scene file. The CLI passes its `--out` stem: derived assets belong to
+/// the output that references them, and naming them after the input turns
+/// every Bitterli-style `<scene>/scene-v4.pbrt` into the same colliding
+/// `scene-v4-sky.exr`.
+///
+/// # Errors
+///
+/// As [`import`].
+pub fn import_as(scene: &Path, generated: &Path, stem: &str) -> Result<Import> {
+    std::fs::create_dir_all(generated)?;
+    let parser = parse::Parser::open(scene)?;
+    let (set, warnings) = map::Mapper::new(parser, generated, stem.to_owned()).run()?;
     Ok(Import { set, warnings })
 }
 

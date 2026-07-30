@@ -1,0 +1,1921 @@
+// '4060.b Spaceship' — thecali (CC0, public domain; crediting the
+// artist encouraged; original at blendswap.com/blends/view/75686). The
+// retro rocket on a dark studio floor: brushed metals at four roughness
+// grades, a glass canopy over a red-lit cockpit. Official pbrt-v4
+// export from https://benedikt-bitterli.me/resources/ —
+// `scenes/corpus/fetch.sh spaceship` materializes the source; this RON
+// was bootstrapped once by `cenote-cli import
+// sources/bitterli/spaceship/scene-v4.pbrt` and is the source of truth
+// — re-imports diff into scratch, never over it. The constant
+// image-less infinite light lands as the derived, gitignored
+// `spaceship-sky.exr` beside this file (README.md's mechanics section
+// has the one-line regeneration recipe).
+//
+// Import fidelity: exact in effect — the importer averages pbrt's u/v
+// roughness axes (×9), but every pair is equal-axis, so the average is
+// the identity.
+(
+    version: 2,
+    ops: [
+        Settings((
+            name: "main",
+            resolution: Some((1280, 720)),
+            spp: Some(64),
+            max_bounces: Some(65),
+            seed: None,
+        )),
+        Camera((
+            name: "main",
+            position: Some((-0.51966155, 0.81700677, 3.8243847)),
+            look_at: Some((-0.38370937, 0.7653299, 2.835018)),
+            up: Some((0.007034968, 0.9986637, -0.05119568)),
+            vfov_degrees: Some(35.9834),
+            focus_distance: None,
+            aperture_radius: Some(0.0),
+        )),
+        Material((
+            name: "Backdrop",
+            base_color: Some(Constant((0.1, 0.1, 0.1))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "RoughAluminium",
+            base_color: Some(Constant((0.9280474, 0.9178046, 0.91890866))),
+            base_diffuse_roughness: None,
+            base_metalness: Some(Constant(1.0)),
+            specular_weight: None,
+            specular_roughness: Some(Constant(0.31622776)),
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "RoughSteel",
+            base_color: Some(Constant((0.11111111, 0.11111111, 0.11111111))),
+            base_diffuse_roughness: None,
+            base_metalness: Some(Constant(1.0)),
+            specular_weight: None,
+            specular_roughness: Some(Constant(0.31622776)),
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "DarkPlastic",
+            base_color: Some(Constant((0.01, 0.01, 0.01))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: Some(1.0),
+            coat_color: None,
+            coat_roughness: Some(0.4472136),
+            coat_ior: Some(1.5),
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "PinkLeather",
+            base_color: Some(Constant((0.256, 0.013, 0.08))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: Some(1.0),
+            coat_color: None,
+            coat_roughness: Some(0.6324555),
+            coat_ior: Some(1.5),
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "Leather",
+            base_color: Some(Constant((0.034, 0.014, 0.008))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: Some(1.0),
+            coat_color: None,
+            coat_roughness: Some(0.6324555),
+            coat_ior: Some(1.5),
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "RedLeather",
+            base_color: Some(Constant((0.163, 0.03, 0.037))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: Some(1.0),
+            coat_color: None,
+            coat_roughness: Some(0.6324555),
+            coat_ior: Some(1.5),
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "BrightPinkLeather",
+            base_color: Some(Constant((0.772, 0.175, 0.262))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: Some(1.0),
+            coat_color: None,
+            coat_roughness: Some(0.6324555),
+            coat_ior: Some(1.5),
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "Glass",
+            base_color: None,
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: None,
+            specular_roughness: Some(Constant(0.1)),
+            specular_ior: Some(1.5),
+            transmission_weight: Some(1.0),
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "DarkRubber",
+            base_color: Some(Constant((0.025, 0.025, 0.025))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: Some(1.0),
+            coat_color: None,
+            coat_roughness: Some(0.6324555),
+            coat_ior: Some(1.5),
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Material((
+            name: "Black",
+            base_color: Some(Constant((0.0, 0.0, 0.0))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Mesh((
+            name: "Mesh050-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh050.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh050-0",
+            mesh: Some("Mesh050-0"),
+            material: Some("Backdrop"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh042-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh042.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh042-0",
+            mesh: Some("Mesh042-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh044-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh044.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh044-0",
+            mesh: Some("Mesh044-0"),
+            material: Some("Leather"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh038-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh038.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh038-0",
+            mesh: Some("Mesh038-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh040-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh040.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh040-0",
+            mesh: Some("Mesh040-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh072-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh072.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh072-0",
+            mesh: Some("Mesh072-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh033-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh033.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh033-0",
+            mesh: Some("Mesh033-0"),
+            material: Some("RoughSteel"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh043-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh043.ply",
+            )),
+        )),
+        Material((
+            name: "Black-glow-0",
+            base_color: Some(Constant((0.0, 0.0, 0.0))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: Some(1.0),
+            emission_color: Some(Constant((20.0, 3.0, 3.0))),
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Instance((
+            name: "Mesh043-0",
+            mesh: Some("Mesh043-0"),
+            material: Some("Black-glow-0"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh028-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh028.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh028-0",
+            mesh: Some("Mesh028-0"),
+            material: Some("Leather"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh055-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh055.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh055-0",
+            mesh: Some("Mesh055-0"),
+            material: Some("RedLeather"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh053-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh053.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh053-0",
+            mesh: Some("Mesh053-0"),
+            material: Some("DarkPlastic"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh036-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh036.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh036-0",
+            mesh: Some("Mesh036-0"),
+            material: Some("RedLeather"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh035-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh035.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh035-0",
+            mesh: Some("Mesh035-0"),
+            material: Some("PinkLeather"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh031-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh031.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh031-0",
+            mesh: Some("Mesh031-0"),
+            material: Some("RedLeather"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh030-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh030.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh030-0",
+            mesh: Some("Mesh030-0"),
+            material: Some("PinkLeather"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh027-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh027.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh027-0",
+            mesh: Some("Mesh027-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh064-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh064.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh064-0",
+            mesh: Some("Mesh064-0"),
+            material: Some("RoughSteel"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh058-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh058.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh058-0",
+            mesh: Some("Mesh058-0"),
+            material: Some("RoughSteel"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Material((
+            name: "diffuse-0",
+            base_color: Some(Constant((0.0, 0.0, 0.0))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Mesh((
+            name: "Mesh029-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh029.ply",
+            )),
+        )),
+        Material((
+            name: "diffuse-0-glow-0",
+            base_color: Some(Constant((0.0, 0.0, 0.0))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: Some(1.0),
+            emission_color: Some(Constant((3.88628, 3.77255, 3.43137))),
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Instance((
+            name: "Mesh029-0",
+            mesh: Some("Mesh029-0"),
+            material: Some("diffuse-0-glow-0"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh080-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh080.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh080-0",
+            mesh: Some("Mesh080-0"),
+            material: Some("Black"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh067-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh067.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh067-0",
+            mesh: Some("Mesh067-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh060-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh060.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh060-0",
+            mesh: Some("Mesh060-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh026-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh026.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh026-0",
+            mesh: Some("Mesh026-0"),
+            material: Some("RoughSteel"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh047-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh047.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh047-0",
+            mesh: Some("Mesh047-0"),
+            material: Some("RoughSteel"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh061-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh061.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh061-0",
+            mesh: Some("Mesh061-0"),
+            material: Some("DarkPlastic"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh063-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh063.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh063-0",
+            mesh: Some("Mesh063-0"),
+            material: Some("DarkRubber"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh065-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh065.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh065-0",
+            mesh: Some("Mesh065-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh048-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh048.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh048-0",
+            mesh: Some("Mesh048-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh066-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh066.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh066-0",
+            mesh: Some("Mesh066-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh068-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh068.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh068-0",
+            mesh: Some("Mesh068-0"),
+            material: Some("DarkRubber"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh071-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh071.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh071-0",
+            mesh: Some("Mesh071-0"),
+            material: Some("RoughSteel"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh046-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh046.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh046-0",
+            mesh: Some("Mesh046-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh076-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh076.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh076-0",
+            mesh: Some("Mesh076-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh059-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh059.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh059-0",
+            mesh: Some("Mesh059-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh057-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh057.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh057-0",
+            mesh: Some("Mesh057-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh062-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh062.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh062-0",
+            mesh: Some("Mesh062-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh074-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh074.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh074-0",
+            mesh: Some("Mesh074-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh075-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh075.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh075-0",
+            mesh: Some("Mesh075-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh078-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh078.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh078-0",
+            mesh: Some("Mesh078-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh081-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh081.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh081-0",
+            mesh: Some("Mesh081-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh034-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh034.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh034-0",
+            mesh: Some("Mesh034-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh084-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh084.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh084-0",
+            mesh: Some("Mesh084-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh085-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh085.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh085-0",
+            mesh: Some("Mesh085-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh073-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh073.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh073-0",
+            mesh: Some("Mesh073-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh077-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh077.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh077-0",
+            mesh: Some("Mesh077-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh087-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh087.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh087-0",
+            mesh: Some("Mesh087-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh052-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh052.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh052-0",
+            mesh: Some("Mesh052-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh025-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh025.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh025-0",
+            mesh: Some("Mesh025-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh024-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh024.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh024-0",
+            mesh: Some("Mesh024-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh086-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh086.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh086-0",
+            mesh: Some("Mesh086-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh023-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh023.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh023-0",
+            mesh: Some("Mesh023-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh021-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh021.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh021-0",
+            mesh: Some("Mesh021-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh039-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh039.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh039-0",
+            mesh: Some("Mesh039-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh020-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh020.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh020-0",
+            mesh: Some("Mesh020-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh032-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh032.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh032-0",
+            mesh: Some("Mesh032-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh019-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh019.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh019-0",
+            mesh: Some("Mesh019-0"),
+            material: Some("RoughSteel"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh018-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh018.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh018-0",
+            mesh: Some("Mesh018-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh070-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh070.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh070-0",
+            mesh: Some("Mesh070-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh016-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh016.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh016-0",
+            mesh: Some("Mesh016-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh015-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh015.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh015-0",
+            mesh: Some("Mesh015-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh054-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh054.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh054-0",
+            mesh: Some("Mesh054-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh013-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh013.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh013-0",
+            mesh: Some("Mesh013-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh079-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh079.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh079-0",
+            mesh: Some("Mesh079-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh041-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh041.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh041-0",
+            mesh: Some("Mesh041-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh012-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh012.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh012-0",
+            mesh: Some("Mesh012-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh011-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh011.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh011-0",
+            mesh: Some("Mesh011-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh083-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh083.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh083-0",
+            mesh: Some("Mesh083-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh010-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh010.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh010-0",
+            mesh: Some("Mesh010-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh069-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh069.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh069-0",
+            mesh: Some("Mesh069-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh009-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh009.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh009-0",
+            mesh: Some("Mesh009-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh007-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh007.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh007-0",
+            mesh: Some("Mesh007-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh017-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh017.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh017-0",
+            mesh: Some("Mesh017-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh006-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh006.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh006-0",
+            mesh: Some("Mesh006-0"),
+            material: Some("RoughSteel"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh037-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh037.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh037-0",
+            mesh: Some("Mesh037-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh008-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh008.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh008-0",
+            mesh: Some("Mesh008-0"),
+            material: Some("RoughSteel"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh045-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh045.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh045-0",
+            mesh: Some("Mesh045-0"),
+            material: Some("RoughSteel"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh005-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh005.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh005-0",
+            mesh: Some("Mesh005-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh004-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh004.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh004-0",
+            mesh: Some("Mesh004-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh049-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh049.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh049-0",
+            mesh: Some("Mesh049-0"),
+            material: Some("RoughSteel"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh082-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh082.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh082-0",
+            mesh: Some("Mesh082-0"),
+            material: Some("RoughSteel"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh014-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh014.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh014-0",
+            mesh: Some("Mesh014-0"),
+            material: Some("RoughSteel"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh003-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh003.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh003-0",
+            mesh: Some("Mesh003-0"),
+            material: Some("RoughSteel"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh002-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh002.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh002-0",
+            mesh: Some("Mesh002-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh051-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh051.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh051-0",
+            mesh: Some("Mesh051-0"),
+            material: Some("RoughSteel"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh001-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh001.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh001-0",
+            mesh: Some("Mesh001-0"),
+            material: Some("Glass"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh056-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh056.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh056-0",
+            mesh: Some("Mesh056-0"),
+            material: Some("RoughAluminium"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh000-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh000.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh000-0",
+            mesh: Some("Mesh000-0"),
+            material: Some("BrightPinkLeather"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Mesh((
+            name: "Mesh022-0",
+            source: Some(Ply(
+                path: "sources/bitterli/spaceship/models/Mesh022.ply",
+            )),
+        )),
+        Instance((
+            name: "Mesh022-0",
+            mesh: Some("Mesh022-0"),
+            material: Some("RedLeather"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Material((
+            name: "diffuse-1",
+            base_color: Some(Constant((0.0, 0.0, 0.0))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Mesh((
+            name: "trianglemesh-0",
+            source: Some(Inline(
+                positions: [
+                    (-2.04973, 5.14472, 0.974365),
+                    (2.04973, 5.14472, 0.974365),
+                    (2.04973, 5.14472, 2.24722),
+                    (-2.04973, 5.14472, 2.24721),
+                ],
+                normals: Some([
+                    (0.000000150996, -1.0, 0.0000000874228),
+                    (0.000000150996, -1.0, 0.0000000874228),
+                    (0.000000150996, -1.0, 0.0000000874228),
+                    (0.000000150996, -1.0, 0.0000000874228),
+                ]),
+                uvs: Some([
+                    (0.0, 1.0),
+                    (1.0, 1.0),
+                    (1.0, 0.0),
+                    (0.0, 0.0),
+                ]),
+                triangles: [
+                    (0, 1, 2),
+                    (0, 2, 3),
+                ],
+            )),
+        )),
+        Material((
+            name: "diffuse-1-glow-0",
+            base_color: Some(Constant((0.0, 0.0, 0.0))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: Some(1.0),
+            emission_color: Some(Constant((9.0, 9.0, 10.0))),
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Instance((
+            name: "trianglemesh-0",
+            mesh: Some("trianglemesh-0"),
+            material: Some("diffuse-1-glow-0"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Material((
+            name: "diffuse-2",
+            base_color: Some(Constant((0.0, 0.0, 0.0))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Mesh((
+            name: "trianglemesh-1",
+            source: Some(Inline(
+                positions: [
+                    (-2.04973, 5.14472, -2.24722),
+                    (2.04973, 5.14472, -2.24721),
+                    (2.04973, 5.14472, -0.974365),
+                    (-2.04973, 5.14472, -0.974365),
+                ],
+                normals: Some([
+                    (0.000000150996, -1.0, 0.0000000874228),
+                    (0.000000150996, -1.0, 0.0000000874228),
+                    (0.000000150996, -1.0, 0.0000000874228),
+                    (0.000000150996, -1.0, 0.0000000874228),
+                ]),
+                uvs: Some([
+                    (0.0, 1.0),
+                    (1.0, 1.0),
+                    (1.0, 0.0),
+                    (0.0, 0.0),
+                ]),
+                triangles: [
+                    (0, 1, 2),
+                    (0, 2, 3),
+                ],
+            )),
+        )),
+        Material((
+            name: "diffuse-2-glow-0",
+            base_color: Some(Constant((0.0, 0.0, 0.0))),
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: Some(0.0),
+            specular_roughness: None,
+            specular_ior: None,
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: Some(1.0),
+            emission_color: Some(Constant((9.0, 9.0, 10.0))),
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Instance((
+            name: "trianglemesh-1",
+            mesh: Some("trianglemesh-1"),
+            material: Some("diffuse-2-glow-0"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+        Environment((
+            name: "sky",
+            path: Some(Some("spaceship-sky.exr")),
+            tint: None,
+            transform: None,
+        )),
+        Mesh((
+            name: "trianglemesh-2",
+            source: Some(Inline(
+                positions: [
+                    (-39.236, 78.436, -30.208),
+                    (39.236, 78.436, -30.208),
+                    (39.236, -0.0359497, -30.208),
+                    (-39.236, -0.0359497, -30.208),
+                ],
+                normals: Some([
+                    (0.0, -0.000000131134, -1.0),
+                    (0.0, -0.000000131134, -1.0),
+                    (0.0, -0.000000131134, -1.0),
+                    (0.0, -0.000000131134, -1.0),
+                ]),
+                uvs: Some([
+                    (0.0, 1.0),
+                    (1.0, 1.0),
+                    (1.0, 0.0),
+                    (0.0, 0.0),
+                ]),
+                triangles: [
+                    (0, 1, 2),
+                    (0, 2, 3),
+                ],
+            )),
+        )),
+        Instance((
+            name: "trianglemesh-2",
+            mesh: Some("trianglemesh-2"),
+            material: Some("Backdrop"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))),
+            ]),
+            camera_visible: None,
+        )),
+    ],
+)

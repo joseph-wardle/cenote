@@ -11,17 +11,29 @@ Sources are **not** in git (~8.5 GB): `./fetch.sh` materializes them into
 clone pinned at `30cf4a0` (content addressing is the checksum). A fresh
 clone renders any landed scene after `./fetch.sh <name>`.
 
+Two scenes light themselves through a **derived sky** beside their RON
+(`spaceship-sky.exr`, `teapot-full-sky.exr`) — import-generated,
+gitignored like the sources. To (re)generate one, re-run the bootstrap
+import into scratch — never over the curated RON — and keep the sky it
+writes beside its `--out`:
+
+```sh
+cargo run --release -p cenote-cli -- import \
+    sources/bitterli/<name>/scene-v4.pbrt --out /tmp/<name>.ron
+mv /tmp/<name>-sky.exr scenes/corpus/
+```
+
 | Scene | Source | License | Status | Gaps (unlock) |
 |---|---|---|---|---|
 | cornell-box | Bitterli | CC0 | landed (rung 1) | none |
 | veach-mis | Bitterli | CC0 | landed (rung 1) | none — equal-axis aniso averages exactly |
 | veach-ajar | Bitterli | CC0 | landed (rung 1) | none — TGA decode + the UV v-flip landed with this rung; equal-axis aniso exact |
 | veach-bidir | Bitterli | CC0 | landed (rung 1) | none — equal-axis aniso exact; native oracle is bdpt |
-| glass-of-water | Bitterli | CC0 | pending (rung 2) | aniso averaged |
-| coffee | Bitterli | CC BY 3.0 (cekuhnen) | pending (rung 2) | aniso averaged |
-| spaceship | Bitterli | CC0 (thecali) | pending (rung 2) | aniso averaged |
-| teapot-full | Bitterli | CC0 | pending (rung 2) | PFM sky (fix proposed); tea medium (M8 volumes) |
-| water-caustic | Bitterli | CC0 | pending (rung 2) | none |
+| glass-of-water | Bitterli | CC0 (aXel) | landed (rung 2) | none — equal-axis aniso exact; native oracle is bdpt |
+| coffee | Bitterli | CC BY 3.0 (cekuhnen) | landed (rung 2) | none — equal-axis aniso exact |
+| spaceship | Bitterli | CC0 (thecali) | landed (rung 2) | none — equal-axis aniso exact |
+| teapot-full | Bitterli | CC0 | landed (rung 2) | tea medium (M8 volumes); procedural checker curated to the CI-baked PNG; PFM sky landed with this rung |
+| water-caustic | Bitterli | CC0 | landed (rung 2) | none — native oracle is SPPM; unidirectional PT resolves the caustic slowly (spp, not bias) |
 | volumetric-caustic | Bitterli | CC0 | placeholder | participating media (M8 volumes) |
 | bathroom | Bitterli | CC0 (Mareck) | pending (rung 3) | TGA; aniso; displacement; one alpha shape |
 | kitchen | Bitterli | CC BY 3.0 (Jay-Artist) | pending (rung 3) | TGA; aniso; displacement; diffuse transmission |
