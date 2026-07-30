@@ -939,6 +939,85 @@ interactive regime (warm-started motion) that still-frame accumulation cannot
 measure. The 8-0 D-entry amends D-129's artifact 2 with the numbers (the D-142
 precedent: correct the claim to what is true).
 
+## 4g. Step-9 plan — polish, the licensed broad pass (interviewed 2026-07-29)
+
+Step 9 closes M6. Grounding findings from the interview: the def-of-done has already
+drifted (§7 points a stranger at `shift.slang`, a file that does not exist — the hybrid
+shift lives in `reservoir_path.slang` and `restir_pair.slang`), and the README intro is
+two milestones stale (line 12 still says "Status: M3 complete" above a body that
+demonstrates M6). The surface is bounded and measurable: the M6 diff range
+(`f9e1859^..HEAD`) touches 48 files under `crates/` (~6.4k insertions) — ~8k lines of
+shaders (`openpbr` 922, `restir_candidates` 871, `restir_target` 868 the largest),
+`wavefront.rs` at 4.7k, `restir.rs` ~1k, `convergence.rs` 390.
+
+| # | Question | Decision | Why |
+|---|----------|----------|-----|
+| 1 | Scope | **The four polish bullets + the licensed broad simplification pass; no fresh perf campaign.** "Efficient" means the pass provably ends no slower than it started and banks cheap wins simplification exposes — not a hunt | Step 7 was the perf step and closed with measured numbers; a fresh hunt has no finish line and fights manageable chunks |
+| 2 | Verification bar | **Bit-exact goldens per commit, by default.** A candidate that must reorder float math is surfaced individually — the specific reordering, unbiasedness gates, cross-referenced relMSE — and decided per case; expected exception list: short or empty | The goldens are a free *proof* of behaviour preservation; a re-blessed golden can hide a regression behind "just ULPs". Most cleanliness wins (naming, dead code, headers, host Rust) are naturally bit-exact |
+| 3 | Process | **Inventory-first.** 9-0 is a read-only sweep producing the candidate list below; the user prunes it; execution rungs work strictly off the approved list. Mid-rung discoveries are flagged for follow-up, never done in-flight | "Simpler" is partly taste, and this pass touches the estimator's most delicate code. Judgment spent once, where a veto is cheap — the 8-0 inventory precedent |
+| 4 | Surface | **Exactly the M6 diff range** (the 48 files) plus the docs bullets. Outside-range findings are flagged out-of-scope, not fixed | The step-9 license was M6's; M2/M3 had their own polish steps. Range compliance is one git command |
+| 5 | Perf duty | **Lightweight pin.** Capture the brass-room ReSTIR frame (512²) and the spatial-stage timing before the pass; re-measure per shader-touching rung, back-to-back on a warmed GPU; >~3 % frame regression → investigate, fix or revert the candidate. Deltas, not absolutes (D-149: this desktop is contention-sensitive). Host-only and docs rungs skip it | Bit-exactness proves *what* is computed, not *how fast*; register pressure and slang-optimizer surprises (the 7a negative-percent trap) are the regression class the harness can't see |
+| 6 | Viewer checklist | **User-owned and blocking.** Orbit warm-start, re-converge on hold, the 8192-frame park — on a quiet desktop, any time during the step; result recorded in the closing D-entry. M6 is not declared done before it | The def-of-done is the milestone's contract, and this bullet guards the interactive regime the README economics point at. Weakening a def-of-done at the finish line is a precedent this log refuses |
+| 7 | README breadth | **Truth pass, structure kept**: status line, the what's-next intro block (M4 shipped, M5 deferred, M6 complete), remaining ReSTIR-DI-era wording, layout-table rows verified, repro commands actually run. `docs/charter.md`'s roadmap gets the same staleness check | The 8b section already gives M6 the poster; a restructure is motion without information. "Every sentence verifiably current" is a bounded finish line |
+| 8 | Rungs & cadence | **9-0 inventory** (this section + candidate list, one commit) → **9a…9n execution rungs** (grouped as the inventory proposes, likely by subsystem; one commit each; bit-exact or pre-agreed exception, perf-pinned, tests green serially) → **9z closing rung** (README truth pass + charter check, def-of-done drift fixes incl. the `shift.slang` naming and a deferrals.md accuracy pass, goldens regenerated-and-eyeballed, closing D-entry). Each rung awaits its explicit Go | The step-3…8 ladder cadence; per-rung Go is what keeps each diff a small, refusable unit. Rungs after the prune are mechanical, so the latency cost is a few one-word replies |
+
+Leaf defaults (stated, not interviewed): goldens "regenerated and eyeballed" means
+*confirm current code reproduces the checked-in bytes* — the frozen-goldens rule makes
+any other reading wrong — plus a perceptual pass: a tonemapped contact sheet of every
+golden rendered and sent for the user's eyeball. Pruned and out-of-range findings land
+in deferrals.md or die explicitly in the D-entry — nothing lingers unrecorded. Commit
+subjects stay poetic single-liners. One closing D-entry for the step; per-rung entries
+only where a rung makes a real decision.
+
+### 9-0 candidate list (swept 2026-07-30)
+
+**The headline finding is thinness, and it is a finding.** The M6 range carries no
+TODO/FIXME markers, no references to the retired `reservoir_di`, no dead code the
+greps or the delta reads could surface, and no unfactored duplication — the shared
+helpers the steps extracted as they went (`nee.slang`, `restir_target.slang`'s four
+layers, `assert_reuse_gate`, `update_or_path`) already did the broad pass's usual
+work. The stage kernels are single linear functions by declared house style ("the
+recorded sequence *is* the map"), not neglect. Continuous per-step polish left step
+9 little to do in code, which is what the plan hoped ladder discipline would buy.
+Coverage, honestly stated: every module header and Rosetta block read; every
+lightly-touched file's full M6 delta read; kernel bodies swept at structure level
+(function inventory, section markers, field-usage greps), not re-derived line by
+line — the estimator math is the gates' jurisdiction, not this pass's.
+
+**Perf pin (captured 2026-07-30, quiet GPU, min-of-3, two-point spp differencing):**
+brass-room 512² `ReSTIR` frame **5.515 ms**; `--no-spatial` **3.548 ms**; spatial
+stage ≈ **1.97 ms**. (D-149's 10.9 ms was measured beside a ~90 %-loaded game;
+this is the same machine idle. Rep noise ran to ~15 %, so the >~3 % bar is judged
+on min-of-3 taken back-to-back, never single reps.)
+
+Code candidates — proposed rungs 9a (comments only) and 9b (one rename):
+
+| id | site | category | defect → change | bit-exact | size |
+|----|------|----------|-----------------|-----------|------|
+| A | `reservoir_path.slang:123` | header-drift | `rcVertexRandomSeed` inline comment claims "replay seed from xₖ onward"; the field is reserved-zero (only the round-trip fixture writes it) and the Rosetta above says so → align the inline comment with the Rosetta | certain (comment) | S |
+| B | `reservoir_path.slang:171` | header-drift | `cvNormalization` inline comment claims "`ReSTCV` running weight"; 6b-ii closed the lane's recurrence without it and the host mirror already documents reserved-zero → align | certain (comment) | S |
+| C | `PathSample.reserved` (shader + `src/restir.rs` mirror + `reservoir_path_test`) | naming-drift | the field carries the live path-kind/terminal/shiftable bits and the rc-length byte (`restir_scene.slang` accessors read `sample.reserved & 0x3` — actively confusing) → rename to a truthful name (e.g. `packedKind`), same layout, all three sites | certain (pure rename) | M |
+| D | `wavefront.rs` module header | header-drift | the header describes only the brute-force bounce loop; `ReSTIR` mode's bounce-0 reservoir chain — the def-of-done's stranger path — is undocumented at module level (the in-function comment at the recording site is current) → add one short paragraph | certain (comment) | S |
+| E | `wavefront.rs:726` (`RenderMode::Restir` doc) | header-drift | doc still says M3 `ReSTIR`-DI ("the reservoir stages own the light-sampling term… every later bounce unchanged"); since D-134 the reservoir owns the whole primary-hit path integral and bounce 0 alone is recorded → rewrite the doc | certain (comment) | S |
+| F | `restir.rs:1–18` module header | header-drift | "Both land now, in step 2" — present tense for an M3-era event; borderline (historical anchors are house style) → re-tense or leave, user's call | certain (comment) | S |
+
+Docs items — all 9z, per the interviewed decisions:
+
+| id | site | defect → change |
+|----|------|-----------------|
+| G | m6-plan.md §7 | stranger path names `shift.slang`, which does not exist — the shift maps live in `restir_target.slang` → correct the file names |
+| H | deferrals.md:183 | splatting/CRIS entry still marked *(revisit: M6)* — M6 came, landed the shift family, and consciously shipped without splatting/CRIS → re-point the revisit trigger; sweep the file for other now-stale markers |
+| I | README | intro two milestones stale ("Status: M3 complete", M4 pitched as next) → the full truth pass (Q7): status, what's-next block, remaining stale claims, table rows, repro commands actually run |
+| J | charter.md roadmap | written pre-reorder (M5 geometry depth before M6) → minimal annotation of the M5/M6 swap, honouring the charter's own conventions |
+| K | goldens | regenerate-and-eyeball: confirm current code reproduces the checked-in bytes, render the tonemapped contact sheet, send for the user's eyeball |
+| L | decisions.md | closing D-entry: the pass's findings, the perf pin, the viewer-checklist result; M6 declared done only after the user's desktop run (Q6) |
+
+Proposed execution: **9a** = A+B+D+E(+F if approved) — comment-only, provably
+bit-exact, no perf duty; **9b** = C — the one code-touching rung, goldens +
+determinism tests + perf pin re-measured; **9z** = G–L + the closing D-entry.
+Nothing was found that needs the float-reordering escape hatch — the exception
+list the interview predicted would be empty, is.
+
 ## 5. Fallback seams (pre-agreed, in slip order)
 
 - **Reciprocal spatial reuse (step 7)** → plain O(M) defensive pairwise MIS (M3's, on
