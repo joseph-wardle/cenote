@@ -155,10 +155,49 @@ consistently, but a winding-vs-normals disagreement would silently flip
 a one-sided emitter (watch at zero-day's rung, where emissive
 orientation is already the crux).
 
+**Rung-4 notes — the eyeball earned a renderer fix.** Zero-day
+(frame180, the README showcase frame) imported to 16559 ops, and
+native-vs-native measured a dire 0.495 that is almost entirely *film*:
+the scene's Film block carries a Canon EOS 100D sensor response, 5500 K
+white balance, and ISO 175 — a new documented gap class (cenote renders
+scene-referred radiance) — and stripping the trio from the pbrt
+reference drops the score to 0.105. The residual hunt ran seven false
+suspects to ground (blackbody normalization matches pbrt's 1-nit
+photometric convention to three decimals; depth, convergence, clamps,
+occlusion and tmax bisections all null) before a one-panel microtest
+pinned the real bug: **a one-sided emitter under a negative-determinant
+instance transform emitted from the wrong side.** The hit side was
+always correct — the inverse-transpose normal lands on the mapped
+object-front for any invertible transform — but the light records bake
+world-space corners, whose cross-product normal carries the
+determinant, so next-event refused the emitting side and MIS's power
+heuristic (side-agnostic |cos| in the hit-side weight) kept deferring
+to the strategy that never fired: ×500 dark, not ×2. Zero-day authors
+nearly everything through mirrored chains, so most of its 283 lights
+were wrong-sided — and the importer's 97 trap-4 warnings marked
+exactly the *healthy* shapes (pbrt XORs handedness to cancel the
+mirror out of its world-vertex bake; folding that into object-space
+winding double-corrected). Fixed renderer-side ("An emitter keeps its
+face through every mirror"): the light record carries sign(det), the
+importer's flip is `ReverseOrientation` alone, and the microtest goes
+0.0017 → 0.909 against pbrt's 0.910. Zero-day lands at **0.035**
+eighth-res against the film-stripped reference (256 spp ≡ 1024 —
+converged), with the roughness-scale/coat-texture flattening on the 30
+RustMixed metals and the BASE ROOM displacement as its remaining
+documented gaps. The earlier rungs are provably untouched: Bitterli
+exports bake a mirror into every CTM, which the import fold cancels to
+det +1 — goldens, README figures, and all eleven landed scenes verified
+bit-identical, so the recorded rung-1…3 numbers stand. Rung-3's
+winding-vs-normals watchpoint also closes for this scene: all 283
+emissive PLYs wind with their authored normals (a future
+disagreeing-mesh scene would follow winding — cenote's rule — where
+pbrt follows authored normals; documented, adversarial-only so far).
+
 **Documented-only renderer gaps** (unlock noted in each RON header when
 its rung lands): anisotropic roughness, displacement, diffuse-transmission
 lobe, textured coat roughness, dispersion (all unassigned material-depth
-work); participating media (M8).
+work); film/sensor response (sensor, white balance, ISO — zero-day);
+participating media (M8).
 
 ## 4. The ladder
 
@@ -172,7 +211,7 @@ build (`~/Documents/pbrt-v4/build/pbrt`, the README-figure one).
 | 1 | **Done**: cornell-box, veach-mis, veach-ajar, veach-bidir; TGA decode + the UV v-flip landed with it |
 | 2 | **Done**: glass-of-water, coffee, spaceship, teapot-full, water-caustic; the PFM reader, output-stem sky naming, and teapot's curated checker landed with it |
 | 3 | **Done**: bathroom, kitchen — no code changes; the recon's gap map held exactly (rung-3 notes below) |
-| 4 | zero-day (the ReSTIR showcase; emission-side eyeball is the rung's crux) |
+| 4 | **Done**: zero-day — the emission-side eyeball found and fixed the mirrored-emitter renderer bug; film response documented as a new gap class (rung-4 notes below) |
 | 5–10 | Heavies, one each: bmw-m6 (consider folding tests/scenes/showcase into the corpus here), crown, bistro (shape-alpha decision), kroken (ND decision), watercolor (ND), sanmiguel (redefinition fix) |
 | 11 | Swap rung — **gated on M6 closed** (viewer checklist → D-152 addendum): measure veach-ajar and zero-day against brass-room/many-lights on the reuse gate + convergence harness; if they clear, migrate gates, goldens, README figures; either way the numbers land in the D-entry |
 | 12 | Close: README final, full-corpus contact sheet, deferrals pointer, closing D-entry |
