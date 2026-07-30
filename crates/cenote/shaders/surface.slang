@@ -94,7 +94,13 @@ public SpawnPoint spawnPoint(GeometryRecord mesh, Hit hit, float3 rayDirection) 
     wldOffset = fma(wldScale, objOffset, wldOffset);
 
     // Emission is one-sided: record which side the ray struck by the raw
-    // winding normal, before it is flushed to face the ray below.
+    // winding normal, before it is flushed to face the ray below. No
+    // mirror correction is needed here — dot(M·n, M⁻ᵀ·n) = |n|² > 0 for
+    // any invertible M, so the inverse-transpose normal above always lands
+    // on the mapped image of the object-space front, even under a
+    // negative-determinant instance transform. This is the convention the
+    // light records' `winding` sign keeps `connectTriangle` in agreement
+    // with (their baked world edges do flip under a mirror).
     let frontFace = dot(wldNormal, rayDirection) < 0.0;
     // Face the arriving ray (instances disable facing cull), so the offset
     // pushes off the side the scattered ray leaves from.

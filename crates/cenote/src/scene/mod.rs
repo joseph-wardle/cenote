@@ -37,7 +37,7 @@ use std::path::PathBuf;
 
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Vec2, Vec3};
+use glam::{Mat3, Mat4, Vec2, Vec3};
 
 use crate::color::luminance;
 use crate::environment::Environment;
@@ -748,6 +748,13 @@ fn upload_scene_table(
 /// triangle of the mesh (degenerate ones included), in primitive order,
 /// transformed to world space — the contiguity `GeometryRecord.light`
 /// depends on.
+///
+/// Emission is one-sided off the *object-space* winding front; a
+/// mirroring transform (negative determinant) reverses the baked corners'
+/// world winding relative to that front, so the sign rides along for
+/// `connectTriangle` to restore the side — keeping next-event
+/// connections on the same face BSDF-sampled hits already emit from
+/// (their inverse-transpose normal is mirror-corrected by construction).
 fn emissive_triangles(
     positions: &[Vec3],
     triangles: &[[u32; 3]],
@@ -755,6 +762,11 @@ fn emissive_triangles(
     emission: Vec3,
     instance: u32,
 ) -> Vec<TriangleLight> {
+    let winding = if Mat3::from_mat4(transform).determinant() < 0.0 {
+        -1.0
+    } else {
+        1.0
+    };
     triangles
         .iter()
         .enumerate()
@@ -763,6 +775,7 @@ fn emissive_triangles(
             emission,
             instance,
             primitive: primitive as u32,
+            winding,
         })
         .collect()
 }

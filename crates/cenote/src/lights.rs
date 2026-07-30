@@ -49,6 +49,12 @@ pub struct TriangleLight {
     /// The triangle's index within its mesh, so a BSDF-sampled hit on the
     /// light finds this record at `GeometryRecord.light + primitive`.
     pub primitive: u32,
+    /// Which side of the world-space corners emits: `+1.0` when the
+    /// winding of `corners` is the emitting front, `-1.0` when the
+    /// instance transform mirrors (negative determinant) — the baked
+    /// corners then wind backwards relative to the object-space front
+    /// face, and the emitting side is the opposite one.
+    pub winding: f32,
 }
 
 /// A delta light: zero area, so next-event estimation is its only
@@ -105,7 +111,14 @@ pub(crate) struct LightRecord {
     /// ray toward a far-side point hits the near side of the same
     /// instance first.
     primitive: u32,
-    _pad0: [u32; 2],
+    /// Triangle only: `±1.0`, the sign relating the stored edges' winding
+    /// to the emitting front face — `-1.0` under a mirroring instance
+    /// transform. `connectTriangle` multiplies its cross-product normal by
+    /// this, so emission stays on the object-space winding-front side
+    /// however the instance is placed (and agrees with the hit side, whose
+    /// inverse-transpose normal is inherently mirror-corrected).
+    winding: f32,
+    _pad0: u32,
 }
 
 // std430 alignment: the trailing pad rounds the record up to a 16-byte
@@ -157,7 +170,8 @@ fn record(
         instance: ids.0,
         kind,
         primitive: ids.1,
-        _pad0: [0; 2],
+        winding: 1.0,
+        _pad0: 0,
     }
 }
 
@@ -269,8 +283,9 @@ pub(crate) fn total_power(triangles: &[TriangleLight], deltas: &[DeltaLight]) ->
 fn raw_records(triangles: &[TriangleLight], deltas: &[DeltaLight]) -> Vec<LightRecord> {
     let mut records: Vec<LightRecord> = triangles
         .iter()
-        .map(|light| {
-            record(
+        .map(|light| LightRecord {
+            winding: light.winding,
+            ..record(
                 KIND_TRIANGLE,
                 light.corners[0],
                 light.corners[1] - light.corners[0],
@@ -322,6 +337,7 @@ mod tests {
             emission,
             instance,
             primitive,
+            winding: 1.0,
         }
     }
 
@@ -416,6 +432,23 @@ mod tests {
         let records = build(&triangles[..1], &deltas);
         assert!((records[1].pdf - 0.5).abs() < 1e-6, "{}", records[1].pdf);
         assert_eq!(records[1].instance, LIGHT_NONE);
+    }
+
+    /// The winding sign rides the record untouched — a mirrored
+    /// instance's triangles keep their `-1.0` through the alias pass,
+    /// while delta lights always carry `+1.0` (they have no winding).
+    #[test]
+    #[expect(clippy::float_cmp, reason = "the sign is copied, never computed")]
+    fn winding_sign_survives_the_alias_pass() {
+        let mut mirrored = triangle([Vec3::ZERO, Vec3::X, Vec3::Z], Vec3::ONE, 0, 0);
+        mirrored.winding = -1.0;
+        let deltas = [DeltaLight::Point {
+            position: Vec3::Y,
+            intensity: Vec3::ONE,
+        }];
+        let records = build(&[mirrored], &deltas);
+        assert_eq!(records[0].winding, -1.0);
+        assert_eq!(records[1].winding, 1.0);
     }
 
     /// Triangle records precede delta records and sit in (instance,

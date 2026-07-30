@@ -591,9 +591,15 @@ impl Mapper {
     fn shape_directive(&mut self, directive: &Directive) -> Result<()> {
         self.verify_block(directive, true)?;
         let ty = directive.names[0].as_str();
-        // Trap 4's XOR: ReverseOrientation and a mirroring transform
-        // each flip the surface's orientation; together they cancel.
-        let flip = self.state.reverse_orientation ^ swaps_handedness(self.state.ctm);
+        // Trap 4, resolved on the renderer's terms: pbrt XORs
+        // ReverseOrientation with the CTM's handedness because it bakes
+        // world-space vertices and must cancel the mirror out of their
+        // winding. cenote keeps object-space geometry and det-corrects the
+        // emission side under the instance transform itself (both the hit
+        // side's inverse-transpose normal and the light records' winding
+        // sign), so a mirroring CTM needs no compensation here — only
+        // ReverseOrientation genuinely flips the authored orientation.
+        let flip = self.state.reverse_orientation;
         let (source, mesh_prefix) = match ty {
             "trianglemesh" => (trianglemesh(directive, flip)?, "trianglemesh".to_owned()),
             "plymesh" => {
@@ -1828,14 +1834,17 @@ Translate 1 0 0
         });
     }
 
-    /// Trap 4's XOR: `ReverseOrientation` flips authored normals and
-    /// winding; a mirroring transform flips them back.
+    /// `ReverseOrientation` alone flips authored normals and winding. A
+    /// mirroring transform does NOT flip them back — pbrt's trap-4 XOR
+    /// compensates for its own world-space vertex bake, but cenote keeps
+    /// object-space winding and det-corrects the emission side under the
+    /// instance transform, so the mirror must stay out of the decision.
     #[test]
     #[expect(
         clippy::float_cmp,
         reason = "authored normal components must copy through bit-exact"
     )]
-    fn reverse_orientation_xors_with_mirroring_transforms() {
+    fn reverse_orientation_flips_regardless_of_mirroring() {
         let plate = r#"Shape "trianglemesh"
             "point3 P" [0 0 0  1 0 0  0 1 0]
             "normal N" [0 0 1  0 0 1  0 0 1]
@@ -1866,15 +1875,16 @@ Translate 1 0 0
             };
             let (plain, plain_winding) = normal_z(mesh("trianglemesh-0"));
             let (reversed, reversed_winding) = normal_z(mesh("trianglemesh-1"));
-            let (cancelled, cancelled_winding) = normal_z(mesh("trianglemesh-2"));
+            let (mirrored, mirrored_winding) = normal_z(mesh("trianglemesh-2"));
             assert_eq!(plain, 1.0);
             assert_eq!(plain_winding, [0, 1, 2]);
             // ReverseOrientation alone flips…
             assert_eq!(reversed, -1.0);
             assert_eq!(reversed_winding, [0, 2, 1]);
-            // …and a handedness-swapping transform cancels it.
-            assert_eq!(cancelled, 1.0);
-            assert_eq!(cancelled_winding, [0, 1, 2]);
+            // …and the mirroring transform leaves the (still-reversed)
+            // orientation alone: the renderer det-corrects the mirror.
+            assert_eq!(mirrored, -1.0);
+            assert_eq!(mirrored_winding, [0, 2, 1]);
         });
     }
 

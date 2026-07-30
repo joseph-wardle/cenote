@@ -437,6 +437,70 @@ fn a_point_light_is_analytically_exact() {
     }
 }
 
+/// A mirroring instance transform must not swap an emitter's face:
+/// emission is one-sided off the *object-space* winding front, carried
+/// through the transform. `ground_plane` is x-symmetric, so composing a
+/// `diag(-1,1,1)` mirror maps the panel's point set onto itself while
+/// reversing its world winding (determinant −1) — the same world-space
+/// quad, re-expressed. Both expressions must light the receiver
+/// identically. The failure mode this pins is nearly black, not
+/// half-bright: the baked light record's world winding flips, next-event
+/// estimation refuses the emitting side, and MIS's power heuristic —
+/// whose hit-side weight uses the side-agnostic |cos| — keeps deferring
+/// to the strategy that never fires.
+#[test]
+fn a_mirrored_emitter_lights_the_same_side() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let renderer = Renderer::new(&gpu).expect("renderer");
+    // An emissive panel 2 m up, rotated so its winding front faces the
+    // receiver plane below; the camera looks down at the receiver.
+    let facing_down =
+        Mat4::from_translation(Vec3::Y * 2.0) * Mat4::from_rotation_x(std::f32::consts::PI);
+    let mirror = Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0));
+    let mean = |emitter: Mat4| {
+        let objects = [
+            Object {
+                mesh: ground_plane(4.0),
+                transform: Mat4::IDENTITY,
+                material: Material::matte(Vec3::splat(0.5), 0.0),
+            },
+            Object {
+                mesh: ground_plane(1.0),
+                transform: emitter,
+                material: Material {
+                    emission: Vec3::splat(5.0),
+                    ..Material::matte(Vec3::ZERO, 0.0)
+                },
+            },
+        ];
+        let camera = Camera {
+            position: Vec3::new(0.0, 1.0, 3.0),
+            look_at: Vec3::ZERO,
+            up: Vec3::Y,
+            vfov_degrees: 45.0,
+            lens: None,
+        };
+        let scene = Scene::new(&gpu, &objects, camera, &Environment::constant(Vec3::ZERO))
+            .expect("scene");
+        let sum = accumulate_sum(&gpu, &renderer, &scene, 32, 32);
+        sum.chunks_exact(4)
+            .map(|chunk| chunk[..3].iter().sum::<f32>())
+            .sum::<f32>()
+            / (32.0 * 32.0 * 32.0)
+    };
+
+    let plain = mean(facing_down);
+    let mirrored = mean(facing_down * mirror);
+    assert!(plain > 0.05, "the receiver must be lit at all: {plain}");
+    let ratio = mirrored / plain;
+    assert!(
+        (ratio - 1.0).abs() < 0.05,
+        "the mirrored panel must light the same side: {mirrored} vs {plain}"
+    );
+}
+
 /// The white-furnace matrix over the full `OpenPBR` closure, extended
 /// lobe by lobe. A white material of any construction must return
 /// exactly the sky's

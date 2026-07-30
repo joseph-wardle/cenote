@@ -8,9 +8,15 @@
 // `lights.rs`, which mirrors them struct for struct.
 //
 // Emissive surfaces are one-sided, like pbrt's default area light: only the
-// winding-front face emits, so every light-side cosine is signed and a
-// receiver behind the emitter is dark. (BSDF surfaces stay two-sided — it is
-// emission, not shading, that picks a side.)
+// *object-space* winding-front face emits, carried consistently through the
+// instance transform — a mirrored instance emits from the image of that same
+// side. The records bake world-space corners, whose winding a mirroring
+// (negative-determinant) transform reverses, so each record carries the sign
+// (`winding`) that restores the front; the hit side needs no such sign, since
+// its inverse-transpose normal lands on the mapped front by construction.
+// Every light-side cosine is signed and a receiver behind the emitter is
+// dark. (BSDF surfaces stay two-sided — it is emission, not shading, that
+// picks a side.)
 
 // `GeometryRecord.light` for instances that are not lights — and, on a
 // queued shadow ray, the target "instance" of a connection with nothing
@@ -60,7 +66,9 @@ public struct LightRecord {
     public uint instance;        // triangle: TLAS custom index; delta: LIGHT_NONE
     public uint kind;            // LIGHT_KIND_*
     public uint primitive;       // triangle only: index within its mesh
-    uint pad0;
+    public float winding;        // triangle only: ±1 — the sign relating the
+                                 //   stored edges' winding to the emitting
+                                 //   front (−1 under a mirroring instance)
     uint pad1;
 };
 
@@ -108,7 +116,9 @@ public LightConnection connectTriangle(LightRecord light, float2 bary, float3 fr
     let position = light.anchor + bary.x * light.edge1 + bary.y * light.edge2;
     let delta = position - from;
     let r2 = dot(delta, delta);
-    let normal = normalize(cross(light.edge1, light.edge2));
+    // The record's winding sign restores the object-space front from the
+    // baked world edges, whose cross flips under a mirroring instance.
+    let normal = light.winding * normalize(cross(light.edge1, light.edge2));
     let direction = delta * rsqrt(r2);
     // One-sided: the winding-front normal must face the receiver, so the
     // cosine is signed. A receiver behind the emitter gets nothing.
