@@ -120,7 +120,7 @@ public struct PathSample : IDefaultInitializable {
     public float3 F;                 // 32..44 F  — RGB path integrand, this domain
     public float neeLightPdf;        // 44..48 the NEE light pdf, kept unpacked
     public uint initRandomSeed;      // 48..52 replay/dup-map key for early segments
-    public uint rcVertexRandomSeed;  // 52..56 replay seed from xₖ onward
+    public uint rcVertexRandomSeed;  // 52..56 reserved — stays zero (D-128 headroom)
     public float cachedJacobian;     // 56..60 shift Jacobian terms, pre-multiplied
     public uint reserved;            // 60..64 the path-kind/terminal/shiftable
                                      //   bits (restir_scene.slang); rest reserved
@@ -168,7 +168,7 @@ public struct StoredPathReservoir {
     public uint flags;             // 72..76 — reserved (path/reconnection flags)
     public uint pad0;              // 76..80 — pad: 16-byte-aligns the CV lane
     public float3 cvAccumulator;   // 80..92 — ReSTCV accumulated colour (step 6)
-    public float cvNormalization;  // 92..96 — ReSTCV running weight (step 6)
+    public float cvNormalization;  // 92..96 — ReSTCV slot, reserved-zero (6b-ii)
 };
 
 // Persist a live path reservoir, dropping the pass-local weightSum and zeroing

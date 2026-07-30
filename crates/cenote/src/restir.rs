@@ -7,7 +7,7 @@
 //! here computes lighting; it owns the memory reuse runs on and keeps that
 //! memory correct across the two events that make `ReSTIR` hard to retrofit —
 //! a light being added or removed (the identity remap) and a viewport being
-//! resized or replaced (per-view ownership). Both land now, in step 2, because
+//! resized or replaced (per-view ownership). Both landed in M3 step 2, because
 //! both are high-retrofit-cost seams (M3 plan §6, D-085).
 //!
 //! The reservoir buffer is deliberately `AoS` where the path pool is `SoA`:

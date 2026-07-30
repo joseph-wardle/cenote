@@ -14,6 +14,18 @@
 //! — and a wave whose paths all die early just dispatches empty rounds
 //! until the recording runs out.
 //!
+//! In `ReSTIR` mode a reservoir chain is recorded into bounce 0 between
+//! intersect and `shade_surface` — candidates, temporal, the spatial
+//! gather/combine pair, resolve — and owns the primary hit's whole
+//! non-delta path integral (D-134). Its reservoirs carry whole light
+//! paths (`reservoir_path.slang`): candidates streams M light samples
+//! plus every event of one BSDF walk, the reuse stages fold in last
+//! frame's and the neighbours' path reservoirs through the hybrid shift,
+//! and resolve shades the survivor. `shade_surface` keeps only the
+//! directly visible emission there and pushes no continuation, so a
+//! `ReSTIR` wave records bounce 0 alone (`record_wave` is the sequence,
+//! pass by pass).
+//!
 //! Radiance starts the wave zero-filled and every kernel write is a plain
 //! add: emission and shadow-ray contributions land per bounce, and each
 //! path's terminal add carries alpha 1, so "every pixel finished exactly
@@ -716,18 +728,21 @@ pub enum LightSampling {
     NeeOnly = 2,
 }
 
-/// How the primary hit's direct lighting is estimated. Orthogonal to
-/// [`LightSampling`]: it chooses *which estimator* runs the light-sampling
-/// strategy at bounce 0, not which strategies exist.
+/// How the primary hit is estimated. Orthogonal to [`LightSampling`]: it
+/// chooses *which estimator* owns the primary hit's light transport, not
+/// which sampling strategies exist.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RenderMode {
     /// The M2 path tracer: `shade_surface` does per-bounce NEE itself.
     PathTracer,
-    /// M3 `ReSTIR`-DI: at bounce 0 the reservoir stages
-    /// (`restir_candidates`/`restir_resolve`) own the light-sampling term,
-    /// resolved into a per-view reservoir buffer; `shade_surface`'s bounce-0
-    /// NEE is switched off. Every later bounce is unchanged. At convergence this
-    /// matches [`PathTracer`](Self::PathTracer) exactly — the unbiasedness gate.
+    /// `ReSTIR` — M3's DI reservoir, unified to whole paths in M6
+    /// (D-124/D-134): at bounce 0 the reservoir chain (`restir_candidates`,
+    /// the reuse stages, `restir_resolve`) owns the primary hit's whole
+    /// non-delta path integral, resolved into a per-view reservoir buffer;
+    /// `shade_surface` keeps only the directly visible emission there and
+    /// pushes no continuation, so bounce 0 is a wave's one recorded round.
+    /// At convergence this matches [`PathTracer`](Self::PathTracer) exactly
+    /// — the unbiasedness gate.
     Restir,
 }
 
