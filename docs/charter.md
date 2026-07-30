@@ -85,6 +85,8 @@ Where MoonRay optimizes for memory capacity and CPU-scale robustness on unbounde
 
 Sizing is honest: **M0–M5 fit before April 2027 (~400 h)**. M6+ are post-graduation or capacity-permitting. Each milestone ends with a demo artifact.
 
+*Amendment (2026-07-24): the swap condition fired — a rendering-research role became the primary target — so M6 (ReSTIR PT) ran fifth, directly after M4; M5 geometry depth is deferred to capacity (decisions.md, "M6 locked"). The roadmap below is otherwise as originally written.*
+
 **M0 — Skeleton** (4–6 wks)
 Cargo workspace; ash device init with `VK_KHR_ray_query` + `acceleration_structure` + descriptor indexing; Slang compiled at build *and* hot-reloadable at runtime; BLAS/TLAS build; one compute kernel ray-querying a triangle mesh; EXR out via `exr`. *Demo: flat-shaded mesh render, hot-reloading shader.*
 

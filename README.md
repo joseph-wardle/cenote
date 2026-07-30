@@ -9,7 +9,7 @@ Where CPU production renderers optimize for memory capacity on unbounded scenes,
 Cenote makes the inverse bet: extreme single-GPU performance on scenes that fit in
 VRAM.
 
-**Status: M3 complete** — the six-kernel wavefront engine
+**Status: M6 complete** — the wavefront engine
 (indirect dispatch, zero mid-frame readbacks), Sobol-Burley sampling, the
 full `OpenPBR` closure — coat, fuzz, rough glass with interior absorption,
 thin-walled surfaces, variable IOR, fractional opacity — energy-compensated
@@ -27,20 +27,25 @@ one multi-layer EXR, OIDN denoising over those guides (a CLI flag and a
 viewer toggle, in builds with the `denoise` feature), a progressive viewer,
 and a batch CLI that writes exactly the image the viewer converges to.
 
-M3 adds the renderer's theoretical core — **ReSTIR-DI**: screen-space
+M3 added the renderer's theoretical core — **ReSTIR-DI**: screen-space
 reservoir resampling at the primary hit, spatial and temporal reuse folded
 under defensive pairwise MIS, unbiased by construction so it converges to the
 very image the path tracer does and gets there faster where the lights are
-many ([below](#many-lights-resampled)).
+many ([below](#many-lights-resampled)). M6 grew that reservoir from a light
+sample to a whole light path — **ReSTIR PT**, reconnection and replay shifts
+carrying indirect paths between pixels and across frames, with a ReSTCV
+control variate over the top ([below](#paths-resampled)).
 
-**M4 — a scene-index-native Hydra render delegate + out-of-process render
-server — is underway** ([docs/m4-plan.md](docs/m4-plan.md)): the transport
-spine is in place — `cenote-wire` (the explicit wire mirror of the change-set
-schema), `cenote-server` (loopback TCP around `render::Session`, pixels
-through a lock-free shared-memory framebuffer, converted to `Rec.709`
-server-side), and the byte-exact cross-language drift guard — proven by an
-integration test that drives the real binary over the wire and reads the
-frame out of shared memory.
+Between them, **M4 shipped the pipeline story**
+([docs/m4-plan.md](docs/m4-plan.md)): `cenote-wire` (the explicit wire mirror
+of the change-set schema), `cenote-server` (loopback TCP around
+`render::Session`, pixels through a lock-free shared-memory framebuffer,
+converted to `Rec.709` server-side), the byte-exact cross-language drift
+guard, and `hdCenote` — a scene-index-native Hydra render delegate rendering
+live inside `usdview` and batch through `usdrecord` and `husk` (see
+[hydra/README.md](hydra/README.md)). M5 — geometry depth: subdivision, hair —
+is deferred; ReSTIR PT outranked it when a rendering-research target became
+primary ([docs/m6-plan.md](docs/m6-plan.md)).
 
 ![A 5×5 grid of terracotta spheres resting on a glossy gray floor — roughness increasing left to right, metalness back to front — under a blue sky](docs/demo.png)
 
@@ -159,9 +164,10 @@ construction it leaves per-pixel luminance untouched and repairs colour
 noise, which a scalar error metric cannot see; its temporal warm-up costs a
 few percent early and anneals to ~2% by 128 frames.*
 
-The economics, stated plainly: a ReSTIR PT frame costs about 4.7× a
-brute-force sample on this scene (10.9 ms against 2.3 ms per spp at 512² —
-the candidate stream and the path walk are real work), so at matched
+The economics, stated plainly: a ReSTIR PT frame costs about 4× a
+brute-force sample on this scene (≈5.4 ms against ≈1.4 ms per spp at 512² on
+an idle RTX 4070 Ti SUPER, min-of-N two-point differencing — the candidate
+stream and the path walk are real work), so at matched
 *seconds* on a still frame, the plain path tracer currently wins: its
 stratified sampler converges super-linearly as accumulation walks the sample
 sequence in order, while resampling trades that structure away for reuse.
@@ -262,7 +268,7 @@ cargo test --workspace   # on the GPU machine — includes the goldens
 | `crates/cenote-server/` | Out-of-process render server: loopback-TCP request/response around `render::Session`, shared-memory framebuffer (M4) |
 | `crates/cenote-viewer/` | Interactive viewer binary: live render in a window, orbit camera, progressive accumulation, stats/controls overlay, live-editable scene files |
 | `crates/cenote-wire/` | The render server's wire: explicit change-set mirror types, MessagePack framing, the shm layout — and the byte-exact cross-language drift guard |
-| `hydra/` | The C++ half of M4 — the wire mirror and the C++ side of the drift guard now, the `hdCenote` Hydra delegate plugin next (see its README) |
+| `hydra/` | The C++ half of M4 — the `hdCenote` scene-index-native Hydra render delegate, its transport client, and the C++ wire mirror with the drift-guard corpus test (see its README) |
 | `scenes/` | Hand-written example scene — the scene model in one readable `.ron` file |
 | `tests/scenes/` | The vendored CC0 pbrt corpus (see its README for provenance) and the showcase fetch script |
 | `docs/charter.md` | Project charter: vision, locked decisions, milestone roadmap |

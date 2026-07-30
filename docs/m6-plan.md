@@ -218,6 +218,7 @@ compiles, clippy-clean (incl. `--features denoise`), tests pass on the GPU machi
    Expanded to a three-rung ladder in §4f (interviewed 2026-07-29).
 9. **Polish** — goldens regenerated and eyeballed, module headers and the reservoir
    Rosetta block current, README flagship section, decisions.md current. *M6 done.*
+   Expanded to an inventory-first ladder in §4g (interviewed 2026-07-29).
 
 ## 4a. Step-3 plan — the hybrid shift (interviewed 2026-07-25)
 
@@ -1018,6 +1019,21 @@ determinism tests + perf pin re-measured; **9z** = G–L + the closing D-entry.
 Nothing was found that needs the float-reordering escape hatch — the exception
 list the interview predicted would be empty, is.
 
+### Step-9 close (2026-07-30)
+
+All three rungs landed: **9a** (`0152fef`, A+B+D+E+F, comment-only), **9b**
+(`dd9b414`, the `pathFlags` rename — Enhanced's own name for the packed word —
+with the `cachedJacobian` comment fix riding along; all seven importing kernels
+proven *instruction-identical* in SPIR-V with debug names stripped, a stronger
+verdict than the stopwatch), and **9z** (the docs rung, this commit; D-152 is
+the closing entry). Two protocol notes for future pins: the first rep after a
+rebuild is garbage (the low-spp run pays the pipeline-cache compile, driving
+the delta negative — discard it), and byte-comparing regenerated goldens is
+meaningless (the `exr` writer emits scanline chunks in nondeterministic
+parallel order) — chunk-keyed pixel comparison is the frozen-goldens test, and
+all seven pass it. M6 is declared done by the D-152 addendum once the
+user-owned viewer checklist (§4g decision 6) passes.
+
 ## 5. Fallback seams (pre-agreed, in slip order)
 
 - **Reciprocal spatial reuse (step 7)** → plain O(M) defensive pairwise MIS (M3's, on
@@ -1083,7 +1099,8 @@ sourcing guides from the canonical path, not discovered late.
   brute force, so they remain a free regression gate; the change-set, apply-order, and
   bitwise-determinism tests stay green through the path reservoir buffers.
 - A stranger can read `wavefront.rs`'s stage sequence and see the reuse stages carry whole
-  paths, read `shift.slang` and `reservoir.slang`'s Rosetta block to map the code to the
+  paths, read `restir_target.slang`'s shift maps and `reservoir_path.slang`'s Rosetta
+  block to map the code to the
   Enhanced paper and the course, and read [deferrals.md](deferrals.md) to know exactly
   what — duplication maps, splatting/CRIS, the light-BVH, path guiding — was consciously
   left for later and when it returns.

@@ -3783,3 +3783,50 @@ identical. §7's poster bullet re-worded from equal-time to equal-sample (the D-
 now in the definition of done). All six docs figures reproduce byte-for-byte on a warm-cache
 re-run; no Rust, no shader, no golden, no test is touched by the rung. Step 8 — the scene, the
 harness, the figures — is complete.
+
+## 2026-07-30 — M6 step 9: the licensed broad pass finds the house already swept
+
+### D-152: Step 9 closes — polish confirms thinness, and the truth pass catches what only running the docs could
+Status: accepted (2026-07-30). The inventory-first ladder (§4g) ran to completion: **9-0**
+(`6450c27`) swept the whole M6 diff range and returned the headline that per-step polish had
+already done the broad pass's work — no TODOs, no dead code, no `reservoir_di` leftovers, an
+empty float-reordering exception list; **9a** (`0152fef`) landed the five comment-only fixes;
+**9b** (`dd9b414`) renamed `PathSample.reserved` → `pathFlags` (Enhanced's own name for the
+packed word) across shader, host mirror, and fixture, with the `cachedJacobian` comment fix
+riding along. 9b's regression proof is stronger than timing: all seven kernels importing the
+renamed structs compile to **instruction-identical SPIR-V** once debug names are stripped
+(slangc `-target spirv-asm`, OpName/OpString lines dropped, diff) — the stopwatch's +4% read
+was contention, and the pin protocol gains two recorded caveats (the first rep after a rebuild
+pays the pipeline-cache compile and must be discarded; the desktop's background load can
+double every number mid-session, reproducing D-149's 10.9/2.3 ms almost exactly at 10.3/2.2).
+
+**The perf duty closes with the quiet-GPU numbers**: brass-room 512² ReSTIR frame ≈5.4 ms
+(min 5.336), `--no-spatial` ≈3.15 ms, spatial stage ≈2 ms, brute force ≈1.3–1.7 ms/spp — a
+ReSTIR frame ≈4× a brute sample, not D-149's contended 4.7×. The README economics paragraph
+now states the idle-GPU numbers with the method named; the direction of the claim (matched
+tripod seconds favour stratified brute force) is unchanged.
+
+**The 9z truth pass, and what running the docs caught.** The def-of-done's stranger path
+pointed at `shift.slang`, a file that never existed — now `restir_target.slang`'s shift maps
+and `reservoir_path.slang`'s Rosetta. deferrals.md's splatting/CRIS entry no longer says
+*revisit: M6* (M6 came and consciously shipped without them), and the stochastic-pairwise-MIS
+trigger no longer names M6 as future. The README status block tells the current story (M6
+complete, M4's delegate/server/husk shipped, M5 deferred by the fired swap condition); the
+charter roadmap carries a dated amendment for the reorder, its original text untouched. The
+catch that vindicates "repro commands actually run": M6's `cenote-flip` bin made **every
+documented `cargo run -p cenote-cli` command ambiguous** — broken as written until this
+commit's one-line `default-run` manifest fix, the minimal change that makes item I true. All
+four documented commands were then run and write what they claim. Goldens: `UPDATE_GOLDENS`
+regeneration reproduced five of seven byte-identically; the two that differed are
+**pixel-identical** under chunk-keyed comparison — the `exr` writer emits scanline chunks in
+nondeterministic parallel order, so byte equality was never the right test — and the
+checked-in bytes stay. The tonemapped seven-golden contact sheet went to the user's eyeball.
+
+**Flagged, not fixed** (inventory discipline, outside the approved list): the CLI `--restir`
+help text still says "ReSTIR-DI at the primary hit" — stale since D-124/D-134; the §2 plan
+sketch in m6-plan.md still lists `shift.slang`/`restcv.slang` as planned files (left as the
+historical record of what was planned; §7 was the normative fix).
+
+**M6 is not yet declared done.** The user-owned viewer checklist (orbit warm-start,
+re-converge on hold, the 8192-frame park, quiet desktop — §4g decision 6) is the one open
+gate; its result lands here as an addendum, and M6 closes with it.

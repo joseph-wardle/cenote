@@ -1,6 +1,9 @@
 [package]
 name = "cenote-cli"
 description = "Headless batch renderer over the cenote core library"
+# The package grew a second bin (`cenote-flip`), which made every documented
+# `cargo run -p cenote-cli` ambiguous — this keeps them working as written.
+default-run = "cenote-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

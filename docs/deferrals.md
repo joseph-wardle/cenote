@@ -180,7 +180,8 @@ built to extend but that M3 consciously does not build.
   *orthogonal* to screen-space ReSTIR — the accelerator for the vertices a screen-space
   reservoir can't see. It instantiates the same reservoir primitive; that is why the
   primitive is index-agnostic. (D-086)
-- **Reservoir path reuse — splatting, CRIS** *(revisit: M6, ReSTIR-PT)* — Today: M6
+- **Reservoir path reuse — splatting, CRIS** *(revisit: post-M6 — splatting/CRIS wait
+  for a measured case)* — Today: M6
   steps 2–5 landed spatiotemporal path reuse whole — the **reconnection shift**
   (D-134/D-135), the **hybrid shift** with the footprint pair criteria (D-137/D-140),
   and **temporal path reuse** across the frame boundary through the same shared shift
@@ -222,7 +223,8 @@ built to extend but that M3 consciously does not build.
   intra-tile correlation, so it is a cost, not a free upgrade, and waits for the
   measurement that justifies it. (D-088)
 - **Stochastic pairwise MIS** *(revisit: when neighbour counts grow enough that O(M)
-  pairwise MIS is itself the cost — M6 path reuse, or ReGIR)* — Today: defensive
+  pairwise MIS is itself the cost — M6 shipped fine without it; ReGIR-era counts are
+  the likely trigger)* — Today: defensive
   pairwise MIS, O(M), evaluated in full. Production shape: the stochastic pairwise
   estimator (subsample the pairwise terms) when M is large. A drop-in refinement of the
   same combine function. (D-087)
