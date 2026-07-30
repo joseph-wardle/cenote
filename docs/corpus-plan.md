@@ -131,6 +131,30 @@ couldn't see it). The CLI now names derived assets after `--out`
 lands beside the RON" always claimed; the corpus README's derived-sky
 recipe covers regeneration.
 
+**Rung-3 notes.** No code changes — the recon's gap map held exactly,
+but the decision-7 bar earned its keep by *weighing* the gaps. Bathroom
+measured 0.082 eighth-res against native pbrt — far above the gapped
+expectation — and the hunt (window-region crops matching pbrt to four
+decimals, a from-scratch two-quad microtest agreeing to five, blinds
+and mirror bisections moving nothing) ended at the *displacement*
+warnings everyone had priced as minor: the window light grazes the
+bumpy foam and tile floor, the angle where bump maps darken hardest, so
+the flat import runs the foam ~1.9× and the floor ~3× bright. Strip
+displacement from the pbrt reference and bathroom drops to 0.045; the
+rest is the ~10% Schlick-vs-exact-Fresnel surplus ajar documented
+(the alpha-less rug is visually nil at this framing). Kitchen measured
+0.053, and degrading pbrt by its two documented gaps (blinds
+transmission flattened, displacement dropped) collapses it to 0.015 —
+the gap-free baseline, nothing else diverging. Lesson recorded for the
+remaining rungs: a "dropped texture" warning's cost is
+lighting-geometry-dependent — the same class of gap is invisible in
+one scene and the headline in the next. Side discovery, microtest-only:
+pbrt orients a mesh's geometric normal to agree with authored shading
+normals where cenote trusts winding — every corpus mesh so far winds
+consistently, but a winding-vs-normals disagreement would silently flip
+a one-sided emitter (watch at zero-day's rung, where emissive
+orientation is already the crux).
+
 **Documented-only renderer gaps** (unlock noted in each RON header when
 its rung lands): anisotropic roughness, displacement, diffuse-transmission
 lobe, textured coat roughness, dispersion (all unassigned material-depth
@@ -147,7 +171,7 @@ build (`~/Documents/pbrt-v4/build/pbrt`, the README-figure one).
 | 0 | **Done** (`0eb7560`): fetch.sh, sources recon, this plan, README skeleton, gitignore |
 | 1 | **Done**: cornell-box, veach-mis, veach-ajar, veach-bidir; TGA decode + the UV v-flip landed with it |
 | 2 | **Done**: glass-of-water, coffee, spaceship, teapot-full, water-caustic; the PFM reader, output-stem sky naming, and teapot's curated checker landed with it |
-| 3 | Interiors: bathroom, kitchen |
+| 3 | **Done**: bathroom, kitchen — no code changes; the recon's gap map held exactly (rung-3 notes below) |
 | 4 | zero-day (the ReSTIR showcase; emission-side eyeball is the rung's crux) |
 | 5–10 | Heavies, one each: bmw-m6 (consider folding tests/scenes/showcase into the corpus here), crown, bistro (shape-alpha decision), kroken (ND decision), watercolor (ND), sanmiguel (redefinition fix) |
 | 11 | Swap rung — **gated on M6 closed** (viewer checklist → D-152 addendum): measure veach-ajar and zero-day against brass-room/many-lights on the reuse gate + convergence harness; if they clear, migrate gates, goldens, README figures; either way the numbers land in the D-entry |
