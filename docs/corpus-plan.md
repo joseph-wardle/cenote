@@ -81,7 +81,7 @@ the verbatim lists):
 | bmw-m6 | 7 | Near-clean; one interior "interface" material defaults |
 | crown | 28 | Dispersion → IOR 1.5, gem media interfaces → M8, textured-roughness remap caveat |
 | bistro | 251 → 8 | **243 alpha-textured shapes** — the foliage cutouts; shape-alpha landed at rung 7, the re-import is near-clean (iso, maxcomponentvalue, CuZn ×2, coat thickness/albedo ×4) |
-| kroken | 173 | UV transforms ×18, procedural-texture params dropped; ND license |
+| kroken | 173 → 172 | UV transforms ×18 = planar mappings ×14 + affine ×4 (2 inert); mix/directionmix covers → mid-gray, curated to means; ND license → RON local-generated (rung 8) |
 | watercolor | 184 | Same class as kroken; ND license |
 | sanmiguel | fails | Duplicate texture definition (fix below); expect bistro-class alpha foliage after |
 | zero-day | 188 | **ReverseOrientation on emissive plymesh ×97** (emission side needs the eyeball test), textured coat roughness imports smooth, texture scale 0.01 dropped |
@@ -96,6 +96,7 @@ decision 8):
 | PFM read for infinite-light images | importer, small | **landed, rung 2** | teapot-full imports |
 | Texture redefinition tolerated (last wins + warning) | importer, small | sanmiguel rung | sanmiguel imports |
 | Shape `alpha` texture → material opacity | importer, medium | **landed, rung 7** (cutout material forks; mask channel by header probe) | bistro/sanmiguel foliage; bathroom's rug (curated in at rung 7) |
+| UV affine transforms (uscale/vscale/udelta/vdelta) + texture mapping modes | **core + schema**, medium — `TextureRef` carries no transform and sampling has no mapping modes | parked at rung 8: kroken's 18 are 14 planar projections (position-derived UVs, the bigger feature) + 4 affine of which 2 are inert, all on shelf props — decided on watercolor's evidence at rung 9 | kroken/watercolor books, magazines, fabrics tile correctly |
 
 **Rung-1 discovery — the UV convention gap.** veach-ajar's landscape
 painting rendered upside-down, and the side-by-side bar (decision 7) ran
@@ -279,17 +280,73 @@ preserved). Curations: CuZn (brass) conductors ride the standard lookdev
 brass F0 (the importer's copper fallback warned); `maxcomponentvalue 20`
 documented as bmw's regularize class.
 
+**Rung-8 notes.** kroken landed with the campaign's first *uncommitted*
+RON, and the eyeball earned another renderer-bug find. The ND decision,
+license text in hand: CC-BY-ND 2.0 §3 grants "modifications as are
+technically necessary to exercise the rights in other media and formats,
+but otherwise you have no rights to make Derivative Works" — and a
+curated conversion (substituted materials, baked textures, one picked
+camera) is a derivative, so distributing it in this repo would breach the
+ND term. Resolution: `scenes/corpus/curate-kroken.py` is committed — a
+content-free script that re-imports the untracked sources and re-applies
+every curation — and `kroken.ron` joins the derived assets in gitignore.
+The same pattern serves watercolor at rung 9. Recon's "procedural
+textures" resolved to `mix`/`directionmix`/`scale`/planar classes, no
+checkerboard bake needed; the 18 UV-transform warnings are 14 planar
+projections + 4 affines (2 inert), all shelf props, so the core
+UV-transform feature stayed parked on watercolor's evidence. Curations:
+the polka-dot pillow (a `mix` material, dot mask as amount) baked to a
+dots base-color texture plus its normal map; red-glass media as
+approximate Beer–Lambert tint (sigma_s nonzero — pbrt in-scatters, M8);
+gray'd mix/directionmix props (blanket, magazines, book covers, box,
+pages) to linearized image means. Numbers, eighth-res vs native pbrt
+(cenote 2048 spp GPU vs pbrt 512 CPU — pbrt's own GPU path OOMs on
+kroken's displacement micro-tessellation; self-distance 0.009): **0.105
+raw / 0.073 display-clamped**, cenote +8% mean. The decomposition ran
+four degradation renders and three microtests: (1) coat class — pbrt's
+simulated coat costs this white GI box 19% of scene mean vs OpenPBR's
+analytic 4.4% (bistro's model gap, amplified by interior multi-bounce);
+(2) displacement costs pbrt 5.8% (shag rug + concrete, bathroom class);
+(3) **the alpha-0 invisible sun lands at exactly half strength in
+cenote** — the fix candidate below; (4) an all-diffuse bisect agrees to
+±3% where the real material set differs 14%, pinning the residual on
+conductor/dielectric relay (the white metal shelving bounces the window
+light; veach-ajar's Schlick-vs-exact class + textured-metal drops); (5)
+the dropped portal is a real domain gap — pbrt's portal restricts env
+light to window directions (kroken leaks ~15% env without it), cenote
+lights a full dome. Blackbody normalization exonerated: an area-light
+microtest matches pbrt to 3 decimals, and the derived 2×1 sky stores the
+same hue ×7.5. Bare-floor and window-box env microtests match to 0.8% —
+uniform-dome transport is exact.
+
+**Rung-8 fix candidate — invisible-emitter MIS (renderer, medium).** An
+emitter whose geometry BSDF rays pass through (geometry_opacity 0, the
+rung-7 cutout fork) can never be hit, so the emitter-hit MIS strategy
+never fires — yet NEE still discounts by the power heuristic against it.
+pbrt's convention: an alpha-0 light illuminates at full strength
+(microtest: pbrt alpha-0 ≡ pbrt visible to 5 digits; cenote lands at
+half — scratchpad rung8/micro/*). The consistent weighting is
+`powerHeuristic(neePdf, α·bsdfPdf)` with α the light's opacity — α=0
+gives NEE weight 1, and partial α (bistro's lantern forks) stays
+correctly balanced against the α-probability emitter-hit strategy.
+Needs the light's opacity scalar on the light record (textured masks
+would approximate by mean or stay document-only). Decided with a
+later rung's Go, rung-4 style.
+
 **Documented-only renderer gaps** (unlock noted in each RON header when
 its rung lands): anisotropic roughness, displacement, diffuse-transmission
 lobe, textured coat roughness, dispersion (all unassigned material-depth
 work); film/sensor response (sensor, white balance, ISO — zero-day;
 bistro's iso-only ×1.1); mix materials (bmw-m6 LEATHER, curated to a
-hand-blend; crown's texture-amount masks, curated to textured metalness);
-firefly regularization (integrator `regularize` — convergence class,
-not bias; bmw-m6; bistro's `maxcomponentvalue`); the coateddiffuse
-layered-coat depth (pbrt simulates, OpenPBR approximates — bistro's
-dominant divergence, bathroom/ajar's ~10% class); participating media
-(M8).
+hand-blend; crown's texture-amount masks, curated to textured metalness;
+kroken's pillow, baked); firefly regularization (integrator `regularize`
+— convergence class, not bias; bmw-m6; bistro's `maxcomponentvalue`);
+the coateddiffuse layered-coat depth (pbrt simulates, OpenPBR
+approximates — bistro's dominant divergence, bathroom/ajar's ~10% class;
+GI-amplified to 19-vs-4.4% in kroken's white box); infinite-light
+portals (kroken — sampling aid pbrt-side *and* an emission-domain
+restriction); texture mapping modes (planar projection; kroken/
+watercolor); participating media (M8).
 
 ## 4. The ladder
 
@@ -307,7 +364,8 @@ build (`~/Documents/pbrt-v4/build/pbrt`, the README-figure one).
 | 5 | **Done**: bmw-m6 — no code changes; LEATHER mix curated to a hand-blend, tests/scenes/showcase folded into the corpus (rung-5 notes below) |
 | 6 | **Done**: crown — no code changes; gem media curated as exact Beer–Lambert tint, dispersion at the mean IOR, mask mixes as textured metalness; displacement proven dominant by degradation (rung-6 notes below) |
 | 7 | **Done**: bistro — shape-alpha landed (243 masks → 53 cutout forks), the RON version-probe parse fix landed with it, bathroom's rug curated in; coateddiffuse model proven the dominant divergence by two-sided degradation (rung-7 notes below) |
-| 8–10 | Heavies, one each: kroken (ND decision), watercolor (ND), sanmiguel (redefinition fix) |
+| 8 | **Done**: kroken — the ND decision resolved to **RON-as-derived-asset**: CC-BY-ND 2.0 grants format shifts but not derivative distribution, so `curate-kroken.py` (committed, content-free) regenerates the curated RON locally; pillow mix baked to a dots texture, red-glass media to Beer–Lambert tint; UV-transform core feature parked on watercolor's evidence; the divergence decomposition found the **invisible-emitter MIS bug** (alpha-0 sun at half strength — fix candidate, rung-8 notes below) |
+| 9–10 | Heavies, one each: watercolor (ND, curation-script pattern set at rung 8), sanmiguel (redefinition fix) |
 | 11 | Swap rung — **gated on M6 closed** (viewer checklist → D-152 addendum): measure veach-ajar and zero-day against brass-room/many-lights on the reuse gate + convergence harness; if they clear, migrate gates, goldens, README figures; either way the numbers land in the D-entry |
 | 12 | Close: README final, full-corpus contact sheet, deferrals pointer, closing D-entry |
 
@@ -324,4 +382,7 @@ cargo run -p cenote-viewer -- scenes/corpus/<name>.ron
 Re-import for diffing goes to scratch, never over the committed RON.
 Derived assets (`<name>-sky.exr`) and `sources/` are gitignored; the
 committed surface of `scenes/corpus/` is the RONs, README.md, and
-fetch.sh.
+fetch.sh. The CC-BY-ND scenes are the exception: their RONs are derived
+assets too (gitignored), regenerated by a committed `curate-<name>.py`
+that re-imports and re-applies the curations — the script, carrying no
+scene content, is what the repo tracks.

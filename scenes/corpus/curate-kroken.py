@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""Regenerate scenes/corpus/kroken.ron locally — the ND-licensed scene the
+repo cannot carry.
+
+Kroken is CC-BY-ND 2.0 (Angelo Ferretti, via pbrt-v4-scenes): the license
+grants format shifts "technically necessary to exercise the rights in other
+media and formats" but no right to distribute Derivative Works, and a curated
+RON (substituted materials, one picked camera, documented degradations) is a
+derivative. So unlike every other corpus scene, the RON here is a *derived
+asset*: this script rebuilds it from the untracked sources, and only the
+script — which carries no scene content beyond material names and a handful
+of interoperability constants — is committed. `./fetch.sh kroken` first.
+
+Usage: python3 scenes/corpus/curate-kroken.py   (from anywhere)
+"""
+
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+CORPUS = Path(__file__).resolve().parent
+ROOT = CORPUS.parent.parent
+KROKEN = CORPUS / "sources/pbrt-v4-scenes/kroken"
+RON = CORPUS / "kroken.ron"
+DOTS = CORPUS / "kroken-dots.exr"
+
+HEADER = """\
+// Kroken — living-room interior (camera-1, the pbrt-v4-scenes showcase view).
+//
+// Provenance: pbrt-v4-scenes @ 30cf4a0, kroken/camera-1.pbrt; scene licensed
+// from Angelo Ferretti (lucydreams.it), CC-BY-ND 2.0. THIS FILE IS NOT
+// COMMITTED: the ND term withholds the right to distribute derivatives, and a
+// curated conversion is one — regenerate it with scenes/corpus/curate-kroken.py
+// (the script and this header are cenote's own text; the scene stays in the
+// untracked sources). Oracle: pbrt volpath maxdepth 15, 1500x1500.
+//
+// Import-time degradations, documented (unlock in parentheses):
+//  - planar texture mappings x14 and UV affine transforms x4 sample authored
+//    UVs directly — books/magazines wear wrong-scaled art (texture mapping
+//    modes); the two directionmix covers and two mix textures land as
+//    mid-gray and are curated to linearized image means below.
+//  - displacement / bump maps dropped scene-wide (rug, blanket, pillow,
+//    concrete) — bathroom/kitchen/crown class.
+//  - diffusetransmission (Carpet, Blanket - Fringe) imports opaque diffuse.
+//  - homogeneous media: red-glass vases curated to Beer-Lambert
+//    transmission_color exp(-scale*(sigma_a+sigma_s)) at depth 1 —
+//    APPROXIMATE, sigma_s is nonzero so pbrt also in-scatters (M8 volumes);
+//    greenish-glass ("Glass - Set") extinction ~1e-4/unit, left clear.
+//  - "Fabric - Pillow" is a pbrt mix material (blue coateddiffuse / white
+//    diffuse by the Dots_Pillow mask): curated to one diffuse wearing a
+//    baked lerp of the two reflectances (kroken-dots.exr, generated here).
+//  - the window is a portal'd uniform 6500 K infinite light; cenote drops
+//    the portal and lights a full dome. pbrt's portal RESTRICTS the env to
+//    window directions (kroken leaks ~15% extra env light without it), so
+//    the two env domains genuinely differ.
+//  - the invisible sun ball (alpha 0 sphere, scale 50) imports faithfully
+//    through the rung-7 cutout fork (geometry_opacity 0 + emission), but
+//    cenote's MIS discounts NEE against a BSDF strategy that can never hit
+//    an invisible emitter — the sun lands at HALF strength (microtest:
+//    2.160 vs pbrt 4.213, which matches its own visible-emitter case to 3
+//    decimals). Renderer fix candidate in docs/corpus-plan.md (rung 8).
+//  - coateddiffuse is the dominant material family (36 of 59) — pbrt's
+//    stochastically simulated coat darkens this white GI box 19% of scene
+//    mean vs OpenPBR's analytic 4.4% (the bistro model gap, GI-amplified);
+//    partly offset by cenote's conductors relaying less window light off
+//    the metal shelving (the veach-ajar Fresnel class — an all-diffuse
+//    bisect agrees to ±3% where the real material set differs 14%).
+"""
+
+# Linearized source-texture means (magick -colorspace RGB), used where an
+# unsupported texture class (mix / directionmix / planar mapping) left a
+# camera-visible prop mid-gray. Values are linear Rec.709 like every Constant.
+PATCHES = {
+    # pbrt: mix("Fabric - Pillow - blue", "... - white") by Dots_Pillow.
+    "Fabric - Pillow": {
+        "base_color": 'Some(Texture((\n'
+        '                path: "kroken-dots.exr",\n'
+        '                color_space: None,\n'
+        '                channel: None,\n'
+        '            )))',
+        "specular_weight": "Some(0.0)",
+        "geometry_normal": 'Some(Some((\n'
+        '                path: "sources/pbrt-v4-scenes/kroken/textures/Pillow_bump.png",\n'
+        '                color_space: None,\n'
+        '                channel: None,\n'
+        '            )))',
+    },
+    # exp(-200*(sigma_a+sigma_s)) = exp(-(0.8, 10, 10)), depth 1.
+    "Glass - Red": {
+        "transmission_color": "Some((0.449, 0.000045, 0.000045))",
+        "transmission_depth": "Some(1.0)",
+    },
+    # directionmix covers: the visible face is the top, use the cover mean.
+    "Magazine - version 1": {"base_color": "Some(Constant((0.672, 0.675, 0.681)))"},
+    "Magazine - version 2-middle-left-top": {
+        "base_color": "Some(Constant((0.660, 0.661, 0.680)))"
+    },
+    # mix(dark, light) by Book_Cover_2 (mean 0.035): stays near the dark arm.
+    "Book 03 - Cover ": {"base_color": "Some(Constant((0.210, 0.164, 0.164)))"},
+    # mix((.2,.2,.2), (.7,.55,.55)) by Box_Diffuse_2 (mean 0.117).
+    "Box": {"base_color": "Some(Constant((0.258, 0.241, 0.241)))"},
+    # mix((.85, .7, .6), (.7, .7, .7)) by the blanket mask (mean 0.583).
+    "Fabric - Blanket": {"base_color": "Some(Constant((0.763, 0.700, 0.658)))"},
+    # planar-projected pages.png has no usable UVs here — its mean.
+    "Books - Pages": {"base_color": "Some(Constant((0.185, 0.169, 0.145)))"},
+    "Books - Pages.1": {"base_color": "Some(Constant((0.185, 0.169, 0.145)))"},
+}
+
+# Field order as the importer emits it — each replacement is anchored on the
+# next field so multi-line values (texture refs) are replaced whole.
+FIELD_ORDER = [
+    "base_color", "base_diffuse_roughness", "base_metalness", "specular_weight",
+    "specular_roughness", "specular_ior", "transmission_weight",
+    "transmission_color", "transmission_depth", "coat_weight", "coat_color",
+    "coat_roughness", "coat_ior", "coat_darkening", "fuzz_weight", "fuzz_color",
+    "fuzz_roughness", "emission_luminance", "emission_color",
+    "geometry_opacity", "geometry_thin_walled", "geometry_normal",
+]
+
+
+def run(cmd, **kwargs):
+    print("+", " ".join(str(c) for c in cmd))
+    subprocess.run(cmd, check=True, **kwargs)
+
+
+def patch_material(text, name, fields):
+    start = text.index(f'name: "{name}",')
+    end = text.index("Material((", start) if "Material((" in text[start:] else len(text)
+    block = text[start:end]
+    for field, value in fields.items():
+        nxt = FIELD_ORDER[FIELD_ORDER.index(field) + 1] if field != "geometry_normal" else None
+        tail = rf"\n            {nxt}:" if nxt else r"\n        \)\),"
+        pattern = re.compile(rf"            {field}:.*?(?={tail})", re.DOTALL)
+        block, n = pattern.subn(f"            {field}: {value},"[:-1] + ",", block, count=1)
+        if n != 1:
+            sys.exit(f"patch failed: {name} / {field}")
+    return text[:start] + block + text[end:]
+
+
+def main():
+    if not KROKEN.is_dir():
+        sys.exit("kroken sources missing — run scenes/corpus/fetch.sh kroken first")
+
+    run(
+        ["cargo", "run", "--release", "-p", "cenote-cli", "--", "import",
+         str(KROKEN / "camera-1.pbrt"), "--out", str(RON)],
+        cwd=ROOT,
+    )
+
+    # Bake the pillow: lerp(blue (0.02, 0.015, 0.1), white (0.8), mask), the
+    # mask linearized the way pbrt reads an 8-bit float imagemap.
+    run(
+        ["oiiotool", str(KROKEN / "textures/Dots_Pillow.png"),
+         "--colorconvert", "srgb", "linear", "--ch", "0,0,0",
+         "--chnames", "R,G,B",
+         "--mulc", "0.78,0.785,0.7", "--addc", "0.02,0.015,0.1",
+         "-d", "half", "-o", str(DOTS)],
+    )
+
+    text = RON.read_text()
+    for name, fields in PATCHES.items():
+        text = patch_material(text, name, fields)
+    if "spp: Some(16)," not in text:
+        sys.exit("patch failed: settings spp")
+    text = text.replace("spp: Some(16),", "spp: Some(256),", 1)
+    RON.write_text(HEADER + text)
+    print(f"wrote {RON} (local only — see header for why it is not committed)")
+
+
+if __name__ == "__main__":
+    main()

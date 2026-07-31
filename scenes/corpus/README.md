@@ -11,9 +11,10 @@ Sources are **not** in git (~8.5 GB): `./fetch.sh` materializes them into
 clone pinned at `30cf4a0` (content addressing is the checksum). A fresh
 clone renders any landed scene after `./fetch.sh <name>`.
 
-Four scenes light themselves through a **derived sky** beside their RON
+Five scenes light themselves through a **derived sky** beside their RON
 (`spaceship-sky.exr`, `teapot-full-sky.exr`, `bmw-m6-sky.exr`,
-`bistro-sky.exr`) — import-generated, gitignored like the sources. To (re)generate one, re-run the bootstrap
+`bistro-sky.exr`, `kroken-sky.exr`) — import-generated, gitignored like
+the sources. To (re)generate one, re-run the bootstrap
 import into scratch — never over the curated RON — and keep the sky it
 writes beside its `--out`:
 
@@ -41,6 +42,6 @@ mv /tmp/<name>-sky.exr scenes/corpus/
 | bmw-m6 | pbrt-v4-scenes | CC0 (tyrant monkey) | landed (rung 5) | interior LEATHER `mix` curated to a hand-blend (80/20 per pbrt-v4 mix semantics); `regularize` dropped — cenote keeps its dielectric-glass fireflies (convergence, not bias); equal-axis aniso exact |
 | crown | pbrt-v4-scenes | per repo README (Martin Lubich) | landed (rung 6) | displacement dropped ×4 — the dominant divergence (sapphire bump, mitra bands); gem media curated as exact Beer–Lambert tint; dispersion carried at mean IOR 3.4; mask `mix`es as textured metalness; film iso/sensor dropped (zero-day class) |
 | bistro | pbrt-v4-scenes | CC BY 4.0 (Amazon Lumberyard, ORCA) | landed (rung 7) | shape-alpha foliage LANDED with this rung (243 masks → 53 cutout materials); coateddiffuse model is the dominant divergence — pbrt's simulated coat darkens ~32% vs OpenPBR's 20% (both-degraded pair agrees to 0.051 clamped); film iso ×1.1 + maxcomponentvalue dropped; CuZn curated to brass F0 |
-| kroken | pbrt-v4-scenes | CC-BY-**ND** 2.0 | pending (rung 8) | UV transforms; procedural textures; ND commit decision |
+| kroken | pbrt-v4-scenes | CC-BY-ND 2.0 (Angelo Ferretti) | landed (rung 8) — **RON not committed**: the ND term withholds derivative distribution, so `curate-kroken.py` regenerates `kroken.ron` locally from the untracked sources | planar texture mappings ×14 + UV affine ×4 sample authored UVs (books/magazines; texture mapping modes); displacement + diffusetransmission dropped; red-glass media curated to approximate Beer–Lambert tint (M8 volumes); pillow `mix` baked to a dots texture; env portal dropped (full dome vs pbrt's window-restricted domain); **alpha-0 invisible sun lands at half strength — renderer MIS fix candidate (rung-8 notes)**; coateddiffuse model class (bistro) |
 | watercolor | pbrt-v4-scenes | CC-BY-**ND** 2.0 | pending (rung 9) | UV transforms; procedural textures; ND commit decision |
 | sanmiguel | pbrt-v4-scenes | per repo README | pending (rung 10) | duplicate-texture import fix (proposed); alpha foliage |
