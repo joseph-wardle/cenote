@@ -148,6 +148,9 @@ struct SceneTable {
     /// kernels share, which keeps their push constants inside Vulkan's
     /// guaranteed 128 bytes.
     bsdf_tables: vk::DeviceAddress,
+    /// Per-texture sample-time parameters ([`TextureParams`]), one record
+    /// per bindless slot in the same index order.
+    texture_params: vk::DeviceAddress,
     /// Rows of the environment's placement (linear part only — the sky is
     /// all directions) — `envToWorld` on the Slang side.
     env_to_world: [[f32; 4]; 3],
@@ -165,6 +168,58 @@ struct SceneTable {
     env_height: u32,
     light_count: u32,
     _pad0: [u32; 3],
+}
+
+/// Sample-time parameters of one bindless texture slot: the affine UV
+/// remap and the value multiplier a [`description::TextureRef`] carries
+/// (identity when it carries none). They fork the bindless index — the
+/// texture [`Key`](texture::Key) includes them — so the record is
+/// per-slot, indexed exactly like the descriptor table. Mirrors `struct
+/// TextureParams` in `shaders/textures.slang` field for field.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct TextureParams {
+    uv_scale: [f32; 2],
+    uv_offset: [f32; 2],
+    scale: f32,
+    _pad0: [u32; 3],
+}
+
+const _: () = assert!(size_of::<TextureParams>() == 32);
+
+/// Upload the sample-time parameter table for `keys`, in their (bindless)
+/// order. A texture-less scene uploads one identity record: the table
+/// address in [`SceneTable`] must point at a real buffer even when no
+/// material record will index it.
+fn upload_texture_params<'k>(
+    gpu: &Context,
+    keys: impl Iterator<Item = &'k texture::Key>,
+) -> Result<Buffer> {
+    let mut records: Vec<TextureParams> = keys
+        .map(|key| {
+            let (uv_scale, uv_offset, scale) = key.4.unpack();
+            TextureParams {
+                uv_scale,
+                uv_offset,
+                scale,
+                _pad0: [0; 3],
+            }
+        })
+        .collect();
+    if records.is_empty() {
+        records.push(TextureParams {
+            uv_scale: [1.0; 2],
+            uv_offset: [0.0; 2],
+            scale: 1.0,
+            _pad0: [0; 3],
+        });
+    }
+    let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
+    gpu.upload_buffer(
+        "scene.texture_params",
+        bytemuck::cast_slice(&records),
+        usage,
+    )
 }
 
 /// The scene, resident on the GPU and ready to trace against.
@@ -246,6 +301,9 @@ struct ResidentBuffers {
     /// The closure's lookup tables — uploaded once at build and never
     /// dirtied (the data is embedded in the binary).
     bsdf_tables: Buffer,
+    /// Per-texture sample-time parameters, in bindless-index order —
+    /// rebuilt whenever the texture residency changes.
+    texture_params: Buffer,
     env_marginal: Buffer,
     env_conditional: Buffer,
     env_pdfs: Buffer,
@@ -257,11 +315,17 @@ impl ResidentBuffers {
     /// alongside. The one place both the procedural [`Scene::new`] and the
     /// description-driven [`Scene::prep`] build this set, so a new resident
     /// buffer is added here once rather than in two build paths that drift.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one argument per resident buffer, in field order — grouping them \
+                  would just restate the struct"
+    )]
     fn assemble(
         gpu: &Context,
         geometry: Buffer,
         materials: Buffer,
         lights: Buffer,
+        texture_params: Buffer,
         env_marginal: Buffer,
         env_conditional: Buffer,
         env_pdfs: Buffer,
@@ -271,6 +335,7 @@ impl ResidentBuffers {
             materials,
             lights,
             bsdf_tables: crate::tables::upload(gpu)?,
+            texture_params,
             env_marginal,
             env_conditional,
             env_pdfs,
@@ -347,6 +412,9 @@ impl Scene {
             geometry,
             materials,
             lights,
+            // The procedural path has no textures — the identity record
+            // keeps the table address valid.
+            upload_texture_params(gpu, std::iter::empty())?,
             marginal,
             conditional,
             pdfs,
@@ -728,6 +796,7 @@ fn upload_scene_table(
         materials: resident.materials.device_address(),
         lights: resident.lights.device_address(),
         bsdf_tables: resident.bsdf_tables.device_address(),
+        texture_params: resident.texture_params.device_address(),
         env_to_world: transform_rows(env_placement.0),
         env_from_world: transform_rows(env_placement.1),
         env_tint: env_tint.to_array(),

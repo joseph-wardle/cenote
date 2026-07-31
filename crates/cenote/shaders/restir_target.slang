@@ -79,11 +79,11 @@ public Surface reconstructSurfaceFrom(SceneTable* scene, Hit hit, float4 ray,
 
     GeometryRecord mesh = scene.geometry[hit.instance];
     let uv = interpolateUv(mesh, hit.primitive, hit.barycentrics);
-    let material = resolveMaterial(scene.materials[hit.instance], uv);
+    let material = resolveMaterial(scene.textureParams, scene.materials[hit.instance], uv);
     let spawn = spawnPoint(mesh, hit, direction);
     var shading = spawn.shading;
     if (material.normalTexture != TEXTURE_NONE) {
-        shading = mappedShadingNormal(mesh, hit, uv, material.normalTexture, spawn);
+        shading = mappedShadingNormal(scene.textureParams, mesh, hit, uv, material.normalTexture, spawn);
     }
 
     Surface s;
@@ -243,7 +243,7 @@ public ReconnectionEnd reconnectionEnd(SceneTable* scene, Hit rc, bool inside,
     // does — same spawn, same normal map, same inside-the-instance IOR flip —
     // with wo this domain's own arriving direction.
     let uv = interpolateUv(mesh, rc.primitive, rc.barycentrics);
-    let material = resolveMaterial(scene.materials[rc.instance], uv);
+    let material = resolveMaterial(scene.textureParams, scene.materials[rc.instance], uv);
     let spawn = spawnPoint(mesh, rc, e.toRc);
     // This domain's Jacobian half, |cosθₖ|/d² of the segment (D-138): the
     // full shift Jacobian is the destination half over the sample's cached
@@ -261,7 +261,7 @@ public ReconnectionEnd reconnectionEnd(SceneTable* scene, Hit rc, bool inside,
     }
     var shading = spawn.shading;
     if (material.normalTexture != TEXTURE_NONE) {
-        shading = mappedShadingNormal(mesh, rc, uv, material.normalTexture, spawn);
+        shading = mappedShadingNormal(scene.textureParams, mesh, rc, uv, material.normalTexture, spawn);
     }
     e.frame = Frame(shading);
     e.wo = e.frame.toLocal(-e.toRc);
@@ -363,7 +363,7 @@ uint replayStep(RaytracingAccelerationStructure tlas, SceneTable* scene,
 
     GeometryRecord mesh = scene.geometry[w.hit.instance];
     let uv = interpolateUv(mesh, w.hit.primitive, w.hit.barycentrics);
-    let material = resolveMaterial(scene.materials[w.hit.instance], uv);
+    let material = resolveMaterial(scene.textureParams, scene.materials[w.hit.instance], uv);
     let spawn = spawnPoint(mesh, w.hit, wiWorld);
     if (w.medium != MEDIUM_NONE) {
         w.prefix *= interiorTransmittance(scene, w.medium, w.segmentOrigin,
@@ -371,7 +371,7 @@ uint replayStep(RaytracingAccelerationStructure tlas, SceneTable* scene,
     }
     var shading = spawn.shading;
     if (material.normalTexture != TEXTURE_NONE) {
-        shading = mappedShadingNormal(mesh, w.hit, uv, material.normalTexture, spawn);
+        shading = mappedShadingNormal(scene.textureParams, mesh, w.hit, uv, material.normalTexture, spawn);
     }
     w.spawn = spawn;
     w.frame = Frame(shading);
@@ -530,7 +530,7 @@ public ReplayShift shiftReplay(RaytracingAccelerationStructure tlas,
             return r;
         }
         let uv = interpolateUv(mesh, w.hit.primitive, w.hit.barycentrics);
-        let material = resolveMaterial(scene.materials[w.hit.instance], uv);
+        let material = resolveMaterial(scene.textureParams, scene.materials[w.hit.instance], uv);
         let neePdf = emitterHitNeePdf(scene, mesh, w.hit.primitive, w.spawn,
                                       w.segmentOrigin, w.direction);
         r.F = w.prefix * material.emission * powerHeuristic(w.scatterPdf, neePdf);
@@ -632,11 +632,11 @@ public Connection connectSampleAt(SceneTable* scene, RestirScene* restir,
             // — same spawn, same normal map, same inside-the-instance IOR flip
             // (the stored bit) — with wo₂ this domain's own arriving direction.
             let uv = interpolateUv(mesh, rc.primitive, rc.barycentrics);
-            let material = resolveMaterial(scene.materials[rc.instance], uv);
+            let material = resolveMaterial(scene.textureParams, scene.materials[rc.instance], uv);
             let spawn = spawnPoint(mesh, rc, c.toLight);
             var shading = spawn.shading;
             if (material.normalTexture != TEXTURE_NONE) {
-                shading = mappedShadingNormal(mesh, rc, uv, material.normalTexture, spawn);
+                shading = mappedShadingNormal(scene.textureParams, mesh, rc, uv, material.normalTexture, spawn);
             }
             let frame = Frame(shading);
             let wo = frame.toLocal(-c.toLight);
@@ -681,7 +681,7 @@ public Connection connectSampleAt(SceneTable* scene, RestirScene* restir,
         let emitter = scene.materials[instance];
         if (emitter.emissionTexture != TEXTURE_NONE) {
             tri.radiance *= sampleColor(
-                emitter.emissionTexture,
+                scene.textureParams, emitter.emissionTexture,
                 interpolateUv(lightMesh, rc.primitive, rc.barycentrics));
         }
         c.toLight = tri.direction;

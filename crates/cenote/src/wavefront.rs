@@ -2375,6 +2375,8 @@ mod tests {
                             path: glow,
                             color_space: None,
                             channel: None,
+                            scale: None,
+                            uv: None,
                         })),
                         ..MaterialPatch::new("lamp")
                     })),
@@ -2398,6 +2400,8 @@ mod tests {
                             path: holes,
                             color_space: None,
                             channel: None,
+                            scale: None,
+                            uv: None,
                         })),
                         ..MaterialPatch::new("card")
                     })),

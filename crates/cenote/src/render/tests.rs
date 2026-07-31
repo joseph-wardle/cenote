@@ -837,6 +837,8 @@ fn the_textured_furnace_closes() {
                 path: white,
                 color_space: None,
                 channel: None,
+                scale: None,
+                uv: None,
             })),
             specular_weight: Some(0.0),
             ..MaterialPatch::new("surface")
@@ -867,6 +869,8 @@ fn the_textured_furnace_closes() {
                 path: gray,
                 color_space: None,
                 channel: None,
+                scale: None,
+                uv: None,
             })),
             ..MaterialPatch::new("surface")
         },
@@ -1062,6 +1066,8 @@ fn an_emission_map_pins_uv_orientation_and_the_idt() {
                         path: map,
                         color_space: None,
                         channel: None,
+                        scale: None,
+                        uv: None,
                     })),
                     ..MaterialPatch::new("emit")
                 })),
@@ -1084,6 +1090,109 @@ fn an_emission_map_pins_uv_orientation_and_the_idt() {
         (48, 16, Vec3::new(0.0, 1.0, 0.0), "top-right green"),
         (16, 48, Vec3::new(0.0, 0.0, 1.0), "bottom-left blue"),
         (48, 48, Vec3::ONE, "bottom-right white"),
+    ] {
+        let probe = pixel(&pixels, size, x, y);
+        let want = expected(texel);
+        for (channel, (got, expect)) in probe[..3].iter().zip(want.to_array()).enumerate() {
+            assert!(
+                (got - expect).abs() < 0.06,
+                "{label}, channel {channel}: {got} vs {expect}"
+            );
+        }
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The emission-map probe again, now through a sample-time remap: a
+/// half-texel offset on both axes rotates the quadrant colors around
+/// the image (the sampler wraps), and a value scale of 0.5 halves every
+/// probe. Pins the storage-space convention — offset v pushes the
+/// sampled window *down* the image — the wrap addressing tiling scales
+/// depend on, and the multiplier's place on linear values before the
+/// IDT.
+#[test]
+fn a_uv_remap_shifts_the_map_and_the_value_scale_multiplies() {
+    use crate::scene::changeset::{
+        CameraPatch, ChangeSet, InstancePatch, MaterialPatch, MeshPatch, Op, SettingsPatch,
+    };
+    use crate::scene::description::{
+        MeshSource, SceneDescription, Texturable, TextureRef, UvTransform,
+    };
+
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let dir = fixture_dir("remap");
+    let map = dir.join("quadrants.png");
+    #[rustfmt::skip]
+        crate::texture::write_png(&map, 2, 2, &[
+            255, 0, 0, 255,    0, 255, 0, 255,
+            0, 0, 255, 255,    255, 255, 255, 255,
+        ]);
+
+    let mut description = SceneDescription::new();
+    description
+        .apply(&ChangeSet {
+            ops: vec![
+                Op::Settings(SettingsPatch::new("main")),
+                Op::Camera(CameraPatch {
+                    position: Some([0.0, 0.0, 2.0]),
+                    look_at: Some([0.0; 3]),
+                    vfov_degrees: Some(53.130_1),
+                    ..CameraPatch::new("main")
+                }),
+                Op::Mesh(MeshPatch {
+                    source: Some(MeshSource::Inline {
+                        positions: vec![
+                            [-1.0, -1.0, 0.0],
+                            [1.0, -1.0, 0.0],
+                            [1.0, 1.0, 0.0],
+                            [-1.0, 1.0, 0.0],
+                        ],
+                        normals: Some(vec![[0.0, 0.0, 1.0]; 4]),
+                        uvs: Some(vec![[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]),
+                        triangles: vec![[0, 1, 2], [0, 2, 3]],
+                    }),
+                    ..MeshPatch::new("quad")
+                }),
+                Op::Material(Box::new(MaterialPatch {
+                    base_color: Some(Texturable::Constant([0.0; 3])),
+                    specular_weight: Some(0.0),
+                    emission_luminance: Some(1.0),
+                    emission_color: Some(Texturable::Texture(TextureRef {
+                        path: map,
+                        color_space: None,
+                        channel: None,
+                        scale: Some(0.5),
+                        uv: Some(UvTransform {
+                            scale: [1.0; 2],
+                            offset: [0.5, 0.5],
+                        }),
+                    })),
+                    ..MaterialPatch::new("emit")
+                })),
+                Op::Instance(InstancePatch {
+                    mesh: Some("quad".into()),
+                    material: Some("emit".into()),
+                    ..InstancePatch::new("emit")
+                }),
+            ],
+        })
+        .expect("valid scene");
+    let scene = Scene::prep(&gpu, &mut description).expect("prep");
+    let renderer = Renderer::new(&gpu).expect("renderer");
+    let size = 64;
+    let pixels = renderer.render(&gpu, &scene, size, size).expect("render");
+
+    // Each screen quadrant's remapped UV lands on the texel center half
+    // a period away on both axes: top-left reads the map's bottom-right,
+    // and every probe wraps to the diagonally opposite quadrant.
+    let expected = |srgb: Vec3| crate::color::acescg_from_rec709(srgb) * 0.5;
+    for (x, y, texel, label) in [
+        (16, 16, Vec3::ONE, "top-left → wrapped white"),
+        (48, 16, Vec3::new(0.0, 0.0, 1.0), "top-right → wrapped blue"),
+        (16, 48, Vec3::new(0.0, 1.0, 0.0), "bottom-left → wrapped green"),
+        (48, 48, Vec3::new(1.0, 0.0, 0.0), "bottom-right → wrapped red"),
     ] {
         let probe = pixel(&pixels, size, x, y);
         let want = expected(texel);
@@ -1125,6 +1234,8 @@ fn normal_maps_tilt_shading_and_keep_energy() {
                 path: flat,
                 color_space: None,
                 channel: None,
+                scale: None,
+                uv: None,
             })),
             ..MaterialPatch::new("surface")
         },
@@ -1156,6 +1267,8 @@ fn normal_maps_tilt_shading_and_keep_energy() {
                     path: map,
                     color_space: None,
                     channel: None,
+                    scale: None,
+                    uv: None,
                 })),
                 ..MaterialPatch::new("surface")
             },
@@ -1234,6 +1347,8 @@ fn textured_opacity_is_per_sample_exact() {
                 path: checker,
                 color_space: None,
                 channel: None,
+                scale: None,
+                uv: None,
             })),
             ..MaterialPatch::new("surface")
         },

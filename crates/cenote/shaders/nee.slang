@@ -97,7 +97,7 @@ public NeeCandidate sampleNee(SceneTable* scene, SpawnPoint spawn, Frame frame,
             let emitter = scene.materials[candidate.instance];
             if (emitter.emissionTexture != TEXTURE_NONE) {
                 candidate.radiance *= sampleColor(
-                    emitter.emissionTexture,
+                    scene.textureParams, emitter.emissionTexture,
                     interpolateUv(scene.geometry[candidate.instance],
                                   candidate.primitive, candidate.bary));
             }

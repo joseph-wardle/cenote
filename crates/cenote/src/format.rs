@@ -181,11 +181,15 @@ mod tests {
                         path: "wood.png".into(),
                         color_space: None,
                         channel: None,
+                        scale: None,
+                        uv: None,
                     })),
                     geometry_normal: Some(Some(TextureRef {
                         path: "wood_n.png".into(),
                         color_space: None,
                         channel: None,
+                        scale: None,
+                        uv: None,
                     })),
                     ..MaterialPatch::new("wood")
                 })),

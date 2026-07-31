@@ -175,6 +175,8 @@ pub(super) fn host_phase(
         let resident = resident_textures.get(&key).copied();
         let prepared = if resident.is_none() || touched {
             let prepared = texture::prepare(&key.0, key.1, key.2, key.3)?;
+            // key.4 (the sample-time params) never reaches prep — the
+            // baked image is transform-independent by design.
             (resident != Some(prepared.hash)).then_some(prepared)
         } else {
             None
@@ -476,7 +478,19 @@ fn texture_key(reference: &TextureRef, usage: texture::Usage) -> texture::Key {
             Some(description::Channel::A) => texture::Channel::A,
         },
     };
-    (reference.path.clone(), usage, srgb, channel)
+    let scale = match usage {
+        // A normal is a direction, not a quantity — the multiplier must
+        // not fork the cache (the schema documents the slot ignores it).
+        texture::Usage::Normal => None,
+        texture::Usage::Color | texture::Usage::Scalar => reference.scale,
+    };
+    let params = texture::Params::new(
+        reference
+            .uv
+            .map(|transform| (transform.scale, transform.offset)),
+        scale,
+    );
+    (reference.path.clone(), usage, srgb, channel, params)
 }
 
 /// A material's textured slots paired with the texture usage each feeds,
@@ -973,6 +987,8 @@ mod tests {
                         path: concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml").into(),
                         color_space: None,
                         channel: None,
+                        scale: None,
+                        uv: None,
                     })),
                     ..MaterialPatch::new("gray")
                 }))],
@@ -1133,6 +1149,8 @@ mod tests {
             path: "/orm.png".into(),
             color_space: None,
             channel,
+            scale: None,
+            uv: None,
         };
         let scalar = |channel| texture_key(&with_channel(channel), texture::Usage::Scalar);
         assert_ne!(
@@ -1149,6 +1167,38 @@ mod tests {
         }
     }
 
+    /// Sample-time parameters fork the key — two transforms of one image
+    /// are two bindless slots, since the params record rides the index —
+    /// while a normal slot's stray value scale is inert (the schema says
+    /// the slot ignores it) and the identity spellings collapse.
+    #[test]
+    fn texture_keys_fork_on_sample_time_params() {
+        let with = |scale, uv| TextureRef {
+            path: "/wood.png".into(),
+            color_space: None,
+            channel: None,
+            scale,
+            uv,
+        };
+        let color = |scale, uv| texture_key(&with(scale, uv), texture::Usage::Color);
+        let remap = description::UvTransform {
+            scale: [2.0, 2.0],
+            offset: [0.0; 2],
+        };
+        assert_ne!(color(None, None), color(Some(3.0), None));
+        assert_ne!(color(None, None), color(None, Some(remap)));
+        // Explicit identity and absent are one key.
+        assert_eq!(color(None, None), color(Some(1.0), None));
+        assert_eq!(
+            color(None, None),
+            color(None, Some(description::UvTransform::default()))
+        );
+        assert_eq!(
+            texture_key(&with(Some(3.0), None), texture::Usage::Normal),
+            texture_key(&with(None, None), texture::Usage::Normal),
+        );
+    }
+
     #[test]
     #[expect(
         clippy::float_cmp,
@@ -1162,11 +1212,15 @@ mod tests {
                 path: "/wood.png".into(),
                 color_space: None,
                 channel: None,
+                scale: None,
+                uv: None,
             }),
             geometry_normal: Some(TextureRef {
                 path: "/weave.png".into(),
                 color_space: None,
                 channel: None,
+                scale: None,
+                uv: None,
             }),
             coat_weight: 0.5,
             transmission_weight: 0.25,

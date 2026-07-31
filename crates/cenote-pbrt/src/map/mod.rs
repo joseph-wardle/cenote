@@ -50,13 +50,13 @@ use cenote::scene::changeset::{
     Op, SettingsPatch,
 };
 use cenote::scene::description::{
-    Channel, ColorSpace, Light, MeshSource, Texturable, TextureRef, Transform,
+    Channel, ColorSpace, Light, MeshSource, Texturable, TextureRef, Transform, UvTransform,
 };
 use cenote::{Error, Result};
 use glam::{Mat3, Mat4, Vec3};
 
 use color::{blackbody_rec709, conductor_f0, named_metal_f0};
-use shape::{disk_mesh, sphere_mesh, trianglemesh};
+use shape::{bilinearmesh, disk_mesh, sphere_mesh, trianglemesh};
 
 use crate::parse::{Directive, Parser};
 
@@ -114,11 +114,51 @@ enum TextureDef {
     Image {
         path: PathBuf,
         color_space: Option<ColorSpace>,
-        /// pbrt `scale` folded onto the texture. Only emission can carry
-        /// it into cenote; other slots warn when it isn't 1.
+        /// pbrt `scale` folded onto the texture — carried onto the
+        /// schema's per-reference multiplier (emission folds it into the
+        /// luminance instead, trap 1).
         scale: f32,
+        /// pbrt's uscale/vscale/udelta/vdelta, in pbrt's v-up convention;
+        /// [`Mapper::texture_ref`] flips the v leg into storage space.
+        uv: Option<UvAffine>,
     },
     Constant([f32; 3]),
+}
+
+/// An imagemap's affine UV remap as pbrt spells it (`st' = st * scale +
+/// delta` with `t` up); cenote stores v down, so the conversion lives at
+/// the same boundary the UV flip itself does.
+#[derive(Clone, Copy)]
+struct UvAffine {
+    scale: [f32; 2],
+    delta: [f32; 2],
+}
+
+/// The schema reference for an image texture definition. The value
+/// multiplier rides along verbatim; the affine's v leg converts from
+/// pbrt's v-up into storage order — with `v_c = 1 − v_p` on both sides of
+/// the remap, `v_c' = 1 − (v_p·s + d)` lands at scale `s`, offset
+/// `1 − s − d` (the same boundary flip `shape.rs` applies to authored
+/// UVs, here applied to the transform instead of the coordinates).
+fn texture_ref(
+    path: PathBuf,
+    color_space: Option<ColorSpace>,
+    scale: f32,
+    uv: Option<UvAffine>,
+) -> TextureRef {
+    TextureRef {
+        path,
+        color_space,
+        channel: None,
+        scale: ((scale - 1.0).abs() > f32::EPSILON).then_some(scale),
+        uv: uv.map(|affine| UvTransform {
+            scale: affine.scale,
+            offset: [
+                affine.delta[0],
+                1.0 - affine.scale[1] - affine.delta[1],
+            ],
+        }),
+    }
 }
 
 /// The pending `AreaLightSource`, applied to every subsequent shape in
@@ -632,6 +672,16 @@ impl Mapper {
         let flip = self.state.reverse_orientation;
         let (source, mesh_prefix) = match ty {
             "trianglemesh" => (trianglemesh(directive, flip)?, "trianglemesh".to_owned()),
+            "bilinearmesh" => match bilinearmesh(directive, flip)? {
+                Some(source) => (source, "bilinearmesh".to_owned()),
+                None => {
+                    self.warn(format!(
+                        "{}: only single-patch bilinearmeshes are supported — skipped",
+                        directive.location
+                    ));
+                    return Ok(());
+                }
+            },
             "plymesh" => {
                 let file = directive.params.string("filename")?.ok_or_else(|| {
                     Error::SceneFormat(format!(
@@ -798,17 +848,12 @@ impl Mapper {
                     path,
                     color_space,
                     scale,
+                    uv,
                 } => {
-                    self.warn_dropped_scale(scale, "alpha", &param.location);
                     let channel = self.mask_channel(&path, &param.location);
-                    (
-                        texture.to_owned(),
-                        Texturable::Texture(TextureRef {
-                            path,
-                            color_space,
-                            channel,
-                        }),
-                    )
+                    let mut reference = texture_ref(path, color_space, scale, uv);
+                    reference.channel = channel;
+                    (texture.to_owned(), Texturable::Texture(reference))
                 }
             }
         };
@@ -880,6 +925,8 @@ impl Mapper {
                     path: self.parser.resolve(file),
                     color_space: None,
                     channel: None,
+                    scale: None,
+                    uv: None,
                 })
             }
             None => Texturable::Constant(self.light_color(directive, "L")?),
@@ -1272,6 +1319,8 @@ impl Mapper {
                 path: self.parser.resolve(file),
                 color_space: None,
                 channel: None,
+                scale: None,
+                uv: None,
             }));
         }
         Ok(patch)
@@ -1452,14 +1501,8 @@ impl Mapper {
                     path,
                     color_space,
                     scale,
-                } => {
-                    self.warn_dropped_scale(scale, name, &param.location);
-                    Texturable::Texture(TextureRef {
-                        path,
-                        color_space,
-                        channel: None,
-                    })
-                }
+                    uv,
+                } => Texturable::Texture(texture_ref(path, color_space, scale, uv)),
             },
             other => {
                 self.warn(format!(
@@ -1469,17 +1512,6 @@ impl Mapper {
                 Texturable::Constant([0.5; 3])
             }
         }))
-    }
-
-    /// A scaled texture feeding a slot that can't carry the scale
-    /// (anything but emission) drops the factor, visibly.
-    fn warn_dropped_scale(&mut self, scale: f32, name: &str, location: &str) {
-        if (scale - 1.0).abs() > f32::EPSILON {
-            self.warn(format!(
-                "{location}: a scaled texture feeds \"{name}\", which cannot carry a \
-                 scale — the factor {scale} is dropped"
-            ));
-        }
     }
 
     /// A scalar material slot: float constant or texture.
@@ -1495,14 +1527,8 @@ impl Mapper {
                     path,
                     color_space,
                     scale,
-                } => {
-                    self.warn_dropped_scale(scale, name, &param.location);
-                    Texturable::Texture(TextureRef {
-                        path,
-                        color_space,
-                        channel: None,
-                    })
-                }
+                    uv,
+                } => Texturable::Texture(texture_ref(path, color_space, scale, uv)),
             },
         }))
     }
@@ -1514,8 +1540,13 @@ impl Mapper {
     }
 
     /// An `imagemap` texture: the filename resolves scene-relative, the
-    /// `encoding` override maps onto the schema's color-space field, and
-    /// everything cenote can't express (inversion, UV transforms) warns.
+    /// `encoding` override maps onto the schema's color-space field, the
+    /// value scale and affine UV remap ride onto the reference, and what
+    /// cenote can't express (inversion) warns.
+    #[expect(
+        clippy::similar_names,
+        reason = "uscale/vscale/udelta/vdelta are pbrt's own parameter names"
+    )]
     fn imagemap_texture(&mut self, directive: &Directive, name: &str) -> Result<TextureDef> {
         let params = &directive.params;
         let file = params.string("filename")?.ok_or_else(|| {
@@ -1545,34 +1576,29 @@ impl Mapper {
                 directive.location
             ));
         }
-        // A mistyped uscale/udelta errors like every other slot — and all
-        // four are read (not short-circuited) so a wrong type is caught and
-        // none is left to spuriously warn as unused.
-        let mut uv_transformed = false;
-        for (param, identity) in [
-            ("uscale", 1.0),
-            ("vscale", 1.0),
-            ("udelta", 0.0),
-            ("vdelta", 0.0),
-        ] {
-            if params
-                .float(param)?
-                .is_some_and(|value| (value - identity).abs() > f32::EPSILON)
-            {
-                uv_transformed = true;
-            }
-        }
-        if uv_transformed {
-            self.warn(format!(
-                "{}: UV transforms are not supported — \"{name}\" samples \
-                 authored UVs directly",
-                directive.location
-            ));
-        }
+        // All four are read unconditionally so a mistyped one errors like
+        // every other slot and none is left to spuriously warn as unused.
+        let uscale = params.float("uscale")?.unwrap_or(1.0);
+        let vscale = params.float("vscale")?.unwrap_or(1.0);
+        let udelta = params.float("udelta")?.unwrap_or(0.0);
+        let vdelta = params.float("vdelta")?.unwrap_or(0.0);
+        let identity = [
+            (uscale, 1.0),
+            (vscale, 1.0),
+            (udelta, 0.0),
+            (vdelta, 0.0),
+        ]
+        .iter()
+        .all(|(value, identity)| (value - identity).abs() <= f32::EPSILON);
+        let uv = (!identity).then_some(UvAffine {
+            scale: [uscale, vscale],
+            delta: [udelta, vdelta],
+        });
         Ok(TextureDef::Image {
             path,
             color_space,
             scale,
+            uv,
         })
     }
 
@@ -1629,10 +1655,12 @@ impl Mapper {
                         path,
                         color_space,
                         scale,
+                        uv,
                     } => TextureDef::Image {
                         path,
                         color_space,
                         scale: scale * factor,
+                        uv,
                     },
                 }
             }
@@ -2475,6 +2503,130 @@ Translate 1 0 0
             assert!(
                 matches!(patch.geometry_opacity, Some(Texturable::Texture(_))),
                 "{patch:?}"
+            );
+        });
+    }
+
+    /// pbrt's affine UV parameters land on the reference with the v leg
+    /// flipped into storage order — `offset_v = 1 − vscale − vdelta`, the
+    /// transform-space image of the `1 − v` the UVs themselves get — and
+    /// an imagemap `scale` rides the reference's multiplier. Both were
+    /// warned-and-dropped before this landed.
+    #[test]
+    fn uv_affines_flip_into_storage_order_and_the_scale_rides() {
+        let world = "Texture \"art\" \"spectrum\" \"imagemap\" \
+            \"string filename\" \"art.png\" \"float scale\" 3 \
+            \"float uscale\" 2 \"float vscale\" 0.5 \
+            \"float udelta\" 0.25 \"float vdelta\" 0.1\n\
+            MakeNamedMaterial \"Art\" \"string type\" \"diffuse\" \
+            \"texture reflectance\" \"art\"\n\
+            NamedMaterial \"Art\"\n\
+            Shape \"trianglemesh\" \"point3 P\" [0 0 0  1 0 0  0 1 0] \
+            \"integer indices\" [0 1 2]";
+        import_world("uv-affine", world, |set, warnings| {
+            let patch = material(set, "Art");
+            let Some(Texturable::Texture(reference)) = &patch.base_color else {
+                panic!("expected a textured base color: {patch:?}");
+            };
+            assert_eq!(reference.scale, Some(3.0));
+            let uv = reference.uv.expect("an affine remap");
+            assert_eq!(uv.scale, [2.0, 0.5]);
+            assert_eq!(uv.offset[0], 0.25);
+            assert!((uv.offset[1] - (1.0 - 0.5 - 0.1)).abs() < 1e-6, "{uv:?}");
+            assert!(
+                warnings.iter().all(|warning| !warning.contains("UV")),
+                "{warnings:?}"
+            );
+        });
+    }
+
+    /// Identity parameters stay off the reference — an untransformed
+    /// imagemap serializes exactly as before the feature.
+    #[test]
+    fn identity_uv_parameters_leave_the_reference_bare() {
+        let world = "Texture \"art\" \"spectrum\" \"imagemap\" \
+            \"string filename\" \"art.png\" \"float uscale\" 1 \"float vdelta\" 0\n\
+            MakeNamedMaterial \"Art\" \"string type\" \"diffuse\" \
+            \"texture reflectance\" \"art\"\n\
+            NamedMaterial \"Art\"\n\
+            Shape \"trianglemesh\" \"point3 P\" [0 0 0  1 0 0  0 1 0] \
+            \"integer indices\" [0 1 2]";
+        import_world("uv-identity", world, |set, _| {
+            let patch = material(set, "Art");
+            let Some(Texturable::Texture(reference)) = &patch.base_color else {
+                panic!("expected a textured base color: {patch:?}");
+            };
+            assert_eq!(reference.scale, None);
+            assert_eq!(reference.uv, None);
+        });
+    }
+
+    /// A `scale` texture over an imagemap composes its factor onto the
+    /// reference's multiplier instead of dropping it.
+    #[test]
+    fn a_scale_texture_composes_onto_the_reference() {
+        let world = "Texture \"wood\" \"spectrum\" \"imagemap\" \
+            \"string filename\" \"wood.png\" \"float scale\" 2\n\
+            Texture \"dim\" \"spectrum\" \"scale\" \
+            \"texture tex\" \"wood\" \"float scale\" 0.25\n\
+            MakeNamedMaterial \"Dim\" \"string type\" \"diffuse\" \
+            \"texture reflectance\" \"dim\"\n\
+            NamedMaterial \"Dim\"\n\
+            Shape \"trianglemesh\" \"point3 P\" [0 0 0  1 0 0  0 1 0] \
+            \"integer indices\" [0 1 2]";
+        import_world("scale-compose", world, |set, _| {
+            let patch = material(set, "Dim");
+            let Some(Texturable::Texture(reference)) = &patch.base_color else {
+                panic!("expected a textured base color: {patch:?}");
+            };
+            assert_eq!(reference.scale, Some(0.5));
+        });
+    }
+
+    /// A single-patch `bilinearmesh` imports as two triangles on the
+    /// patch's `dpdu × dpdv` side, its authored UVs v-flipped like every
+    /// authored stream; a patch mesh with explicit indices stays skipped.
+    #[test]
+    fn a_single_patch_bilinearmesh_imports_as_two_triangles() {
+        let world = "Shape \"bilinearmesh\" \
+            \"point3 P\" [0 0 0  1 0 0  0 1 0  1 1 0] \
+            \"point2 uv\" [0 1  1 1  0 0  1 0]\n\
+            Shape \"bilinearmesh\" \
+            \"point3 P\" [0 0 0  1 0 0  0 1 0  1 1 0] \
+            \"integer indices\" [0 1 2 3]";
+        import_world("bilinear", world, |set, warnings| {
+            let sources: Vec<_> = set
+                .ops
+                .iter()
+                .filter_map(|op| match op {
+                    Op::Mesh(patch) => patch.source.as_ref(),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(sources.len(), 1, "the indexed mesh must skip");
+            let MeshSource::Inline {
+                positions,
+                uvs,
+                triangles,
+                ..
+            } = sources[0]
+            else {
+                panic!("expected an inline mesh");
+            };
+            assert_eq!(positions.len(), 4);
+            // (p00, p10, p11) and (p00, p11, p01): +z winding for a
+            // +x/+y patch, pbrt's dpdu × dpdv.
+            assert_eq!(triangles, &vec![[0, 1, 3], [0, 3, 2]]);
+            // Authored (0,1) at p00 flips to storage (0,0).
+            assert_eq!(
+                uvs.as_ref().expect("authored uvs")[..2],
+                [[0.0, 0.0], [1.0, 0.0]]
+            );
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning.contains("single-patch")),
+                "{warnings:?}"
             );
         });
     }

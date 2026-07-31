@@ -83,6 +83,42 @@ pub struct TextureRef {
     /// Color and normal slots ignore it.
     #[serde(default)]
     pub channel: Option<Channel>,
+    /// A uniform multiplier folded over every sampled value (pbrt's
+    /// imagemap `scale`) — applied after color-space decode, before the
+    /// working-space conversion, so it scales linear light. `None` means 1.
+    /// Normal slots ignore it: a normal is a direction, not a quantity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f32>,
+    /// An affine remap of the mesh UV before sampling, in this schema's
+    /// storage convention (`v = 0` is the image's top row): the sampled
+    /// coordinate is `uv * scale + offset`, wrapping. `None` is the
+    /// identity. Importers converting from a v-up convention (pbrt's
+    /// uscale/vscale/udelta/vdelta) flip the v leg at the boundary, like
+    /// the UVs themselves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uv: Option<UvTransform>,
+}
+
+/// The affine UV remap a [`TextureRef`] may carry: scale about the origin,
+/// then offset.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UvTransform {
+    /// Per-axis multiplier over the mesh UV (tiling above 1).
+    #[serde(default = "one2")]
+    pub scale: [f32; 2],
+    /// Added after the scale.
+    #[serde(default = "zero2")]
+    pub offset: [f32; 2],
+}
+
+impl Default for UvTransform {
+    fn default() -> Self {
+        Self {
+            scale: [1.0; 2],
+            offset: [0.0; 2],
+        }
+    }
 }
 
 /// One channel of a source image — which component a scalar slot samples.
@@ -138,6 +174,14 @@ fn zero3() -> [f32; 3] {
 
 fn one3() -> [f32; 3] {
     [1.0; 3]
+}
+
+fn zero2() -> [f32; 2] {
+    [0.0; 2]
+}
+
+fn one2() -> [f32; 2] {
+    [1.0; 2]
 }
 
 impl Default for Transform {
@@ -774,11 +818,15 @@ mod tests {
                 path: "color.png".into(),
                 color_space: None,
                 channel: None,
+                scale: None,
+                uv: None,
             }),
             geometry_normal: Some(TextureRef {
                 path: "normal.png".into(),
                 color_space: None,
                 channel: None,
+                scale: None,
+                uv: None,
             }),
             ..Material::default()
         };
@@ -787,6 +835,8 @@ mod tests {
             path: "mask.png".into(),
             color_space: None,
             channel: Some(Channel::A),
+            scale: None,
+            uv: None,
         });
         assert_eq!(material.textures().count(), 3);
         assert_eq!(Material::default().textures().count(), 0);

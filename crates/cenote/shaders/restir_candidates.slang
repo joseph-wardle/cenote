@@ -400,7 +400,7 @@ void walkTail(inout Reservoir<PathSample> reservoir, inout float3 cvLane,
 
         GeometryRecord vMesh = scene.geometry[vHit.instance];
         let vUv = interpolateUv(vMesh, vHit.primitive, vHit.barycentrics);
-        let vMaterial = resolveMaterial(scene.materials[vHit.instance], vUv);
+        let vMaterial = resolveMaterial(scene.textureParams, scene.materials[vHit.instance], vUv);
         let vSpawn = spawnPoint(vMesh, vHit, walkDir);
 
         // Beer–Lambert over the arriving segment, if it crossed an interior —
@@ -494,7 +494,7 @@ void walkTail(inout Reservoir<PathSample> reservoir, inout float3 cvLane,
 
         var vShading = vSpawn.shading;
         if (vMaterial.normalTexture != TEXTURE_NONE) {
-            vShading = mappedShadingNormal(vMesh, vHit, vUv, vMaterial.normalTexture, vSpawn);
+            vShading = mappedShadingNormal(scene.textureParams, vMesh, vHit, vUv, vMaterial.normalTexture, vSpawn);
         }
         let vFrame = Frame(vShading);
         let vWo = vFrame.toLocal(-walkDir);
@@ -639,11 +639,11 @@ void restir_candidates(uint3 tid: SV_DispatchThreadID) {
     // reservoir must weigh candidates on the exact BSDF the path tracer shades.
     GeometryRecord mesh = params.scene.geometry[hit.instance];
     let uv = interpolateUv(mesh, hit.primitive, hit.barycentrics);
-    let material = resolveMaterial(params.scene.materials[hit.instance], uv);
+    let material = resolveMaterial(params.scene.textureParams, params.scene.materials[hit.instance], uv);
     let spawn = spawnPoint(mesh, hit, direction);
     var shading = spawn.shading;
     if (material.normalTexture != TEXTURE_NONE) {
-        shading = mappedShadingNormal(mesh, hit, uv, material.normalTexture, spawn);
+        shading = mappedShadingNormal(params.scene.textureParams, mesh, hit, uv, material.normalTexture, spawn);
     }
     let frame = Frame(shading);
     let wo = frame.toLocal(-direction);
@@ -713,7 +713,7 @@ void restir_candidates(uint3 tid: SV_DispatchThreadID) {
             let emitter = params.scene.materials[c.instance];
             if (emitter.emissionTexture != TEXTURE_NONE) {
                 c.radiance *= sampleColor(
-                    emitter.emissionTexture,
+                    params.scene.textureParams, emitter.emissionTexture,
                     interpolateUv(params.scene.geometry[c.instance], c.primitive, c.bary));
             }
             // Stamp the STABLE id, not the volatile instance: the sample must
@@ -808,7 +808,8 @@ void restir_candidates(uint3 tid: SV_DispatchThreadID) {
                     if (c.pdf > 0.0) {
                         let emitter = params.scene.materials[instance];
                         if (emitter.emissionTexture != TEXTURE_NONE) {
-                            c.radiance *= sampleColor(emitter.emissionTexture,
+                            c.radiance *= sampleColor(params.scene.textureParams,
+                                emitter.emissionTexture,
                                 interpolateUv(hitMesh, primitive, bary));
                         }
                         sample.rcVertex.instance = restir.instanceToId[instance];

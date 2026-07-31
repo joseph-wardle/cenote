@@ -44,6 +44,7 @@ public struct SceneTable {
     public Material* materials;
     public LightRecord* lights;
     public float* bsdfTables; // layout in `tables.rs` ↔ openpbr.slang TABLE_*
+    public TextureParams* textureParams; // per bindless slot, same index order
     public Environment env;
     public uint lightCount;
     uint pad0;
@@ -59,7 +60,7 @@ public float opacityAt(SceneTable* scene, uint instance, uint primitive, float2 
     let material = scene.materials[instance];
     var opacity = material.opacity;
     if (material.opacityTexture != TEXTURE_NONE) {
-        opacity *= sampleScalar(material.opacityTexture,
+        opacity *= sampleScalar(scene.textureParams, material.opacityTexture,
                                 interpolateUv(scene.geometry[instance], primitive, bary));
     }
     return opacity;

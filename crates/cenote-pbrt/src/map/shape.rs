@@ -119,6 +119,62 @@ pub(super) fn trianglemesh(directive: &Directive, flip: bool) -> Result<MeshSour
     })
 }
 
+/// A `bilinearmesh` shape's one implicit patch as two triangles —
+/// `None` when the mesh is more than that (explicit "indices" or extra
+/// control points; the mapper warns and skips those). Corner order is
+/// pbrt's (p00, p10, p01, p11); the (0,1,3)(0,3,2) split keeps each
+/// triangle's winding normal on the patch's `dpdu × dpdv` side, and
+/// absent authored UVs default to the patch parameterization. `flip` is
+/// trap 4's `ReverseOrientation`, as in [`trianglemesh`].
+pub(super) fn bilinearmesh(directive: &Directive, flip: bool) -> Result<Option<MeshSource>> {
+    let params = &directive.params;
+    if params.take("indices", &["integer"])?.is_some() {
+        return Ok(None);
+    }
+    let positions_param = params.take("P", &["point3", "point"])?.ok_or_else(|| {
+        Error::SceneFormat(format!(
+            "{}: bilinearmesh has no \"point3 P\"",
+            directive.location
+        ))
+    })?;
+    let floats = positions_param.as_floats()?;
+    if floats.len() != 12 {
+        return Ok(None);
+    }
+    let positions: Vec<[f32; 3]> = floats
+        .chunks_exact(3)
+        .map(|triple| [triple[0] as f32, triple[1] as f32, triple[2] as f32])
+        .collect();
+    let mut uvs: Vec<[f32; 2]> = match params.take("uv", &["point2", "float", "vector2"])? {
+        Some(param) => {
+            let floats = param.as_floats()?;
+            if floats.len() != 8 {
+                return Err(Error::SceneFormat(format!(
+                    "{}: bilinearmesh \"uv\" needs four (u, v) pairs",
+                    param.location
+                )));
+            }
+            floats
+                .chunks_exact(2)
+                .map(|pair| [pair[0] as f32, pair[1] as f32])
+                .collect()
+        }
+        None => vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+    };
+    flip_v(&mut uvs);
+    let triangles = if flip {
+        vec![[0, 3, 1], [0, 2, 3]]
+    } else {
+        vec![[0, 1, 3], [0, 3, 2]]
+    };
+    Ok(Some(MeshSource::Inline {
+        positions,
+        normals: None,
+        uvs: Some(uvs),
+        triangles,
+    }))
+}
+
 /// A pbrt sphere, tessellated: poles on the object-space z axis,
 /// analytic normals, pbrt's parameterization for UVs (`u` around z,
 /// `v = 0` at the +z pole). 32 rings × 64 segments keeps silhouettes

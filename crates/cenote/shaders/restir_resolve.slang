@@ -170,11 +170,11 @@ void restir_resolve(uint3 tid: SV_DispatchThreadID) {
     // reservoir came back empty).
     GeometryRecord mesh = params.scene.geometry[hit.instance];
     let uv = interpolateUv(mesh, hit.primitive, hit.barycentrics);
-    let material = resolveMaterial(params.scene.materials[hit.instance], uv);
+    let material = resolveMaterial(params.scene.textureParams, params.scene.materials[hit.instance], uv);
     let spawn = spawnPoint(mesh, hit, direction);
     var shading = spawn.shading;
     if (material.normalTexture != TEXTURE_NONE) {
-        shading = mappedShadingNormal(mesh, hit, uv, material.normalTexture, spawn);
+        shading = mappedShadingNormal(params.scene.textureParams, mesh, hit, uv, material.normalTexture, spawn);
     }
     let frame = Frame(shading);
     let wo = frame.toLocal(-direction);

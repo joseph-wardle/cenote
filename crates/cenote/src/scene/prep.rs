@@ -25,7 +25,7 @@ use super::lower::{InstanceSpec, all_dirty, host_phase};
 use super::{
     GpuEnvironment, GpuMesh, Placement, ResidentBuffers, ResidentTexture, Scene, build_restir,
     build_scene_tlas, select_probability, upload_environment, upload_instance_tables, upload_mesh,
-    upload_scene_table,
+    upload_scene_table, upload_texture_params,
 };
 use crate::error::Result;
 use crate::gpu::Context;
@@ -89,6 +89,7 @@ impl Scene {
             geometry,
             materials,
             lights,
+            upload_texture_params(gpu, textures.keys())?,
             marginal,
             conditional,
             pdfs,
@@ -176,6 +177,7 @@ impl Scene {
         }
         self.textures = upload_textures(gpu, std::mem::take(&mut self.textures), &host.textures)?;
         self.rebuild_texture_descriptors();
+        self.resident.texture_params = upload_texture_params(gpu, self.textures.keys())?;
         if let Some(spec) = &host.environment {
             // The image re-uploads only when the source changed; the tint
             // and placement always re-land — they live in the scene table,
@@ -485,6 +487,8 @@ mod tests {
                             path: wood.to_owned(),
                             color_space: None,
                             channel: None,
+                            scale: None,
+                            uv: None,
                         })),
                         ..MaterialPatch::new("floor")
                     }))],

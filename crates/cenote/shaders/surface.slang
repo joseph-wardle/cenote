@@ -152,8 +152,8 @@ public float3 reconnectionPoint(GeometryRecord mesh, Hit hit) {
 // including the all-zero stream of an unauthored mesh) keeps the unmapped
 // normal. Like the interpolated normal it replaces, the result is flipped to
 // the geometric side.
-public float3 mappedShadingNormal(GeometryRecord mesh, Hit hit, float2 uv, uint map,
-                                  SpawnPoint spawn) {
+public float3 mappedShadingNormal(TextureParams *params, GeometryRecord mesh, Hit hit,
+                                  float2 uv, uint map, SpawnPoint spawn) {
     uint base = 3 * hit.primitive;
     let i0 = mesh.indices[base];
     let i1 = mesh.indices[base + 1];
@@ -182,7 +182,7 @@ public float3 mappedShadingNormal(GeometryRecord mesh, Hit hit, float2 uv, uint 
     if (dot(bitangent, dpdv) < 0.0) {
         bitangent = -bitangent;
     }
-    let texel = sampleNormal(map, uv);
+    let texel = sampleNormal(params, map, uv);
     var mapped = normalize(texel.x * tangent + texel.y * bitangent
                          + texel.z * spawn.shading);
     // Shading must agree with the face the ray actually struck, exactly as the

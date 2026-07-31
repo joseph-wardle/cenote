@@ -1132,6 +1132,8 @@ mod tests {
                         path: "wood.png".into(),
                         color_space: None,
                         channel: None,
+                        scale: None,
+                        uv: None,
                     })),
                     ..MaterialPatch::new("wood")
                 })),
@@ -1160,6 +1162,8 @@ mod tests {
                 path: "/scenes/wood.png".into(),
                 color_space: None,
                 channel: None,
+                scale: None,
+                uv: None,
             })
         );
     }

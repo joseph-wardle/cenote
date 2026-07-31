@@ -82,7 +82,7 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     // Textured parameters resolve at the hit's UV once; everything below
     // reads one plain material, whatever mix of maps and constants fed it.
     let uv = interpolateUv(mesh, hit.primitive, hit.barycentrics);
-    let material = resolveMaterial(params.scene.materials[hit.instance], uv);
+    let material = resolveMaterial(params.scene.textureParams, params.scene.materials[hit.instance], uv);
     let spawn = spawnPoint(mesh, hit, direction);
     // xyz = the path's weight; w = the previous scatter's pdf (0: camera ray).
     var throughput = params.paths.throughput[path];
@@ -134,7 +134,7 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     // cap because a path ending there still records its open guides.
     var shading = spawn.shading;
     if (material.normalTexture != TEXTURE_NONE) {
-        shading = mappedShadingNormal(mesh, hit, uv, material.normalTexture, spawn);
+        shading = mappedShadingNormal(params.scene.textureParams, mesh, hit, uv, material.normalTexture, spawn);
     }
     let frame = Frame(shading);
     let wo = frame.toLocal(-direction);

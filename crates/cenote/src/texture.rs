@@ -111,7 +111,47 @@ impl Channel {
 /// identity of a prepared texture: two materials sharing a source image
 /// *and* its interpretation share one bindless slot, while a color and a
 /// mask use of the same file are two (as are two channels of one mask).
-pub(crate) type Key = (std::path::PathBuf, Usage, Option<bool>, Channel);
+/// Sample-time [`Params`] fork the key too — they ride the bindless index,
+/// so two transforms of one image are two slots (the image preps and
+/// uploads twice; the prep cache below is keyed on content alone, so only
+/// the upload duplicates).
+pub(crate) type Key = (std::path::PathBuf, Usage, Option<bool>, Channel, Params);
+
+/// The sample-time parameters a texture reference carries beside its image:
+/// the affine UV remap and the value multiplier
+/// ([`description::TextureRef`](crate::scene::description::TextureRef)'s
+/// `uv` and `scale`, identity defaults filled in). Stored as float bits so
+/// the key stays `Ord`; NaN can't arise (lowering rejects nothing here, but
+/// serde never parses NaN from RON) and bit-equality is exactly the
+/// don't-fork-the-cache rule anyway.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Params {
+    uv_scale: [u32; 2],
+    uv_offset: [u32; 2],
+    scale: u32,
+}
+
+impl Params {
+    /// Pack the sample-time parameters, identity for `None`.
+    pub(crate) fn new(uv: Option<([f32; 2], [f32; 2])>, scale: Option<f32>) -> Self {
+        let (uv_scale, uv_offset) = uv.unwrap_or(([1.0; 2], [0.0; 2]));
+        Self {
+            uv_scale: uv_scale.map(f32::to_bits),
+            uv_offset: uv_offset.map(f32::to_bits),
+            scale: scale.unwrap_or(1.0).to_bits(),
+        }
+    }
+
+    /// The parameters as the floats the GPU record carries:
+    /// `(uv_scale, uv_offset, value_scale)`.
+    pub(crate) fn unpack(self) -> ([f32; 2], [f32; 2], f32) {
+        (
+            self.uv_scale.map(f32::from_bits),
+            self.uv_offset.map(f32::from_bits),
+            f32::from_bits(self.scale),
+        )
+    }
+}
 
 /// One texture, prepped and ready to upload: single-level BC blocks over
 /// block-padded rows (dimensions rounded up to multiples of 4 by edge

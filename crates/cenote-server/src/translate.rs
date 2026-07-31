@@ -298,6 +298,11 @@ fn texture_ref(reference: wire::TextureRef) -> description::TextureRef {
             wire::Channel::B => description::Channel::B,
             wire::Channel::A => description::Channel::A,
         }),
+        // The wire schema predates sample-time texture parameters; USD's
+        // `st` inputs don't author them today, so the delegate always
+        // sends identity.
+        scale: None,
+        uv: None,
     }
 }
 
@@ -345,6 +350,8 @@ mod tests {
                 path: "/n.png".into(),
                 color_space: Some(description::ColorSpace::Linear),
                 channel: Some(description::Channel::A),
+                scale: None,
+                uv: None,
             }))
         );
     }
