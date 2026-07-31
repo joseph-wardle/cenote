@@ -125,6 +125,39 @@ enum TextureDef {
     Constant([f32; 3]),
 }
 
+/// pbrt keeps `float` and `spectrum` textures in two disjoint namespaces,
+/// so one name may denote a `float` bump in one file and a `spectrum`
+/// reflectance in another — sanmiguel's `Map #483` does exactly this, a
+/// name collision between two independently authored include files that
+/// only renders correctly because pbrt never conflates the two. We key the
+/// named-texture map by kind so they never collide; a lookup prefers its
+/// slot's kind and falls back to the other only when the preferred
+/// namespace has no such name (pbrt's coercion when a slot borrows across).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum TexKind {
+    Float,
+    Spectrum,
+}
+
+impl TexKind {
+    /// pbrt's texture type word: `float` is scalar, everything else
+    /// (`spectrum`, the legacy `color`) is spectral.
+    fn from_type(word: &str) -> Self {
+        if word == "float" {
+            Self::Float
+        } else {
+            Self::Spectrum
+        }
+    }
+
+    fn other(self) -> Self {
+        match self {
+            Self::Float => Self::Spectrum,
+            Self::Spectrum => Self::Float,
+        }
+    }
+}
+
 /// An imagemap's affine UV remap as pbrt spells it (`st' = st * scale +
 /// delta` with `t` up); cenote stores v down, so the conversion lives at
 /// the same boundary the UV flip itself does.
@@ -239,7 +272,7 @@ pub(crate) struct Mapper {
     state: State,
     attribute_stack: Vec<State>,
     transform_stack: Vec<Mat4>,
-    named_textures: BTreeMap<String, TextureDef>,
+    named_textures: BTreeMap<(TexKind, String), TextureDef>,
     named_materials: BTreeMap<String, MaterialPatch>,
     /// Finished `ObjectBegin` recordings, by object name.
     objects: BTreeMap<String, Vec<RecordedShape>>,
@@ -839,7 +872,7 @@ impl Mapper {
             (format!("={value}"), Texturable::Constant(value))
         } else {
             let texture = param.as_string()?;
-            match self.texture_lookup(texture, &param.location)? {
+            match self.texture_lookup(texture, TexKind::Float, &param.location)? {
                 TextureDef::Constant(value) if value[0] >= 1.0 => {
                     return Ok((base_name, base_patch));
                 }
@@ -1495,7 +1528,7 @@ impl Mapper {
         Ok(Some(match param.ty.as_str() {
             "rgb" | "color" => Texturable::Constant(param.as_rgb()?),
             "float" => Texturable::Constant([param.as_scalar()?; 3]),
-            "texture" => match self.texture_lookup(param.as_string()?, &param.location)? {
+            "texture" => match self.texture_lookup(param.as_string()?, TexKind::Spectrum, &param.location)? {
                 TextureDef::Constant(value) => Texturable::Constant(value),
                 TextureDef::Image {
                     path,
@@ -1521,7 +1554,7 @@ impl Mapper {
         };
         Ok(Some(match param.ty.as_str() {
             "float" => Texturable::Constant(param.as_scalar()?),
-            _ => match self.texture_lookup(param.as_string()?, &param.location)? {
+            _ => match self.texture_lookup(param.as_string()?, TexKind::Float, &param.location)? {
                 TextureDef::Constant(value) => Texturable::Constant(value[0]),
                 TextureDef::Image {
                     path,
@@ -1533,10 +1566,18 @@ impl Mapper {
         }))
     }
 
-    fn texture_lookup(&self, name: &str, location: &str) -> Result<TextureDef> {
-        self.named_textures.get(name).cloned().ok_or_else(|| {
-            Error::SceneFormat(format!("{location}: texture \"{name}\" was never declared"))
-        })
+    /// Resolve a texture reference from the slot's expected `kind`,
+    /// falling back to the other namespace when the preferred one has no
+    /// such name (a slot may legitimately borrow across, e.g. a float
+    /// bump referenced where the scene declared only a spectrum twin).
+    fn texture_lookup(&self, name: &str, kind: TexKind, location: &str) -> Result<TextureDef> {
+        self.named_textures
+            .get(&(kind, name.to_owned()))
+            .or_else(|| self.named_textures.get(&(kind.other(), name.to_owned())))
+            .cloned()
+            .ok_or_else(|| {
+                Error::SceneFormat(format!("{location}: texture \"{name}\" was never declared"))
+            })
     }
 
     /// An `imagemap` texture: the filename resolves scene-relative, the
@@ -1608,13 +1649,8 @@ impl Mapper {
     /// `dispatch` reaches the directive in source order.
     fn define_texture(&mut self, directive: &Directive) -> Result<()> {
         let name = directive.names[0].clone();
+        let kind = TexKind::from_type(&directive.names[1]);
         let class = directive.names[2].clone();
-        if self.named_textures.contains_key(&name) {
-            return Err(Error::SceneFormat(format!(
-                "{}: texture \"{name}\" is defined twice",
-                directive.location
-            )));
-        }
         let params = &directive.params;
         let def = match class.as_str() {
             "imagemap" => self.imagemap_texture(directive, &name)?,
@@ -1628,7 +1664,7 @@ impl Mapper {
             "scale" => {
                 let inner = match params.take("tex", &["texture", "float", "rgb", "color"])? {
                     Some(param) if param.ty == "texture" => {
-                        self.texture_lookup(param.as_string()?, &param.location)?
+                        self.texture_lookup(param.as_string()?, kind, &param.location)?
                     }
                     Some(param) => TextureDef::Constant(param.as_rgb_broadcast()?),
                     None => TextureDef::Constant([1.0; 3]),
@@ -1674,7 +1710,21 @@ impl Mapper {
             }
         };
         self.warn_unused(directive, &format!("texture \"{name}\""));
-        self.named_textures.insert(name, def);
+        if self
+            .named_textures
+            .insert((kind, name.clone()), def)
+            .is_some()
+        {
+            // A same-kind redefinition: pbrt warns and keeps the last, and
+            // since it creates every material only after the full parse,
+            // every reference resolves to that last definition — our
+            // flattened pre-pass agrees. (A cross-kind reuse is not a
+            // redefinition; the two live in separate namespaces.)
+            self.warn(format!(
+                "{}: texture \"{name}\" redefined; the last definition wins",
+                directive.location
+            ));
+        }
         Ok(())
     }
 }
@@ -2580,6 +2630,75 @@ Translate 1 0 0
                 panic!("expected a textured base color: {patch:?}");
             };
             assert_eq!(reference.scale, Some(0.5));
+        });
+    }
+
+    /// pbrt keeps `float` and `spectrum` textures in disjoint namespaces,
+    /// so one name may denote a `float` mask in one include file and a
+    /// `spectrum` reflectance in another — sanmiguel's `Map #483` is
+    /// exactly this collision, and importing it used to fail "defined
+    /// twice". Each slot now resolves against its own kind: the reflectance
+    /// (spectrum) takes the color image, the alpha (float) the mask, though
+    /// both name `"Map"`, and nothing warns of a redefinition.
+    #[test]
+    fn float_and_spectrum_textures_share_a_name_without_colliding() {
+        let source = "WorldBegin\n\
+            Texture \"Map\" \"spectrum\" \"imagemap\" \"string filename\" \"color.png\"\n\
+            Texture \"Map\" \"float\" \"imagemap\" \"string filename\" \"mask.png\"\n\
+            Material \"diffuse\" \"texture reflectance\" \"Map\"\n\
+            Shape \"trianglemesh\" \"point3 P\" [0 0 0  1 0 0  0 1 0] \
+            \"integer indices\" [0 1 2] \"texture alpha\" \"Map\"\n";
+        let files: &[(&str, &[u8])] = &[
+            ("scene.pbrt", source.as_bytes()),
+            ("color.png", &png_header(0)),
+            ("mask.png", &png_header(6)),
+        ];
+        import_files("tex-namespaces", files, |set, warnings| {
+            let shapes = instances(set);
+            let patch = material(set, shapes[0].material.as_deref().expect("a material"));
+            let Some(Texturable::Texture(color)) = &patch.base_color else {
+                panic!("expected a textured base color: {patch:?}");
+            };
+            assert!(color.path.ends_with("color.png"), "{:?}", color.path);
+            let Some(Texturable::Texture(mask)) = &patch.geometry_opacity else {
+                panic!("expected an opacity mask: {patch:?}");
+            };
+            assert!(mask.path.ends_with("mask.png"), "{:?}", mask.path);
+            assert!(
+                !warnings.iter().any(|warning| warning.contains("redefined")),
+                "a cross-kind reuse is not a redefinition: {warnings:?}"
+            );
+        });
+    }
+
+    /// A genuine same-kind redefinition is pbrt's last-wins with a warning:
+    /// pbrt creates every material only after the full parse, so all
+    /// references see the final definition — the flattened pre-pass agrees.
+    #[test]
+    fn a_same_kind_texture_redefinition_takes_the_last_and_warns() {
+        let world = "Texture \"wall\" \"spectrum\" \"imagemap\" \
+            \"string filename\" \"first.png\"\n\
+            Texture \"wall\" \"spectrum\" \"imagemap\" \
+            \"string filename\" \"second.png\"\n\
+            MakeNamedMaterial \"Wall\" \"string type\" \"diffuse\" \
+            \"texture reflectance\" \"wall\"\n\
+            NamedMaterial \"Wall\"\n\
+            Shape \"trianglemesh\" \"point3 P\" [0 0 0  1 0 0  0 1 0] \
+            \"integer indices\" [0 1 2]";
+        import_world("tex-redefine", world, |set, warnings| {
+            let patch = material(set, "Wall");
+            let Some(Texturable::Texture(reference)) = &patch.base_color else {
+                panic!("expected a textured base color: {patch:?}");
+            };
+            assert!(
+                reference.path.ends_with("second.png"),
+                "the last definition wins: {:?}",
+                reference.path
+            );
+            assert!(
+                warnings.iter().any(|warning| warning.contains("redefined")),
+                "{warnings:?}"
+            );
         });
     }
 
