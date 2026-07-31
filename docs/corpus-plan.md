@@ -83,7 +83,7 @@ the verbatim lists):
 | bistro | 251 → 8 | **243 alpha-textured shapes** — the foliage cutouts; shape-alpha landed at rung 7, the re-import is near-clean (iso, maxcomponentvalue, CuZn ×2, coat thickness/albedo ×4) |
 | kroken | 173 → 172 | UV transforms ×18 = planar mappings ×14 + affine ×4 (2 inert); mix/directionmix covers → mid-gray, curated to means; ND license → RON local-generated (rung 8) |
 | watercolor | 184 | Same class as kroken; ND license |
-| sanmiguel | fails | Duplicate texture definition (fix below); expect bistro-class alpha foliage after |
+| sanmiguel | fails → 1405 | **Duplicate-texture failure was a cross-kind name collision** (`Map #483`: float bump vs spectrum reflectance) — fixed by splitting the namespaces (rung 10). Post-fix warnings are near-all benign per-imagemap noise (`wrap`/`mapping "uv"`/`maxanisotropy` ×441 each — cenote defaults or a quality knob); the real gaps are displacement ×64, diffusetransmission ×7 (plant leaves), textured coat/roughness ×4. **No position-projected mappings** (unlike kroken/watercolor — every texture is `mapping "uv"`), **no mix/media** → no hand-curation |
 | zero-day | 188 | **ReverseOrientation on emissive plymesh ×97** (emission side needs the eyeball test), textured coat roughness imports smooth, texture scale 0.01 dropped |
 
 **Proposed fix candidates** (each lands only with its rung's Go, per
@@ -94,7 +94,7 @@ decision 8):
 | TGA decode (extension-hinted + `tga` feature) | core, small | **landed, rung 1** | veach-ajar renders; kitchen, bathroom, and others texture correctly |
 | V-flip imported/PLY UVs to sampler storage order | importer + core, small | **landed, rung 1** (found by decision 7's side-by-side) | every textured import; see below |
 | PFM read for infinite-light images | importer, small | **landed, rung 2** | teapot-full imports |
-| Texture redefinition tolerated (last wins + warning) | importer, small | sanmiguel rung | sanmiguel imports |
+| Texture namespaces split by kind (`float` vs `spectrum`) | importer, small | **landed, rung 10** — the recon reframed the proposed "last-wins" fix: sanmiguel's `Map #483` collision is a *cross-kind* reuse (a float bump and a spectrum reflectance sharing a name across two include files), which pbrt-v4 never conflates because it keeps two namespaces; the map now keys on `(kind, name)`, each slot resolves against its own kind (fallback to the other), and a genuine *same-kind* redefinition warns and takes the last (pbrt's deferred-creation semantics) | sanmiguel imports; guards every future scene against name collisions between independently authored includes |
 | Shape `alpha` texture → material opacity | importer, medium | **landed, rung 7** (cutout material forks; mask channel by header probe) | bistro/sanmiguel foliage; bathroom's rug (curated in at rung 7) |
 | UV affine transforms (uscale/vscale/udelta/vdelta) + imagemap `scale` | **core + schema**, medium — `TextureRef` gained an optional affine `uv` remap and value `scale`, applied at sample time (`ba83d27`) | **landed, rung 9** on watercolor's evidence (the easel drawing's remap + 28 value scales) — the transform rides the reference, not a bake, so tiling stays lossless and `scale > 1` exact; identity default keeps every golden bit-identical | kroken/watercolor books, magazines, fabrics tile correctly; scaled textures no longer warn-and-drop |
 | Single-patch `bilinearmesh` shapes | importer, small | **landed, rung 9** (two triangles on the `dpdu × dpdv` side; indexed patches still skip) | watercolor's floor paint-splatter decals |
@@ -393,6 +393,45 @@ residual 0.050 against the matched-domain reference is the coat model
 (bistro/kroken's coateddiffuse class), the parked mapping modes, and
 the media approximation.
 
+**Rung-10 notes.** sanmiguel — the San Miguel de Allende courtyard, the
+corpus's geometric heavy (70,603 ops, 242 alpha foliage shapes) — is the
+first pbrt-v4 heavy to land from a **bare import with no hand-curation**:
+no `mix`/`directionmix`, no participating media, and every texture uses
+`mapping "uv"` (none of kroken/watercolor's position-projected modes), so
+nothing needed working around. Its licence is a plain "thanks to
+Guillermo M. Leal Llaguno" — the committable `permissions per repo
+README` class (crown/zero-day), so the RON is committed directly, not
+script-regenerated like the ND scenes.
+
+The rung's fix reframed the recon's proposal. The import failed
+`texture "Map #483" is defined twice`, and the proposed remedy was
+"tolerate redefinition, last wins + warning". But the recon showed the
+two `Map #483` definitions are a *different texture each*: a `float` bump
+(`Fierro_A_Bump.png`) in `mesas_abajo-mat.pbrt` and a `spectrum`
+reflectance (a carpet) in `mesas_arriba-mat.pbrt` — a name collision
+between two independently authored include files. pbrt-v4 renders both
+correctly because it keeps **float and spectrum textures in disjoint
+namespaces**; naive last-wins would have mis-bound the chairs' bump to
+the carpet. The fix keys the named-texture map on `(kind, name)`, each
+material slot resolves against its own kind (`reflectance` → spectrum,
+`alpha`/`roughness`/bump → float) with a fallback to the other namespace,
+and a *genuine same-kind* redefinition still warns and takes the last —
+pbrt's deferred-creation semantics, which the flattened pre-pass matches.
+Identity for every existing scene (none carry a cross-kind collision), so
+the corpus goldens stay bit-identical. The 242 alpha shapes → 97 cutout
+materials rode rung-7's shape-alpha unchanged.
+
+Numbers: **0.065 raw / 0.045 clamped** at eighth-res vs native pbrt
+(`--gpu` 512 spp; cenote 256 spp, both downsampled 8× — sanmiguel's
+`cropwindow` is dropped on import, so both render full-frame) — the
+tightest corpus number so far, the coateddiffuse family far less
+GI-amplified in an open-air courtyard than in kroken's white box. The
+signed diff is near-uniform gray; residuals are the derived sky's slight
+tint in the open sky gaps (the six-scene derived-sky class) and cyan
+speckle in the tree's dappled floor light (high-frequency + the 256-vs-512
+spp gap), with displacement ×64, diffusetransmission ×7 (plant leaves),
+and textured coat/roughness ×4 dropped as documented classes.
+
 **Documented-only renderer gaps** (unlock noted in each RON header when
 its rung lands): anisotropic roughness, displacement, diffuse-transmission
 lobe, textured coat roughness, dispersion (all unassigned material-depth
@@ -429,7 +468,7 @@ build (`~/Documents/pbrt-v4/build/pbrt`, the README-figure one).
 | 7 | **Done**: bistro — shape-alpha landed (243 masks → 53 cutout forks), the RON version-probe parse fix landed with it, bathroom's rug curated in; coateddiffuse model proven the dominant divergence by two-sided degradation (rung-7 notes below) |
 | 8 | **Done**: kroken — the ND decision resolved to **RON-as-derived-asset**: CC-BY-ND 2.0 grants format shifts but not derivative distribution, so `curate-kroken.py` (committed, content-free) regenerates the curated RON locally; pillow mix baked to a dots texture, red-glass media to Beer–Lambert tint; UV-transform core feature parked on watercolor's evidence; the divergence decomposition found the **invisible-emitter MIS bug** (alpha-0 sun at half strength — fix candidate, rung-8 notes below) |
 | 9 | **Done**: watercolor — second ND scene (`curate-watercolor.py` regenerates the RON + five bakes locally, kroken's pattern); the rung **landed the parked UV feature** (`ba83d27`: affine `uv` remap + value `scale` on `TextureRef`, single-patch bilinearmesh) on this scene's evidence; mix textures curated to means/bakes, water medium to Beer–Lambert, splatter decals to pre-inverted cutout masks; portal domain proven dominant by degradation (rung-9 notes below) |
-| 10 | sanmiguel (redefinition fix) |
+| 10 | **Done**: sanmiguel — the duplicate-texture failure was a *cross-kind* name collision, fixed by splitting the float/spectrum texture namespaces (pbrt-v4 semantics); the scene then imported and rendered from a **bare import, no hand-curation** (0.065 raw / 0.045 clamped, the tightest corpus number yet); 242 alpha foliage shapes → 97 cutout materials rode rung-7 shape-alpha (rung-10 notes below) |
 | 11 | Swap rung — **gated on M6 closed** (viewer checklist → D-152 addendum): measure veach-ajar and zero-day against brass-room/many-lights on the reuse gate + convergence harness; if they clear, migrate gates, goldens, README figures; either way the numbers land in the D-entry |
 | 12 | Close: README final, full-corpus contact sheet, deferrals pointer, closing D-entry |
 
