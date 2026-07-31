@@ -5,12 +5,16 @@
 //! [`crate::scene::changeset`]; serde derives *are* the parser, so schema
 //! and format cannot drift).
 //!
-//! The version field leads the file and is probed before the full parse,
-//! so a file from a different format generation fails with "version 3, this
-//! build reads 1" instead of a field-level parse error. Typos inside a
-//! recognized version do fail loudly: unknown fields are rejected, never
-//! skipped — a misspelled parameter silently ignored would be a wrong
-//! render with no error, the worst outcome a scene format can produce.
+//! The version field leads the file; when the full parse fails, it is
+//! recovered by a bounded scan of the leading lines, so a file from a
+//! different format generation fails with "version 3, this build reads 1"
+//! instead of a field-level parse error. (The scan replaces a serde probe
+//! of the whole file: ron's skipped-value path re-searches the remaining
+//! source for `..` at every number — quadratic, an hour of parsing on a
+//! corpus scene with inline meshes.) Typos inside a recognized version do
+//! fail loudly: unknown fields are rejected, never skipped — a misspelled
+//! parameter silently ignored would be a wrong render with no error, the
+//! worst outcome a scene format can produce.
 //!
 //! Serialization is plain RON — explicit `Some`, externally tagged enums,
 //! no extensions. (`implicit_some` would collapse the `Some(None)` patches
@@ -41,19 +45,27 @@ struct SceneFileOut<'a> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SceneFileIn {
-    #[expect(
-        dead_code,
-        reason = "the probe reads it; declared so deny_unknown_fields accepts the field"
-    )]
     version: u32,
     ops: Vec<Op>,
 }
 
-/// The version field alone, parsed leniently — readable even when the ops
-/// schema has drifted, so version mismatches diagnose themselves.
-#[derive(Deserialize)]
-struct VersionProbe {
-    version: u32,
+/// The version field, recovered without a parse — readable even when the
+/// ops schema has drifted, so version mismatches diagnose themselves.
+/// [`to_ron`] writes the field first, so it sits on the first non-comment
+/// lines; only the error path pays even this much.
+fn probe_version(text: &str) -> Option<u32> {
+    let head: String = text
+        .lines()
+        .map(str::trim_start)
+        .filter(|line| !line.starts_with("//"))
+        .take(4)
+        .collect();
+    let (_, tail) = head.split_once("version")?;
+    let digits = tail.trim_start().strip_prefix(':')?.trim_start();
+    let end = digits
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(digits.len());
+    digits[..end].parse().ok()
 }
 
 /// Serialize a change-set as scene-file text.
@@ -80,20 +92,26 @@ pub fn to_ron(set: &ChangeSet) -> Result<String> {
 /// different format version, or fails to parse (including unknown fields —
 /// see the module doc).
 pub fn from_ron(text: &str) -> Result<ChangeSet> {
-    let probe: VersionProbe = ron::from_str(text).map_err(|error| {
-        Error::SceneFormat(format!(
-            "not a cenote scene file (expected `(version: {FORMAT_VERSION}, ops: [...])`): {error}"
-        ))
-    })?;
-    if probe.version != FORMAT_VERSION {
-        return Err(Error::SceneFormat(format!(
+    // Typed parse first: the happy path reads every value through its
+    // schema type, never through ron's (quadratic) skipped-value path.
+    // Only a failure pays for diagnosis.
+    match ron::from_str::<SceneFileIn>(text) {
+        Ok(file) if file.version == FORMAT_VERSION => Ok(ChangeSet { ops: file.ops }),
+        Ok(file) => Err(Error::SceneFormat(format!(
             "scene file is format version {}, this build reads {FORMAT_VERSION}",
-            probe.version
-        )));
+            file.version
+        ))),
+        Err(error) => Err(match probe_version(text) {
+            Some(version) if version != FORMAT_VERSION => Error::SceneFormat(format!(
+                "scene file is format version {version}, this build reads {FORMAT_VERSION}"
+            )),
+            Some(_) => Error::SceneFormat(format!("scene file parse failed: {error}")),
+            None => Error::SceneFormat(format!(
+                "not a cenote scene file (expected `(version: {FORMAT_VERSION}, ops: [...])`): \
+                 {error}"
+            )),
+        }),
     }
-    let file: SceneFileIn = ron::from_str(text)
-        .map_err(|error| Error::SceneFormat(format!("scene file parse failed: {error}")))?;
-    Ok(ChangeSet { ops: file.ops })
 }
 
 /// Read a scene file and rebase its relative paths against the file's own
@@ -206,6 +224,20 @@ mod tests {
     fn a_newer_version_is_refused_by_number() {
         let error = from_ron("(version: 999, ops: [])").unwrap_err();
         assert!(error.to_string().contains("999"), "{error}");
+        assert!(error.to_string().contains("reads 2"), "{error}");
+    }
+
+    /// The error-path probe: a file whose ops schema has drifted past
+    /// this build still diagnoses as a version mismatch — read by the
+    /// bounded scan, past any header comments — not as a parse error.
+    #[test]
+    fn a_drifted_file_still_reports_its_version() {
+        let error = from_ron(
+            "// A curated header comment.\n\
+             (version: 3, ops: [Frobnicate((strength: 11))])",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("format version 3"), "{error}");
         assert!(error.to_string().contains("reads 2"), "{error}");
     }
 
