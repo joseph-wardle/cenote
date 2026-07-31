@@ -80,7 +80,7 @@ the verbatim lists):
 | kitchen | 62 | Aniso ×39, displacement ×2, diffuse transmission flattened; TGA |
 | bmw-m6 | 7 | Near-clean; one interior "interface" material defaults |
 | crown | 28 | Dispersion → IOR 1.5, gem media interfaces → M8, textured-roughness remap caveat |
-| bistro | 251 | **243 alpha-textured shapes** — the foliage cutouts; solid until shape-alpha lands |
+| bistro | 251 → 8 | **243 alpha-textured shapes** — the foliage cutouts; shape-alpha landed at rung 7, the re-import is near-clean (iso, maxcomponentvalue, CuZn ×2, coat thickness/albedo ×4) |
 | kroken | 173 | UV transforms ×18, procedural-texture params dropped; ND license |
 | watercolor | 184 | Same class as kroken; ND license |
 | sanmiguel | fails | Duplicate texture definition (fix below); expect bistro-class alpha foliage after |
@@ -95,7 +95,7 @@ decision 8):
 | V-flip imported/PLY UVs to sampler storage order | importer + core, small | **landed, rung 1** (found by decision 7's side-by-side) | every textured import; see below |
 | PFM read for infinite-light images | importer, small | **landed, rung 2** | teapot-full imports |
 | Texture redefinition tolerated (last wins + warning) | importer, small | sanmiguel rung | sanmiguel imports |
-| Shape `alpha` texture → material opacity | importer, medium | bistro rung (decide there) | bistro/sanmiguel foliage; bathroom's one shape |
+| Shape `alpha` texture → material opacity | importer, medium | **landed, rung 7** (cutout material forks; mask channel by header probe) | bistro/sanmiguel foliage; bathroom's rug (curated in at rung 7) |
 
 **Rung-1 discovery — the UV convention gap.** veach-ajar's landscape
 painting rendered upside-down, and the side-by-side bar (decision 7) ran
@@ -245,14 +245,51 @@ remap caveat ×2, dropped texture scale factors (0.62/1.5 reflectance,
 0.1 roughness), one equal-axis aniso (exact). pbrt's `--gpu` build ran
 all references (512 spp ≈ 4 min at 1000×1400, maxdepth 100).
 
+**Rung-7 notes.** bistro landed, and the rung's importer-debt decision
+resolved to *land it*: the renderer was already capable (stochastic
+traversal opacity on `geometry_opacity`, per-sample-exact tests), so per
+decision 8 the shape-`alpha` extension went in — a shape's alpha forks
+its material into a shared cutout (`<base>-cutout-N`) carrying the mask
+on `geometry_opacity`, composing under area lights (glow forks the
+cutout). The mask's channel follows pbrt: an alpha-carrying image reads
+A, anything else the red default (pbrt averages RGB — identical for gray
+masks); the importer tells them apart by a bounded header sniff, PNG by
+IHDR color type, TGA (no magic bytes) by pixel depth. 243 alpha
+references became 53 cutout materials; warnings fell 251 → 8. Bathroom's
+rug — the gap parked for this rung — is curated onto its RON's Rug
+material. The rung also found a *tooling* bug the 23 MB RON exposed
+(zero-day-class inline meshes, 3×): `from_ron`'s serde version probe
+parsed the whole file through ron's skipped-value path, which re-scans
+the remaining source for `..` at every number — quadratic, an hour of
+parsing before the first sample. Fixed in format.rs: typed parse first,
+version recovered by a bounded scan only on the error path; bistro now
+parses in seconds. Vespa view (the repo's gallery shot) is the RON;
+eighth-res RMSE vs native pbrt --gpu: 0.215 raw / 0.063 display-clamped
+(cenote 2048 spp vs pbrt 2048; self-distance 0.003). A pinhole pair
+scores the same — DOF exonerated. The dominant divergence is the
+**coateddiffuse model**, worn by 123 of 132 materials: pbrt's stochastic
+layered coat costs 32% of scene mean, OpenPBR's analytic coat 20%; both
+sides degraded to bare diffuse and exposure-matched (film iso 110 =
+pure ×1.1) agree at 0.116 raw / 0.051 clamped with means within 2%.
+The coat deficit and iso surplus partially cancel, so the native
+comparison is the honest headline (exposure-matching alone worsens it).
+The derived sky was verified energy-exact through the octahedral →
+equirect resample (total flux to 0.4%, the sun disk to 0.7%, tint
+preserved). Curations: CuZn (brass) conductors ride the standard lookdev
+brass F0 (the importer's copper fallback warned); `maxcomponentvalue 20`
+documented as bmw's regularize class.
+
 **Documented-only renderer gaps** (unlock noted in each RON header when
 its rung lands): anisotropic roughness, displacement, diffuse-transmission
 lobe, textured coat roughness, dispersion (all unassigned material-depth
-work); film/sensor response (sensor, white balance, ISO — zero-day);
-mix materials (bmw-m6 LEATHER, curated to a hand-blend; crown's
-texture-amount masks, curated to textured metalness);
+work); film/sensor response (sensor, white balance, ISO — zero-day;
+bistro's iso-only ×1.1); mix materials (bmw-m6 LEATHER, curated to a
+hand-blend; crown's texture-amount masks, curated to textured metalness);
 firefly regularization (integrator `regularize` — convergence class,
-not bias; bmw-m6); participating media (M8).
+not bias; bmw-m6; bistro's `maxcomponentvalue`); the coateddiffuse
+layered-coat depth (pbrt simulates, OpenPBR approximates — bistro's
+dominant divergence, bathroom/ajar's ~10% class); participating media
+(M8).
 
 ## 4. The ladder
 
@@ -269,7 +306,8 @@ build (`~/Documents/pbrt-v4/build/pbrt`, the README-figure one).
 | 4 | **Done**: zero-day — the emission-side eyeball found and fixed the mirrored-emitter renderer bug; film response documented as a new gap class (rung-4 notes below) |
 | 5 | **Done**: bmw-m6 — no code changes; LEATHER mix curated to a hand-blend, tests/scenes/showcase folded into the corpus (rung-5 notes below) |
 | 6 | **Done**: crown — no code changes; gem media curated as exact Beer–Lambert tint, dispersion at the mean IOR, mask mixes as textured metalness; displacement proven dominant by degradation (rung-6 notes below) |
-| 7–10 | Heavies, one each: bistro (shape-alpha decision), kroken (ND decision), watercolor (ND), sanmiguel (redefinition fix) |
+| 7 | **Done**: bistro — shape-alpha landed (243 masks → 53 cutout forks), the RON version-probe parse fix landed with it, bathroom's rug curated in; coateddiffuse model proven the dominant divergence by two-sided degradation (rung-7 notes below) |
+| 8–10 | Heavies, one each: kroken (ND decision), watercolor (ND), sanmiguel (redefinition fix) |
 | 11 | Swap rung — **gated on M6 closed** (viewer checklist → D-152 addendum): measure veach-ajar and zero-day against brass-room/many-lights on the reuse gate + convergence harness; if they clear, migrate gates, goldens, README figures; either way the numbers land in the D-entry |
 | 12 | Close: README final, full-corpus contact sheet, deferrals pointer, closing D-entry |
 
