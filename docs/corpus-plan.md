@@ -96,7 +96,9 @@ decision 8):
 | PFM read for infinite-light images | importer, small | **landed, rung 2** | teapot-full imports |
 | Texture redefinition tolerated (last wins + warning) | importer, small | sanmiguel rung | sanmiguel imports |
 | Shape `alpha` texture → material opacity | importer, medium | **landed, rung 7** (cutout material forks; mask channel by header probe) | bistro/sanmiguel foliage; bathroom's rug (curated in at rung 7) |
-| UV affine transforms (uscale/vscale/udelta/vdelta) + texture mapping modes | **core + schema**, medium — `TextureRef` carries no transform and sampling has no mapping modes | parked at rung 8: kroken's 18 are 14 planar projections (position-derived UVs, the bigger feature) + 4 affine of which 2 are inert, all on shelf props — decided on watercolor's evidence at rung 9 | kroken/watercolor books, magazines, fabrics tile correctly |
+| UV affine transforms (uscale/vscale/udelta/vdelta) + imagemap `scale` | **core + schema**, medium — `TextureRef` gained an optional affine `uv` remap and value `scale`, applied at sample time (`ba83d27`) | **landed, rung 9** on watercolor's evidence (the easel drawing's remap + 28 value scales) — the transform rides the reference, not a bake, so tiling stays lossless and `scale > 1` exact; identity default keeps every golden bit-identical | kroken/watercolor books, magazines, fabrics tile correctly; scaled textures no longer warn-and-drop |
+| Single-patch `bilinearmesh` shapes | importer, small | **landed, rung 9** (two triangles on the `dpdu × dpdv` side; indexed patches still skip) | watercolor's floor paint-splatter decals |
+| Texture mapping modes (planar/cylindrical position-projection) | **core + schema**, medium — sampling has no position-derived UV modes | still parked: watercolor's 14 (9 cylindrical + 5 planar) all wear authored UVs instead, camera-visible on wall art and small props — a bigger feature (a second UV source), deferred past the corpus | kroken/watercolor wall pictures, cylindrical-wrapped props project correctly |
 
 **Rung-1 discovery — the UV convention gap.** veach-ajar's landscape
 painting rendered upside-down, and the side-by-side bar (decision 7) ran
@@ -333,6 +335,64 @@ Needs the light's opacity scalar on the light record (textured masks
 would approximate by mean or stay document-only). Decided with a
 later rung's Go, rung-4 style.
 
+**Rung-9 notes.** watercolor — an attic art studio, the second CC-BY-ND
+scene — landed as a derived asset like kroken (`curate-watercolor.py`
+regenerates the RON and five bakes; the `.gitignore` block grew one
+line). It is the rung that **spent the UV feature the campaign had
+parked since rung 8** (`ba83d27`): recon found the scene's namesake
+easel drawing wearing a pure affine remap, 28 more references carrying
+value `scale`s the importer used to warn-and-drop, and three floor
+paint-splatter *bilinearmesh* decals — enough camera-visible evidence
+to land the core feature rather than curate around it. `TextureRef`
+gained an optional affine `uv` remap and a value `scale`, both applied
+at sample time (so tiling stays lossless and `scale > 1` exact against
+the unorm BC formats) through a per-texture parameter table beside the
+bindless images; the importer converts pbrt's uscale/vscale/udelta/
+vdelta at the same v-flip boundary the UVs themselves cross
+(`offset_v = 1 − vscale − vdelta`). Identity defaults keep every
+existing golden bit-identical. What stayed parked: the 14 *mapping
+modes* (9 cylindrical, 5 planar) that project position-derived UVs —
+a second UV source, a bigger feature, deferred past the corpus; those
+props wear authored UVs and small camera-visible art scales wrong.
+
+Curations (all in the header): the near-white wall `mix` to its
+constant; the walnut desk, jute rug, and concrete floor — the scene's
+largest surfaces — to bakes (`watercolor-noce/carpet/concrete.exr`,
+the AO-biased scales pbrt applies, folded in; the AO masks broadcast to
+RGB so the multiply doesn't collapse to red); the six `mix` *materials*
+(Tin 05, Case gold, the drippy tins, Spot catcher, Paper-script) to
+blends of their arms, Tin 05's dirt mask becoming textured metalness
+(crown's pattern, now exact since the reference carries the 1.5 scale);
+the TiO2 paint-tube conductor (copper fallback) to a neutral F0; the
+brush-water medium to Beer–Lambert on the cup glass; the floor splatter
+decals to **pre-inverted** cutout masks (the source masks carry
+`bool invert`, so the bake is `1 − mask`, spot10's 1.04 scale folded in
+before inversion as pbrt applies it).
+
+Numbers: **0.072 raw / 0.060 clamped** at eighth-res vs native pbrt
+(volpath 512 spp CPU — pbrt renders this scene on the GPU too, but the
+CPU reference matches the campaign's convention). Better than kroken's
+0.105/0.073: watercolor's coateddiffuse family is less GI-amplified
+(the room is not a white box). The signed diff is a near-uniform slight
+over-brightness across the whole room — cenote's full dome delivers
+more total light than pbrt's window-restricted portals — with localized
+spots at the glass vases/cup (media approximation) and the abstract
+wall art (the parked mapping modes). The room is lit *entirely* by two
+portal'd copies of one infinite light (one per skylight; the source's
+two blackbody area lights have their shapes commented out); cenote
+keeps the first light and lights a full dome, so the portal domain is
+the dominant gap, exactly kroken's class — the full dome admits blue
+overhead sky the window portals never do, which is the cool cast in the
+comparison. Degradation confirms it: a pbrt render with the portals
+*removed* (full dome, `camera-1-noportal.pbrt` in the untracked
+sources) diverges from stock pbrt by **0.034 clamped** — over half the
+total — and cenote sits *closer* to that no-portal pbrt (0.050) than to
+stock pbrt (0.060), i.e. cenote's full dome behaves like pbrt's full
+dome, and the portal restriction is the single largest lever. The
+residual 0.050 against the matched-domain reference is the coat model
+(bistro/kroken's coateddiffuse class), the parked mapping modes, and
+the media approximation.
+
 **Documented-only renderer gaps** (unlock noted in each RON header when
 its rung lands): anisotropic roughness, displacement, diffuse-transmission
 lobe, textured coat roughness, dispersion (all unassigned material-depth
@@ -344,9 +404,12 @@ kroken's pillow, baked); firefly regularization (integrator `regularize`
 the coateddiffuse layered-coat depth (pbrt simulates, OpenPBR
 approximates — bistro's dominant divergence, bathroom/ajar's ~10% class;
 GI-amplified to 19-vs-4.4% in kroken's white box); infinite-light
-portals (kroken — sampling aid pbrt-side *and* an emission-domain
-restriction); texture mapping modes (planar projection; kroken/
-watercolor); participating media (M8).
+portals (kroken/watercolor — a sampling aid pbrt-side *and* an
+emission-domain restriction; watercolor's dominant gap, the whole room
+lit through two portal'd skylights); texture *mapping modes*
+(position-projected planar/cylindrical UVs — a second UV source, still
+parked after rung 9 landed the affine-remap half; kroken/watercolor
+wall art and props); participating media (M8).
 
 ## 4. The ladder
 
@@ -365,7 +428,8 @@ build (`~/Documents/pbrt-v4/build/pbrt`, the README-figure one).
 | 6 | **Done**: crown — no code changes; gem media curated as exact Beer–Lambert tint, dispersion at the mean IOR, mask mixes as textured metalness; displacement proven dominant by degradation (rung-6 notes below) |
 | 7 | **Done**: bistro — shape-alpha landed (243 masks → 53 cutout forks), the RON version-probe parse fix landed with it, bathroom's rug curated in; coateddiffuse model proven the dominant divergence by two-sided degradation (rung-7 notes below) |
 | 8 | **Done**: kroken — the ND decision resolved to **RON-as-derived-asset**: CC-BY-ND 2.0 grants format shifts but not derivative distribution, so `curate-kroken.py` (committed, content-free) regenerates the curated RON locally; pillow mix baked to a dots texture, red-glass media to Beer–Lambert tint; UV-transform core feature parked on watercolor's evidence; the divergence decomposition found the **invisible-emitter MIS bug** (alpha-0 sun at half strength — fix candidate, rung-8 notes below) |
-| 9–10 | Heavies, one each: watercolor (ND, curation-script pattern set at rung 8), sanmiguel (redefinition fix) |
+| 9 | **Done**: watercolor — second ND scene (`curate-watercolor.py` regenerates the RON + five bakes locally, kroken's pattern); the rung **landed the parked UV feature** (`ba83d27`: affine `uv` remap + value `scale` on `TextureRef`, single-patch bilinearmesh) on this scene's evidence; mix textures curated to means/bakes, water medium to Beer–Lambert, splatter decals to pre-inverted cutout masks; portal domain proven dominant by degradation (rung-9 notes below) |
+| 10 | sanmiguel (redefinition fix) |
 | 11 | Swap rung — **gated on M6 closed** (viewer checklist → D-152 addendum): measure veach-ajar and zero-day against brass-room/many-lights on the reuse gate + convergence harness; if they clear, migrate gates, goldens, README figures; either way the numbers land in the D-entry |
 | 12 | Close: README final, full-corpus contact sheet, deferrals pointer, closing D-entry |
 

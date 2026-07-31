@@ -18,3 +18,4 @@
 # CC-BY-ND scenes: the license withholds derivative distribution, so their
 # RONs are derived assets too — curate-<name>.py regenerates them locally
 /scenes/corpus/kroken.ron
+/scenes/corpus/watercolor.ron
