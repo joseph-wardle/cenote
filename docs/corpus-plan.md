@@ -432,6 +432,43 @@ speckle in the tree's dappled floor light (high-frequency + the 256-vs-512
 spp gap), with displacement ×64, diffusetransmission ×7 (plant leaves),
 and textured coat/roughness ×4 dropped as documented classes.
 
+**Rung-11 notes — the swap measured out, and the gate design held.** M6 closed
+first: the user's viewer checklist (orbit warm-start, re-converge on hold, the
+8192-frame park on a quiet desktop — §4g decision 6) passed on the brass-room
+flagship, landing the D-152 addendum. That opened the one gate the swap was
+waiting on. Then decision 6's hypothesis — veach-ajar takes `indirect_glossy`'s
+GI-gate role, zero-day succeeds `many_lights` — was *measured* on the reuse-gate
+protocol (`convergence.rs::assert_reuse_gate` replayed verbatim: 128², a deep
+ReSTIR reference, brute + ReSTIR at 8/32 spp), and it did not survive contact
+with the numbers.
+
+**zero-day fails outright.** Despite 283 emitters, at 8 spp ReSTIR carries *more*
+error than brute force (0.44–0.59× — a ratio below one, so reuse is a net loss at
+the low budget); it recovers to 1.51× only at 32 spp. It is a mixed direct/
+indirect architectural interior, not the starved-DI regime `many_lights` distills
+(256 emitters over a cluster of occluders, where a single next-event draw is
+mostly wasted), so the resampling has no rare good sample to rescue at 8 spp.
+
+**veach-ajar is marginal, not the slam-dunk a noisy reference first faked.** A
+256-spp reference made it look like a 22× win; a converged 4096-spp reference
+(the 256 was itself unconverged on this brutal scene) collapsed that to the honest
+~1.40× raw / **1.14× clamped at 8 spp — under the gate's 1.3× floor** — clearing
+only at 32 spp (1.53× / 1.36×). veach-ajar's image is mostly directly-and-once-lit
+with a small genuinely-hard-indirect fraction; the incumbent `indirect_glossy`
+(emitter faced away, black environment, everything lit *only* through the panel's
+glossy bounce) is pure hard-GI and wins a robust ~2×. A gate that passes by 1.14×
+is a flaky gate — one driver's float reordering from red.
+
+So the swap was **held**: the purpose-built synthetic gates are the stronger,
+more robust reuse stressors, and the literature scenes stay the gallery/benchmark
+scenes they already are (veach-ajar rung 1, zero-day rung 4). No harness, golden,
+or README-figure change. This is the "either way the numbers land in the D-entry"
+outcome decision 6 anticipated, and it *validates* M6's gate design rather than
+mutating it — the measurement, not a preference, made the call. (The one-off
+measurement harness lived in `cenote-cli`, where the RON loader and GPU meet, and
+was removed after; a real migration would have keyed on `cenote::format::load`,
+which crate `cenote`'s own tests can call without the circular `cenote-pbrt` dep.)
+
 **Documented-only renderer gaps** (unlock noted in each RON header when
 its rung lands): anisotropic roughness, displacement, diffuse-transmission
 lobe, textured coat roughness, dispersion (all unassigned material-depth
@@ -469,7 +506,7 @@ build (`~/Documents/pbrt-v4/build/pbrt`, the README-figure one).
 | 8 | **Done**: kroken — the ND decision resolved to **RON-as-derived-asset**: CC-BY-ND 2.0 grants format shifts but not derivative distribution, so `curate-kroken.py` (committed, content-free) regenerates the curated RON locally; pillow mix baked to a dots texture, red-glass media to Beer–Lambert tint; UV-transform core feature parked on watercolor's evidence; the divergence decomposition found the **invisible-emitter MIS bug** (alpha-0 sun at half strength — fix candidate, rung-8 notes below) |
 | 9 | **Done**: watercolor — second ND scene (`curate-watercolor.py` regenerates the RON + five bakes locally, kroken's pattern); the rung **landed the parked UV feature** (`ba83d27`: affine `uv` remap + value `scale` on `TextureRef`, single-patch bilinearmesh) on this scene's evidence; mix textures curated to means/bakes, water medium to Beer–Lambert, splatter decals to pre-inverted cutout masks; portal domain proven dominant by degradation (rung-9 notes below) |
 | 10 | **Done**: sanmiguel — the duplicate-texture failure was a *cross-kind* name collision, fixed by splitting the float/spectrum texture namespaces (pbrt-v4 semantics); the scene then imported and rendered from a **bare import, no hand-curation** (0.065 raw / 0.045 clamped, the tightest corpus number yet); 242 alpha foliage shapes → 97 cutout materials rode rung-7 shape-alpha (rung-10 notes below) |
-| 11 | Swap rung — **gated on M6 closed** (viewer checklist → D-152 addendum): measure veach-ajar and zero-day against brass-room/many-lights on the reuse gate + convergence harness; if they clear, migrate gates, goldens, README figures; either way the numbers land in the D-entry |
+| 11 | **Done**: swap rung — M6 closed on the viewer checklist (D-152 addendum), then veach-ajar and zero-day were measured against the reuse gate. **Neither cleared it, so the swap was held**: zero-day loses to brute force at 8 spp, veach-ajar clears only marginally (1.14× clamped, under the 1.3× floor). The in-code `many_lights` + `indirect_glossy` gates stay; the numbers landed in the D-entry (rung-11 notes below) |
 | 12 | Close: README final, full-corpus contact sheet, deferrals pointer, closing D-entry |
 
 ## 5. Mechanics
