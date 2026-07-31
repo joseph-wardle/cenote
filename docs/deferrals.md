@@ -10,6 +10,13 @@ Unlike [decisions.md](decisions.md), this file is **not** append-only: when a
 deferral is picked up, its entry moves into a new dated decision entry and is deleted
 here. An entry's D-reference points at the decision that created the deferral.
 
+The scene corpus (`scenes/corpus/`) is where the deferrals below meet real
+scenes. Every corpus RON header names the gaps that scene hits and the feature
+that unlocks each; [corpus-plan.md](corpus-plan.md) §3 catalogues them across
+all 19 scenes and the rung notes measure what each costs. When a trigger here
+reads "first corpus scene that uses one," that gap map is where to check
+whether one already has.
+
 ---
 
 ## Scene API & formats

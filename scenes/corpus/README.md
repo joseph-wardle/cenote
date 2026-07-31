@@ -6,10 +6,22 @@ bootstrap, each RON's header telling its own story: provenance, license,
 and every knowing degradation with the feature that unlocks it. The
 campaign plan (and the full rung-0 gap map) is `docs/corpus-plan.md`.
 
+The campaign is **complete**: all 19 scenes landed — 18 render (the table
+below), and `volumetric-caustic` waits as a documented placeholder until M8
+volumes. Two landings drove renderer/importer fixes rather than curations
+(zero-day's mirrored-emitter bug, sanmiguel's cross-kind texture-name
+collision); the rest are provenance, curation, and a measured gap list.
+
 Sources are **not** in git (~8.5 GB): `./fetch.sh` materializes them into
 `sources/` — Bitterli zips whole, pbrt-v4-scenes as one sparse partial
 clone pinned at `30cf4a0` (content addressing is the checksum). A fresh
-clone renders any landed scene after `./fetch.sh <name>`.
+clone renders any landed scene after `./fetch.sh <name>`:
+
+```sh
+./fetch.sh veach-ajar
+cargo run --release -p cenote-viewer -- scenes/corpus/veach-ajar.ron   # or
+cargo run --release -p cenote-cli -- render scenes/corpus/veach-ajar.ron --out ajar.exr
+```
 
 Seven scenes light themselves through a **derived sky** beside their RON
 (`spaceship-sky.exr`, `teapot-full-sky.exr`, `bmw-m6-sky.exr`,

@@ -487,6 +487,32 @@ lit through two portal'd skylights); texture *mapping modes*
 parked after rung 9 landed the affine-remap half; kroken/watercolor
 wall art and props); participating media (M8).
 
+**Rung-12 notes — the campaign closes.** All 19 scenes are accounted for:
+18 render as first-class RONs, and `volumetric-caustic` stays a documented
+placeholder until M8 volumes. The close touched three tracked documents and
+produced one untracked artifact. (1) The **corpus README** gained a
+completion header (the two renderer/importer fixes the eyeball drove, versus
+the rest that are provenance-and-curation) and a fetch→render snippet. (2)
+The **top-level README** gained a "The research corpus" subsection under
+*Next to pbrt-v4* — the corpus is the extended form of that section's
+importer-fidelity story — and a `scenes/corpus/` repo-map row. (3) The **one
+deferrals pointer** (decision 5) now sits in `deferrals.md`'s preamble: the
+corpus is where those deferrals meet real scenes, and each RON header plus
+§3's gap map is where a "first corpus scene that…" trigger is checked. (4) A
+**send-only 18-scene contact sheet** was rendered fresh — every landed scene
+at a thumbnail resolution through the tm tool's `aces` mode (cenote's own
+look, 0 stops), montaged with labels — and sent to the user, not committed:
+the send-only channel is exactly what keeps the two CC-BY-ND scenes' rendered
+images out of the repo while still letting the user see the whole corpus at
+once. The **closing D-entry** is drafted for the user to place (decisions.md
+is append-only and its entries are the user's call), carrying the campaign's
+arc: the two-class bar, the importer/renderer fixes each eyeball earned (TGA
+decode, the UV v-flip, the PFM sky reader, output-stem sky naming, the
+float/spectrum texture-namespace split, shape-alpha cutouts, the affine UV
+remap + value scale, single-patch bilinearmesh, and the mirrored-emitter
+render fix), the ND-as-script-regenerated pattern, the swap held (D-153), and
+the documented gap classes that outlived the campaign.
+
 ## 4. The ladder
 
 Per-rung Go, one commit each, poetic subjects. Scene rungs follow the
@@ -507,7 +533,7 @@ build (`~/Documents/pbrt-v4/build/pbrt`, the README-figure one).
 | 9 | **Done**: watercolor — second ND scene (`curate-watercolor.py` regenerates the RON + five bakes locally, kroken's pattern); the rung **landed the parked UV feature** (`ba83d27`: affine `uv` remap + value `scale` on `TextureRef`, single-patch bilinearmesh) on this scene's evidence; mix textures curated to means/bakes, water medium to Beer–Lambert, splatter decals to pre-inverted cutout masks; portal domain proven dominant by degradation (rung-9 notes below) |
 | 10 | **Done**: sanmiguel — the duplicate-texture failure was a *cross-kind* name collision, fixed by splitting the float/spectrum texture namespaces (pbrt-v4 semantics); the scene then imported and rendered from a **bare import, no hand-curation** (0.065 raw / 0.045 clamped, the tightest corpus number yet); 242 alpha foliage shapes → 97 cutout materials rode rung-7 shape-alpha (rung-10 notes below) |
 | 11 | **Done**: swap rung — M6 closed on the viewer checklist (D-152 addendum), then veach-ajar and zero-day were measured against the reuse gate. **Neither cleared it, so the swap was held**: zero-day loses to brute force at 8 spp, veach-ajar clears only marginally (1.14× clamped, under the 1.3× floor). The in-code `many_lights` + `indirect_glossy` gates stay; the numbers landed in the D-entry (rung-11 notes below) |
-| 12 | Close: README final, full-corpus contact sheet, deferrals pointer, closing D-entry |
+| 12 | **Done**: close — corpus + top-level READMEs finalized, a send-only 18-scene contact sheet rendered through cenote's own look, the one deferrals pointer added, closing D-entry drafted for placement (rung-12 notes below) |
 
 ## 5. Mechanics
 

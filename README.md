@@ -95,6 +95,22 @@ pbrt renders spectrally and writes linear `Rec.709`; cenote renders RGB in
 `ACEScg`.The reference is pbrt-v4 at
 [`5f7a606`](https://github.com/mmp/pbrt-v4/commit/5f7a606806a4ac7b939131ded9d7a30ebd02416e).
 
+### The research corpus
+
+Beyond the three CI scenes, `scenes/corpus/` carries eighteen of the scenes
+the rendering literature actually measures on — Veach's ajar door and MIS
+plates, the Bistro, San Miguel, Zero-Day, the Bitterli bathroom and kitchen,
+Kroken, Watercolor — each imported once from its official pbrt-v4 source and
+then curated into a first-class cenote `.ron` whose header tells the scene's
+provenance, licence, and every knowing degradation with the feature that
+unlocks it. Each landed only after matching a side-by-side pbrt-v4 reference;
+the divergences that survived became the renderer's documented gap list. Two
+of them were bugs the eyeball caught, fixed rather than curated around — a
+mirrored-instance emitter lighting from the wrong side, and a cross-kind
+texture-name collision the importer mis-bound. The full story is
+[scenes/corpus/README.md](scenes/corpus/README.md); the campaign log, with
+every rung's landing number, is [docs/corpus-plan.md](docs/corpus-plan.md).
+
 ## Many lights, resampled
 
 ReSTIR is cenote's theoretical core, and the many-light scene is the case it
@@ -270,7 +286,8 @@ cargo test --workspace   # on the GPU machine — includes the goldens
 | `crates/cenote-wire/` | The render server's wire: explicit change-set mirror types, MessagePack framing, the shm layout — and the byte-exact cross-language drift guard |
 | `hydra/` | The C++ half of M4 — the `hdCenote` scene-index-native Hydra render delegate, its transport client, and the C++ wire mirror with the drift-guard corpus test (see its README) |
 | `scenes/` | Hand-written example scene — the scene model in one readable `.ron` file |
-| `tests/scenes/` | The vendored CC0 pbrt corpus (see its README for provenance) |
+| `scenes/corpus/` | The research-scene corpus — the literature's benchmark scenes (Veach, Bistro, San Miguel, Zero-Day, …) as first-class `.ron`s, each header telling its provenance and every knowing degradation (see its README; campaign in `docs/corpus-plan.md`) |
+| `tests/scenes/` | The vendored CC0 pbrt corpus wired into CI (see its README for provenance) |
 | `docs/charter.md` | Project charter: vision, locked decisions, milestone roadmap |
 | `docs/decisions.md` | Append-only log of every design decision and its rationale |
 | `docs/m0-plan.md` | The M0 implementation plan |
