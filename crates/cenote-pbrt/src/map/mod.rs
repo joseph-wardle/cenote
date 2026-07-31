@@ -50,7 +50,7 @@ use cenote::scene::changeset::{
     Op, SettingsPatch,
 };
 use cenote::scene::description::{
-    ColorSpace, Light, MeshSource, Texturable, TextureRef, Transform,
+    Channel, ColorSpace, Light, MeshSource, Texturable, TextureRef, Transform,
 };
 use cenote::{Error, Result};
 use glam::{Mat3, Mat4, Vec3};
@@ -205,6 +205,11 @@ pub(crate) struct Mapper {
     objects: BTreeMap<String, Vec<RecordedShape>>,
     /// The recording in progress, if any.
     active_object: Option<(String, Vec<RecordedShape>)>,
+    /// Materials forked to carry a shape `alpha` cutout, keyed by base
+    /// material name × mask identity — shapes pairing the same material
+    /// with the same mask share one fork. The patch rides along so a
+    /// pending area light can fork the fork.
+    cutout_forks: BTreeMap<(String, String), (String, MaterialPatch)>,
     counters: BTreeMap<String, u32>,
     /// The world-space conjugation every emitted transform passes
     /// through: [`FLIP_Z`], or the identity for reflective-camera scenes
@@ -237,6 +242,7 @@ impl Mapper {
             named_materials: BTreeMap::new(),
             objects: BTreeMap::new(),
             active_object: None,
+            cutout_forks: BTreeMap::new(),
             counters: BTreeMap::new(),
             conjugation: FLIP_Z,
             environment_emitted: false,
@@ -587,6 +593,30 @@ fn swaps_handedness(matrix: Mat4) -> bool {
     Mat3::from_mat4(matrix).determinant() < 0.0
 }
 
+/// Whether a mask image carries an alpha channel, by a bounded header
+/// sniff: a PNG's IHDR color type (4 and 6 have alpha; palette images
+/// can smuggle alpha through a `tRNS` chunk this never sees, but cutout
+/// masks aren't authored that way), or a TGA's pixel depth (32-bit
+/// carries alpha; TGA has no magic bytes, so like the decoder it is
+/// extension-hinted). `None` when the file can't be read or the format
+/// can't be told.
+fn mask_has_alpha(path: &Path) -> Option<bool> {
+    use std::io::Read;
+    const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    let mut header = [0u8; 26];
+    std::fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut header))
+        .ok()?;
+    match extension.as_str() {
+        "png" if header[..8] == PNG_SIGNATURE && &header[12..16] == b"IHDR" => {
+            Some(matches!(header[25], 4 | 6))
+        }
+        "tga" => Some(header[16] == 32),
+        _ => None,
+    }
+}
+
 impl Mapper {
     fn shape_directive(&mut self, directive: &Directive) -> Result<()> {
         self.verify_block(directive, true)?;
@@ -667,7 +697,7 @@ impl Mapper {
             name: mesh.clone(),
             source: Some(source),
         }));
-        let material = self.shape_material(&directive.location);
+        let material = self.shape_material(directive)?;
         self.warn_unused(directive, &format!("shape \"{ty}\""));
 
         if let Some((_, shapes)) = &mut self.active_object {
@@ -688,9 +718,11 @@ impl Mapper {
     }
 
     /// The material this shape wears: the current one, pbrt's implicit
-    /// default diffuse, or — under a pending area light — a fork of it
-    /// with the emission folded in (shared across the light's shapes).
-    fn shape_material(&mut self, location: &str) -> String {
+    /// default diffuse, or a fork of it — first for a shape `alpha`
+    /// cutout, then — under a pending area light — for the emission
+    /// (each shared across shapes that repeat the combination).
+    fn shape_material(&mut self, directive: &Directive) -> Result<String> {
+        let location = &directive.location;
         let (base_name, base_patch) = if let Some((name, patch)) = &self.state.material {
             (name.clone(), patch.clone())
         } else {
@@ -705,8 +737,9 @@ impl Mapper {
             }
             ("pbrt-default".to_owned(), patch)
         };
+        let (base_name, base_patch) = self.cutout_fork(directive, base_name, base_patch)?;
         let Some(mut area) = self.state.area_light.clone() else {
-            return base_name;
+            return Ok(base_name);
         };
         if self.active_object.is_some() {
             // pbrt's own limitation, kept: instanced emitters would need
@@ -715,10 +748,10 @@ impl Mapper {
                 "{location}: area lights are not supported with object instancing — \
                  the shape imports unlit"
             ));
-            return base_name;
+            return Ok(base_name);
         }
         if let Some(fork) = area.forks.get(&base_name) {
-            return fork.clone();
+            return Ok(fork.clone());
         }
         let fork = self.fresh(&format!("{base_name}-glow"));
         let mut patch = base_patch;
@@ -731,7 +764,86 @@ impl Mapper {
         }
         area.forks.insert(base_name, fork.clone());
         self.state.area_light = Some(area);
-        fork
+        Ok(fork)
+    }
+
+    /// A shape's `alpha` — pbrt puts the cutout mask on the shape, the
+    /// schema puts opacity on the material — lands as a fork of the
+    /// shape's material with the mask on `geometry_opacity`, where the
+    /// traversal kernels test it per crossing. A fully-opaque alpha (the
+    /// default, spelled out) forks nothing.
+    fn cutout_fork(
+        &mut self,
+        directive: &Directive,
+        base_name: String,
+        base_patch: MaterialPatch,
+    ) -> Result<(String, MaterialPatch)> {
+        let Some(param) = directive.params.take("alpha", &["float", "texture"])? else {
+            return Ok((base_name, base_patch));
+        };
+        let (mask, opacity) = if param.ty == "float" {
+            let value = param.as_scalar()?;
+            if value >= 1.0 {
+                return Ok((base_name, base_patch));
+            }
+            (format!("={value}"), Texturable::Constant(value))
+        } else {
+            let texture = param.as_string()?;
+            match self.texture_lookup(texture, &param.location)? {
+                TextureDef::Constant(value) if value[0] >= 1.0 => {
+                    return Ok((base_name, base_patch));
+                }
+                TextureDef::Constant(value) => (texture.to_owned(), Texturable::Constant(value[0])),
+                TextureDef::Image {
+                    path,
+                    color_space,
+                    scale,
+                } => {
+                    self.warn_dropped_scale(scale, "alpha", &param.location);
+                    let channel = self.mask_channel(&path, &param.location);
+                    (
+                        texture.to_owned(),
+                        Texturable::Texture(TextureRef {
+                            path,
+                            color_space,
+                            channel,
+                        }),
+                    )
+                }
+            }
+        };
+        let key = (base_name.clone(), mask);
+        if let Some((name, patch)) = self.cutout_forks.get(&key) {
+            return Ok((name.clone(), patch.clone()));
+        }
+        let fork = self.fresh(&format!("{base_name}-cutout"));
+        let mut patch = base_patch;
+        patch.name.clone_from(&fork);
+        patch.geometry_opacity = Some(opacity);
+        self.ops.push(Op::Material(Box::new(patch.clone())));
+        self.cutout_forks.insert(key, (fork.clone(), patch.clone()));
+        Ok((fork, patch))
+    }
+
+    /// The channel a mask image feeds a scalar slot from. pbrt reads a
+    /// float imagemap through the image's alpha channel when it has a
+    /// meaningful one and averages RGB otherwise; the schema's scalar
+    /// slots read a single channel, so an alpha-carrying PNG maps to
+    /// `A` and everything else to the red default — exact for the
+    /// grayscale masks the average case is in practice.
+    fn mask_channel(&mut self, path: &Path, location: &str) -> Option<Channel> {
+        match mask_has_alpha(path) {
+            Some(true) => Some(Channel::A),
+            Some(false) => None,
+            None => {
+                self.warn(format!(
+                    "{location}: \"{}\" could not be probed for an alpha channel — \
+                     the mask reads the red channel",
+                    path.display()
+                ));
+                None
+            }
+        }
     }
 
     fn area_light_directive(&mut self, directive: &Directive) -> Result<()> {
@@ -1551,13 +1663,13 @@ mod tests {
     /// enough for `apply` to see them — callers that apply do so inside.
     fn import_files<T>(
         test: &str,
-        files: &[(&str, &str)],
+        files: &[(&str, impl AsRef<[u8]>)],
         inspect: impl FnOnce(&ChangeSet, &[String]) -> T,
     ) -> T {
         let dir = std::env::temp_dir().join(format!("cenote-map-{test}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("fixture dir");
         for (name, source) in files {
-            std::fs::write(dir.join(name), source).expect("write fixture");
+            std::fs::write(dir.join(name), source.as_ref()).expect("write fixture");
         }
         let imported = crate::import(&dir.join(files[0].0), &dir.join("generated"));
         let result = match &imported {
@@ -1982,7 +2094,7 @@ Translate 1 0 0
         import_files(
             "state",
             &[
-                ("scene.pbrt", &world_scene(&world)),
+                ("scene.pbrt", world_scene(&world).as_str()),
                 ("wood.png", "not-a-real-png"),
             ],
             |set, warnings| {
@@ -2025,7 +2137,7 @@ Translate 1 0 0
         import_files(
             "forward-texture",
             &[
-                ("scene.pbrt", &world_scene(&world)),
+                ("scene.pbrt", world_scene(&world).as_str()),
                 ("wood.png", "not-a-real-png"),
             ],
             |set, _| {
@@ -2233,6 +2345,136 @@ Translate 1 0 0
             assert!(
                 warnings.iter().any(|warning| warning.contains("two-sided")),
                 "{warnings:?}"
+            );
+        });
+    }
+
+    /// The first 26 bytes of a PNG — signature and IHDR through the
+    /// color type, everything the alpha probe reads. Not decodable.
+    fn png_header(color_type: u8) -> [u8; 26] {
+        let mut header = [0u8; 26];
+        header[..8].copy_from_slice(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+        header[8..12].copy_from_slice(&13u32.to_be_bytes());
+        header[12..16].copy_from_slice(b"IHDR");
+        header[24] = 8;
+        header[25] = color_type;
+        header
+    }
+
+    /// A shape `alpha` texture forks the material into a cutout whose
+    /// mask feeds `geometry_opacity` — through the alpha channel when
+    /// the PNG carries one. Shapes pairing the same material and mask
+    /// share the fork; a maskless shape keeps the unforked base.
+    #[test]
+    fn shape_alpha_forks_a_cutout_material() {
+        let source = "WorldBegin\n\
+            Texture \"mask\" \"float\" \"imagemap\" \"string filename\" \"mask.png\"\n\
+            Material \"diffuse\" \"rgb reflectance\" [0.8 0.2 0.2]\n\
+            Shape \"trianglemesh\" \"point3 P\" [0 0 0  1 0 0  0 1 0] \
+            \"integer indices\" [0 1 2] \"texture alpha\" \"mask\"\n\
+            Shape \"trianglemesh\" \"point3 P\" [0 0 0  1 0 0  0 1 0] \
+            \"integer indices\" [0 1 2]\n\
+            Shape \"trianglemesh\" \"point3 P\" [0 0 0  1 0 0  0 1 0] \
+            \"integer indices\" [0 1 2] \"texture alpha\" \"mask\"\n";
+        let files: &[(&str, &[u8])] = &[
+            ("scene.pbrt", source.as_bytes()),
+            ("mask.png", &png_header(6)),
+        ];
+        import_files("alpha-cutout", files, |set, warnings| {
+            let shapes = instances(set);
+            let cutout = shapes[0].material.as_deref().expect("a material");
+            assert_eq!(cutout, "diffuse-0-cutout-0");
+            assert_eq!(shapes[1].material.as_deref(), Some("diffuse-0"));
+            assert_eq!(shapes[2].material.as_deref(), Some(cutout));
+            let patch = material(set, cutout);
+            let Some(Texturable::Texture(reference)) = &patch.geometry_opacity else {
+                panic!("no opacity mask: {patch:?}");
+            };
+            assert!(reference.path.ends_with("mask.png"));
+            assert_eq!(reference.channel, Some(Channel::A));
+            // The base color rode along into the fork.
+            assert_eq!(
+                patch.base_color,
+                Some(Texturable::Constant([0.8, 0.2, 0.2]))
+            );
+            assert_eq!(material(set, "diffuse-0").geometry_opacity, None);
+            assert!(warnings.is_empty(), "{warnings:?}");
+        });
+    }
+
+    /// The mask channel follows the image: an alpha-less PNG or a
+    /// 24-bit TGA reads the red default (pbrt averages RGB — identical
+    /// for the gray masks that case is in practice), and a float
+    /// `alpha` imports as a constant — unless it is the fully-opaque
+    /// default, which forks nothing.
+    #[test]
+    fn mask_channels_and_float_alphas_follow_the_source() {
+        // A 24-bit TGA header: pixel depth (byte 16) is all the sniff
+        // reads — TGA has no magic bytes.
+        let mut tga = [0u8; 26];
+        tga[2] = 2;
+        tga[16] = 24;
+        let source = "WorldBegin\n\
+            Texture \"mask\" \"float\" \"imagemap\" \"string filename\" \"mask.png\"\n\
+            Texture \"rug\" \"float\" \"imagemap\" \"string filename\" \"rug.tga\"\n\
+            Shape \"trianglemesh\" \"point3 P\" [0 0 0  1 0 0  0 1 0] \
+            \"integer indices\" [0 1 2] \"texture alpha\" \"mask\"\n\
+            Shape \"trianglemesh\" \"point3 P\" [0 0 0  1 0 0  0 1 0] \
+            \"integer indices\" [0 1 2] \"float alpha\" 0.25\n\
+            Shape \"trianglemesh\" \"point3 P\" [0 0 0  1 0 0  0 1 0] \
+            \"integer indices\" [0 1 2] \"float alpha\" 1\n\
+            Shape \"trianglemesh\" \"point3 P\" [0 0 0  1 0 0  0 1 0] \
+            \"integer indices\" [0 1 2] \"texture alpha\" \"rug\"\n";
+        let files: &[(&str, &[u8])] = &[
+            ("scene.pbrt", source.as_bytes()),
+            ("mask.png", &png_header(0)),
+            ("rug.tga", &tga),
+        ];
+        import_files("alpha-channels", files, |set, warnings| {
+            let shapes = instances(set);
+            let gray = material(set, shapes[0].material.as_deref().expect("a material"));
+            let Some(Texturable::Texture(reference)) = &gray.geometry_opacity else {
+                panic!("no opacity mask: {gray:?}");
+            };
+            assert_eq!(reference.channel, None);
+            let faded = material(set, shapes[1].material.as_deref().expect("a material"));
+            assert_eq!(faded.geometry_opacity, Some(Texturable::Constant(0.25)));
+            assert_eq!(shapes[2].material.as_deref(), Some("pbrt-default"));
+            let rug = material(set, shapes[3].material.as_deref().expect("a material"));
+            let Some(Texturable::Texture(reference)) = &rug.geometry_opacity else {
+                panic!("no opacity mask: {rug:?}");
+            };
+            assert_eq!(reference.channel, None);
+            assert!(warnings.is_empty(), "{warnings:?}");
+        });
+    }
+
+    /// An alpha'd emitter wears both forks: the cutout comes first, so
+    /// the area light's glow forks the cutout material and the shape
+    /// ends up with mask and emission together.
+    #[test]
+    fn an_alpha_cutout_composes_with_an_area_light() {
+        let source = "WorldBegin\n\
+            Texture \"mask\" \"float\" \"imagemap\" \"string filename\" \"mask.png\"\n\
+            AreaLightSource \"diffuse\" \"rgb L\" [4 2 1]\n\
+            Shape \"trianglemesh\" \"point3 P\" [0 0 0  1 0 0  0 1 0] \
+            \"integer indices\" [0 1 2] \"texture alpha\" \"mask\"\n";
+        let files: &[(&str, &[u8])] = &[
+            ("scene.pbrt", source.as_bytes()),
+            ("mask.png", &png_header(6)),
+        ];
+        import_files("alpha-glow", files, |set, _| {
+            let shapes = instances(set);
+            let name = shapes[0].material.as_deref().expect("a material");
+            assert_eq!(name, "pbrt-default-cutout-0-glow-0");
+            let patch = material(set, name);
+            assert_eq!(
+                patch.emission_color,
+                Some(Texturable::Constant([4.0, 2.0, 1.0]))
+            );
+            assert!(
+                matches!(patch.geometry_opacity, Some(Texturable::Texture(_))),
+                "{patch:?}"
             );
         });
     }
