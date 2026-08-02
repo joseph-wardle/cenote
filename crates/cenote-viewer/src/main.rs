@@ -35,7 +35,6 @@ use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 use anyhow::Context as _;
-use cenote::render::{DebugView, RenderMode};
 use cenote::scene::changeset::{ChangeSet, Op};
 use cenote::scene::description::SceneDescription;
 use winit::application::ApplicationHandler;
@@ -312,30 +311,6 @@ impl Viewer {
         self.window.request_redraw();
     }
 
-    /// Push the panel's estimator + debug choice to the render thread
-    /// (latest-wins, idempotent) and report whether a debug view is live — the
-    /// redraw presents that false-colour in place of beauty. The debug view is
-    /// only meaningful while `ReSTIR` owns the primary hit, so it clears when
-    /// the toggle is off.
-    fn sync_render_settings(&self) -> bool {
-        let restir = self.gui.restir();
-        self.session.set_render_mode(if restir {
-            RenderMode::Restir
-        } else {
-            RenderMode::PathTracer
-        });
-        self.session.set_spatial_reuse(self.gui.spatial_reuse());
-        self.session.set_temporal_reuse(self.gui.temporal_reuse());
-        self.session.set_cheap_restart(self.gui.cheap_restart());
-        let debug_view = if restir {
-            self.gui.debug_view()
-        } else {
-            DebugView::Off
-        };
-        self.session.set_debug_view(debug_view);
-        debug_view != DebugView::Off
-    }
-
     /// One display frame: take the render thread's latest linear average (or
     /// keep the one we hold), tonemap it at the panel's exposure, run the UI,
     /// present, and request the next redraw. The renderer accumulates
@@ -428,11 +403,6 @@ impl Viewer {
             }
         }
 
-        let debugging = self.sync_render_settings();
-
-        // A live debug view takes precedence over beauty: its false-colour is
-        // already display-ready, so it presents through the tonemap's
-        // passthrough (no exposure, no tone curve).
         //
         // Otherwise the denoise toggle swaps which buffer the tonemap reads —
         // raw average or the denoised view — and nothing upstream notices.
@@ -440,7 +410,7 @@ impl Viewer {
         // raw frame stands in.
         #[cfg(feature = "denoise")]
         let beauty = {
-            let denoising = self.gui.denoise() && !debugging;
+            let denoising = self.gui.denoise();
             if denoising {
                 self.denoise
                     .update(&self.gpu, frame)
@@ -453,20 +423,13 @@ impl Viewer {
         };
         #[cfg(not(feature = "denoise"))]
         let beauty = frame.beauty();
-        let (average, passthrough) = if debugging {
-            (frame.debug(), true)
-        } else {
-            (beauty, false)
-        };
-
         self.tonemap
             .apply(
                 &self.gpu,
-                average,
+                beauty,
                 frame.width(),
                 frame.height(),
                 self.gui.exposure(),
-                passthrough,
             )
             .context("tonemapping the frame")?;
         self.stats.render = frame.stats().clone();

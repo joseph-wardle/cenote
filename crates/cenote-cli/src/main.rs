@@ -72,47 +72,6 @@ struct RenderArgs {
     #[arg(long)]
     denoise: bool,
 
-    /// Render with ReSTIR-DI at the primary hit instead of the path tracer's
-    /// per-bounce NEE. The two converge to the same image (the unbiasedness
-    /// gate); this is the batch half of that comparison.
-    #[arg(long)]
-    restir: bool,
-
-    /// Drop `ReSTIR`'s spatial-reuse pass, leaving single-frame initial RIS.
-    /// Only meaningful with --restir; lets a batch isolate what the
-    /// k-neighbour gather buys over the candidates pass alone.
-    #[arg(long)]
-    no_spatial: bool,
-
-    /// Drop `ReSTIR`'s temporal reuse, leaving each frame's reservoirs
-    /// independent. Only meaningful with --restir; the fresh-RNG spatial-only
-    /// path the D-085 correctness anchor converges against.
-    #[arg(long)]
-    no_temporal: bool,
-
-    /// Drop `ReSTIR`'s control-variate shading (`ReSTCV`), shading each
-    /// pixel's surviving path alone — the zero-CV degenerate (D-130). Only
-    /// meaningful with --restir and spatial reuse on; the layer the
-    /// colour-noise fix is measured against.
-    #[arg(long)]
-    no_cv: bool,
-
-    /// Draw every restart frame at `ReSTIR`'s full candidate count instead of
-    /// the cheap one (M7 step 7a) — the pre-7a renderer. A batch render restarts
-    /// only at its cold opening frame, which is never cheapened, so this is
-    /// visible only alongside --restart-every-sample; that pairing is the A/B.
-    #[arg(long)]
-    no_cheap_restart: bool,
-
-    /// Reset the film after every sample, so each one renders as the frame after
-    /// a restart: the moving camera's estimator state without a moving camera.
-    /// Reprojection is the identity here, so nothing ever disoccludes — an upper
-    /// bound on moving frame time, and no evidence at all about moving quality.
-    /// The image it writes is one sample; --out is for the timing, not the
-    /// picture.
-    #[arg(long)]
-    restart_every_sample: bool,
-
     /// Re-render whenever a shader source is edited (hot reload).
     /// Compiles kernels from the source checkout; a broken edit prints
     /// the compiler's diagnostics and keeps the last good image.
@@ -225,15 +184,6 @@ fn render(args: &RenderArgs) -> anyhow::Result<()> {
     let depth = args.depth.unwrap_or(settings.max_bounces);
 
     let mut renderer = cenote::render::Renderer::with_max_bounces(&gpu, depth)?;
-    renderer.set_render_mode(if args.restir {
-        cenote::render::RenderMode::Restir
-    } else {
-        cenote::render::RenderMode::PathTracer
-    });
-    renderer.set_spatial_reuse(!args.no_spatial);
-    renderer.set_temporal_reuse(!args.no_temporal);
-    renderer.set_cv_shading(!args.no_cv);
-    renderer.set_cheap_restart(!args.no_cheap_restart);
     if let Some(threshold) = args.noise_threshold {
         renderer.set_noise_threshold(threshold);
     }
@@ -331,22 +281,18 @@ fn render_frame(
         )),
         None => None,
     };
-    for sample in 0..spp {
+    for _ in 0..spp {
         // The timer keeps its own cadence: every frame is bracketed, one in
         // `PassTimer::BREAKDOWN_INTERVAL` is resolved kernel by kernel. So
         // the frame times a benchmark reads are the renderer's, not the
         // instrument's.
         let started = Instant::now();
-        // Read before the wave: the candidate count is picked from the film's
-        // state going in, which this sample is about to change.
-        let candidates = renderer.candidate_count(film);
         let passes = renderer.accumulate_timed(gpu, scene, film, timer.as_mut())?;
         let frame = cenote::stats::Frame {
             cpu: started.elapsed(),
             passes,
             size: (film.width(), film.height()),
             samples: film.samples(),
-            candidates,
         };
         // Traced from this frame, not from the recorder's snapshot: a settle
         // curve wants *this* sample's wall-clock, and the snapshot
@@ -359,24 +305,13 @@ fn render_frame(
         recorder.record(frame);
         // With --noise-threshold, stop as soon as enough of the image has
         // converged; --spp is the hard cap the loop bound already enforces.
-        // Below CONVERGENCE_MIN_SAMPLES the metric is untrusted (D-094), so the
-        // guard short-circuits the 4-byte readback there.
+        // Below CONVERGENCE_MIN_SAMPLES the metric is untrusted, so the guard
+        // short-circuits the 4-byte readback there.
         if args.noise_threshold.is_some()
             && film.samples() >= cenote::render::Renderer::CONVERGENCE_MIN_SAMPLES
             && film.converged_fraction(gpu)? >= cenote::render::Renderer::CONVERGENCE_TARGET
         {
             break;
-        }
-        // The moving harness (M7 step 7a), after the sample is recorded so the
-        // frame it reports is the one that was rendered. `Film::reset` zeroes
-        // the sample count and nothing else — the reservoirs survive, which is
-        // what makes the next frame a *warm* restart rather than a cold one.
-        // Deliberately no `Recorder::restart`: the interactivity marks measure
-        // one interaction, and this loop is a thousand of them. Never after the
-        // last sample, so the film still holds one and there is an image to
-        // resolve.
-        if args.restart_every_sample && sample + 1 < spp {
-            film.reset();
         }
     }
     // A buffered write that fails only on drop fails silently; a stats file
@@ -463,13 +398,6 @@ fn print_report(report: &cenote::stats::Report) {
         millis(report.smoothed.median),
         millis(report.smoothed.p95),
     );
-    // Which arm this run is, printed beside the numbers it explains: the same
-    // scene at the same size renders at two different speeds depending on the
-    // candidate count its frames were drawn with, and a frame time with no M
-    // beside it cannot say which.
-    if let Some(candidates) = report.candidates {
-        println!("  restir      M {candidates} at the last sample");
-    }
     match report.bound {
         cenote::stats::Bound::Unknown => println!("  gpu           — (no timestamps)"),
         // Every sampled frame is bracketed, so this is the whole render's

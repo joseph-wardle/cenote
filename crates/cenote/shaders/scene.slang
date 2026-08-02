@@ -71,7 +71,7 @@ public float opacityAt(SceneTable* scene, uint instance, uint primitive, float2 
 // transmission depth. A zero depth means no interior — the tint sat on the
 // interface instead — and transmits fully. Callers pass a real interior
 // (`medium != MEDIUM_NONE`); shared by `shade_surface`'s per-bounce loop and
-// the `ReSTIR` candidate tail, so the two absorb identically.
+// the queued shadow rays.
 public float3 interiorTransmittance(SceneTable* scene, uint medium,
                                     float3 from, float3 to) {
     Material interior = scene.materials[medium];
@@ -91,8 +91,7 @@ public float3 interiorTransmittance(SceneTable* scene, uint medium,
 // lights): the connection is visible iff the nearest solid thing along the ray
 // is that target or nothing. The identity test needs no distance epsilon — the
 // ray's `tmax` is bounded to the target (see `ShadowRay` in pathstate.slang).
-// Shared by `trace_shadow` (the queued next-event rays) and `restir_resolve`
-// (the inline delta-light term the reservoir leaves out, D-088).
+// Used by `trace_shadow`, for the queued next-event rays.
 public float shadowVisibility(RaytracingAccelerationStructure tlas, SceneTable* scene,
                               RayDesc ray, uint light, uint primitive) {
     RayQuery<RAY_FLAG_NONE> query;

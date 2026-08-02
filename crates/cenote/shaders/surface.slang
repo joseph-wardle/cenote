@@ -1,9 +1,6 @@
-// Hit reconstruction shared by every stage that shades a surface: the
-// wavefront's `shade_surface`, and M3's `restir_candidates`/`restir_resolve`,
-// which re-derive the same spawn point and shading frame to weigh and shade a
-// reservoir's light sample. Splitting it here keeps that geometry in one place
-// — a drift between the three would put the reservoir's target function and
-// its resolve on a different surface than the path tracer, a silent bias.
+// Hit reconstruction for the wavefront's `shade_surface`: the spawn point and
+// shading frame a hit is shaded through. Split out here so the geometry lives
+// in one place.
 
 import pathstate;
 import scene;

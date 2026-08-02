@@ -96,11 +96,8 @@ public struct LightConnection {
 
 // Reconnect to a chosen point on a triangle light: the connection geometry
 // (direction, solid-angle pdf, shadow-ray extent) for a barycentric point
-// already picked. `sampleLights` calls it after drawing the point; M3's
-// `restir_resolve` calls it to re-derive the same connection from a reservoir's
-// *stored* point — sharing this math is what keeps the two on one surface, so a
-// reused sample weighs exactly as the fresh draw did. `bary` weights the
-// record's edge1/edge2 corners. pdf 0 means the receiver is behind the
+// already picked, drawn by `sampleLights`. `bary` weights the record's
+// edge1/edge2 corners. pdf 0 means the receiver is behind the
 // one-sided emitter, or the record is degenerate.
 public LightConnection connectTriangle(LightRecord light, float2 bary, float3 from) {
     LightConnection c;

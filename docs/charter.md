@@ -6,7 +6,9 @@
 
 ## 1. Vision statement
 
-A portable, GPU-first, interactive-progressive production path tracer built on Vulkan ray tracing, with GRIS/ReSTIR as its theoretical core and a defining thesis: **the interactive lookdev preview and the converged final frame are the same estimator.** No biased preview modes, no "final gather" switch — reuse-accelerated progressive rendering that provably converges, so what the artist sees at one second is an honest prediction of the frame at one hour.
+A portable, GPU-first, interactive-progressive production path tracer built on Vulkan ray tracing, with a defining thesis: **the interactive lookdev preview and the converged final frame are the same estimator.** No biased preview modes, no "final gather" switch — progressive rendering that provably converges, so what the artist sees at one second is an honest prediction of the frame at one hour.
+
+*Amendment (2026-08-02): "with GRIS/ReSTIR as its theoretical core" struck. M3 and M6 built that core and it worked — unbiased, gated, better per sample. Measured at equal wall clock it was 2.6–4.8× **less** efficient than the path tracer beneath it, because a reservoir sample cost 5–6× what it saved (D-156). The thesis above survives it and is in fact stronger without it: with no reuse in the estimator, preview and final are not merely convergent, they are literally the same samples. The implementation is preserved on the `restir-archive` branch.*
 
 Where MoonRay optimizes for memory capacity and CPU-scale robustness on unbounded production scenes, this renderer optimizes for extreme single-GPU performance on scenes that fit in VRAM — the inverse bet, aimed at smaller-scale productions and lookdev.
 
@@ -29,10 +31,10 @@ Where MoonRay optimizes for memory capacity and CPU-scale robustness on unbounde
 | USD/Hydra | Core deliverable, MoonRay pattern: own lean scene rep + separate Hydra delegate | Quarantines USD C++ swamp outside the core |
 | Host language | **Rust** (ash + gpu-allocator + winit + egui) | Mature VK RT bindings, existing XPBD miles, language stability, recruiter legibility |
 | Shader language | **Slang** → SPIR-V | RT support, generics/modules, prior experience |
-| Execution | **Wavefront + ray queries in compute, from day one** | ReSTIR is multi-pass anyway; no SBT zoo; one programming model; matches Cycles X / MoonRay convergent architecture |
+| Execution | **Wavefront + ray queries in compute, from day one** | No SBT zoo; one programming model; matches Cycles X / MoonRay convergent architecture |
 | Materials | **Fixed OpenPBR ubershader**; params = constant or texture; pattern-VM seam reserved | Single coherent shading kernel; industry-converging standard |
-| Sampling | **GRIS as the theoretical core from day one**, staged GRIS-DI → ReSTIR PT; unbiased-by-construction; **convergence-under-reuse is a named design pillar** | Anything biased poisons the offline path; correlation management (M-caps, reuse decay, spatial-only converge mode) is the novel territory |
-| Integrator | Exactly one: unidirectional PT + NEE/MIS, GRIS layered on | What Cycles X and MoonRay both do; features are stages, not systems |
+| Sampling | Sobol-Burley, progressive, unbiased-by-construction | Anything biased poisons the offline path. *(Amended 2026-08-02: was "GRIS as the theoretical core from day one"; retired on the equal-time measurement, D-156.)* |
+| Integrator | Exactly one: unidirectional PT + NEE/MIS | What Cycles X and MoonRay both do; features are stages, not systems |
 | Geometry staging | Triangles + pre-tessellated subdivs → **curves** → **SSS (random walk)** → **volumes (NanoVDB)**; path state + scheduler designed for all four now | Film needs curves; SSS is cheap once wavefront exists; volumes are the biggest lift |
 | Denoising | **OIDN only, both modes** (GPU backend, Vulkan interop); albedo/normal AOVs are core outputs | One denoiser = preview honestly predicts final; vendor-neutral |
 | Process boundary | **Library-first**: Rust core behind a narrow C ABI designed around **transactional change-sets**; thin render-server wrapper later; Hydra delegate (C++) talks to server | Bento philosophy; change-set API = interactive edits + Hydra dirtying + file format, one mechanism |
@@ -106,7 +108,7 @@ Thin server over the C ABI; shared-memory framebuffer; C++ delegate in a separat
 Subdiv tessellation at prep (uniform Catmull-Clark own-rolled, or OpenSubdiv behind the prep boundary); curves via procedural AABBs + custom hair intersector in the ray-query loop; hair BSDF lobe. *Demo: groomed character asset.*
 
 **M6 — ReSTIR PT / GRIS full** (8–12 wks, post-grad likely)
-Reconnection shift, hybrid shift, random replay; convergence-under-reuse study — this is the research-edge flagship and potential SIGGRAPH-poster territory.
+Reconnection shift, hybrid shift, random replay; convergence-under-reuse study — this is the research-edge flagship and potential SIGGRAPH-poster territory. *(Shipped, then retired: the convergence-under-reuse study is what measured it out — D-156. See `restir-archive`.)*
 
 **M7 — SSS random walk** (3–4 wks) → **M8 — Volumes** (8+ wks, NanoVDB via pnanovdb from Slang, volume stack, null scattering) → **Stretch: film shot proof** — one *Sandwich Kwon Do* shot re-lit and rendered (materials re-baked to OpenPBR textures), compared against the RenderMan frame.
 

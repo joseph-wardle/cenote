@@ -1,11 +1,8 @@
-// The two halves of the per-vertex NEE↔BSDF MIS pair, shared by the path
-// tracer's shading loop (`shade_surface`) and the `ReSTIR` candidate stage's
-// inline indirect tail (`restir_candidates`, D-134). Both loops run the same
-// per-vertex estimator — one next-event connection plus a BSDF continuation
-// under the power heuristic — and the unbiasedness gate (`ReSTIR` ≡ brute
-// force) holds only while the two evaluate identical densities and weights.
-// One copy here, so they can never drift into a silent bias — the same
-// rationale `restir_target.slang` gives for the shared surface reconstruction.
+// The two halves of the per-vertex NEE↔BSDF MIS pair used by the path
+// tracer's shading loop (`shade_surface`): one next-event connection plus a
+// BSDF continuation, combined under the power heuristic. One copy here, so
+// the density a connection is drawn with and the weight it is combined with
+// can never drift apart into a silent bias.
 
 import environment;
 import lights;

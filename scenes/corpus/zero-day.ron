@@ -2,8 +2,8 @@
 // (beeple-crap.com; distributed with pbrt-v4-scenes — use per that
 // repo's README). A dark voting-machine hall lit by 283 area lights —
 // warm 2300 K bulb strips, 6000 K panel floods in louvered fixture
-// boxes, two rgb screens — the many-light stress scene this corpus
-// points at ReSTIR. Sparse clone pinned at 30cf4a0;
+// boxes, two rgb screens — this corpus's many-light stress scene.
+// Sparse clone pinned at 30cf4a0;
 // `scenes/corpus/fetch.sh zero-day` materializes the source; this RON
 // was bootstrapped once by `cenote-cli import
 // sources/pbrt-v4-scenes/zero-day/frame180.pbrt` and is the source of

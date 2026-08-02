@@ -3,17 +3,15 @@
 //! [`ChangeSet::many_lights`] is the scene as data and [`Scene::many_lights`]
 //! is that change-set prepped, the same production path the demo takes.
 //!
-//! This is the scene M3's validation harness renders: the case `ReSTIR`'s
-//! resampling exists for. A brute-force next-event estimator draws one of
-//! the [`LIGHT_GRID`]² emitters per sample and shadows it; with this many
+//! This is the scene the validation harness renders for the hardest case
+//! next-event estimation faces: the estimator draws one of the
+//! [`LIGHT_GRID`]² emitters per sample and shadows it, and with this many
 //! lights and this much occlusion that single draw is mostly wasted, so the
-//! image crawls toward convergence. `ReSTIR` resamples the same candidates and
-//! reuses its neighbours', spending its one shadow ray where it lands light —
-//! and at convergence the two must agree, which is the whole unbiasedness
-//! thesis the goldens pin. The emitters carry distinct power (color sweeps
-//! the panel, luminance ripples across it) so the reservoir's weighting has
-//! something real to sort; the occluders overlap their penumbrae so the
-//! shadow field is genuinely hard.
+//! image crawls toward convergence. It is where the light list's
+//! power-proportional selection has to earn its keep — the emitters carry
+//! distinct power (colour sweeps the panel, luminance ripples across it) so
+//! the weighting has something real to sort, and the occluders overlap their
+//! penumbrae so the shadow field is genuinely hard.
 
 use super::changeset::{
     CameraPatch, ChangeSet, InstancePatch, MaterialPatch, MeshPatch, Op, SettingsPatch,
@@ -35,9 +33,8 @@ impl Scene {
     /// The many-light validation scene: an overhead panel of
     /// [`LIGHT_GRID`]² small warm-to-cool emitters over a 3×3 cluster of
     /// matte spheres on a Lambert floor, under a black sky (no
-    /// environment) so the emitters are the scene's only light. The M3
-    /// harness renders this to measure `ReSTIR` against a brute-force
-    /// reference and pin that they converge to the same image.
+    /// environment) so the emitters are the scene's only light — the
+    /// convergence harness's many-light subject.
     ///
     /// # Errors
     ///
@@ -230,8 +227,8 @@ mod tests {
     }
 
     /// The committed `scenes/many-lights.ron` — the flagship scene file the
-    /// M3 validation figures render, and the one a stranger opens to see the
-    /// case `ReSTIR` exists for — stays in lockstep with the builder it's
+    /// validation figures render, and the one a stranger opens to see the
+    /// many-light case — stays in lockstep with the builder it's
     /// generated from. A change to [`ChangeSet::many_lights`] that isn't
     /// regenerated fails here (CPU-only, so it runs everywhere) rather than
     /// silently shipping a stale scene the figures no longer describe.

@@ -6,7 +6,7 @@
 // vertices, a black-absorber material carrying the emission, and a
 // camera-invisible instance under the flattened world matrix — all three
 // named by the prim path. The renderer keeps no analytic light shapes:
-// emissive triangles are its native area light, ReSTIR's whole reason,
+// emissive triangles are its native area light,
 // so synthesis is the honest translation, not a workaround. Radiometry
 // follows the UsdLux luminous spec: intensity·2^exposure with color and
 // blackbody temperature as the tint, `normalize` dividing by world-space

@@ -22,8 +22,7 @@
 // downloading the whole variance field every frame. The tally is zero-filled
 // before this kernel each sample, so it is a fresh snapshot, not a running
 // count; and no pixel counts until N passes `minSamples`, below which a
-// handful of samples make Var meaningless (and ReSTIR's temporal history has
-// not yet handed off to independent frames — D-094).
+// handful of samples make Var meaningless.
 //
 // Every contribution is finite-guarded before it lands: a NaN or Inf in
 // any channel drops that buffer's whole sample for the pixel — one bad

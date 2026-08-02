@@ -8,7 +8,6 @@
 use std::time::Duration;
 
 use cenote::gpu::GuiFrame;
-use cenote::render::DebugView;
 use cenote::scene::changeset::MaterialPatch;
 use cenote::scene::description::SceneDescription;
 use cenote::stats::{Bound, READABLE_SAMPLES, Stats};
@@ -33,41 +32,10 @@ pub struct FrameStats {
 }
 
 /// The egui context/winit bridge and the panel's widget state.
-// The panel's toggles are independent orthogonal switches, not a state — a state
-// machine would model transitions that don't exist.
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "independent UI toggles, not a state to machine"
-)]
 pub struct Gui {
     state: egui_winit::State,
     /// Exposure in stops, applied by the tonemap kernel.
     exposure: f32,
-    /// Render with `ReSTIR`-DI at the primary hit instead of the path tracer —
-    /// the D-090 unbiasedness gate, driven live.
-    restir: bool,
-    /// Fold in spatial neighbours (M3 step 4). On by default; toggling it off
-    /// drops to single-frame RIS, the other half of the gate — both converge to
-    /// the same image. Only meaningful while `restir` is on.
-    spatial_reuse: bool,
-    /// Warm-start from the previous frame's reservoirs (M3 step 5). On by
-    /// default; toggling it off shows the reuse-free preview. Both converge to
-    /// the same still (the decay ramp hands temporal off on hold — D-094). Only
-    /// meaningful while `restir` is on.
-    temporal_reuse: bool,
-    /// Draw the frame that restarts accumulation thin, leaning on the history
-    /// the reset kept (M7 step 7a). On by default; toggling it off pins M flat,
-    /// the pre-7a renderer. Only meaningful while `restir` and `temporal_reuse`
-    /// are both on — with no history being read there is nothing to lean on.
-    ///
-    /// This is the one estimator toggle a still image cannot settle. It acts
-    /// only on the frame that restarts accumulation, so a held camera stops
-    /// exercising it after one frame — the question it raises, *is a moving
-    /// preview at M = 1 acceptable on the disocclusions a held camera never
-    /// produces?*, is answered by orbiting with it and nowhere else.
-    cheap_restart: bool,
-    /// Which D-092 debug view to false-colour (only while `restir` is on).
-    debug_view: DebugView,
     /// Show the OIDN-denoised view instead of the raw average.
     #[cfg(feature = "denoise")]
     denoise: bool,
@@ -90,11 +58,6 @@ impl Gui {
         Self {
             state,
             exposure: 0.0,
-            restir: false,
-            spatial_reuse: true,
-            temporal_reuse: true,
-            cheap_restart: true,
-            debug_view: DebugView::Off,
             #[cfg(feature = "denoise")]
             denoise: false,
             lookdev: Lookdev::default(),
@@ -104,33 +67,6 @@ impl Gui {
     /// Exposure in stops, for [`cenote::render::Tonemap::apply`].
     pub fn exposure(&self) -> f32 {
         self.exposure
-    }
-
-    /// Whether the `ReSTIR` estimator toggle is on.
-    pub fn restir(&self) -> bool {
-        self.restir
-    }
-
-    /// Whether spatial reuse is on (only acted on while [`Gui::restir`] is on).
-    pub fn spatial_reuse(&self) -> bool {
-        self.spatial_reuse
-    }
-
-    /// Whether temporal reuse is on (only acted on while [`Gui::restir`] is on).
-    pub fn temporal_reuse(&self) -> bool {
-        self.temporal_reuse
-    }
-
-    /// Whether the cheap restart frame is on (only acted on while
-    /// [`Gui::restir`] is on).
-    pub fn cheap_restart(&self) -> bool {
-        self.cheap_restart
-    }
-
-    /// The selected D-092 debug view — [`DebugView::Off`] unless the panel's
-    /// picker chose one (and only meaningful while [`Gui::restir`] is on).
-    pub fn debug_view(&self) -> DebugView {
-        self.debug_view
     }
 
     /// Whether the panel's denoise toggle is on.
@@ -196,32 +132,6 @@ impl Gui {
                 ui.add(egui::Slider::new(&mut self.exposure, -4.0..=4.0).text("exposure"));
                 #[cfg(feature = "denoise")]
                 ui.checkbox(&mut self.denoise, "denoise");
-
-                ui.separator();
-                ui.checkbox(&mut self.restir, "ReSTIR");
-                // Spatial reuse and the debug picker only make sense while ReSTIR
-                // owns the primary hit — restir_resolve is what writes the surface.
-                ui.add_enabled_ui(self.restir, |ui| {
-                    ui.checkbox(&mut self.temporal_reuse, "temporal reuse");
-                    ui.checkbox(&mut self.spatial_reuse, "spatial reuse");
-                    ui.checkbox(&mut self.cheap_restart, "cheap restart");
-                    egui::ComboBox::from_label("debug view")
-                        .selected_text(debug_view_label(self.debug_view))
-                        .show_ui(ui, |ui| {
-                            for view in [
-                                DebugView::Off,
-                                DebugView::SelectedLight,
-                                DebugView::Confidence,
-                                DebugView::UnbiasedWeight,
-                            ] {
-                                ui.selectable_value(
-                                    &mut self.debug_view,
-                                    view,
-                                    debug_view_label(view),
-                                );
-                            }
-                        });
-                });
             });
     }
 }
@@ -276,13 +186,7 @@ fn stats_lines(ui: &mut egui::Ui, stats: &FrameStats) {
         Bound::Unknown => ui.monospace("  gpu        —  (no timestamps)"),
         bound => ui.monospace(format!("  gpu   {:>6.2} ms   {bound}", millis(frame.gpu()))),
     };
-    // The sample count, and — in ReSTIR — the candidate count that sample was
-    // drawn with. M drops on every restart, so a frame time watched during an
-    // orbit is only readable beside the M that produced it.
-    match frame.candidates {
-        Some(candidates) => ui.monospace(format!("spp     {:>6}   M {candidates}", frame.samples)),
-        None => ui.monospace(format!("spp     {:>6}", frame.samples)),
-    };
+    ui.monospace(format!("spp     {:>6}", frame.samples));
 
     if frame.passes.has_breakdown() {
         egui::CollapsingHeader::new("kernels")
@@ -326,14 +230,4 @@ fn stats_lines(ui: &mut egui::Ui, stats: &FrameStats) {
                 ui.monospace(format!("{name:<12}{}", bytes(value)));
             }
         });
-}
-
-/// The panel's short name for each D-092 debug view.
-fn debug_view_label(view: DebugView) -> &'static str {
-    match view {
-        DebugView::Off => "off",
-        DebugView::SelectedLight => "selected light",
-        DebugView::Confidence => "confidence (M)",
-        DebugView::UnbiasedWeight => "weight (W)",
-    }
 }

@@ -213,36 +213,6 @@ fn diffuse_furnace_closes() {
     );
 }
 
-/// The same white furnace, closed by the full `ReSTIR` estimator — the
-/// first test to drive [`RenderMode::Restir`] end to end. `ReSTIR` owns
-/// bounce 0's direct lighting, resampling environment directions
-/// (spatial and temporal reuse both on, so pairwise MIS, the reservoir
-/// weights, and the reproject warm-start all run) while the path tracer
-/// carries the indirect bounces the albedo-1 plane needs to close. If
-/// the resampled estimator loses or invents energy — a wrong reservoir
-/// weight, an unnormalised target, a dropped Jacobian — the furnace
-/// stops closing. Stochastic like the rough furnace above, so the mean
-/// over many samples carries the assertion.
-#[test]
-fn restir_furnace_closes() {
-    let Some(gpu) = crate::gpu::test_context() else {
-        return;
-    };
-    let mut renderer = Renderer::new(&gpu).expect("renderer");
-    renderer.set_render_mode(RenderMode::Restir);
-    let sky = 0.5;
-
-    let scene = furnace_scene(&gpu, Material::matte(Vec3::ONE, 0.0), Vec3::ZERO, 1.0, None);
-    let samples = 64;
-    let sum = accumulate_sum(&gpu, &renderer, &scene, 32, samples);
-    let mean =
-        sum.chunks_exact(4).map(|chunk| chunk[0]).sum::<f32>() / (32.0 * 32.0 * samples as f32);
-    assert!(
-        (mean - sky).abs() < 0.005,
-        "ReSTIR furnace leaked: mean {mean} vs {sky}"
-    );
-}
-
 /// The spawn-point offsets hold at scene scale — the property the van
 /// Antwerpen rigorous error bounds exist for. A half-albedo Lambert
 /// furnace, with the plane pushed 10⁴ m from the origin and scaled
@@ -2045,84 +2015,5 @@ fn the_noise_threshold_reaches_the_kernel() {
     assert!(
         loose > tight,
         "a looser threshold must converge strictly more pixels: {loose} vs {tight}"
-    );
-}
-
-/// The cheap restart frame (M7 step 7a) reaches the kernel — and nowhere its
-/// premise fails.
-///
-/// A moving camera resets the film every frame onto reservoirs that survive the
-/// reset, so it renders sample 0 over and over against a *warm* history, which
-/// is why one candidate suffices there. Warming a film and resetting it
-/// reproduces exactly that state, so the two arms must draw different images:
-/// were the toggle ignored, both would render the full count and read identical.
-///
-/// The other two cases are the premise, and each is a way to have no history to
-/// lean on. A cold film has never committed a frame — that is a batch render's
-/// opening sample, which must stay full strength precisely because everything
-/// after it warm-starts from what it commits. And temporal reuse switched off
-/// reads no history at all, warm reservoirs or not; that arm is the one a
-/// silently-cheapened restart would corrupt without ever failing a still test.
-#[test]
-fn the_cheap_restart_reaches_the_kernel_only_on_a_live_history() {
-    let Some(gpu) = crate::gpu::test_context() else {
-        return;
-    };
-    let mut renderer = Renderer::new(&gpu).expect("renderer");
-    renderer.set_render_mode(RenderMode::Restir);
-    let scene = furnace_scene(&gpu, Material::matte(Vec3::ONE, 0.0), Vec3::ZERO, 1.0, None);
-
-    // Sample 0 again onto whatever history the film already carries. The reset
-    // clears the beauty sums, so what comes back is the restarted sample alone.
-    let restart = |renderer: &Renderer, film: &mut Film| -> Vec<f32> {
-        film.reset();
-        renderer.accumulate(&gpu, &scene, film).expect("accumulate");
-        download_f32(&gpu, &film.beauty.sum)
-    };
-    // One committed frame, then that restart: the moving camera's estimator
-    // state, on a film of its own so the two arms differ only by the toggle.
-    let after_a_restart = |renderer: &Renderer| -> Vec<f32> {
-        let mut film = Film::new(&gpu, 32, 32).expect("film");
-        renderer
-            .accumulate(&gpu, &scene, &mut film)
-            .expect("accumulate");
-        assert!(
-            film.restir_history_is_warm(),
-            "one frame must warm the history"
-        );
-        restart(renderer, &mut film)
-    };
-    let cheap = after_a_restart(&renderer);
-    renderer.set_cheap_restart(false);
-    let pinned = after_a_restart(&renderer);
-    assert_ne!(
-        cheap, pinned,
-        "a restart onto a warm history must not render the full candidate count"
-    );
-
-    renderer.set_cheap_restart(true);
-    let cold_cheap = accumulate_sum(&gpu, &renderer, &scene, 32, 1);
-    renderer.set_cheap_restart(false);
-    let cold_pinned = accumulate_sum(&gpu, &renderer, &scene, 32, 1);
-    assert_eq!(
-        cold_cheap, cold_pinned,
-        "a film with no history must render its first sample at full strength"
-    );
-
-    // Warm reservoirs, but nothing reading them. The warmth has to be built
-    // first — temporal reuse is what commits a frame — and then switched off
-    // under the film, which is exactly what the viewer's toggle does.
-    let mut film = Film::new(&gpu, 32, 32).expect("film");
-    renderer.set_cheap_restart(true);
-    renderer
-        .accumulate(&gpu, &scene, &mut film)
-        .expect("accumulate");
-    renderer.set_temporal_reuse(false);
-    let stale_cheap = restart(&renderer, &mut film);
-    renderer.set_cheap_restart(false);
-    assert_eq!(
-        stale_cheap,
-        restart(&renderer, &mut film),
-        "with temporal reuse off there is no history to lean on, warm or not"
     );
 }

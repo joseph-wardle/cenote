@@ -64,9 +64,9 @@ use std::time::{Duration, Instant};
 
 use ash::vk;
 
-use super::{DebugView, Film, RenderMode, Renderer, ResolveTargets};
+use super::{Film, Renderer, ResolveTargets};
 use crate::error::{Error, Result};
-use crate::gpu::{Buffer, Context, MemoryLocation, Pass, PassTimer};
+use crate::gpu::{Buffer, Context, MemoryLocation, PassTimer};
 use crate::scene::changeset::{ChangeSet, Dirty, Kind};
 use crate::scene::description::SceneDescription;
 use crate::scene::{Camera, Scene};
@@ -130,13 +130,6 @@ fn publish_interval(samples: u32) -> Duration {
 /// What the viewer feeds the render thread, latest-wins, snapshotted once per
 /// sample. No exposure: that is the consumer's view transform, applied
 /// downstream of the published frame.
-// Latest-wins scalars on one snapshot, not a state: the estimator toggles are
-// independent of each other and of `running`, and every combination is one
-// someone asks for on purpose.
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "independent latest-wins inputs, not a state to machine"
-)]
 #[derive(Clone, Copy)]
 struct RenderInputs {
     /// The view to render. Applied to the scene when `generation` changes.
@@ -147,32 +140,6 @@ struct RenderInputs {
     /// the new camera and restarts accumulation — the threaded equivalent of
     /// the single-threaded viewer's `Film::reset`.
     generation: u64,
-    /// Which estimator owns the primary hit's direct lighting. The viewer's
-    /// `ReSTIR` toggle writes it; the render thread adopts a change and
-    /// restarts accumulation (the two estimators converge to the same image,
-    /// so this keeps an A/B switch crisp rather than mixing them).
-    render_mode: RenderMode,
-    /// The D-092 debug view to false-colour, or [`DebugView::Off`]. Flows
-    /// straight into each sample — the debug surface is single-shot and live,
-    /// so a change needs no accumulation restart.
-    debug_view: DebugView,
-    /// Whether `ReSTIR` folds in spatial neighbours (M3 step 4). Meaningful only
-    /// in [`RenderMode::Restir`]; like `render_mode`, a change restarts
-    /// accumulation so the on/off images (both the same integral) never mix — the
-    /// D-090 unbiasedness gate the viewer drives.
-    spatial_reuse: bool,
-    /// Whether `ReSTIR` warm-starts from the previous frame's reservoirs (M3
-    /// step 5). Meaningful only in [`RenderMode::Restir`]; a change restarts
-    /// accumulation like the other estimator switches. On a held camera the
-    /// decay ramp (D-094) anneals temporal off regardless, so on/off converge to
-    /// the same still — this toggle is for watching the warm-start live.
-    temporal_reuse: bool,
-    /// Whether a restart frame may be drawn cheap (M7 step 7a). Meaningful only
-    /// in [`RenderMode::Restir`]; a change restarts accumulation like the other
-    /// estimator switches, so a flip never blends two candidate policies into
-    /// one image. What it changes is visible only while the camera is moving,
-    /// which no still render reproduces — this is the toggle a person judges.
-    cheap_restart: bool,
     /// Hard cap on accumulated samples (M3 step 6c). At this count the render
     /// thread parks — stops accumulating and idles — until an input restarts the
     /// film, so a settled view stops pinning the GPU.
@@ -226,10 +193,6 @@ struct FrameBuffers {
     albedo: Buffer,
     normal: Buffer,
     depth: Buffer,
-    /// The D-092 debug false-colour, copied from the film's single-shot debug
-    /// buffer at publish. Untouched (and unread) unless a [`DebugView`] is
-    /// active; the viewer presents it in place of `beauty` when it is.
-    debug: Buffer,
 }
 
 /// A published frame: the estimator's current best image as a **linear**
@@ -279,14 +242,6 @@ impl Frame {
     #[must_use]
     pub fn depth(&self) -> &Buffer {
         &self.buffers.depth
-    }
-
-    /// The `ReSTIR` debug false-colour (RGBA f32) — meaningful only when the
-    /// frame was published with a [`DebugView`] active. Already display-ready:
-    /// present it through the tonemap's passthrough, not the tone curve.
-    #[must_use]
-    pub fn debug(&self) -> &Buffer {
-        &self.buffers.debug
     }
 
     /// Width in pixels.
@@ -368,11 +323,6 @@ impl Session {
                 camera,
                 size: (width, height),
                 generation: 0,
-                render_mode: RenderMode::PathTracer,
-                debug_view: DebugView::Off,
-                spatial_reuse: true,
-                temporal_reuse: true,
-                cheap_restart: true,
                 max_samples: auto_stop.max_samples,
                 noise_threshold: auto_stop.noise_threshold,
                 running: true,
@@ -411,86 +361,6 @@ impl Session {
             inputs.generation += 1;
         }
         self.lanes.epoch.fetch_add(1, Ordering::Release);
-    }
-
-    /// Switch the primary-hit estimator — the viewer's `ReSTIR` toggle. The
-    /// render thread adopts the change at the next wave boundary and restarts
-    /// accumulation, so an A/B flip shows one estimator at a time.
-    ///
-    /// # Panics
-    ///
-    /// If the render thread panicked while holding the input lock.
-    pub fn set_render_mode(&self, mode: RenderMode) {
-        self.lanes
-            .inputs
-            .lock()
-            .expect("inputs mutex poisoned")
-            .render_mode = mode;
-    }
-
-    /// Select the D-092 debug view the render thread false-colours (or
-    /// [`DebugView::Off`]). The debug surface is single-shot, so the change is
-    /// live on the next published frame without restarting accumulation.
-    ///
-    /// # Panics
-    ///
-    /// If the render thread panicked while holding the input lock.
-    pub fn set_debug_view(&self, view: DebugView) {
-        self.lanes
-            .inputs
-            .lock()
-            .expect("inputs mutex poisoned")
-            .debug_view = view;
-    }
-
-    /// Toggle `ReSTIR` spatial reuse (M3 step 4). Meaningful only in
-    /// [`RenderMode::Restir`]; the render thread adopts a change and restarts
-    /// accumulation, so the on/off images stay unmixed — the interactive form of
-    /// the D-090 unbiasedness gate.
-    ///
-    /// # Panics
-    ///
-    /// If the render thread panicked while holding the input lock.
-    pub fn set_spatial_reuse(&self, enabled: bool) {
-        self.lanes
-            .inputs
-            .lock()
-            .expect("inputs mutex poisoned")
-            .spatial_reuse = enabled;
-    }
-
-    /// Toggle `ReSTIR` temporal reuse — the warm-start from the previous frame's
-    /// reservoirs (M3 step 5). Meaningful only in [`RenderMode::Restir`]; the
-    /// render thread adopts a change and restarts accumulation, so an on/off
-    /// comparison never mixes the two (both converge to the same still, since the
-    /// decay ramp hands temporal off on a held camera regardless — D-094).
-    ///
-    /// # Panics
-    ///
-    /// If the render thread panicked while holding the input lock.
-    pub fn set_temporal_reuse(&self, enabled: bool) {
-        self.lanes
-            .inputs
-            .lock()
-            .expect("inputs mutex poisoned")
-            .temporal_reuse = enabled;
-    }
-
-    /// Toggle the cheap restart frame (M7 step 7a): a restart drawn thin,
-    /// leaning on the history the reset kept. Meaningful only in
-    /// [`RenderMode::Restir`]; the render thread adopts a change and restarts
-    /// accumulation, so a flip never mixes two candidate policies into one
-    /// image.
-    ///
-    /// # Panics
-    ///
-    /// If the render thread panicked while holding the input lock.
-    pub fn set_cheap_restart(&self, enabled: bool) {
-        self.lanes
-            .inputs
-            .lock()
-            .expect("inputs mutex poisoned")
-            .cheap_restart = enabled;
     }
 
     /// Note a new render-target size; the render thread rebuilds its film to
@@ -664,11 +534,6 @@ fn join_render_thread(thread: JoinHandle<Result<()>>) -> Result<()> {
 /// latest inputs, folding queued edits in at wave boundaries and publishing
 /// a resolved average on the throttle. Returns when the running flag clears,
 /// or early on the first device fault.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one wave of the loop, in the order the waves run; splitting it \
-              would scatter the applied-state bookkeeping across helpers"
-)]
 fn render_loop(
     gpu: &Context,
     mut description: SceneDescription,
@@ -685,11 +550,6 @@ fn render_loop(
     let mut applied_size = (0, 0);
     let mut applied_generation = 0;
     // Which estimator is in the renderer, so a viewer toggle restarts
-    // accumulation on the switch (matching `Session::new`'s default).
-    let mut applied_render_mode = RenderMode::PathTracer;
-    let mut applied_spatial_reuse = true;
-    let mut applied_temporal_reuse = true;
-    let mut applied_cheap_restart = true;
     // The auto-stop threshold currently in the renderer (M3 step 6c). `None` =
     // the renderer's default; a change is adopted without a reset, since it only
     // moves what counts as converged, not the beauty.
@@ -764,58 +624,15 @@ fn render_loop(
             film.reset();
             applied_generation = input.generation;
         }
-        // The estimator switch restarts accumulation (the two converge to the
-        // same image, so this keeps an A/B flip from mixing them). The debug
-        // view is single-shot and live, so it just flows into the next sample.
-        if input.render_mode != applied_render_mode {
-            log::debug!("render mode adopted; accumulation restarts");
-            renderer.set_render_mode(input.render_mode);
-            applied_render_mode = input.render_mode;
-            film.reset();
-            last_publish = None;
-        }
-        // The spatial-reuse toggle is the other estimator switch, restarted the
-        // same way so an on/off comparison never mixes the two.
-        if input.spatial_reuse != applied_spatial_reuse {
-            log::debug!("spatial reuse adopted; accumulation restarts");
-            renderer.set_spatial_reuse(input.spatial_reuse);
-            applied_spatial_reuse = input.spatial_reuse;
-            film.reset();
-            last_publish = None;
-        }
-        // The temporal-reuse toggle restarts the same way. Note the film reset
-        // (accumulation from sample 0) is also the decay clock's reset, so
-        // flipping temporal on restarts its warm-start from a fresh ramp — the
-        // on state is visibly the warm-start, the off state its absence.
-        if input.temporal_reuse != applied_temporal_reuse {
-            log::debug!("temporal reuse adopted; accumulation restarts");
-            renderer.set_temporal_reuse(input.temporal_reuse);
-            applied_temporal_reuse = input.temporal_reuse;
-            film.reset();
-            last_publish = None;
-        }
-        // The cheap restart restarts too: it only ever acts on sample 0, so a
-        // flip mid-accumulation would land on nothing until the next reset, and
-        // the A/B would silently compare an arm against itself.
-        if input.cheap_restart != applied_cheap_restart {
-            log::debug!("cheap restart adopted; accumulation restarts");
-            renderer.set_cheap_restart(input.cheap_restart);
-            applied_cheap_restart = input.cheap_restart;
-            film.reset();
-            last_publish = None;
-        }
         // Every restart above rewound the film's sample count, and that is
-        // the one signal all of them share — a resize, an edit, a camera
-        // move, either reuse toggle, the cheap restart. (It is also the signal
-        // the cheap restart reads, which is why one cheap frame covers all of
-        // them and not just camera motion.) Re-arming the interactivity marks off
-        // it keeps the measurement honest without seven call sites that would
-        // drift apart the first time an eighth reset is added — as one just was.
+        // the one signal all of them share — a resize, an edit, a camera move.
+        // Re-arming the interactivity marks off it keeps the measurement honest
+        // without a call site per reset, which would drift apart the first time
+        // another reset is added.
         if film.samples() < last_samples {
             recorder.restart();
         }
         last_samples = film.samples();
-        renderer.set_debug_view(input.debug_view);
         // The auto-stop threshold changes only what the accumulate kernel counts
         // as converged, so it is adopted without a reset — the per-sample count
         // self-heals on the next sample. `None` restores the renderer default.
@@ -867,10 +684,6 @@ fn render_loop(
         // Every frame is bracketed; one in `PassTimer::BREAKDOWN_INTERVAL`
         // is also resolved kernel by kernel.
         let started = Instant::now();
-        // Read before the wave, not after: the candidate count is picked from
-        // the film's state going in, and `accumulate_timed` has moved it on by
-        // the time it returns.
-        let candidates = renderer.candidate_count(film);
         let passes = renderer.accumulate_timed(gpu, &scene, film, timer.as_mut())?;
         // `stats::Frame` is the measurement of a sample; the `Frame` this
         // module publishes is the pixels. Spelled out so the two never read
@@ -880,7 +693,6 @@ fn render_loop(
             passes,
             size: (film.width(), film.height()),
             samples: film.samples(),
-            candidates,
         });
         if last_memory_sample.is_none_or(|at| at.elapsed() >= MEMORY_SAMPLE_INTERVAL) {
             recorder.memory(gpu.memory());
@@ -928,16 +740,6 @@ fn publish(
             depth: &free.depth,
         },
     )?;
-    // The debug surface isn't a film accumulation channel — it's a single-shot
-    // buffer the wave just wrote — so it's lifted into the frame slot by a plain
-    // copy rather than a resolve.
-    if let Some(debug) = renderer.debug_buffer(film) {
-        gpu.submit_passes(&[Pass::CopyBuffer {
-            src: debug,
-            dst: &free.debug,
-            size: u64::from(film.width()) * u64::from(film.height()) * 16,
-        }])?;
-    }
     let frame = Frame {
         buffers: Arc::clone(free),
         width: film.width(),
@@ -1042,13 +844,6 @@ fn publish_buffers(gpu: &Context, width: u32, height: u32) -> Result<[Arc<FrameB
             albedo: buffer("session.frame.albedo", texels * 16)?,
             normal: buffer("session.frame.normal", texels * 16)?,
             depth: buffer("session.frame.depth", texels * 4)?,
-            // Also a copy target for the film's debug buffer at publish.
-            debug: gpu.create_buffer(
-                "session.frame.debug",
-                texels * 16,
-                usage | vk::BufferUsageFlags::TRANSFER_DST,
-                MemoryLocation::GpuOnly,
-            )?,
         }))
     };
     Ok([slot()?, slot()?])
@@ -1278,12 +1073,6 @@ mod tests {
         assert_eq!(session.epoch(), 3);
         session.replace(ChangeSet::demo());
         assert_eq!(session.epoch(), 4);
-
-        session.set_render_mode(RenderMode::Restir);
-        session.set_debug_view(DebugView::Off);
-        session.set_spatial_reuse(false);
-        session.set_temporal_reuse(false);
-        assert_eq!(session.epoch(), 4, "viewer toggles must not bump the epoch");
     }
 
     /// An applied edit's stamp reaches the published frame: accumulation

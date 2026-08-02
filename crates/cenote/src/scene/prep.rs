@@ -23,13 +23,12 @@ use super::changeset::Dirty;
 use super::description::SceneDescription;
 use super::lower::{InstanceSpec, all_dirty, host_phase};
 use super::{
-    GpuEnvironment, GpuMesh, Placement, ResidentBuffers, ResidentTexture, Scene, build_restir,
+    GpuEnvironment, GpuMesh, Placement, ResidentBuffers, ResidentTexture, Scene,
     build_scene_tlas, select_probability, upload_environment, upload_instance_tables, upload_mesh,
     upload_scene_table, upload_texture_params,
 };
 use crate::error::Result;
 use crate::gpu::Context;
-use crate::restir::LightIdentityRegistry;
 use crate::texture;
 
 impl Scene {
@@ -105,15 +104,6 @@ impl Scene {
             select_probability(tinted_power, host.light_power()),
             host.light_count(),
         )?;
-        let mut identity = LightIdentityRegistry::new();
-        let restir = build_restir(
-            gpu,
-            &mut identity,
-            &host.triangle_lights,
-            &host.delta_lights,
-            &light_names(&host.instances),
-            tinted_power,
-        )?;
         description.take_dirty();
         Ok(Self {
             tlas,
@@ -130,9 +120,6 @@ impl Scene {
             env_tint: spec.tint,
             env_to_world: spec.to_world,
             env_from_world: spec.from_world,
-            identity,
-            restir,
-            epoch: 0,
         })
     }
 
@@ -216,25 +203,9 @@ impl Scene {
             select_probability(env_power, host.light_power()),
             host.light_count(),
         )?;
-        // The reservoir path's slice rides the same light-edit rebuild: the
-        // candidate table and the identity remap track the churn the combined
-        // table just absorbed.
-        self.restir = build_restir(
-            gpu,
-            &mut self.identity,
-            &host.triangle_lights,
-            &host.delta_lights,
-            &light_names(&host.instances),
-            env_power,
-        )?;
         if let Some(camera) = host.camera {
             self.camera = camera;
         }
-        // A new build: the instance tables above re-uploaded (and the TLAS may
-        // have renumbered), so build-keyed history is now stale — see
-        // `Scene::epoch`. Bumped only on success: a rejected edit left the
-        // previous build fully live.
-        self.epoch += 1;
         Ok(())
     }
 }
@@ -271,12 +242,6 @@ fn upload_textures(
         textures.insert(key.clone(), texture);
     }
     Ok(textures)
-}
-
-/// The light-identity name per TLAS custom index — each spec's `name#i`,
-/// in flattened order, for the registry reconcile.
-fn light_names(instances: &[InstanceSpec]) -> Vec<String> {
-    instances.iter().map(|spec| spec.name.clone()).collect()
 }
 
 /// Resolve instance specs against the resident mesh map. The lookup can't
@@ -539,28 +504,12 @@ mod tests {
         let mut description = replay(&history);
         let mut scene = Scene::prep(&gpu, &mut description).expect("prep");
 
-        // The temporal epoch gate's scene half (§4c decision 2), asserted
-        // across the same walk: a fresh build is build 0, a camera move is
-        // not a build (it re-uploads nothing), and every applied edit bumps
-        // the counter exactly once — whatever it dirtied.
-        assert_eq!(scene.epoch(), 0, "a fresh build is build 0");
-        let camera = *scene.camera();
-        *scene.camera_mut() = camera;
-        assert_eq!(scene.epoch(), 0, "a camera move must not bump the build");
-
-        let mut builds = 0;
         for (label, set) in edit_walk(&sky, &wood) {
             description.apply(&set).expect(label);
             let dirty = description.take_dirty();
             scene
                 .update(&gpu, &description, &dirty)
                 .unwrap_or_else(|error| panic!("{label}: {error}"));
-            builds += 1;
-            assert_eq!(
-                scene.epoch(),
-                builds,
-                "{label}: an applied edit must bump the build counter exactly once"
-            );
             history.push(set);
             let fresh = Scene::prep(&gpu, &mut replay(&history)).expect("fresh prep");
             assert_eq!(

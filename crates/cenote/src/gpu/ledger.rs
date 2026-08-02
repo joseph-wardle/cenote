@@ -2,18 +2,17 @@
 //!
 //! Every allocation already carries a name for the allocator's own
 //! bookkeeping, and those names already follow a dotted convention
-//! (`scene.geometry`, `film.albedo.sum`, `restir.reservoir.curr`,
-//! `wavefront.queue.ray`). The ledger reads the bucket off those leading
+//! (`scene.geometry`, `film.albedo.sum`, `wavefront.queue.ray`). The
+//! ledger reads the bucket off those leading
 //! segments, so an allocation is counted correctly the moment it is *named*
 //! correctly, and there is no second table to keep in sync with the first.
 //!
 //! The trade is that the naming convention became load-bearing rather than
-//! decorative, and adopting it caught two groups sitting in the wrong
-//! place: the mesh buffers carried no prefix at all (`{mesh}.vertices`) and
-//! would have counted as scratch, and `ReSTIR`'s scene-derived light tables
-//! were named `restir.*`, which would have priced them as the cost of
-//! reuse. Both were renamed rather than special-cased, which is the point —
-//! see [`Bucket::of`] for the one distinction that needs explaining.
+//! decorative, and adopting it caught a group sitting in the wrong place:
+//! the mesh buffers carried no prefix at all (`{mesh}.vertices`) and would
+//! have counted as scratch. They were renamed rather than special-cased,
+//! which is the point — see [`Bucket::of`] for the distinction that needs
+//! explaining.
 //!
 //! One relaxed atomic add per allocation and one subtract per free is not a
 //! measurable cost against creating and destroying a Vulkan buffer, which
@@ -28,12 +27,11 @@ use ash::vk;
 use crate::gpu::Context;
 use crate::stats::Memory;
 
-/// Which of [`Memory`]'s five buckets an allocation belongs to.
+/// Which of [`Memory`]'s four buckets an allocation belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Bucket {
     Scene,
     Film,
-    Reservoirs,
     Textures,
     Scratch,
 }
@@ -47,10 +45,6 @@ impl Bucket {
     /// tables (`scene.env.*`) are scene data and stay with the geometry.
     /// Segment matching is what keeps those two apart — a plain string
     /// prefix would swallow `scene.environment` into `scene.env`.
-    ///
-    /// `restir.*` is **live reuse state and nothing else** — that bucket's
-    /// whole job is to price reuse, so the scene-derived light tables the
-    /// estimator reads are named `scene.restir.*` and stay with the scene.
     ///
     /// Anything unrecognized is scratch. That is the honest default: an
     /// uncounted allocation would quietly make the total a lie, and scratch
@@ -70,7 +64,6 @@ impl Bucket {
             ("scene", Some("texture" | "environment")) => Bucket::Textures,
             ("scene" | "accel", _) => Bucket::Scene,
             ("film" | "session" | "tonemap", _) => Bucket::Film,
-            ("restir", _) => Bucket::Reservoirs,
             _ => Bucket::Scratch,
         }
     }
@@ -86,7 +79,6 @@ impl Bucket {
 pub(super) struct Ledger {
     scene: AtomicU64,
     film: AtomicU64,
-    reservoirs: AtomicU64,
     textures: AtomicU64,
     scratch: AtomicU64,
 }
@@ -96,7 +88,6 @@ impl Ledger {
         match bucket {
             Bucket::Scene => &self.scene,
             Bucket::Film => &self.film,
-            Bucket::Reservoirs => &self.reservoirs,
             Bucket::Textures => &self.textures,
             Bucket::Scratch => &self.scratch,
         }
@@ -119,7 +110,6 @@ impl Ledger {
         Memory {
             scene: self.scene.load(Ordering::Relaxed),
             film: self.film.load(Ordering::Relaxed),
-            reservoirs: self.reservoirs.load(Ordering::Relaxed),
             textures: self.textures.load(Ordering::Relaxed),
             scratch: self.scratch.load(Ordering::Relaxed),
             budget,
@@ -192,13 +182,6 @@ mod tests {
         // only whole-segment matching tells `scene.env` from
         // `scene.environment`.
         assert_eq!(Bucket::of("scene.env.marginal"), Bucket::Scene);
-        // A film channel that happens to be about ReSTIR is still film.
-        assert_eq!(Bucket::of("film.restir.debug"), Bucket::Film);
-        // And the reuse state itself is not.
-        assert_eq!(Bucket::of("restir.reservoir.curr"), Bucket::Reservoirs);
-        // But a scene-derived table the estimator merely reads is scene
-        // data — the reservoir bucket prices reuse, not the light list.
-        assert_eq!(Bucket::of("scene.restir.candidates"), Bucket::Scene);
         assert_eq!(Bucket::of("wavefront.queue.ray"), Bucket::Scratch);
         // Staging on its way to or from the host carries the film without
         // being it, so it is scratch by decision, not by oversight.
@@ -208,17 +191,16 @@ mod tests {
         assert_eq!(Bucket::of("something.new"), Bucket::Scratch);
     }
 
-    /// Bytes come back out again — the property that makes the reservoir
-    /// bucket a live cost rather than a high-water mark of everything ever
-    /// allocated.
+    /// Bytes come back out again — the property that makes a bucket a live
+    /// cost rather than a high-water mark of everything ever allocated.
     #[test]
     fn allocations_are_counted_out_as_well_as_in() {
         let ledger = Ledger::default();
-        let bucket = ledger.add("restir.reservoir.curr", 1024);
-        assert_eq!(ledger.read(None).reservoirs, 1024);
-        ledger.add("restir.reservoir.prev", 512);
+        let bucket = ledger.add("film.beauty.sum", 1024);
+        assert_eq!(ledger.read(None).film, 1024);
+        ledger.add("film.albedo.sum", 512);
         assert_eq!(ledger.read(None).total(), 1536);
         ledger.remove(bucket, 1024);
-        assert_eq!(ledger.read(None).reservoirs, 512);
+        assert_eq!(ledger.read(None).film, 512);
     }
 }

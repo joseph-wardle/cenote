@@ -6,22 +6,15 @@
 /// its file. The build embeds them in this order and hot reload recompiles
 /// them in this order. Not listed: shared modules (`pathstate.slang`,
 /// `rng.slang`, `bluenoise.slang`, `color.slang`, `openpbr.slang`, `lights.slang`,
-/// `nee.slang`, `environment.slang`, `scene.slang`, `surface.slang`,
-/// `reservoir.slang`, `reservoir_path.slang`, `restir_scene.slang`,
-/// `restir_mis.slang`, `restir_target.slang`, `restir_pair.slang`,
-/// `restir_reproject.slang`) compile into their importers, and test-only
-/// fixtures (`rng_test.slang`) compile at test time.
-pub const KERNELS: [&str; 13] = [
+/// `nee.slang`, `environment.slang`, `scene.slang`, `surface.slang`) compile
+/// into their importers, and test-only fixtures (`rng_test.slang`) compile at
+/// test time.
+pub const KERNELS: [&str; 8] = [
     "raygen",
     "intersect",
     "shade_miss",
     "shade_surface",
     "trace_shadow",
-    "restir_candidates",
-    "restir_temporal",
-    "restir_spatial_gather",
-    "restir_spatial",
-    "restir_resolve",
     "accumulate",
     "resolve",
     "tonemap",

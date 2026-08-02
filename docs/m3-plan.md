@@ -1,5 +1,12 @@
 # Cenote — M3 Implementation Plan
 
+> **Retired 2026-08-02 (D-157).** The estimator this plan builds was removed from
+> `main` after D-156 measured it 2.6–4.8× less efficient than the path tracer at
+> equal wall clock. The implementation, its harness, and its goldens live on the
+> `restir-archive` branch. This plan is kept as the record of how it was built and
+> why each choice was made — every decision in it stood up; the estimator simply
+> did not fit a renderer that accumulates.
+
 *Decisions locked 2026-07-11 via structured interview, preceded by a sourced research
 pass over ReSTIR-DI (Bitterli 2020) and GRIS/"Foundations of ReSTIR" (Lin 2022), the
 defensive pairwise-MIS formulation (Bitterli 2022 thesis), Wyman–Panteleev presampled

@@ -1,5 +1,15 @@
 # Cenote — M7 Implementation Plan: Lean & Interactive
 
+> **Course change, 2026-08-02 (D-156, D-157).** §3.5.3 measured reuse at equal wall
+> clock and it lost — 2.6–4.8× less efficient than the path tracer beneath it. Decision
+> 2 below ("one always-on ReSTIR path, PT demoted to CI oracle") is therefore falsified,
+> and ReSTIR has been removed from `main` (preserved on `restir-archive`). The path
+> tracer *is* the spine; steps 7a/7c/7d as written no longer have a subject. What
+> survives unchanged is the milestone's actual goal — cheap while moving, fast to
+> settle — and its instrument: 7-0's measurement spine, which is what made the course
+> change visible. The rungs below are kept as written; read them as the plan that
+> produced the measurement, not as the plan still being executed.
+
 *Decisions locked 2026-08-01 via structured interview, after an honest look at where the
 renderer sits: correct, well-tested, and **slower with ReSTIR on than off**. The
 milestone's premise is the user's own: "a cool renderer, but needlessly verbose, poorly
@@ -27,7 +37,7 @@ Three framing notes, because they govern every choice below:
 | # | Decision | Choice | Rationale |
 |---|---|---|---|
 | 1 | Metric | **Both** cheap-while-moving and fast-to-settle | The interactive claim is two claims; optimizing one alone is how the current state happened |
-| 2 | Spine | **One always-on, motion-scaled ReSTIR path.** Plain PT is demoted to CI oracle and reference | Two first-class estimators is the split brain. The oracle role is the one PT must keep (D-090) |
+| 2 | Spine | ~~**One always-on, motion-scaled ReSTIR path.** Plain PT demoted to CI oracle~~ — **falsified by §3.5.3 (D-156)**; PT is the spine, ReSTIR is gone (D-157) | Two first-class estimators was the split brain; the right resolution turned out to be the other one |
 | 3 | Moving preview | Fast GPU denoiser (NRD leads; research spike is 7b). OIDN stays for stills. **The final frame must converge without a denoiser** | A denoiser is how every production renderer makes motion readable — but it must never be load-bearing for correctness |
 | 4 | Candidate count | `M` becomes a **tuned, motion-scaled parameter** (1–2 moving, 8+ still), not `const 16` | The single largest unnecessary cost, and the one most directly against the interactivity goal |
 | 5 | Appetite | Rearchitect the loop, debloat hard — **gated on measurement first** | The user's call, stated plainly; the gate is what keeps it from being a rewrite on a hunch |

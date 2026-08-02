@@ -67,11 +67,6 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     let bounce = params.packed & 0xff;
     let maxBounces = (params.packed >> 8) & 0xff;
     let lightSampling = (params.packed >> 16) & 0xff;
-    // Bit 24 marks ReSTIR mode. The unified reservoir owns the whole path
-    // integral at the primary hit (D-134), so this kernel keeps only the
-    // directly visible emission and the guides there — no NEE, no continuation
-    // — and, with no rays pushed, is never dispatched past bounce 0.
-    let restirPrimary = ((params.packed >> 24) & 1) != 0 && bounce == 0;
     uint path = params.hits.entries[tid.x];
     uint pixel = params.paths.pixel[path];
     Hit hit = params.paths.hit[path];
@@ -175,10 +170,9 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     }
 
     // Next-event estimation: one candidate connection, drawn and weighted by
-    // the shared `sampleNee` (nee.slang — one copy with the ReSTIR tail, so
-    // the two estimators can never drift). The contribution is fully weighted
+    // the shared `sampleNee` (nee.slang). The contribution is fully weighted
     // there; trace_shadow just adds it if the connection is unoccluded.
-    if (!restirPrimary && lightSampling != LIGHT_SAMPLING_BSDF
+    if (lightSampling != LIGHT_SAMPLING_BSDF
         && (params.scene.lightCount > 0 || params.scene.env.selectProb > 0.0)) {
         let uLight = sample_1d(pixel, params.sampleIndex,
                                bounceDimension(bounce, NEE_LIGHT));
@@ -202,21 +196,6 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
         }
     }
 
-    // ReSTIR mode owns the *whole* path integral at the primary hit through the
-    // unified reservoir (D-134): the candidate stage already traced the indirect
-    // tail and the reuse stages resolve it, so the continuation stops here — no
-    // scatter, no next bounce. What stays with this kernel at the primary hit is
-    // the directly-visible emission (kept above, the reservoir's deliberate
-    // exclusion, D-088) and the denoiser guides, which record the primary
-    // surface in full since nothing rides onward. This is the pixel's terminal
-    // add.
-    if (restirPrimary) {
-        if (aovOn && any(guide > 0.0)) {
-            recordGuides(params.aov, pixel, guide, aovAlbedo, shading);
-        }
-        params.radiance[pixel] += float4(contribution, 1.0);
-        return;
-    }
 
     // Scatter off the mixture: one technique drawn by BSDF_LOBE (the
     // pick's leftover, rescaled, drives the glass technique's

@@ -818,9 +818,8 @@ public struct BsdfSample {
 // world direction leaves through the same geometric face the shading frame put
 // it on. Directions valid in the shading frame but passing through the real
 // triangle are the standard shading-normal trade — a sliver of energy lost
-// near silhouettes, never light through walls — and every estimator that
-// scatters (`shade_surface`, the ReSTIR candidate draw, its inline tail) must
-// reject them by this one test, or their MIS densities silently drift apart.
+// near silhouettes, never light through walls — and every scatter must reject
+// them by this one test, or its MIS densities silently drift apart.
 public bool scatterExitsSurface(BsdfSample scatter, float3 wiWorld,
                                 float3 geometricNormal) {
     return scatter.pdf > 0.0 && scatter.wi.z != 0.0

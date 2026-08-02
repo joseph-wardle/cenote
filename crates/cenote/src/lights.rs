@@ -180,9 +180,7 @@ fn record(
 /// indexing depends on it), then the delta lights, each selected in
 /// proportion to its [`power`] through a Walker/Vose alias table — one slot
 /// per light, carried on the light's own record, selected in O(1). This is
-/// the list M2 next-event estimation draws from; M3 keeps it for secondary
-/// bounces and the brute-force reference, and splits the primary-hit
-/// reservoir candidates off into [`candidate_table`] / [`delta_table`].
+/// the list next-event estimation draws from at every bounce.
 ///
 /// Degenerate triangles and an all-dark list are legal: their selection
 /// probability (and `pdf`) is zero, so sampling skips whatever it draws
@@ -193,32 +191,9 @@ pub(crate) fn build(triangles: &[TriangleLight], deltas: &[DeltaLight]) -> Vec<L
     finish_alias(raw_records(triangles, deltas))
 }
 
-/// The reservoir-candidate light table: the emissive triangles `ReSTIR`'s
-/// initial RIS resamples, power-normalized among *themselves* — the
-/// normalization the combined [`build`] can't give, because it spreads each
-/// triangle's share across the delta lights too, so a triangle slot there can
-/// alias into a delta and a triangle-only draw is impossible. The
-/// HDRI/environment is the candidate set's other member, selected on a
-/// separate coin flip (its share weighed against this table's [`total_power`]);
-/// delta lights are excluded deliberately (D-088) — they carry no Monte-Carlo
-/// noise, so they stay on exact additive NEE outside the reservoir, in
-/// [`delta_table`].
-pub(crate) fn candidate_table(triangles: &[TriangleLight]) -> Vec<LightRecord> {
-    finish_alias(raw_records(triangles, &[]))
-}
-
-/// The delta-light table: the analytic distant/point lights, power-normalized
-/// among themselves, for the exact additive next-event term the reservoir's
-/// resolve pass adds *outside* the reservoir (D-088). Split from the combined
-/// [`build`] so the [`candidate_table`] above stays delta-free.
-pub(crate) fn delta_table(deltas: &[DeltaLight]) -> Vec<LightRecord> {
-    finish_alias(raw_records(&[], deltas))
-}
-
 /// Finish a raw record list into a power-proportional alias table: fill each
 /// record's selection `pdf` (per kind) and its Walker/Vose alias slot,
-/// normalized over exactly the records handed in — so the combined list and
-/// each `ReSTIR` partition table normalize identically, each over its own set.
+/// normalized over exactly the records handed in.
 /// An all-dark list keeps its never-sampled defaults (pdf 0, threshold 1).
 fn finish_alias(mut records: Vec<LightRecord>) -> Vec<LightRecord> {
     let powers: Vec<f64> = records.iter().map(power).collect();
@@ -540,119 +515,4 @@ mod tests {
         assert!(total_power(&triangles, &[]).abs() < 1e-12);
     }
 
-    /// The reservoir-candidate table holds exactly the triangles, and
-    /// normalizes their selection over *themselves*, not the combined list.
-    /// With a delta light present to carry off part of the combined mass,
-    /// each triangle's candidate pdf is strictly larger than its combined pdf
-    /// — the dilution the candidate table refuses — while the candidate shares
-    /// still sum to one across the triangles alone.
-    #[test]
-    fn candidate_table_normalizes_over_triangles_alone() {
-        let triangles = [
-            triangle([Vec3::ZERO, Vec3::X * 2.0, Vec3::Z], Vec3::splat(3.0), 0, 0),
-            triangle([Vec3::ZERO, Vec3::X, Vec3::Z * 2.0], Vec3::splat(1.0), 4, 0),
-        ];
-        // A delta light with real power, so it dilutes the combined
-        // normalization the candidate table must ignore.
-        let deltas = [DeltaLight::Point {
-            position: Vec3::Y,
-            intensity: Vec3::splat(2.0),
-        }];
-
-        let candidates = candidate_table(&triangles);
-        assert_eq!(candidates.len(), 2, "only the triangles are candidates");
-        assert!(candidates.iter().all(|record| record.kind == KIND_TRIANGLE));
-
-        // Selection is exact over the triangle-only power total.
-        let total = total_power(&triangles, &[]);
-        for (index, record) in candidates.iter().enumerate() {
-            let want = power(record) / total;
-            let got = selection_probability(&candidates, index as u32);
-            assert!((got - want).abs() < 1e-6, "triangle {index}: {got} vs {want}");
-        }
-
-        // Combined with the delta, each triangle's pdf shrinks: the combined
-        // normalization hands part of every share to the delta. The candidate
-        // table refuses that dilution, so its pdf is strictly larger.
-        let combined = build(&triangles, &deltas);
-        for index in 0..candidates.len() {
-            assert!(
-                candidates[index].pdf > combined[index].pdf,
-                "candidate pdf {} must exceed delta-diluted combined pdf {}",
-                candidates[index].pdf,
-                combined[index].pdf
-            );
-        }
-    }
-
-    /// The delta table holds the analytic lights alone, its selection
-    /// normalized over just them; a delta's stored pdf is the selection
-    /// probability itself (there is no area to divide through).
-    #[test]
-    fn delta_table_normalizes_over_deltas_alone() {
-        let deltas = [
-            DeltaLight::Distant {
-                direction: -Vec3::Y,
-                irradiance: Vec3::splat(1.0),
-            },
-            DeltaLight::Point {
-                position: Vec3::Y * 3.0,
-                intensity: Vec3::splat(0.5),
-            },
-        ];
-        let table = delta_table(&deltas);
-        assert_eq!(table.len(), 2);
-        assert!(table.iter().all(|record| record.kind != KIND_TRIANGLE));
-
-        let total = total_power(&[], &deltas);
-        for (index, record) in table.iter().enumerate() {
-            let want = power(record) / total;
-            // A delta's stored pdf is its selection probability outright.
-            assert!((f64::from(record.pdf) - want).abs() < 1e-6);
-            let got = selection_probability(&table, index as u32);
-            assert!((got - want).abs() < 1e-6, "delta {index}: {got} vs {want}");
-        }
-    }
-
-    /// The partition is a renormalization, not a reshape: concatenating the
-    /// candidate and delta tables reproduces the combined list record for
-    /// record, byte-identical in geometry and identity — only the sampling
-    /// fields (pdf, alias slot) differ, because each side normalizes over its
-    /// own set. This is the contract step 3.2 leans on: candidate slot `i` is
-    /// triangle `i`.
-    #[test]
-    fn partition_preserves_geometry_and_identity() {
-        let triangles = [
-            triangle([Vec3::ZERO, Vec3::X, Vec3::Z], Vec3::splat(2.0), 0, 0),
-            triangle(
-                [Vec3::Y, Vec3::Y + Vec3::X, Vec3::Y + Vec3::Z],
-                Vec3::splat(1.0),
-                3,
-                0,
-            ),
-        ];
-        let deltas = [DeltaLight::Distant {
-            direction: -Vec3::Y,
-            irradiance: Vec3::splat(1.0),
-        }];
-
-        let combined = build(&triangles, &deltas);
-        let mut partition = candidate_table(&triangles);
-        partition.extend(delta_table(&deltas));
-        assert_eq!(combined.len(), partition.len());
-
-        for (from_combined, from_partition) in combined.iter().zip(&partition) {
-            // Copy the (legitimately renormalized) sampling fields across, then
-            // demand the rest be byte-identical — geometry, emission, identity.
-            let mut normalized = *from_partition;
-            normalized.pdf = from_combined.pdf;
-            normalized.alias_threshold = from_combined.alias_threshold;
-            normalized.alias_index = from_combined.alias_index;
-            assert_eq!(
-                bytemuck::bytes_of(from_combined),
-                bytemuck::bytes_of(&normalized),
-                "partition must preserve everything but the sampling fields"
-            );
-        }
-    }
 }

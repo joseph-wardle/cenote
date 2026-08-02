@@ -17,7 +17,7 @@
 use std::path::Path;
 
 use cenote::output::{read_exr, write_exr};
-use cenote::render::{RenderMode, Renderer};
+use cenote::render::Renderer;
 use cenote::scene::Scene;
 
 mod common;
@@ -27,11 +27,9 @@ use common::{accumulate, test_context};
 /// of the demo image, small enough to live in the repo forever.
 const SIZE: u32 = 256;
 
-/// Sample count for the accumulated goldens (the many-light reference and
-/// both `ReSTIR` pins). Enough that the image is settled — a representative
-/// pin rather than single-sample noise — and, for `ReSTIR`, enough frames
-/// that temporal reuse warms up and spatial reuse runs; small enough that
-/// three GPU renders stay quick. Deterministic either way: a reset replays
+/// Sample count for the accumulated many-light golden. Enough that the image
+/// is settled — a representative pin rather than single-sample noise — and
+/// small enough that the render stays quick. Deterministic: a reset replays
 /// the exact sequence, so the golden reproduces bit for bit.
 const ACCUM_SPP: u32 = 32;
 
@@ -76,12 +74,10 @@ fn accumulated_demo_matches_golden() {
     compare_with_golden("demo-64spp", &actual);
 }
 
-/// The many-light validation scene by brute force: the path tracer's
-/// NEE+MIS estimator draws one of the 256 emitters per sample and shadows
-/// it. This is the reference `ReSTIR` is measured against — the
-/// ground-truth image both estimators must converge to (D-085) — pinned
-/// here so a change to the reference itself surfaces before it silently
-/// moves the target.
+/// The many-light validation scene: the NEE+MIS estimator draws one of the
+/// 256 emitters per sample and shadows it. The case that stresses the light
+/// list's power-proportional selection hardest, pinned so a change to the
+/// alias table surfaces here rather than as a slow drift in convergence.
 #[test]
 fn many_lights_matches_golden() {
     let Some(gpu) = test_context() else {
@@ -91,66 +87,6 @@ fn many_lights_matches_golden() {
     let renderer = Renderer::new(&gpu).expect("renderer");
     let actual = accumulate(&gpu, &renderer, &scene, SIZE, ACCUM_SPP);
     compare_with_golden("many-lights", &actual);
-}
-
-/// The flagship demo through `ReSTIR`-DI — the first golden to pin the
-/// `ReSTIR` estimator's output. Spatial and temporal reuse both on (the
-/// default, flagship config), so the reservoir stages, pairwise MIS, and
-/// the reproject warm-start all sit under the pin: a regression in any of
-/// them moves this image while the path-traced `demo` goldens stay put.
-#[test]
-fn restir_demo_matches_golden() {
-    let Some(gpu) = test_context() else {
-        return;
-    };
-    let scene = Scene::demo(&gpu).expect("demo scene");
-    let mut renderer = Renderer::new(&gpu).expect("renderer");
-    renderer.set_render_mode(RenderMode::Restir);
-    let actual = accumulate(&gpu, &renderer, &scene, SIZE, ACCUM_SPP);
-    compare_with_golden("restir-demo", &actual);
-}
-
-/// The many-light scene through `ReSTIR` — the estimator on the case it
-/// exists for, where the brute-force single draw starves among hundreds of
-/// lights and resampling pays off. Pinned deterministically here; that it
-/// *converges to* the `many-lights` reference above is the convergence
-/// test's job (step 7 part 3), not this regression pin's.
-#[test]
-fn restir_many_lights_matches_golden() {
-    let Some(gpu) = test_context() else {
-        return;
-    };
-    let scene = Scene::many_lights(&gpu).expect("many-lights scene");
-    let mut renderer = Renderer::new(&gpu).expect("renderer");
-    renderer.set_render_mode(RenderMode::Restir);
-    let actual = accumulate(&gpu, &renderer, &scene, SIZE, ACCUM_SPP);
-    compare_with_golden("restir-many-lights", &actual);
-}
-
-/// The D-130 degenerate pin (M6 step 6a): with CV shading toggled off, the
-/// estimator must *be* the pre-6a survivor-shading `ReSTIR` — bit for bit,
-/// not perceptually. The survivor goldens are byte copies of the `ReSTIR`
-/// pins as they stood before 6a landed, so this test is each later rung's
-/// standing no-op proof: the vector-weight lane (and, from 6b, the control
-/// variate) may only ever *add* to the toggle-on image, never move the
-/// toggle-off one.
-#[test]
-fn restir_survivor_toggle_reproduces_the_pre_cv_estimator() {
-    let Some(gpu) = test_context() else {
-        return;
-    };
-    let pin = |name: &str, scene: &Scene| {
-        let mut renderer = Renderer::new(&gpu).expect("renderer");
-        renderer.set_render_mode(RenderMode::Restir);
-        renderer.set_cv_shading(false);
-        let actual = accumulate(&gpu, &renderer, scene, SIZE, ACCUM_SPP);
-        compare_bit_identical(name, &actual);
-    };
-    pin("restir-demo-survivor", &Scene::demo(&gpu).expect("demo scene"));
-    pin(
-        "restir-many-lights-survivor",
-        &Scene::many_lights(&gpu).expect("many-lights scene"),
-    );
 }
 
 /// Compare a fresh `SIZE`² render against `tests/golden/{name}.exr` — or,
@@ -200,44 +136,6 @@ fn compare_with_golden(name: &str, actual: &[f32]) {
         golden_path.display(),
         actual_path.display(),
         heatmap_path.display(),
-    );
-}
-
-/// Compare bit-for-bit against `tests/golden/{name}.exr` — the exact-equality
-/// variant of [`compare_with_golden`], for the survivor-toggle pin alone. Its
-/// claim is that the toggle *is* the prior estimator, which the renderer's
-/// bitwise determinism makes checkable exactly; a FLIP threshold would wave
-/// through a subtly different one. The cost is the driver/compiler FP
-/// sensitivity the FLIP goldens deliberately shed (see the module header):
-/// when an update reorders float math, regenerate every golden together and
-/// the eyeball falls on the FLIP pins.
-fn compare_bit_identical(name: &str, actual: &[f32]) {
-    let Some(golden_path) = update_or_path(name, actual) else {
-        return;
-    };
-    let (width, height, golden) = read_exr(&golden_path).unwrap_or_else(|err| {
-        panic!(
-            "can't read golden {}: {err}\n\
-             if it doesn't exist yet: UPDATE_GOLDENS=1 cargo test -p cenote --test golden",
-            golden_path.display()
-        )
-    });
-    assert_eq!(
-        (width, height),
-        (SIZE, SIZE),
-        "golden has stale dimensions — regenerate with UPDATE_GOLDENS=1"
-    );
-    let differing = actual
-        .iter()
-        .zip(&golden)
-        .filter(|(a, g)| a.to_bits() != g.to_bits())
-        .count();
-    assert!(
-        differing == 0,
-        "survivor-toggle render differs from {} in {differing} of {} floats — \
-         the CV toggle no longer reproduces the survivor estimator bit for bit",
-        golden_path.display(),
-        golden.len(),
     );
 }
 

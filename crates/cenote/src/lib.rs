@@ -43,7 +43,6 @@
 //! between the two surfaces as a failed golden-image test, never as silent
 //! corruption.
 
-mod bluenoise;
 pub mod color;
 #[cfg(feature = "denoise")]
 pub mod denoise;
@@ -54,10 +53,8 @@ pub mod gpu;
 pub mod lights;
 pub mod material;
 pub mod output;
-mod pairing;
 mod ply;
 pub mod render;
-mod restir;
 pub mod scene;
 pub mod shaders;
 pub mod stats;

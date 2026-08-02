@@ -7,9 +7,8 @@
 // rather than recovered as f32 CDF differences.
 //
 // `sample()` and `pdf()` are deliberately separate entry points: sampling
-// serves next-event estimation now, and the standalone pdf query is what
-// BSDF-strategy MIS weights need — and what every ReSTIR target-function
-// evaluation will ask for later.
+// serves next-event estimation, and the standalone pdf query is what
+// BSDF-strategy MIS weights need.
 //
 // Directions map to the image with +Y up: v = θ/π from the zenith, u wraps
 // the azimuth with the image's horizontal center facing −Z (the way the
@@ -139,12 +138,10 @@ public struct Environment {
 
     // Reconnect to a stored image point: the direction, radiance, and
     // solid-angle pdf for a candidate held as `uv` rather than a primary draw.
-    // ReSTIR stores the env candidate's `uv` (a point on the image, the
-    // analogue of a triangle's barycentrics), so two candidate sources share
-    // one reconstruction: a next-event draw (via `sample`, which fills `uv`)
-    // and a BSDF-sampled ray that escaped to the sky (via `locate`, which
-    // inverts its direction to `uv`). `restir_resolve` reconnects the survivor
-    // through here. The texel indices recover from `uv` exactly as `pdf` below.
+    // Two sources share one reconstruction: a next-event draw (via `sample`,
+    // which fills `uv`) and a BSDF-sampled ray that escaped to the sky (via
+    // `locate`, which inverts its direction to `uv`). The texel indices recover
+    // from `uv` exactly as `pdf` below.
     public EnvironmentSample connect(float2 uv) {
         let sinTheta = sin(PI * uv.y);
         let col = min(uint(uv.x * float(width)), width - 1);

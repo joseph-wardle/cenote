@@ -256,16 +256,6 @@ pub struct Frame {
     pub size: (u32, u32),
     /// Samples in the film's average after it.
     pub samples: u32,
-    /// The initial-RIS candidate count M this sample was drawn with, or `None`
-    /// in path-tracer mode, which has no reservoirs to fill.
-    ///
-    /// On a restart frame it names which arm produced the measurement — 1 is
-    /// the cheap restart (M7 step 7a), 16 the pinned pre-7a renderer — which is
-    /// otherwise nowhere in a sidecar. It also makes the kernel breakdown
-    /// readable, now that `restir_candidates` costs a different amount on a
-    /// restart than after.
-    #[serde(default)]
-    pub candidates: Option<u32>,
 }
 
 impl Frame {
@@ -325,9 +315,6 @@ pub struct Memory {
     pub scene: u64,
     /// The film: accumulation buffers, AOVs, and the published frames.
     pub film: u64,
-    /// `ReSTIR` reuse state — the reservoir copies and the G-buffers.
-    /// The price of reuse, stated as a number rather than assumed.
-    pub reservoirs: u64,
     /// Decoded and compressed material textures.
     pub textures: u64,
     /// The wavefront's path pool and queues, plus host staging on its way
@@ -345,16 +332,15 @@ impl Memory {
     /// Everything the renderer is holding.
     #[must_use]
     pub fn total(&self) -> u64 {
-        self.scene + self.film + self.reservoirs + self.textures + self.scratch
+        self.scene + self.film + self.textures + self.scratch
     }
 
     /// The named buckets, largest concern first, for display.
     #[must_use]
-    pub fn buckets(&self) -> [(&'static str, u64); 5] {
+    pub fn buckets(&self) -> [(&'static str, u64); 4] {
         [
             ("scene", self.scene),
             ("film", self.film),
-            ("reservoirs", self.reservoirs),
             ("textures", self.textures),
             ("scratch", self.scratch),
         ]
@@ -447,15 +433,6 @@ pub struct Report {
     pub interactivity: Interactivity,
     /// Peak memory per bucket over the run.
     pub peak_memory: Memory,
-    /// The initial-RIS candidate count M the run's *last* sample was drawn
-    /// with — `None` for a path-traced run.
-    ///
-    /// The last, because it is the run's steady state: every run's opening frame
-    /// is cold and so never the cheap one (M7 step 7a), leaving the first sample
-    /// unable to name the arm. A `--restart-every-sample` capture reads 1 with
-    /// the cheap restart on and 16 with it pinned.
-    #[serde(default)]
-    pub candidates: Option<u32>,
 }
 
 impl Report {
@@ -510,9 +487,6 @@ pub struct Recorder {
     /// The last frame that carried a breakdown, so [`Frame::bound`] on it
     /// compares a GPU time and a CPU time from the same sample.
     latest: Frame,
-    /// [`Report::candidates`] — the most recent sample's, and see there for why
-    /// the most recent rather than the first.
-    last_candidates: Option<u32>,
 }
 
 impl Recorder {
@@ -545,7 +519,6 @@ impl Recorder {
             breakdown_cpu: Duration::ZERO,
             totals: PassTimings::default(),
             latest: Frame::default(),
-            last_candidates: None,
         }
     }
 
@@ -574,7 +547,6 @@ impl Recorder {
         if self.interactivity.to_first_ray.is_none() {
             self.interactivity.to_first_ray = Some(self.origin.elapsed());
         }
-        self.last_candidates = frame.candidates;
         if self.awaiting_first_pixel {
             self.interactivity.to_first_pixel = Some(self.reset.elapsed());
             self.awaiting_first_pixel = false;
@@ -614,7 +586,6 @@ impl Recorder {
         self.peak_memory = Memory {
             scene: self.peak_memory.scene.max(memory.scene),
             film: self.peak_memory.film.max(memory.film),
-            reservoirs: self.peak_memory.reservoirs.max(memory.reservoirs),
             textures: self.peak_memory.textures.max(memory.textures),
             scratch: self.peak_memory.scratch.max(memory.scratch),
             budget: memory.budget.or(self.peak_memory.budget),
@@ -662,7 +633,6 @@ impl Recorder {
             bound: Bound::of(sampling, gpu),
             interactivity: self.interactivity,
             peak_memory: self.peak_memory,
-            candidates: self.last_candidates,
         }
     }
 
@@ -757,7 +727,6 @@ mod tests {
             passes,
             size: (8, 8),
             samples,
-            candidates: None,
         }
     }
 
@@ -810,7 +779,6 @@ mod tests {
             passes: breakdown(&[("intersect", 1000)]),
             size: (64, 64),
             samples: 1,
-            candidates: None,
         };
         assert_eq!(frame.bound(), Bound::Cpu);
         assert_eq!(frame.gpu(), Duration::from_millis(1));
@@ -830,7 +798,6 @@ mod tests {
             passes: PassTimings::default(),
             size: (64, 64),
             samples: 1,
-            candidates: None,
         };
         assert_eq!(frame.bound(), Bound::Unknown);
     }
@@ -939,18 +906,18 @@ mod tests {
         let mut recorder = Recorder::new();
         recorder.memory(Memory {
             scene: 100,
-            reservoirs: 900,
+            textures: 900,
             ..Memory::default()
         });
         recorder.memory(Memory {
             scene: 500,
-            reservoirs: 0,
+            textures: 0,
             ..Memory::default()
         });
         let peak = recorder.report(String::new(), String::new()).peak_memory;
         assert_eq!(peak.scene, 500);
-        assert_eq!(peak.reservoirs, 900, "a freed bucket keeps its peak");
-        assert_eq!(recorder.stats().memory.reservoirs, 0, "live is live");
+        assert_eq!(peak.textures, 900, "a freed bucket keeps its peak");
+        assert_eq!(recorder.stats().memory.textures, 0, "live is live");
     }
 
     /// A report round-trips through RON, and durations read as plain
@@ -960,7 +927,7 @@ mod tests {
         let mut recorder = Recorder::new();
         recorder.record(Frame {
             size: (128, 64),
-            ..sample(5, breakdown(&[("restir_spatial", 2500)]), 4)
+            ..sample(5, breakdown(&[("shade_surface", 2500)]), 4)
         });
         let report = recorder.report("test device".into(), "brass-room".into());
 

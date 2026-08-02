@@ -46,7 +46,7 @@ void trace_shadow(uint3 tid: SV_DispatchThreadID) {
     // Fractional-opacity candidates that aren't the target pass through, each
     // multiplying its transparency into the connection; the target itself
     // commits, opaque or not. The identity, opacity, and epsilon-free reasoning
-    // all live in `shadowVisibility` (scene.slang), shared with restir_resolve.
+    // all live in `shadowVisibility` (scene.slang).
     let attenuation = shadowVisibility(sceneTlas, params.scene, ray,
                                        shadow.light, shadow.primitive);
     if (attenuation > 0.0) {

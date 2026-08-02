@@ -140,8 +140,7 @@ pub enum Pass<'a> {
         value: u32,
     },
     /// Copy a byte range from one buffer to another (`vkCmdCopyBuffer`) — how
-    /// the render thread lifts a single-shot buffer (the `ReSTIR` debug surface)
-    /// into a published frame slot without a resolve pass.
+    /// a single-shot buffer is lifted somewhere else without a resolve pass.
     CopyBuffer {
         /// Source (needs `TRANSFER_SRC` usage).
         src: &'a Buffer,
@@ -511,8 +510,6 @@ impl Context {
                     other.tlas.handle() == scene.tlas.handle()
                         && std::ptr::eq(other.environment, scene.environment)
                         && std::ptr::eq(other.textures, scene.textures)
-                        && std::ptr::eq(other.blue_noise, scene.blue_noise)
-                        && std::ptr::eq(other.pairing, scene.pairing)
                 }),
             "one pipeline, two scenes — its single descriptor set can hold only one"
         );
@@ -523,22 +520,13 @@ impl Context {
     /// set: the TLAS at binding 0, the environment at binding 1, the
     /// bindless texture table at binding 2 — only as far as the scene
     /// fills it, since the binding is partially bound and kernels never
-    /// index past what the material records name — the blue-noise mask at
-    /// binding 3, and the pairing textures at binding 4.
+    /// index past what the material records name.
     fn write_scene_descriptors(&self, pipeline: &ComputePipeline, scene: SceneBindings) {
         let descriptors = pipeline.scene.as_ref().expect("checked against bindings");
         let handles = [scene.tlas.handle()];
         let mut tlas_write = vk::WriteDescriptorSetAccelerationStructureKHR::default()
             .acceleration_structures(&handles);
         let image_info = scene.environment.descriptor();
-        let blue_noise_info = vk::DescriptorBufferInfo::default()
-            .buffer(scene.blue_noise.handle())
-            .offset(0)
-            .range(vk::WHOLE_SIZE);
-        let pairing_info = vk::DescriptorBufferInfo::default()
-            .buffer(scene.pairing.handle())
-            .offset(0)
-            .range(vk::WHOLE_SIZE);
         let mut writes = vec![
             vk::WriteDescriptorSet::default()
                 .dst_set(descriptors.set)
@@ -553,19 +541,6 @@ impl Context {
                 .dst_binding(1)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .image_info(slice::from_ref(&image_info)),
-            // The blue-noise mask (D-095) at binding 3 and the pairing
-            // textures (M6 step 7a) at binding 4 — renderer-global storage
-            // buffers, always present.
-            vk::WriteDescriptorSet::default()
-                .dst_set(descriptors.set)
-                .dst_binding(3)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(slice::from_ref(&blue_noise_info)),
-            vk::WriteDescriptorSet::default()
-                .dst_set(descriptors.set)
-                .dst_binding(4)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(slice::from_ref(&pairing_info)),
         ];
         if !scene.textures.is_empty() {
             writes.push(

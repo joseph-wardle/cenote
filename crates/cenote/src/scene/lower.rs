@@ -80,9 +80,6 @@ impl HostScene {
 /// placements lowers to N specs, and the flattened position is the TLAS
 /// custom index everywhere downstream.
 pub(super) struct InstanceSpec {
-    /// The element's light-identity name, `name#i` — per placement, so an
-    /// emissive copy's reservoir history is its own.
-    pub(super) name: String,
     pub(super) mesh: String,
     pub(super) transform: Mat4,
     pub(super) material: Material,
@@ -315,7 +312,7 @@ fn lower_instances(
 ) -> Result<(Vec<InstanceSpec>, Vec<TriangleLight>)> {
     let mut instances = Vec::with_capacity(description.instances().len());
     let mut triangle_lights = Vec::new();
-    for (name, instance) in description.instances() {
+    for instance in description.instances().values() {
         // Apply validated the references and every transform, so lookups
         // can't miss and the inverses the records need exist.
         let material = materials[instance.material.as_str()];
@@ -329,7 +326,7 @@ fn lower_instances(
         } else {
             None
         };
-        for (element, transform) in instance.transforms.iter().enumerate() {
+        for transform in &instance.transforms {
             let index = instances.len() as u32;
             let transform = transform.to_mat4();
             if let Some((positions, triangles)) = &geometry {
@@ -342,7 +339,6 @@ fn lower_instances(
                 ));
             }
             instances.push(InstanceSpec {
-                name: format!("{name}#{element}"),
                 mesh: instance.mesh.clone(),
                 transform,
                 material,
@@ -923,8 +919,6 @@ mod tests {
             .expect("valid data");
         let host = host(&description).expect("an instanced emitter lowers");
         assert_eq!(host.instances.len(), 2);
-        assert_eq!(host.instances[0].name, "thing#0");
-        assert_eq!(host.instances[1].name, "thing#1");
         // One triangle × two placements: a light record each, tied to its
         // own flattened index, its corners under its own placement.
         assert_eq!(host.triangle_lights.len(), 2);

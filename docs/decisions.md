@@ -4192,3 +4192,56 @@ shared ReSTIR reference — measures 1.65×. Either the shared reference deflate
 error or cross-referencing inflates it through a mean disagreement. Not separated, and it
 does not bear on the verdict above, which holds at every budget on both scenes under either
 protocol. It does bear on how large the gate's headline margin really is.
+
+### D-157: ReSTIR is removed — the estimator is preserved on a branch, the renderer keeps the path tracer
+
+**What happened.** D-156 measured reuse at equal wall clock and it lost: 2.6× less
+efficient than the path tracer on many-lights, ~4.8× on indirect-glossy, because a
+reservoir sample cost 5–6× what it saved. That falsified M7 decision 2 (one always-on
+ReSTIR path, PT demoted to CI oracle). This entry is the consequence: ReSTIR is out of
+the tree entirely, and the path tracer is the renderer.
+
+**Preserved, not destroyed.** The complete implementation — M3's DI reservoirs, M6's
+path reuse with reconnection/replay shifts and ReSTCV, the whole validation harness,
+every golden, and the measurements that retired it — is the `restir-archive` branch,
+pushed before a line was deleted. Nothing about it was wrong. It was unbiased, gated
+against brute force on two regimes, and genuinely better per *sample*. It was the wrong
+shape for a renderer that accumulates against a strong NEE+MIS baseline with no frame
+budget and no denoiser.
+
+**What came out.** 21 shaders and 4 Rust modules deleted outright; ~2,300 lines of
+ReSTIR tests, the 5 reservoir kernels, `RenderMode`, `DebugView`, and six estimator
+toggles across `Renderer`, `Session`, the CLI, and the viewer. `wavefront.rs` went from
+4,833 lines to 1,579.
+
+**And what came out with it, which was the surprise.** Removing the consumer made a
+second layer dead, none of it obviously ReSTIR-shaped from the outside:
+
+- **The blue-noise mask** (D-095) and `bluenoise.slang`. The sample-index ranking was
+  wired into the reservoir stages only — no path-tracer kernel ever imported it.
+- **Descriptor set 0, bindings 3 and 4.** Their only tenants were that mask and the
+  pairing textures, so the binding model lost a third of its width.
+- **`rng.slang`'s replay re-key and ranked sampling** (D-138): with no shift to replay
+  a prefix for, `pathReplaySeed`/`replay_*`/`sample_ranked_*` had no callers.
+- **The stable light-identity registry**, and with it `Scene::epoch` and
+  `InstanceSpec::name` — the epoch counter existed for the temporal epoch gate and
+  nothing else, so scene edits no longer count builds.
+- **The tonemap's passthrough path**, which existed to present the debug false-colour.
+- **The `reservoirs` memory bucket**, `stats::Frame::candidates`, and the light list's
+  `candidate_table`/`delta_table` partition.
+- **Three `#[expect(clippy::…)]` attributes** that had been suppressing lints the
+  estimator toggles caused (`struct_excessive_bools` twice, `too_many_lines` once).
+
+That second layer is the honest measure of how deep a "pluggable" estimator actually
+reaches. It was not pluggable; it was load-bearing in eight places that never said so.
+
+**What was kept, deliberately.** `convergence.rs` was rewritten rather than deleted: its
+job — pin that the estimator converges, and at ~1/N — still applies to the surviving
+one, and it now asserts that on both regimes (measured 5.6× and 5.1× error reduction for
+4× the samples, the Sobol sequence beating 1/N slightly). `decisions.md` and the M3/M6
+plans stay as written: a log that deletes its own history is worthless, and D-156 is
+*why* this happened. `deferrals.md`'s reuse section was retired per that file's own
+not-append-only rule, with the revival trigger restated as a change in the underlying
+trade rather than a feature gap.
+
+**Verified.** 254 tests pass, clippy clean, release build clean, demo renders.

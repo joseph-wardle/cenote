@@ -1,28 +1,19 @@
-//! Convergence test: the quantitative half of M3's validation harness.
+//! Convergence test: the quantitative half of the validation harness.
 //!
-//! The goldens next door pin that the estimators don't *change*; this pins
-//! that they *converge*. On the many-light scene — 256 emitters over a
-//! cluster of occluders (D-085) — both the brute-force path tracer and
-//! `ReSTIR` must drive their error toward zero as samples accumulate, and at
-//! a matched sample budget `ReSTIR`'s resampling must get there with less
-//! error. That gap is the whole reason the method exists: a single
-//! next-event draw among 256 lights is mostly wasted, while `ReSTIR`
-//! resamples the good candidates and borrows its neighbours'. The
-//! indirect-glossy GI gate below makes the same claims on the other regime
-//! the method exists for — hard indirect light — through the same protocol,
-//! so one helper ([`assert_reuse_gate`]) owns it and the two gates cannot
-//! drift on what "the gate" means (M6 §4f decision 7).
+//! The goldens next door pin that the estimator doesn't *change*; this pins
+//! that it *converges*. Error against a deep reference must fall as samples
+//! accumulate, and fall at the rate a Monte Carlo average is supposed to:
+//! four times the budget, roughly a quarter of the mean-squared error. A
+//! bias — a dropped Jacobian, a mis-weighted MIS combination, a stale
+//! throughput — shows up here as an error curve that flattens against a
+//! floor instead of walking down toward zero, which no single-image golden
+//! can see.
 //!
-//! Ground truth is `ReSTIR` at a high budget, not brute force. On this scene
-//! `ReSTIR`'s variance is so much lower that brute force would need thousands
-//! of samples to match its noise floor — too expensive for a reference the
-//! other renders are measured against. The Part-2 goldens already pin that
-//! the two estimators agree in the mean (brute-force `many-lights` and
-//! `restir-many-lights` land within ~1e-4 per channel), so this reference
-//! privileges neither estimator's *answer* — only its noise floor. The two
-//! load-bearing claims are then read off brute force's *clean* numbers: it
-//! converges toward the reference (so it agrees with `ReSTIR`, unbiasedness
-//! quantified), and at a matched budget it carries more error than `ReSTIR`.
+//! Two scenes, for the two regimes that stress different parts of the
+//! estimator: [`Scene::many_lights`], 256 emitters over a cluster of
+//! occluders, where next-event estimation carries the image; and
+//! [`indirect_glossy_scene`], lit only through a glossy panel's reflection,
+//! where it cannot help and every path has to find the light by scattering.
 //!
 //! Deterministic, like the goldens: accumulation replays the exact sample
 //! sequence, so every relMSE below reproduces run to run — the thresholds
@@ -32,10 +23,9 @@
 use cenote::environment::Environment;
 use cenote::gpu::Context;
 use cenote::material::Material;
-use cenote::render::{Film, RenderMode, Renderer};
+use cenote::render::Renderer;
 use cenote::scene::{Camera, Object, Scene, ground_plane, icosphere};
 use glam::{Mat4, Vec3};
-use std::time::Instant;
 
 mod common;
 use common::{accumulate, test_context};
@@ -45,117 +35,73 @@ use common::{accumulate, test_context};
 /// the reference render stays quick.
 const SIZE: u32 = 128;
 
-/// Samples for the reference image — `ReSTIR` accumulated well past the test
-/// budgets, so its residual noise sits far below the errors being compared.
-const REFERENCE_SPP: u32 = 256;
+/// Samples for the reference image — far past the test budgets, so its
+/// residual noise sits well below the errors being compared. Accumulation
+/// replays one sample sequence, so the estimates below share their frames
+/// with this reference; at 64× the deepest budget the resulting deflation is
+/// under 2%, which no threshold here is tight enough to notice.
+const REFERENCE_SPP: u32 = 2048;
 
-/// The low matched budget, where a single next-event draw among 256 lights
-/// is starved and `ReSTIR`'s reuse pays off most.
+/// The low budget — few enough samples that the image is visibly noisy.
 const LOW_SPP: u32 = 8;
 
-/// The high matched budget — 4× the low one, so a plain Monte Carlo estimator
-/// should roughly quarter its mean-squared error getting here.
+/// The high budget — 4× the low one, so a plain Monte Carlo estimator should
+/// roughly quarter its mean-squared error getting here.
 const HIGH_SPP: u32 = 32;
 
-/// The shared gate protocol (M6 §4f decision 7): a deep `ReSTIR` reference,
-/// both estimators measured at the two matched budgets, and every claim a
-/// reuse gate makes, asserted in one place so the two scenes below cannot
-/// drift on what the gate means. `agreement_bound` is the absolute
-/// unbiasedness threshold, measured per scene (M6 §4f decision 5) — the
-/// noise floors differ, so no one constant is a margin on both.
-fn assert_reuse_gate(gpu: &Context, scene: &Scene, label: &str, agreement_bound: f32) {
-    // Ground truth: ReSTIR far past the test budgets, its noise floor well
-    // below the errors below.
-    let mut restir = Renderer::new(gpu).expect("renderer");
-    restir.set_render_mode(RenderMode::Restir);
-    let reference = accumulate(gpu, &restir, scene, SIZE, REFERENCE_SPP);
+/// The shared protocol, so the two scenes below cannot drift on what the
+/// gate means: a deep reference, the estimator measured at both budgets, and
+/// the two claims asserted in one place.
+///
+/// The 1/N band is deliberately wide on both sides. Below: accumulation
+/// walks each pixel's Owen-scrambled Sobol sequence in order, a
+/// quasi-Monte-Carlo estimator that can converge *faster* than 1/N, so an
+/// upper bound near 4 would fail on a scene that happens to be well-behaved.
+/// Above: a scene whose error is dominated by rare high-variance paths
+/// (fireflies) settles more slowly than 1/N without anything being wrong.
+/// What the band actually catches is a curve that has stopped moving — the
+/// bias signature — which lands far below 2.
+fn assert_converges(gpu: &Context, scene: &Scene, label: &str) {
+    let renderer = Renderer::new(gpu).expect("renderer");
+    let reference = accumulate(gpu, &renderer, scene, SIZE, REFERENCE_SPP);
+    let low = rel_mse(&accumulate(gpu, &renderer, scene, SIZE, LOW_SPP), &reference);
+    let high = rel_mse(&accumulate(gpu, &renderer, scene, SIZE, HIGH_SPP), &reference);
 
-    // Brute force measured cleanly against that reference — a different
-    // estimator, so no shared samples tilt its numbers.
-    let brute = Renderer::new(gpu).expect("renderer");
-    let brute_low = rel_mse(&accumulate(gpu, &brute, scene, SIZE, LOW_SPP), &reference);
-    let brute_high = rel_mse(&accumulate(gpu, &brute, scene, SIZE, HIGH_SPP), &reference);
+    eprintln!("{label} relMSE: {LOW_SPP} spp {low:.5}, {HIGH_SPP} spp {high:.5} ({:.2}×)", low / high);
 
-    let restir_low = rel_mse(&accumulate(gpu, &restir, scene, SIZE, LOW_SPP), &reference);
-    let restir_high = rel_mse(&accumulate(gpu, &restir, scene, SIZE, HIGH_SPP), &reference);
-
-    eprintln!("{label} relMSE brute:  {LOW_SPP} spp {brute_low:.5}, {HIGH_SPP} spp {brute_high:.5}");
-    eprintln!("{label} relMSE ReSTIR: {LOW_SPP} spp {restir_low:.5}, {HIGH_SPP} spp {restir_high:.5}");
-
-    // Both estimators converge: 4× the samples, distinctly less error.
     assert!(
-        brute_high < brute_low,
-        "{label}: brute force didn't converge: \
-         {LOW_SPP} spp {brute_low:.5} → {HIGH_SPP} spp {brute_high:.5}"
+        high < low,
+        "{label}: error didn't fall with samples: \
+         {LOW_SPP} spp {low:.5} → {HIGH_SPP} spp {high:.5}"
     );
+    let ratio = low / high;
     assert!(
-        restir_high < restir_low,
-        "{label}: ReSTIR didn't converge: \
-         {LOW_SPP} spp {restir_low:.5} → {HIGH_SPP} spp {restir_high:.5}"
-    );
-
-    // Brute force converges *toward the ReSTIR reference* — the two agree,
-    // so its error against that image is already small at the high budget.
-    // This is the unbiasedness thesis read off the path tracer's clean
-    // numbers rather than off the reference privileging its own answer — and
-    // it is the assert a *slow* bias needs: a shift whose bias shrank error
-    // more slowly without stopping it would still pass the trend asserts
-    // above, but not an absolute bound set from the honest numbers.
-    assert!(
-        brute_high < agreement_bound,
-        "{label}: brute force should be closing on the ReSTIR image \
-         by {HIGH_SPP} spp: {brute_high:.5} (bound {agreement_bound})"
-    );
-
-    // The headline: at a matched budget ReSTIR carries clearly less error,
-    // by a real margin — not the sliver a near-tie could fake. A 1.3× floor
-    // asserts the real win without pinning an exact factor that estimator
-    // evolution (the D-094/step-5b warm-start correlation) or a driver's
-    // floating-point reordering could nudge. Read off brute force's clean
-    // numbers, so the win isn't an artifact of the reference sharing
-    // samples with ReSTIR.
-    assert!(
-        restir_low * 1.3 < brute_low,
-        "{label}: ReSTIR should carry clearly less error at {LOW_SPP} spp: \
-         ReSTIR {restir_low:.5} vs brute {brute_low:.5}"
-    );
-    assert!(
-        restir_high * 1.3 < brute_high,
-        "{label}: ReSTIR should carry clearly less error at {HIGH_SPP} spp: \
-         ReSTIR {restir_high:.5} vs brute {brute_high:.5}"
+        (2.0..8.0).contains(&ratio),
+        "{label}: 4× the samples should buy roughly 4× less error, got {ratio:.2}× \
+         ({LOW_SPP} spp {low:.5} → {HIGH_SPP} spp {high:.5})"
     );
 }
 
-/// Both estimators drive the many-light scene's error toward zero, and at a
-/// matched budget `ReSTIR` gets there with less of it — the variance
-/// reduction the method exists for, measured rather than asserted by faith.
-/// Since M6 step 2 (D-134) the reservoir owns the *whole* path integral at
-/// the primary hit — direct light plus the reconnection-reused indirect — so
-/// the win compounds the resampling of both; step 5b's warm-start narrowed
-/// the measured 8-spp margin from ~1.6× to ~1.5× (32 spp: ~1.7×), which is
-/// why the gate asserts the shared 1.3× floor rather than a pinned factor.
-/// The agreement bound is the 32-spp measurement (~0.011) with a ~5× margin.
+/// The many-light regime: a single next-event draw among 256 emitters is
+/// mostly wasted, so the image is noisy at a low budget and the alias table's
+/// power-proportional selection is what makes it converge at all. A
+/// mis-normalized selection pdf would bias the mean and flatten the curve.
 #[test]
-fn restir_converges_faster_than_brute_force() {
+fn the_path_tracer_converges_on_many_lights() {
     let Some(gpu) = test_context() else {
         return;
     };
     let scene = Scene::many_lights(&gpu).expect("many-lights scene");
-    assert_reuse_gate(&gpu, &scene, "many-lights", 0.05);
+    assert_converges(&gpu, &scene, "many-lights");
 }
 
-/// The indirect-glossy GI scene: the step-3b glossy-primary set (wavefront.rs's
-/// twin, built through the public API) with its lighting turned
-/// *indirect-only* — the emitter faces the sub-floor metal panel and shows the
-/// world its dark back (emission is one-sided), and the environment is black,
-/// so every camera-visible surface is lit exclusively through the panel's
-/// glossy reflection. That is the regime path reuse exists for — per pixel the
-/// good path (surface → panel → emitter) is rare, so plain PT is starved while
-/// the reservoir keeps whichever walk found it and reuse spreads it — and its
-/// samples are exactly the hybrid-shift shapes of steps 3a-3c (the panel
-/// vertex is below the pair floor, so the reuse rides seed replay). Shared by
-/// the step-3c gate below and the step-5 decay-handoff report, which measures
-/// the same regime over frames instead of over samples.
+/// The indirect-glossy scene: a glossy metal panel below the floor faces the
+/// one emitter, and the emitter shows the world its dark back (emission is
+/// one-sided) against a black environment — so every camera-visible surface
+/// is lit *exclusively* through the panel's reflection. Next-event estimation
+/// cannot reach the light at all here; the whole image is carried by BSDF
+/// sampling finding the panel and then the emitter behind it, which is the
+/// hardest transport the renderer is asked to converge.
 fn indirect_glossy_scene(gpu: &Context) -> Scene {
     let objects = [
         Object {
@@ -194,325 +140,13 @@ fn indirect_glossy_scene(gpu: &Context) -> Scene {
         .expect("indirect glossy scene")
 }
 
-/// The M6 step-3c "reuse is alive" gate (D-139): `ReSTIR` PT must beat plain
-/// path tracing at equal spp on a glossy *GI* scene — the one claim every
-/// unbiasedness gate is blind to, since an estimator whose every shift
-/// silently returned J = 0 would still converge to the right image, just no
-/// faster than brute force. The scene ([`indirect_glossy_scene`]) is that
-/// regime distilled. Direct-lit variants of it measurably do NOT clear this
-/// bar: there PT's summed per-vertex estimator is already low-variance and
-/// the one-survivor resampling costs more than 5-neighbour reuse recovers —
-/// the many-light and hard-GI regimes are where the method pays, and this
-/// gate pins the hard-GI one. The measured reuse margin sits near 2×; the
-/// agreement bound (added at M6 step 8a, closing the slow-bias hole this
-/// gate alone had) is the 32-spp measurement (~0.038) with a ~4× margin —
-/// wider in absolute terms than many-lights' because per pixel the good
-/// path is rare, so brute force is simply noisier here at every budget.
 #[test]
-fn restir_pt_beats_brute_force_on_glossy_indirect_gi() {
+fn the_path_tracer_converges_on_glossy_indirect_gi() {
     let Some(gpu) = test_context() else {
         return;
     };
     let scene = indirect_glossy_scene(&gpu);
-    assert_reuse_gate(&gpu, &scene, "indirect-glossy", 0.15);
-}
-
-/// The step-5 decay-handoff curve (M6 §4c): relMSE of the accumulated image
-/// after 1/2/4/8/16/32 frames on the indirect-glossy scene, the shipping
-/// estimator (temporal on, default decay window) against temporal-off. What
-/// it shows (§4c's T5 outcomes): the held-camera *cost* of history
-/// correlation early — correlated frames average slower — annealing to
-/// equality as the decay ramp hands the still over to spatial-only
-/// accumulation (D-094); the warm-start's payoff is per-frame quality during
-/// motion, which an accumulated average cannot see. Each point accumulates
-/// into a fresh film, so frames-since-reset — what the ramp actually reads —
-/// equals the frame count. A report, not a gate (§4c decision 4): run
-/// explicitly when a checkpoint needs numbers:
-///
-/// ```text
-/// cargo test -p cenote --release --test convergence -- \
-///     --ignored --test-threads=1 --nocapture
-/// ```
-#[test]
-#[ignore = "a measurement report, not a gate — run explicitly for checkpoint numbers"]
-fn restir_decay_handoff_report() {
-    let Some(gpu) = test_context() else {
-        return;
-    };
-    let scene = indirect_glossy_scene(&gpu);
-    let mut restir = Renderer::new(&gpu).expect("renderer");
-    restir.set_render_mode(RenderMode::Restir);
-    let reference = accumulate(&gpu, &restir, &scene, SIZE, REFERENCE_SPP);
-    for frames in [1u32, 2, 4, 8, 16, 32] {
-        restir.set_temporal_reuse(true);
-        let on = rel_mse(&accumulate(&gpu, &restir, &scene, SIZE, frames), &reference);
-        restir.set_temporal_reuse(false);
-        let off = rel_mse(&accumulate(&gpu, &restir, &scene, SIZE, frames), &reference);
-        eprintln!("handoff at {frames:2} frames: temporal-on {on:.5}, temporal-off {off:.5}");
-    }
-}
-
-/// The step-6-0 baseline (M6 §4d decision 1), captured before the estimator
-/// moves — two measurements the later rungs are read against.
-///
-/// **The floor curve.** Does the converged-still configuration — spatial-only,
-/// fresh RNG per frame (D-085) — actually accumulate at brute force's ~1/N
-/// rate, or does within-frame reuse correlation leave a floor? D-127 originally
-/// credited `ReSTCV` as the fix for a convergence plateau; the step-6 deep-read
-/// found it is a constant-factor fix (D-142), which leaves the floor question
-/// to a measurement: accumulated relMSE at 8…128 frames for both estimators on
-/// the indirect-glossy scene. Read the floor off `ReSTIR`'s own ×N column — a
-/// ~1/N estimator holds it flat, a floor makes it climb without end. The
-/// brute column rides along for scale, but its ratio to `ReSTIR` is not the
-/// lens: brute accumulation walks each pixel's Owen-scrambled Sobol sequence
-/// in order, a quasi-Monte Carlo estimator that can dip mildly *below* 1/N,
-/// while resampling forfeits that low-discrepancy structure — so the ratio
-/// drifts brute-ward with N even with no floor anywhere (the measured 6-0
-/// shape, recorded in M6 §4d).
-///
-/// Each estimator is measured against a deep reference built from the *other*
-/// one. Accumulation replays the exact sample sequence, so an estimate shares
-/// its frames with any deeper reference from the same estimator, and the
-/// overlap deflates the measured tail — `E[(mean_N − mean_R)²]` falls to
-/// `v·(1/N − 1/R)`, half the true error at N = R/2 — exactly where a floor would
-/// show. Cross-referencing keeps the samples independent; the residual each
-/// reference adds inflates both curves' last points by a symmetric few
-/// percent, which the ratio mostly cancels.
-///
-/// **The chroma baseline.** Per-channel relMSE on many-lights (the chromatic
-/// scene — 256 randomly-hued emitters), the shipping estimator under the
-/// suite's own protocol (ReSTIR-at-256 reference, matched budgets), as the
-/// before-side of step 6a's vector-shading delta. Brute force at the high
-/// budget rides along as the mechanism check: its per-channel spread is what
-/// the scene itself induces, so the gap between the spreads is the part the
-/// scalar-luminance target owns. Like the decay-handoff report: a report, not
-/// a gate — run explicitly when a checkpoint needs numbers:
-///
-/// ```text
-/// cargo test -p cenote --release --test convergence -- \
-///     --ignored --test-threads=1 --nocapture
-/// ```
-#[test]
-#[ignore = "a measurement report, not a gate — run explicitly for checkpoint numbers"]
-fn restir_floor_and_chroma_report() {
-    // Floor-curve references deep enough that their residual sits well under
-    // the smallest error measured against them: ReSTIR's 128-frame error is
-    // ~v_r/128 and the brute reference's residual ~2·v_r/4096, a ~+6%
-    // inflation on the last point; the ReSTIR reference at 1024 independent
-    // frames does the same for brute's side.
-    const FLOOR_FRAMES: [u32; 5] = [8, 16, 32, 64, 128];
-    const RESTIR_REFERENCE_FRAMES: u32 = 1024;
-    const BRUTE_REFERENCE_FRAMES: u32 = 4096;
-
-    let Some(gpu) = test_context() else {
-        return;
-    };
-
-    let scene = indirect_glossy_scene(&gpu);
-    let mut restir = Renderer::new(&gpu).expect("renderer");
-    restir.set_render_mode(RenderMode::Restir);
-    restir.set_temporal_reuse(false);
-    let brute = Renderer::new(&gpu).expect("renderer");
-
-    let restir_reference = accumulate(&gpu, &restir, &scene, SIZE, RESTIR_REFERENCE_FRAMES);
-    let brute_reference = accumulate(&gpu, &brute, &scene, SIZE, BRUTE_REFERENCE_FRAMES);
-    for frames in FLOOR_FRAMES {
-        let restir_err = rel_mse(
-            &accumulate(&gpu, &restir, &scene, SIZE, frames),
-            &brute_reference,
-        );
-        let brute_err = rel_mse(
-            &accumulate(&gpu, &brute, &scene, SIZE, frames),
-            &restir_reference,
-        );
-        let n = frames as f32;
-        eprintln!(
-            "floor at {frames:3} frames: ReSTIR {restir_err:.6} (×N {:.3}), \
-             brute {brute_err:.6} (×N {:.3}), ratio {:.3}",
-            restir_err * n,
-            brute_err * n,
-            restir_err / brute_err
-        );
-    }
-
-    // The chroma baseline: the shipping estimator (defaults untouched), the
-    // suite's reference protocol. The reference shares the estimate's frames,
-    // deflating these numbers by a protocol-constant factor — fine for the
-    // 6a delta, which re-runs the identical protocol on both sides.
-    let scene = Scene::many_lights(&gpu).expect("many-lights scene");
-    let mut restir = Renderer::new(&gpu).expect("renderer");
-    restir.set_render_mode(RenderMode::Restir);
-    let reference = accumulate(&gpu, &restir, &scene, SIZE, REFERENCE_SPP);
-    for spp in [LOW_SPP, HIGH_SPP] {
-        let [r, g, b] = rel_mse_channels(
-            &accumulate(&gpu, &restir, &scene, SIZE, spp),
-            &reference,
-        );
-        eprintln!("chroma ReSTIR {spp:2} spp per-channel relMSE: R {r:.5}, G {g:.5}, B {b:.5}");
-    }
-    let brute = Renderer::new(&gpu).expect("renderer");
-    let [r, g, b] = rel_mse_channels(
-        &accumulate(&gpu, &brute, &scene, SIZE, HIGH_SPP),
-        &reference,
-    );
-    eprintln!("chroma brute  {HIGH_SPP:2} spp per-channel relMSE: R {r:.5}, G {g:.5}, B {b:.5}");
-}
-
-/// Resolution for the equal-time report below, and the reason it cannot
-/// borrow [`SIZE`]. What that report measures is per-sample *cost*, and cost
-/// is the one quantity 128² gets badly wrong: measured there, `ReSTIR` costs
-/// 1.67 ms/sample against brute force's 1.52 — a 1.1× ratio, because at
-/// sixteen thousand pixels neither estimator is pixel-bound and `ReSTIR`'s
-/// extra dispatches hide inside per-dispatch overhead. At a megapixel the
-/// same two are 22.0 and 4.4 ms, a 5.3× ratio — which is what the 1440p
-/// scoreboard independently measures on this scene (M7 §3.5.2). So the gates
-/// above are blind to reuse's price by construction: the right call for
-/// testing convergence, and the reason this report needs its own resolution.
-/// The ms/sample column keeps that cross-check reproducible.
-const TIME_SIZE: u32 = 1024;
-
-/// One estimator's error-against-wall-clock ladder: for each budget, a fresh
-/// film, the sample loop timed, and relMSE against `reference`. Film
-/// allocation and the readback sit outside the clock — they are paid once per
-/// session, not per sample, so counting them would flatter the estimator that
-/// takes fewer samples. Returns the (seconds, relMSE) points.
-fn efficiency_ladder(
-    gpu: &Context,
-    renderer: &Renderer,
-    scene: &Scene,
-    reference: &[f32],
-    budgets: &[u32],
-    label: &str,
-) -> Vec<(f64, f32)> {
-    budgets
-        .iter()
-        .map(|&spp| {
-            let mut film = Film::new(gpu, TIME_SIZE, TIME_SIZE).expect("film");
-            let start = Instant::now();
-            for _ in 0..spp {
-                renderer
-                    .accumulate(gpu, scene, &mut film)
-                    .expect("accumulate");
-            }
-            let seconds = start.elapsed().as_secs_f64();
-            let error = rel_mse(&film.beauty_average(gpu).expect("average"), reference);
-            // Monte Carlo efficiency, 1/(relMSE × seconds): a 1/N estimator
-            // holds it flat down the ladder, which is what makes it
-            // comparable between two ladders that never land on the same
-            // second.
-            eprintln!(
-                "{label} {spp:4} spp: {seconds:7.3} s ({:6.2} ms/sample), \
-                 relMSE {error:.5}, efficiency {:8.1}",
-                seconds * 1000.0 / f64::from(spp),
-                1.0 / (f64::from(error) * seconds)
-            );
-            (seconds, error)
-        })
-        .collect()
-}
-
-/// The equal-wall-clock efficiency report (M7 §3.5.3): the measurement
-/// [`assert_reuse_gate`] deliberately does not make.
-///
-/// That gate compares the estimators at a matched *sample* count, which is
-/// the right protocol for the claim it makes — resampling draws a better
-/// sample than one starved next-event draw does — and it is silent on whether
-/// a `ReSTIR` sample is worth what it costs. For a renderer that accumulates,
-/// and for interactivity, the question is error per *second*: the 1440p
-/// scoreboard prices a `ReSTIR` sample at 4.5–5× a path-traced one, and an
-/// estimator that costs 5× to carry 1.6× less error is a net loss to anyone
-/// who could have spent that time on more samples instead.
-///
-/// So: both ladders, wall-clock timed, on the two scenes the gate asserts the
-/// win on. Those are `ReSTIR`'s best cases — a starved many-light direct
-/// regime and a hard indirect one — so a loss here is a loss everywhere.
-/// Cross-referenced exactly as the floor report above, and for the same
-/// reason: accumulation replays one sample sequence, so an estimate sharing
-/// frames with a reference from its own estimator would be measuring its
-/// error against its own noise and would read low. A report, not a gate:
-///
-/// ```text
-/// cargo test -p cenote --release --test convergence -- \
-///     --ignored --test-threads=1 --nocapture
-/// ```
-fn report_equal_time(gpu: &Context, label: &str, scene: &Scene) {
-    // Overlapping in time, not in samples: at ~5× the per-sample cost,
-    // ReSTIR's deepest budget lands between brute's last two, so the
-    // equal-time comparison below is read off two rendered points rather
-    // than interpolated. References deep enough to sit well past both.
-    const BRUTE_BUDGETS: [u32; 6] = [16, 32, 64, 128, 256, 512];
-    const RESTIR_BUDGETS: [u32; 3] = [16, 32, 64];
-    const RESTIR_REFERENCE_FRAMES: u32 = 1024;
-    const BRUTE_REFERENCE_FRAMES: u32 = 4096;
-
-    // Shipping defaults on both sides — the configuration the gate measures
-    // and the viewer runs, temporal reuse included.
-    let mut restir = Renderer::new(gpu).expect("renderer");
-    restir.set_render_mode(RenderMode::Restir);
-    let brute = Renderer::new(gpu).expect("renderer");
-
-    let restir_reference = accumulate(gpu, &restir, scene, TIME_SIZE, RESTIR_REFERENCE_FRAMES);
-    let brute_reference = accumulate(gpu, &brute, scene, TIME_SIZE, BRUTE_REFERENCE_FRAMES);
-
-    let brute_points = efficiency_ladder(
-        gpu,
-        &brute,
-        scene,
-        &restir_reference,
-        &BRUTE_BUDGETS,
-        &format!("{label} brute "),
-    );
-    let restir_points = efficiency_ladder(
-        gpu,
-        &restir,
-        scene,
-        &brute_reference,
-        &RESTIR_BUDGETS,
-        &format!("{label} ReSTIR"),
-    );
-
-    // The headline: at the wall clock ReSTIR's deepest budget spends, where
-    // had the path tracer got to? Brute's nearest rendered point, with the
-    // time it was measured at printed beside it, so a reader can see how well
-    // the two line up instead of trusting a fitted number.
-    //
-    // Read it as a *floor* on the gap, not the gap. Brute's deep points are
-    // where its relMSE × N stops falling and starts climbing — it has run
-    // down to the reference's own residual and is being credited with error
-    // that is the reference's, while ReSTIR at a sixth the sample count is
-    // nowhere near that floor. The efficiency column at the shallow end,
-    // where both estimators are still on their 1/N trend, is the clean
-    // comparison; this line is the concrete one.
-    let (restir_seconds, restir_error) = *restir_points.last().expect("a ReSTIR point");
-    let (brute_seconds, brute_error) = brute_points
-        .iter()
-        .copied()
-        .min_by(|a, b| {
-            (a.0 - restir_seconds)
-                .abs()
-                .total_cmp(&(b.0 - restir_seconds).abs())
-        })
-        .expect("a brute point");
-    eprintln!(
-        "{label} equal time: ReSTIR relMSE {restir_error:.5} at {restir_seconds:.3} s, \
-         brute {brute_error:.5} at {brute_seconds:.3} s — brute carries {:.2}× \
-         ReSTIR's error for the same wall clock\n",
-        f64::from(brute_error) / f64::from(restir_error)
-    );
-}
-
-/// [`report_equal_time`] on the two scenes the reuse gates above assert the
-/// win on, so the equal-time question is asked of exactly the cases
-/// `ReSTIR` was accepted for.
-#[test]
-#[ignore = "a measurement report, not a gate — run explicitly for checkpoint numbers"]
-fn restir_equal_time_efficiency_report() {
-    let Some(gpu) = test_context() else {
-        return;
-    };
-    let many_lights = Scene::many_lights(&gpu).expect("many-lights scene");
-    report_equal_time(&gpu, "many-lights", &many_lights);
-    report_equal_time(&gpu, "indirect-glossy", &indirect_glossy_scene(&gpu));
+    assert_converges(&gpu, &scene, "indirect-glossy");
 }
 
 /// Relative MSE against `reference`: the mean over every colour channel of
@@ -522,27 +156,15 @@ fn restir_equal_time_efficiency_report() {
 /// from exploding the ratio, and the truly-black sky (0 in both) drops out
 /// at zero.
 fn rel_mse(estimate: &[f32], reference: &[f32]) -> f32 {
-    let [r, g, b] = rel_mse_channels(estimate, reference);
-    (r + g + b) / 3.0
-}
-
-/// [`rel_mse`] split per colour channel — the chroma lens (M6 §4d decision
-/// 7): a scalar-luminance resampling target selects survivors by intensity
-/// and leaves their *hue* to luck, so its error should sit unevenly across
-/// R/G/B where a brute-force estimator's sits evenly. No new metric — the
-/// same relative squared error, just not averaged across the one axis the
-/// colour-noise fix acts on.
-fn rel_mse_channels(estimate: &[f32], reference: &[f32]) -> [f32; 3] {
     const EPS: f32 = 1e-3;
-    let mut sums = [0.0_f64; 3];
+    let mut sum = 0.0_f64;
     let mut count = 0.0_f64;
     for (est, refr) in estimate.chunks_exact(4).zip(reference.chunks_exact(4)) {
         for channel in 0..3 {
             let difference = est[channel] - refr[channel];
-            sums[channel] +=
-                f64::from(difference * difference / (refr[channel] * refr[channel] + EPS));
+            sum += f64::from(difference * difference / (refr[channel] * refr[channel] + EPS));
         }
-        count += 1.0;
+        count += 3.0;
     }
-    sums.map(|sum| (sum / count) as f32)
+    (sum / count) as f32
 }

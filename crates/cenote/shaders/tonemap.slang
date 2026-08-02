@@ -20,10 +20,7 @@ struct Params {
     uint width;
     uint height;
     float exposureScale; // exp2(exposure stops)
-    // Bool: skip exposure + the ACES tone curve and sRGB-encode the input as-is
-    // — for the ReSTIR debug surface, whose false-colour is already display-
-    // ready and would only be desaturated by the tone transform.
-    uint passthrough;
+    uint pad0;
 };
 
 [vk::push_constant]
@@ -93,8 +90,7 @@ void tonemap(uint3 tid: SV_DispatchThreadID) {
     uint pixel = tid.y * params.width + tid.x;
 
     let radiance = params.average[pixel].rgb;
-    let color = params.passthrough != 0 ? saturate(radiance)
-                                        : acesDisplay(radiance * params.exposureScale);
+    let color = acesDisplay(radiance * params.exposureScale);
     let encoded = float3(srgbEncode(color.r), srgbEncode(color.g), srgbEncode(color.b));
     params.display[pixel] = packRgba8(encoded, 1.0);
 }

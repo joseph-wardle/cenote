@@ -52,23 +52,6 @@ pub struct Kernels {
     pub shade_surface: Kernel,
     /// Occlusion tests for queued shadow rays.
     pub trace_shadow: Kernel,
-    /// `ReSTIR` initial RIS: stream the primary hit's light candidates through
-    /// a per-pixel reservoir.
-    pub restir_candidates: Kernel,
-    /// `ReSTIR` temporal reuse: fold last frame's `prev` reservoir into this
-    /// frame's `cand` at the same pixel, M-capped, under defensive pairwise MIS.
-    pub restir_temporal: Kernel,
-    /// `ReSTIR` spatial gather pre-pass (M6 step 7b): every pixel's forward
-    /// shift evaluations and visibility rays, written to the pair records the
-    /// combine reads.
-    pub restir_spatial_gather: Kernel,
-    /// `ReSTIR` spatial reuse: fold k screen-space neighbours' reservoirs into
-    /// each pixel's under defensive pairwise MIS — ray-free since 7b, reading
-    /// the gather pre-pass's records.
-    pub restir_spatial: Kernel,
-    /// `ReSTIR` resolve: shade the surviving light sample and queue its
-    /// visibility ray.
-    pub restir_resolve: Kernel,
     /// Film: add a wave's sample into the running sums (NaN/Inf-guarded).
     pub accumulate: Kernel,
     /// Film: running sums → the resolved linear `ACEScg` average.
@@ -98,14 +81,6 @@ impl Kernels {
             shade_miss: kernel(spirv!("shade_miss"), c"shade_miss"),
             shade_surface: kernel(spirv!("shade_surface"), c"shade_surface"),
             trace_shadow: kernel(spirv!("trace_shadow"), c"trace_shadow"),
-            restir_candidates: kernel(spirv!("restir_candidates"), c"restir_candidates"),
-            restir_temporal: kernel(spirv!("restir_temporal"), c"restir_temporal"),
-            restir_spatial_gather: kernel(
-                spirv!("restir_spatial_gather"),
-                c"restir_spatial_gather",
-            ),
-            restir_spatial: kernel(spirv!("restir_spatial"), c"restir_spatial"),
-            restir_resolve: kernel(spirv!("restir_resolve"), c"restir_resolve"),
             accumulate: kernel(spirv!("accumulate"), c"accumulate"),
             resolve: kernel(spirv!("resolve"), c"resolve"),
             tonemap: kernel(spirv!("tonemap"), c"tonemap"),
@@ -134,11 +109,6 @@ impl Kernels {
             shade_miss,
             shade_surface,
             trace_shadow,
-            restir_candidates,
-            restir_temporal,
-            restir_spatial_gather,
-            restir_spatial,
-            restir_resolve,
             accumulate,
             resolve,
             tonemap,
@@ -169,26 +139,6 @@ impl Kernels {
             trace_shadow: Kernel {
                 spirv: trace_shadow?,
                 entry: c"trace_shadow",
-            },
-            restir_candidates: Kernel {
-                spirv: restir_candidates?,
-                entry: c"restir_candidates",
-            },
-            restir_temporal: Kernel {
-                spirv: restir_temporal?,
-                entry: c"restir_temporal",
-            },
-            restir_spatial_gather: Kernel {
-                spirv: restir_spatial_gather?,
-                entry: c"restir_spatial_gather",
-            },
-            restir_spatial: Kernel {
-                spirv: restir_spatial?,
-                entry: c"restir_spatial",
-            },
-            restir_resolve: Kernel {
-                spirv: restir_resolve?,
-                entry: c"restir_resolve",
             },
             accumulate: Kernel {
                 spirv: accumulate?,
@@ -321,18 +271,13 @@ mod tests {
         u32::from_le_bytes(bytes[..4].try_into().unwrap()) == 0x0723_0203
     }
 
-    fn all(kernels: &Kernels) -> [&Kernel; 13] {
+    fn all(kernels: &Kernels) -> [&Kernel; 8] {
         [
             &kernels.raygen,
             &kernels.intersect,
             &kernels.shade_miss,
             &kernels.shade_surface,
             &kernels.trace_shadow,
-            &kernels.restir_candidates,
-            &kernels.restir_temporal,
-            &kernels.restir_spatial_gather,
-            &kernels.restir_spatial,
-            &kernels.restir_resolve,
             &kernels.accumulate,
             &kernels.resolve,
             &kernels.tonemap,

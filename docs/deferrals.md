@@ -164,104 +164,26 @@ shadergen degrades SSS to diffuse. (D-059)
   each hand-wired through the film. Production shape: LPE-selected containers
   (MoonRay/Arnold) or Cycles' pass matrix — a registry the wavefront writes
   through, not four more hand-built buffer pairs. (D-080)
-- **Per-pixel adaptive sample steering** *(revisit: when the variance estimate's
-  reliability on ReSTIR residual is measured — post-M3)* — Today: M3 lands the
-  per-pixel variance substrate and a *global* noise-threshold auto-stop (D-089), but
-  not per-pixel/per-tile steering. Production shape: gate steering to the converged
-  independent-frame phase (where the residual decorrelates and the white-noise variance
-  estimate becomes reliable), make termination *tile*-based so no half-stopped pixel
-  starves its neighbours' spatial reuse, keep the estimate and threshold deterministic.
-  MoonRay's adaptive sampling is the reference; the ReSTIR-residual correlation is the
-  reason it can't be a naive per-pixel copy. (D-089)
+- **Per-pixel adaptive sample steering** *(revisit: when a scene's converged tail is
+  dominated by a minority of slow pixels)* — Today: the per-pixel variance substrate
+  and a *global* noise-threshold auto-stop (D-089), but not per-pixel/per-tile
+  steering. Production shape: tile-based termination with a deterministic estimate and
+  threshold. MoonRay's adaptive sampling is the reference. (D-089)
 
-## ReSTIR & light reuse
+## Light reuse
 
-The screen-space primary-hit DI reuse of M3 (D-085…D-090) is the first tenant of the
-index-agnostic reservoir primitive (D-086). Everything below is a reuse axis it was
-built to extend but that M3 consciously does not build.
-
-- **ReGIR world-space reservoirs** *(revisit: many local lights illuminating
-  secondary/volume/SSS vertices — M7/M8 era or a dedicated many-lights pass)* — Today:
-  reuse is screen-space, primary-hit only; secondary bounces use M2 NEE+MIS. Production
-  shape: world-space reservoirs in a hash grid (Boksansky/Wyman, RT Gems II 2021),
-  *orthogonal* to screen-space ReSTIR — the accelerator for the vertices a screen-space
-  reservoir can't see. It instantiates the same reservoir primitive; that is why the
-  primitive is index-agnostic. (D-086)
-- **Reservoir path reuse — splatting, CRIS** *(revisit: post-M6 — splatting/CRIS wait
-  for a measured case)* — Today: M6
-  steps 2–5 landed spatiotemporal path reuse whole — the **reconnection shift**
-  (D-134/D-135), the **hybrid shift** with the footprint pair criteria (D-137/D-140),
-  and **temporal path reuse** across the frame boundary through the same shared shift
-  block, epoch-gated across edits (D-141). Still pending from the family: reservoir
-  **splatting** and continuous RIS. It reuses the D-086 primitive and the `Hit`-shaped
-  reconnection vertex M1 chose; the DI shift built in M3 is the base case the
-  reconnection shift generalized. (D-086, D-087, D-134, D-141)
-- **Instance-identity registry — indirect history across scene edits** *(revisit:
-  editing-heavy interactive workflows, where losing one frame of indirect warm-start
-  per edit is felt)* — Today: temporal reuse gates indirect history on the scene build
-  (the epoch gate, D-141): a reconnection sample at rest holds a raw TLAS custom index
-  an edit may renumber, so when `prev` was rendered against an older build the pair is
-  dropped before any dereference — the neighbour simply doesn't exist that frame — while
-  NEE history keeps surviving edits through the light-id registry (M3), and camera-only
-  motion (the common temporal case, orbiting) rebuilds nothing and never trips the gate.
-  Production shape: per-instance stable ids with mesh fingerprints and an at-rest remap
-  of stored `rcVertex.instance` across builds — cross-build index composition, the
-  indirect twin of the light-id registry. It buys exactly one frame of indirect
-  warm-start across an edit that resets the film anyway, which is why it waits for a
-  workflow where that frame matters. (D-141)
-- **Stochastic opacity in the reused indirect tail** *(revisit: a lookdev scene with
-  cutout/fractional-opacity geometry along an indirect bounce — beside the tail's scope
-  lines, D-136)* — Today: the inline tail the candidate stage traces for a reconnection
-  sample (D-134) commits every crossing as opaque (nearest hit wins), the same shortcut the
-  DI BSDF candidate takes; the hash-driven stochastic pass-through that `intersect`/`trace_shadow`
-  run is not replayed there, so an alpha-cutout leaf in an indirect bounce reads solid. The
-  diffuse/glossy checkpoint scenes carry none. Production shape: thread the same deterministic
-  transparency split through the tail's continuation and NEE rays — out with volumes, which are
-  likewise not reconnection-eligible (m6-plan §2). Two interior-media corners sit in the same
-  bucket: an emitter *nested inside* a closed interior reaches the BSDF draw as a light
-  candidate with no Beer–Lambert over the segment (the tail itself absorbs correctly since
-  D-134's medium seeding), and a reconnection sample whose x₁→x₂ segment crossed an absorbing
-  interior bakes the *source* pixel's absorption into Lo — exact in its own pixel, approximate
-  at a neighbour. (D-134, D-136)
-- **Presampled light tiles** *(revisit: measured per-candidate global-gather bottleneck
-  at large light counts)* — Today: candidates are drawn directly from the
-  power-proportional alias table. Production shape: Wyman–Panteleev (2021) RIS over
-  presampled tiles — a memory-coherence win for millions of lights that injects
-  intra-tile correlation, so it is a cost, not a free upgrade, and waits for the
-  measurement that justifies it. (D-088)
-- **Stochastic pairwise MIS** *(revisit: when neighbour counts grow enough that O(M)
-  pairwise MIS is itself the cost — M6 shipped fine without it; ReGIR-era counts are
-  the likely trigger)* — Today: defensive
-  pairwise MIS, O(M), evaluated in full. Production shape: the stochastic pairwise
-  estimator (subsample the pairwise terms) when M is large. A drop-in refinement of the
-  same combine function. (D-087)
-- **Compatibility-guided neighbours + MCMC decorrelation** *(revisit: if the correlation
-  floor bites — the converged-still contract proves insufficient in practice)* — Today:
-  the converged still image decorrelates by construction (spatial-only, fresh per-frame
-  RNG — D-085). Production shape, if correlated reuse still leaves a structured residual:
-  compatibility-guided neighbour selection (bias reuse toward similar surfaces) and
-  MCMC-style decorrelation of the reused stream. The named next move for the step-4/5
-  correlation risk, so it is a plan and not a scramble. (D-085, D-089)
-- **Duplication maps — spatiotemporal decorrelation for the interactive preview**
-  *(revisit: only if a live per-frame denoised preview during motion is built — see the
-  two-tier denoiser under Display & denoise)* — Today: M6 ships without them; correlation
-  in the reused stream is fought unbiased and by construction — the decay ramp hands
-  temporal → spatial-only + fresh-per-frame RNG (D-085), and the once-per-second OIDN
-  view averages the temporal-correlated early window into a decorrelated tail before it
-  ever samples the film. Production shape (Lin et al. 2026, *ReSTIR PT Enhanced* §5):
-  each pixel counts how many reservoirs in a 17×17 neighbourhood share its
-  `initRandomSeed` and throttles the temporal confidence cap where that count is high,
-  killing the firefly "correlation blobs" a denoiser mistakes for signal. It is the
-  *only biased* Enhanced contribution (~3.25 % worst-case, and it plateaus **above** the
-  reference under accumulation — the paper itself says disable it for unbiased offline,
-  §7.4), so it can never touch the accumulated film. Its one payoff — cleaner denoiser
-  input — lands only for a denoiser that consumes the noisy early frames, which cenote's
-  cadence-throttled view of the *accumulated* film does not. Free to add later:
-  `initRandomSeed` is already stored for random replay, so no reservoir re-layout is
-  needed. If it ever ships it is a preview-view-only feature, fenced from the estimator
-  by the same seam that keeps denoising a view (never the film) — and should be A/B'd
-  against the unbiased compatibility-guided + MCMC decorrelation above, which carry no
-  bias into a preview that might then be let to accumulate. (D-085, D-089)
+*Retired 2026-08-02.* This section held the reuse axes M3/M6's screen-space ReSTIR
+was built to extend — ReGIR world-space reservoirs, reservoir splatting and
+continuous RIS, the instance-identity registry, duplication maps. All of them
+extend a reuse estimator this renderer no longer has: measured at equal wall
+clock, reuse cost 5–6× per sample to save 1.2–2.0× the error, making it 2.6–4.8×
+*less* efficient than the path tracer beneath it (D-156). The entries are not
+deleted so much as relocated — the implementation they extend, and they
+themselves, are preserved on the `restir-archive` branch. Reviving any of them
+means reviving that branch first, and the trigger for *that* is a change in the
+underlying trade: a fixed frame budget the path tracer cannot meet, a much weaker
+light-sampling baseline, or a denoiser that consumes noisy early frames rather
+than the accumulated film.
 
 ## Performance & sync (one measured pre-M3 pass, per D-043)
 
@@ -302,18 +224,17 @@ built to extend but that M3 consciously does not build.
   of the estimator (never part of it, `cenote-viewer/src/denoise.rs`). The CPU filter
   costs ~200 ms at 720p and trails the orbit by up to a second, which reads as
   non-interactive during motion. Production shape: a fast GPU denoiser for roughly the
-  first 32 samples — NVIDIA **NRD** (ReLAX is the variant tuned for ReSTIR / path-traced
+  first 32 samples — NVIDIA **NRD** (ReLAX is the variant tuned for path-traced
   signals; ReBLUR the general one) or the **OptiX** AI denoiser (GPU, temporal mode,
   driven by the albedo/normal guides cenote already emits) — handed off to OIDN once
-  accumulation passes ~32 spp for the higher-quality still. The crossover mirrors the
-  estimator's own ReSTIR-early / better-long-term shape and the decay ramp's frame-16
-  handoff. Trade-off between the two candidates: NRD is the more interactive-tuned but
-  integration-heavy path (needs motion vectors, normalised hit distance, and a G-buffer
-  contract — much of which the ReSTIR/AOV plumbing already produces); the OptiX denoiser
-  is the lighter lift (albedo/normal already in hand). Which denoiser, and whether the
-  fast tier runs per-frame during motion, is the open sub-decision — and the per-frame
-  case is the exact trigger that would revive duplication maps under ReSTIR & light
-  reuse above. This is what makes ReSTIR PT's fast early frames *feel* fast. (D-081)
+  accumulation passes ~32 spp for the higher-quality still. Trade-off between the two
+  candidates: NRD is the more interactive-tuned but integration-heavy path (needs
+  motion vectors, normalised hit distance, and a G-buffer contract — the AOV plumbing
+  already produces much of it); the OptiX denoiser is the lighter lift (albedo/normal
+  already in hand). Which denoiser, and whether the fast tier runs per-frame during
+  motion, is the open sub-decision. This is the single largest lever left on how fast
+  the first second *feels* (D-081, and see D-156: with reuse retired, the fast early
+  frame is the denoiser's job, not the estimator's).
 
 ## Viewer & lookdev
 
@@ -387,12 +308,12 @@ of that first delegate lands here.
   lookdev scenes — a core-renderer feature, surfaced by the M4 UsdLux mapping)* — Today:
   area lights are emissive meshes (rect → 2 triangles, disk/sphere → tessellated emissive
   geometry), sampled by the existing power-alias NEE with MIS — correct, unbiased,
-  ReSTIR-integrated, golden-covered. Production shape: parametric rect/disk/sphere/cylinder
+  golden-covered. Production shape: parametric rect/disk/sphere/cylinder
   primitives with unbiased solid-angle importance sampling (Ureña spherical-rectangle,
   sphere-cone), a matching entry in the alias table, and — the real cost — a
   ray-vs-analytic-light intersection path so BSDF-sampled rays still hit the light and MIS
-  stays symmetric (else glossy reflections of the light lose their strategy), plus the
-  ReSTIR reservoir learning the new light type. LTC-style analytic shading is *not* the
+  stays symmetric (else glossy reflections of the light lose their strategy).
+  LTC-style analytic shading is *not* the
   route: it is biased, and the preview=final thesis forbids it. Justified by variance
   (sphere lights first), never by "UsdLux has a RectLight prim." (D-103)
 - **Subdivision refinement** *(revisit: subdiv-authored hero assets read visibly faceted
