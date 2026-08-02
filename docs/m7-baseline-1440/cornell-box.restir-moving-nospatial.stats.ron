@@ -1,0 +1,86 @@
+(
+    device: "NVIDIA GeForce RTX 4070 Ti SUPER (discrete GPU, NVIDIA 580.173.02, Vulkan 1.4)",
+    scene: "/home/wardle/Documents/cenote/scenes/corpus/cornell-box.ron",
+    size: (2560, 1440),
+    samples: 1,
+    wall: 3204.968599,
+    sampling: 1770.7586580000002,
+    gpu: 1679.050144,
+    frames: 64,
+    breakdown_frames: 2,
+    passes: (
+        total: 51.163904,
+        entries: [
+            (
+                label: "fill",
+                gpu: 1.686848,
+                calls: 44,
+            ),
+            (
+                label: "raygen",
+                gpu: 0.774304,
+                calls: 8,
+            ),
+            (
+                label: "intersect",
+                gpu: 0.958464,
+                calls: 8,
+            ),
+            (
+                label: "shade_miss",
+                gpu: 0.523456,
+                calls: 8,
+            ),
+            (
+                label: "restir_candidates",
+                gpu: 32.730976000000005,
+                calls: 8,
+            ),
+            (
+                label: "restir_temporal",
+                gpu: 9.794496,
+                calls: 8,
+            ),
+            (
+                label: "restir_resolve",
+                gpu: 1.7226240000000002,
+                calls: 8,
+            ),
+            (
+                label: "shade_surface",
+                gpu: 1.260704,
+                calls: 8,
+            ),
+            (
+                label: "trace_shadow",
+                gpu: 0.42969599999999997,
+                calls: 8,
+            ),
+            (
+                label: "accumulate",
+                gpu: 1.282336,
+                calls: 2,
+            ),
+        ],
+    ),
+    smoothed: (
+        median: 27.145304,
+        p95: 27.848436,
+    ),
+    mean_frame: 27.167539,
+    bound: Gpu,
+    interactivity: (
+        to_first_ray: Some(677.792551),
+        to_first_pixel: Some(677.7930319999999),
+        to_readable: None,
+    ),
+    peak_memory: (
+        scene: 99348,
+        film: 457113644,
+        reservoirs: 1769472096,
+        textures: 512,
+        scratch: 374226744,
+        budget: Some(17171480576),
+    ),
+    candidates: Some(1),
+)

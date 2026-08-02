@@ -211,7 +211,7 @@ impl RestirResources {
         // never read (the table says count 0).
         let padded = [LightRecord::zeroed()];
         let candidate_lights = gpu.upload_buffer(
-            "restir.candidates",
+            "scene.restir.candidates",
             bytemuck::cast_slice(if candidate_table.is_empty() {
                 &padded
             } else {
@@ -222,7 +222,7 @@ impl RestirResources {
         // The delta lights, uploaded the same way: a scene with none uploads the
         // zeroed placeholder the kernel never reads (the table says count 0).
         let delta_lights = gpu.upload_buffer(
-            "restir.deltas",
+            "scene.restir.deltas",
             bytemuck::cast_slice(if delta_table.is_empty() {
                 &padded
             } else {
@@ -236,7 +236,7 @@ impl RestirResources {
         // sentinel's slot).
         let padded_id = [LIGHT_ID_NONE];
         let instance_to_id = gpu.upload_buffer(
-            "restir.instance_to_id",
+            "scene.restir.instance_to_id",
             bytemuck::cast_slice(if remap.instance_to_id.is_empty() {
                 &padded_id
             } else {
@@ -245,7 +245,7 @@ impl RestirResources {
             usage,
         )?;
         let id_to_instance = gpu.upload_buffer(
-            "restir.id_to_instance",
+            "scene.restir.id_to_instance",
             bytemuck::cast_slice(&remap.id_to_instance),
             usage,
         )?;
@@ -259,7 +259,7 @@ impl RestirResources {
             delta_count: delta_table.len() as u32,
             _pad0: 0,
         };
-        let table = gpu.upload_buffer("restir.table", bytemuck::bytes_of(&table), usage)?;
+        let table = gpu.upload_buffer("scene.restir.table", bytemuck::bytes_of(&table), usage)?;
         Ok(Self {
             candidate_lights,
             instance_to_id,

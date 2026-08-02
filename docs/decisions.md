@@ -3830,3 +3830,365 @@ historical record of what was planned; §7 was the normative fix).
 **M6 is not yet declared done.** The user-owned viewer checklist (orbit warm-start,
 re-converge on hold, the 8192-frame park, quiet desktop — §4g decision 6) is the one open
 gate; its result lands here as an addendum, and M6 closes with it.
+
+## 2026-08-01 — M7 opens: lean & interactive, and the instrument that has to earn its place
+
+M7 is the rearchitecture the M6 close made unavoidable: the renderer is correct, tested,
+and *slower with reuse on than off*, against a target paper whose scenes read in 12 ms.
+The full plan and its eleven locked decisions are in [m7-plan.md](m7-plan.md); this entry
+records the first rung, which is measurement, because every rung after it is a bet that
+needs a scoreboard.
+
+### D-153: 7-0 builds the measurement spine — and the self-benchmark reopens its own design
+Status: accepted (2026-08-01). Ten decisions were walked one at a time, under one test:
+**a statistic that changes what it measures is worse than no statistic.** The shape that
+came out is two tiers — an always-on tier cheap enough to trust, and an opt-in deep tier
+that accepts overhead and says so, the split Karma (`--stats`), RenderMan (`-statslevel`),
+and MoonRay (log verbosity) all ship. Tier one is **per-dispatch GPU time**, the three
+cheap **interactivity marks** (time-to-first-ray once per scene load, time-to-first-pixel
+per interaction, time-to-16-spp as the readability stand-in — all free host `Instant`
+deltas), **five named memory buckets** sampled rather than recomputed, and a derived
+**CPU-bound/GPU-bound verdict** that replaces OS CPU% with something actionable: the
+frame's wall-clock against its summed dispatch time, both numbers shown so the size of the
+gap is visible and not just its verdict. Tier two — ray counts by type, per-pixel variance
+and the true convergence-rate comparison, and reuse quality (spatial acceptance, temporal
+survival, mean confidence) — is compile-time gated so the shipping kernel stays
+byte-identical to a stats-free build, rather than riding a runtime uniform whose atomics
+would inflate the register footprint and change the occupancy being measured.
+
+**Occupancy, register pressure, and cache throughput are excluded by decision, not by
+omission.** Vulkan cannot report them portably; re-deriving them would mean rebuilding a
+fraction of Nsight Graphics or the Radeon GPU Profiler, badly — which is exactly the bloat
+this milestone deletes. When the fission decision needs those numbers, attach the real
+tool.
+
+**Two registries turned out to already exist.** The pass-ID registry decision 2 asked for
+— names that survive kernel fission re-splitting the loop — is the *kernel list itself*:
+every pipeline is built from a `Kernel` whose entry-point name is already unique and
+already `'static`, so `ComputePipeline` carries it and `Pass::label()` reads it back. Split
+a kernel and both halves appear under their own names the moment they exist; there is no
+table to keep in sync. The memory bucket is likewise the *allocation's own name* — the
+dotted convention (`scene.geometry`, `film.albedo.sum`, `restir.reservoir.curr`,
+`wavefront.queue.ray`) was already there for the allocator's leak reports, and the ledger
+reads the bucket off whole dotted segments. Two renames made the buckets mean what they
+say: mesh buffers were named by mesh and falling to scratch (now `scene.mesh.*`), and the
+ReSTIR **light tables** were inflating the reservoir bucket (now `scene.restir.*`) — that
+bucket's whole job is to price *reuse*, not the light list the estimator reads.
+
+**The self-benchmark was a condition of decision 2, and it failed the design.** The
+hypothesis was that per-dispatch timestamps ride for free, since `submit_passes` already
+places a full memory barrier at every pass boundary — the clock read where the GPU is
+provably quiet. Measurement said no. brass-room 512², plain path tracer (a 1.67 ms frame
+carrying ~90 passes — this renderer's worst case), 15 interleaved pairs of 800-sample
+runs: timing every frame cost **+6.5%**, consistent on the minimum and the median.
+Narrowing the write's stage mask from `ALL_COMMANDS` to compute-and-transfer changed
+nothing, so the cost is the ~1.1 µs write itself, not the wait in front of it. ReSTIR paid
+under 1% (5.9 ms frames, ~15 passes) — but the cheap case is the one that has to be safe.
+
+So the design changed rather than the claim: **timestamps are sampled, one frame in
+eight**, which keeps the per-dispatch granularity decision 2 was actually about while
+putting the cost under a percent. The recorder then keeps the two populations apart on
+purpose — the frame-time headline (median, p95, mean) comes from the **uninstrumented**
+frames, so the number a person reads is what the renderer costs when nobody is looking,
+while the kernel breakdown and the bound verdict come from the instrumented frames, where
+a GPU time and a CPU time can honestly be compared because they are the same frame.
+Re-measured end-to-end on total sampling wall-clock across *all* frames — the number
+sampling cannot hide — the worst case is **+1.4%** (1.380 s → 1.400 s) and ReSTIR is
+**0.0%**, below noise. `--no-gpu-timers` stays in the CLI so the claim is re-checkable
+rather than remembered.
+
+One canonical `Stats` struct feeds all three consumers — the viewer overlay (four fixed
+lines, three collapsing sections), the CLI's console report, and the RON sidecar beside
+the image — so a number on screen and the same number in a file cannot drift. It rides
+**beside** the pixels, never inside them; the byte-exact framebuffer transport goldens are
+untouched. Per-frame time-series is opt-in (`--stats-trace`), for settle curves.
+
+**The baseline is captured** (m7-plan.md §3.5.1, sidecars pinned in `docs/m7-baseline/`):
+four scenes, each earning its slot on one of the two axes the user named — cornell-box as
+the cheapest-frame *dispatch-bound probe*, brass-room for heavy indirect GI, many-lights
+for the NEE-bound case, bistro for production scale — at 1080p, 64 spp, ReSTIR on and off,
+on the current code before a line of the loop changed.
+
+It says four things, none of which was visible yesterday. **Reuse costs 2.3–5.0× per
+frame on every scene**, and nothing clears the 33 ms bar with ReSTIR on except the trivial
+one. **`restir_candidates` is the top kernel in every single ReSTIR run** — 4.1 to 18.5 ms
+per call, ahead of the spatial pass, ahead of everything — which makes 7a's `M` the right
+next rung by measurement rather than by guess. **Seven of eight runs are CPU-bound**, most
+by a wide margin: only 67% of the cornell-box frame is inside a dispatch at all. That gap
+is recording, submission, and the host half of the loop — the launch-cost signature
+decision 6's kernel fission has to answer for — and only bistro-with-ReSTIR, the heaviest
+scene and the slowest frame, keeps the GPU busy enough to read as GPU-bound. And **reuse
+costs a flat 949 MiB at 1080p**, ~3.8× the whole film, before 7d moves any of it. (bistro
+also takes **~14 s to its first ray**; no rung targets that yet, but it is on the board.)
+
+The capture found a bug in the instrument on its first outing, which is the argument for
+capturing early: cornell-box asks for 65 bounces, recording ~1000 passes at 1080p, past
+the timer's starting pool — so its path-tracer run came back honestly unmeasured
+(`bound: Unknown`, `timed_frames: 0`) rather than wrong. The pool now **grows to fit**
+instead of declining to measure, because a pass count is a property of the scene's bounce
+cap and the target's size, and any fixed ceiling is a guess some scene will falsify.
+
+**A review pass followed, and it deleted more than it added.** The spine was built while
+its own design was still moving, and it showed: `submit_passes_timed` had grown as a
+*second* copy of `submit_passes` — same validation, same barrier, same record loop, plus
+stamps — which is exactly the duplication that lets a timed wave and an ordinary one drift
+apart. They are now one function taking `Option<&mut PassTimer>`, so "the timed path and
+the untimed path submit the same work" is a property of the code rather than a claim in a
+comment, and three helpers that had been widened to `pub(super)` to feed the copy went
+private again. `PassTimer::due` now takes the caller's `Option` and hands back the timer,
+collapsing a two-line borrow dance duplicated at both call sites; the readback folds
+straight into `PassTimings` instead of through an intermediate `Vec`. In `stats`, the
+`Bound` verdict became `Bound::of(cpu, gpu)` — it was being computed by building a
+throwaway `Frame`, which buried the one rule that matters (both durations must cover the
+same frames) inside a struct literal. `PassTimings::add`/`merge` fold through one function;
+the `Recorder`'s second `Interactivity` (whose `to_first_ray` was never read, and which
+made every mark a double write) is two booleans; a `Frame::sample_time` accessor left dead
+by the switch to `Stats` is gone. One doc comment in `wavefront.rs` still asserted the
+hypothesis the self-benchmark had *disproved* — that the stamps ride the existing barrier
+for free — and is corrected. And `to_ron` failures now raise `Error::Stats` rather than
+`Error::SceneFormat`, which would have reported a stats-file problem as "scene file
+rejected".
+
+**A second review pass went after the naming, and found the ledger counting things it had
+not been told about.** The memory bucket is the allocation's *name*, which makes names
+load-bearing — so a name that is wrong is a number that is wrong, silently. Three were.
+The presenter's transfer image is allocated straight from the allocator rather than
+through `create_sampled_image`, so it never reached the ledger at all: the one allocation
+the viewer resizes most often was the one missing from the total, and it now counts itself
+in and out like every other resource. `upload_mesh` had gained a `scene.mesh.` prefix while
+its callers already supplied one, producing `scene.mesh.scene.mesh.teapot.vertices`; the
+prefix now lives in exactly one place. And `render.pixels` — a staging buffer for the trip
+back to the host — was bucketed as *film*, beside `download.staging` in scratch; it is
+`download.pixels` now, which retires the `render` arm of `Bucket::of` and leaves every
+remaining arm backed by an allocation the renderer really makes. `Context::memory` was
+also querying the driver for the device-local heap on every read, inside a module whose
+header promises "five relaxed loads"; the heap is a constant of the device and is now read
+once at bring-up, next to the timestamp period that is cached for the same reason.
+
+Three claims in comments were the opposite of the code beside them: `PassTimings::is_empty`
+was documented as "whether anything was measured" (it is the negation), a ledger test
+asserting that `scene.texture_params` is *not* a texture was captioned as though it were,
+and the `scratch` bucket promised to collapse with the wavefront's queues while quietly
+holding the renderer's two global sampling tables. On the code itself: `Recorder::frame`'s
+four positional arguments became `Recorder::record(Frame)`, which lets the CLI build one
+frame and both trace it and record it — deleting a `PassTimings` clone per sample and any
+chance of the logged frame and the counted one being different frames; `Bound` grew a
+`Display` impl, because both consumers had independently spelled the verdict and both used
+a catch-all arm that would have labelled `Unknown` as "cpu-bound"; the recorder's `frames`
+counter is derived from the two populations it was duplicating; `submit_passes_timed` asks
+"is this submission timed" once instead of twice; `PassTimings::add`/`merge` are
+crate-internal, so a measurement is read-only to the consumers that display it; and the
+higher-order `to_ron` wrapper is two `map_err`s.
+
+**Still open in 7-0:** carrying `Stats` to the *third* consumer — the Hydra delegate —
+which needs the shared-memory header extended and its C++ drift guard updated (M4 step 1's
+shape), deliberately left as a scoped piece of work rather than half-landed; relaxing the
+bit-exact goldens to relMSE/FLIP so kernel fission's float-reduction reordering cannot
+false-fail; and tier two.
+
+### D-154: The clock stops charging by the pass — spans, brackets, and a per-write cost seven times the record
+
+**What the question was.** With the spine reviewed twice for shape, the remaining question
+was arithmetic: what does measuring actually cost, and is any of it avoidable? The answer
+had been settled once already — ~1.1 µs a write, sampled one frame in eight to keep it
+under a percent (D-153) — so the work here was meant to be a modest trim. It was not.
+
+**Two cuts, both real.** The first is that `PassTimings` folds by label, so a stamp between
+two consecutive passes that share one buys a number the fold sums straight back together.
+Timing now brackets **spans** — maximal runs of consecutive passes under one label — and
+the wave has plenty: three queue-clearing fills open every bounce, five open the
+submission. Brass-room's 71 passes are 52 spans, so **24% of the stamps were buying
+nothing**, and dropping them costs no information at all.
+
+The second is that the two questions a stats line answers have wildly different prices. *How
+long was the device busy* needs the two outer stamps; *where did it go* needs one per span.
+They were on the same cadence, at the same price. Now every submission is bracketed and
+only one frame in 32 is resolved — which is both cheaper and **better**, because the run's
+bound verdict now weighs device time against wall-clock over every sampled frame instead of
+over the eighth that carried a clock. `Report` gained `gpu` for that total, lost
+`timed_sampling` (whose only job was to be the smaller denominator), and renamed
+`timed_frames` to `breakdown_frames`, which is what it always meant.
+
+**What the measurement said.** Eight interleaved 800-sample runs per arm, brass-room 512²
+path tracer:
+
+| What is stamped | vs `--no-gpu-timers` |
+|---|---:|
+| Every pass boundary, every frame | +49.9% |
+| Every pass boundary, one frame in eight *(D-153's design)* | +7.8% |
+| Every span boundary, one frame in 32, plus the outer stamps every frame *(shipped)* | **+1.9%** |
+| The two outer stamps alone, every frame | ±0%, inside the noise |
+
+An **interior** stamp costs ~15 µs — it is a real serialization point, and the full memory
+barrier already in front of it evidently is not — while the two that **bracket** a
+submission cost nothing measurable, because the GPU is already draining at both ends. That
+asymmetry is the whole design now.
+
+**Two hypotheses died, and a third claim did not survive.** Resetting the query pool from
+the host (`hostQueryReset`) rather than in the command buffer changed nothing: the reset is
+not the cost. Neither did the stamp's stage mask, in any of its three spellings — which
+*confirms* D-153's reading, but not its spelling: `vkCmdWriteTimestamp2` takes a **single**
+stage (VUID-…-stage-03859), so the `COMPUTE_SHADER | ALL_TRANSFER` that shipped was a
+validation error the layers were flagging on every timed test, with behaviour the spec does
+not define. It is `ALL_COMMANDS` now — legal, measurably identical, and correct for a span
+of fills, which a compute-only stamp would close before the transfers finished.
+
+**And D-153's absolute numbers do not reproduce.** The ~1.1 µs write is ~15 µs here, and
++6.5% is +49.9%. The `off` arm is the tell: the same scene, command, and machine that
+recorded 1.380 s recorded 1.846 s today, so the rig is in a different state and the two
+sittings' absolute figures are not comparable. Today's arms are interleaved against each
+other and internally consistent; the table above is the one to trust, and
+`docs/m7-baseline/` is now known to be a **relative** record, not an absolute one.
+
+**The consequence for the pinned baseline.** Measurement got ~4× cheaper, so a post-change
+frame time beats a pre-change one by up to ~6% for no rendering reason. The captures stay
+as they are — recapturing a pre-refactor baseline with post-refactor code would defeat what
+it is for — but any M7 delta read against them owes that much slack back.
+
+### D-155: 7a buys the moving frame one candidate — and the measurement takes the ramp away
+
+**What shipped.** `ReSTIR`'s initial-RIS candidate count M is no longer a constant. The
+frame that *restarts* accumulation — a camera move, a resize, an edit — is drawn with
+`RESTIR_RESTART_CANDIDATES` (1) instead of `RESTIR_CANDIDATES` (16), resolved on the
+host by `Renderer::restir_candidates` and handed to the kernel through the push
+constant that already carried M. The SPIR-V is byte-identical; only a uniform's value moved.
+It is worth 6–13% of a moving frame, interleaved, min-of-median over clean reps at 1080p:
+
+| Scene | cheap restart | pinned at 16 | saved |
+|---|---:|---:|---:|
+| many-lights | 18.67 ms | 21.55 ms | **13.4%** |
+| brass-room | 41.88 ms | 46.95 ms | **10.8%** |
+| cornell-box | 25.76 ms | 28.46 ms | **9.5%** |
+| bistro | 73.76 ms | 78.38 ms | **5.9%** |
+
+**Why one candidate is enough there, and only there.** `Film::reset` zeroes the sample count
+and nothing else — the reservoirs deliberately survive, which is the warm start — so a
+camera being dragged renders sample 0 against a *fat* temporal history, over and over. That
+history is already supplying the confidence a full candidate sweep would buy. And because a
+moving camera never leaves sample 0, that single frame is the whole of its cost: the M7 plan
+§4.0 decomposition, which turns out to be the load-bearing idea in the rung.
+
+**The interviewed shape did not survive contact with the gate.** §4 planned a *ramp* — M
+climbing 1 → 16 over `RESTIR_TEMPORAL_DECAY_FRAMES`, sharing that window with the decay so a
+pixel's total confidence stayed flat across the handoff. It reads well and it is wrong. The
+many-lights reuse gate, on relMSE at 8 spp against brute force:
+
+| M's shape over the first frames | ReSTIR relMSE @ 8 spp | margin vs brute (bar: 1.3×) |
+|---|---:|---:|
+| pinned at 16 (pre-7a) | 0.03816 | 1.41× |
+| **cheap restart frame only (shipped)** | **0.03816** | **1.41×** |
+| ramp over 2 frames | 0.04063 | 1.32× |
+| ramp over 4 frames | 0.04284 | 1.25× ❌ |
+| ramp over 8 frames | 0.04956 | 1.08× ❌ |
+| ramp over 16 frames *(as planned)* | 0.05465 | 0.98× ❌ |
+
+The full ramp erased `ReSTIR`'s entire advantage over path tracing at 8 spp. The mechanism
+is that the decay window is where a settling still **decorrelates**: annealing history to
+zero over sixteen frames is precisely what lets the average converge as a mean of
+independent frames (D-094). A thin candidate frame propped back up by history works directly
+against that — the frames being averaged become re-reads of each other. So the shape is a
+step, not because a step is simpler, but because every sample past the first is *in an
+average* and cannot be cheapened. Decision 3's confidence-flatness argument was reasoning
+about a preview's per-frame quality in a place where the quantity that matters is the
+variance of a mean.
+
+**The premise had to be enforced, not assumed.** "History is already supplying the
+confidence" is false on a *cold* film, which has none. `ViewState` now carries `warm`, set at
+the first `swap`, and the cheap frame fires only where it is true. Three consequences fall
+out: a batch render's opening sample stays at full strength and *creates* the history
+everything after it leans on; temporal reuse being off never warms, so the `--no-temporal`
+arms are untouched; and — because a batch render restarts only at that cold opening frame —
+**every golden passed unchanged, `compare_bit_identical` included.** §4.3's four-step
+migration was written for a re-bake that turned out not to be needed. The stronger outcome:
+the still image is bit-identical to pre-7a everywhere, not merely from sample 16 on.
+
+**What it cost in surface.** `RestirInputs.candidates` (the shape `decay_frames` already
+had, so the thirteen test construction sites pin the still count and stay bit-identical);
+`Renderer::set_cheap_restart`/`candidate_count`; `Frame.candidates` and `Report.candidates`;
+`--no-cheap-restart` and `--restart-every-sample`; a viewer checkbox and an `M` on the
+overlay. The scoreboard gained a permanent `restir-moving` arm (8 → 12 runs) — an *upper*
+bound on real motion, since reprojection is the identity with a held camera so nothing ever
+disoccludes, and a disocclusion drops history before any shift work. It proves the time
+claim and is structurally blind to the quality one, which is what the viewer toggle is for.
+
+`Report.candidates` reads the run's **last** sample, not its first: with the cold guard the
+opening frame is never the cheap one, so only the steady state names the arm — 1 with the
+cheap restart on, 16 with it pinned, in a `--restart-every-sample` capture.
+
+**Load-bearing, and easy to break later.** `RESTIR_TEMPORAL_M_CAP` is a *multiplier* on this
+frame's candidate confidence, so the capped prev:cand ratio stays ~20:1 at M = 1 exactly as
+at M = 16 and a varying M needs no compensating retune. Making it absolute would break this
+rung silently.
+
+**The post-rung review found one bug and deleted a layer.** Reviewing 7a as a whole, after
+the fact:
+
+- **A real hole in the premise.** The guard read `cheap_restart && warm`, and `warm` is a
+  property of the reservoirs, not of anything reading them. Switching temporal reuse *off*
+  after it had warmed — which the viewer's toggle does, and only the viewer's — left `warm`
+  true, so every restart drew at M = 1 with no history being read at all: exactly the
+  starvation the guard exists to prevent, in the arm that would look like ReSTIR performing
+  badly rather than like a bug. `Renderer::restir_candidates` now conjoins `temporal_reuse`,
+  and the wiring test carries a third case that fails without it.
+- **Two layers collapsed to one.** With the ramp gone, `Wavefront::restir_candidate_count`
+  was `if sample == 0`, wrapped by a second condition on `Renderer` — one decision spread
+  across two modules. The whole policy is now a single predicate on `Renderer`, where the
+  film state it reads lives, and `Wavefront` keeps only the two constants. Its unit test
+  went with it: it asserted the branch of a two-branch function, while the test that
+  actually caught the ramp was the many-lights reuse gate, which is still there.
+- **The rename was reverted.** `RESTIR_CANDIDATES_STILL` is `RESTIR_CANDIDATES` again — the
+  count nearly every frame is drawn with should keep the plain name, and "still" was wrong
+  anyway (a cold film and a `--no-temporal` render are not still). The cheap one is
+  `RESTIR_RESTART_CANDIDATES`, matching the `RESTIR_<what>_<thing>` naming already in use.
+- Dropped `_MOVING_IS_CHEAPER`, a const-assert guarding intent rather than bias — unlike
+  `_SUPPORT_COVERAGE` beside it, violating it costs time, not correctness. That left nothing
+  ordering the two counts, so `_SUPPORT_COVERAGE` pins **both** at ≥ 1 (a second pass caught
+  it) rather than resting on the cheap one being the floor: a later edit zeroing
+  `RESTIR_CANDIDATES` is the bias trap the guard exists for, and it would have compiled.
+
+**Still open.** The quality question the headless harness cannot reach — how a disocclusion
+looks at M = 1 while orbiting — is unanswered and belongs to a person with the checkbox. And
+`docs/m7-baseline/` was re-captured while a viewer held the GPU at 94%; the sidecars there
+are a contended read and want a quiet re-run. The pinned pre-7a table in `m7-plan.md` §3 is
+unaffected.
+
+### D-156: The reuse gate never divided by time — and the estimator loses when it does
+
+**What was measured.** `restir_equal_time_efficiency_report`, beside the gates it corrects:
+both estimators wall-clock timed at 1024², on the two scenes the reuse gates assert the win
+on, cross-referenced so neither estimate shares a sample sequence with the reference it is
+scored against. The verdict metric is Monte Carlo efficiency, 1/(relMSE × s).
+
+| Scene | cost ratio | matched-sample win | **efficiency ratio** |
+|---|---:|---:|---:|
+| many-lights | 5.2× | 1.7–2.0× | **0.34–0.39** |
+| indirect-glossy | 6.2× | 1.2–1.4× | **0.20–0.23** |
+
+**Path tracing is 2.6× more efficient per second on many-lights and ~4.8× on
+indirect-glossy.** The matched-sample win is real and reproduces what the gate asserts. It
+is not large enough to cover a 5–6× price. On many-lights brute reaches relMSE 0.00089 in
+1.09 s where ReSTIR reaches 0.00228 in 1.41 s.
+
+**The blind spot, and why it was nobody's mistake.** `assert_reuse_gate` compares at a
+matched *sample* count — the right protocol for the claim it makes, and silent on cost. It
+runs at 128², where the same two estimators cost 1.67 and 1.52 ms/sample: a **1.1×** ratio,
+because sixteen thousand pixels is not pixel-bound and reuse's extra dispatches hide inside
+per-dispatch overhead. Every convergence test in the repo runs there. So reuse's price had
+never been in frame, in any test, since M3. The megapixel ratio matches the 1440p
+scoreboard's independent 5.1× on the same scene, which is what makes it trustworthy: two
+harnesses, two resolutions, two scene definitions, one number.
+
+**What it falsifies.** M7 decision 2 — one always-on motion-scaled ReSTIR path, PT demoted
+to CI oracle — was locked before any equal-time number existed. §3.5.2's exit condition is
+strictly weaker than what has now been measured: even at the projected ~60 ms floor, reuse
+would need its efficiency ratio above 1.0, and from 0.34 that needs the *variance* side to
+improve ~3×, which no rung on the ladder targets. **PT is the interactive spine; ReSTIR is
+opt-in.** Nothing is deleted — the estimator is unbiased, gated, and genuinely better per
+sample, which is the right thing to keep it for.
+
+**Still open.** Under cross-referencing at 128², indirect-glossy shows ReSTIR at *no*
+matched-sample advantage (16 spp 0.0724 vs brute 0.0694) where the gate — same resolution,
+shared ReSTIR reference — measures 1.65×. Either the shared reference deflates ReSTIR's
+error or cross-referencing inflates it through a mean disagreement. Not separated, and it
+does not bear on the verdict above, which holds at every budget on both scenes under either
+protocol. It does bear on how large the gate's headline margin really is.

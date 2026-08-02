@@ -1,0 +1,96 @@
+(
+    device: "NVIDIA GeForce RTX 4070 Ti SUPER (discrete GPU, NVIDIA 580.173.02, Vulkan 1.4)",
+    scene: "/home/wardle/Documents/cenote/scenes/many-lights.ron",
+    size: (1920, 1080),
+    samples: 64,
+    wall: 2298.774865,
+    sampling: 1396.417322,
+    gpu: 1323.54528,
+    frames: 64,
+    breakdown_frames: 2,
+    passes: (
+        total: 40.071008,
+        entries: [
+            (
+                label: "fill",
+                gpu: 0.978848,
+                calls: 28,
+            ),
+            (
+                label: "raygen",
+                gpu: 0.438464,
+                calls: 4,
+            ),
+            (
+                label: "intersect",
+                gpu: 0.33664,
+                calls: 4,
+            ),
+            (
+                label: "shade_miss",
+                gpu: 0.23932799999999999,
+                calls: 4,
+            ),
+            (
+                label: "restir_candidates",
+                gpu: 15.705568,
+                calls: 4,
+            ),
+            (
+                label: "restir_temporal",
+                gpu: 2.027392,
+                calls: 4,
+            ),
+            (
+                label: "restir_spatial_gather",
+                gpu: 9.630400000000002,
+                calls: 4,
+            ),
+            (
+                label: "restir_spatial",
+                gpu: 7.917376,
+                calls: 4,
+            ),
+            (
+                label: "restir_resolve",
+                gpu: 0.943328,
+                calls: 4,
+            ),
+            (
+                label: "shade_surface",
+                gpu: 0.6982400000000001,
+                calls: 4,
+            ),
+            (
+                label: "trace_shadow",
+                gpu: 0.012096,
+                calls: 4,
+            ),
+            (
+                label: "accumulate",
+                gpu: 1.1433280000000001,
+                calls: 2,
+            ),
+        ],
+    ),
+    smoothed: (
+        median: 21.194471,
+        p95: 22.546976,
+    ),
+    mean_frame: 21.481053,
+    bound: Gpu,
+    interactivity: (
+        to_first_ray: Some(574.9583),
+        to_first_pixel: Some(574.9583299999999),
+        to_readable: Some(912.099784),
+    ),
+    peak_memory: (
+        scene: 445248,
+        film: 257126444,
+        reservoirs: 995328096,
+        textures: 512,
+        scratch: 374226744,
+        budget: Some(17171480576),
+    ),
+    candidates: Some(16),
+)

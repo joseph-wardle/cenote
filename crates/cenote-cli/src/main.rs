@@ -11,6 +11,7 @@
 //! every shader edit: recompile via `slangc`, swap the pipeline on
 //! success, keep the last good image on failure.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -96,11 +97,47 @@ struct RenderArgs {
     #[arg(long)]
     no_cv: bool,
 
+    /// Draw every restart frame at `ReSTIR`'s full candidate count instead of
+    /// the cheap one (M7 step 7a) — the pre-7a renderer. A batch render restarts
+    /// only at its cold opening frame, which is never cheapened, so this is
+    /// visible only alongside --restart-every-sample; that pairing is the A/B.
+    #[arg(long)]
+    no_cheap_restart: bool,
+
+    /// Reset the film after every sample, so each one renders as the frame after
+    /// a restart: the moving camera's estimator state without a moving camera.
+    /// Reprojection is the identity here, so nothing ever disoccludes — an upper
+    /// bound on moving frame time, and no evidence at all about moving quality.
+    /// The image it writes is one sample; --out is for the timing, not the
+    /// picture.
+    #[arg(long)]
+    restart_every_sample: bool,
+
     /// Re-render whenever a shader source is edited (hot reload).
     /// Compiles kernels from the source checkout; a broken edit prints
     /// the compiler's diagnostics and keeps the last good image.
     #[arg(long)]
     watch: bool,
+
+    /// Skip the end-of-render statistics — the console summary and the
+    /// `.stats.ron` sidecar beside --out. About output, not overhead: the
+    /// measuring is --no-gpu-timers' business.
+    #[arg(long)]
+    no_stats: bool,
+
+    /// Record nothing on the GPU: no query pool, no timestamps, not one
+    /// extra command in the submission. Every frame is bracketed by two
+    /// stamps and only one in thirty-two is resolved kernel by kernel,
+    /// precisely so timing stays under a percent — but this is the A/B that
+    /// proves it: render a scene with and without, and compare.
+    #[arg(long)]
+    no_gpu_timers: bool,
+
+    /// Append one line of per-frame statistics to this file, for plotting a
+    /// settle curve. Opt-in: a converging render writes one line per
+    /// sample, which is the point and also why it is not on by default.
+    #[arg(long)]
+    stats_trace: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -128,6 +165,10 @@ fn parse_noise_threshold(raw: &str) -> Result<f32, String> {
 }
 
 fn main() -> anyhow::Result<()> {
+    // First statement in the process, so time-to-first-ray covers the
+    // shader compile, the scene load, and the acceleration-structure build
+    // — all the things a person actually waits through.
+    cenote::stats::mark_startup();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     match Command::parse() {
         Command::Render(args) => render(&args),
@@ -192,6 +233,7 @@ fn render(args: &RenderArgs) -> anyhow::Result<()> {
     renderer.set_spatial_reuse(!args.no_spatial);
     renderer.set_temporal_reuse(!args.no_temporal);
     renderer.set_cv_shading(!args.no_cv);
+    renderer.set_cheap_restart(!args.no_cheap_restart);
     if let Some(threshold) = args.noise_threshold {
         renderer.set_noise_threshold(threshold);
     }
@@ -213,6 +255,7 @@ fn render(args: &RenderArgs) -> anyhow::Result<()> {
         args,
         #[cfg(feature = "denoise")]
         denoiser.as_mut(),
+        None,
     )?;
     if !args.watch {
         return Ok(());
@@ -244,6 +287,7 @@ fn render(args: &RenderArgs) -> anyhow::Result<()> {
             args,
             #[cfg(feature = "denoise")]
             denoiser.as_mut(),
+            Some(start),
         )?;
         println!("reloaded in {} ms", start.elapsed().as_millis());
     }
@@ -255,6 +299,10 @@ fn render(args: &RenderArgs) -> anyhow::Result<()> {
 /// progressively, run to a fixed sample count and written to disk.
 /// `--denoise` adds a second EXR of the OIDN-denoised beauty beside it;
 /// the raw estimator output is never replaced.
+///
+/// `origin` is where the statistics' time-to-first-ray counts from: `None`
+/// for the first render, meaning process start, and the moment the edit
+/// landed for a `--watch` re-render.
 fn render_frame(
     gpu: &cenote::gpu::Context,
     scene: &cenote::scene::Scene,
@@ -263,9 +311,52 @@ fn render_frame(
     spp: u32,
     args: &RenderArgs,
     #[cfg(feature = "denoise")] denoiser: Option<&mut cenote::denoise::Denoiser>,
+    origin: Option<Instant>,
 ) -> anyhow::Result<()> {
-    for _ in 0..spp {
-        renderer.accumulate(gpu, scene, film)?;
+    // A hot-reload re-render measures its own startup — what a person
+    // waited through is the recompile, not the launch an hour ago.
+    let mut recorder =
+        origin.map_or_else(cenote::stats::Recorder::new, cenote::stats::Recorder::since);
+    // `--no-gpu-timers` is the A/B: no pool, no timestamps, a submission
+    // byte-identical to a build with no stats code in it at all.
+    let mut timer = if args.no_gpu_timers {
+        None
+    } else {
+        gpu.create_pass_timer(cenote::gpu::PassTimer::WAVE_CAPACITY)?
+    };
+    let mut trace = match &args.stats_trace {
+        Some(path) => Some(std::io::BufWriter::new(
+            std::fs::File::create(path)
+                .with_context(|| format!("opening the stats trace {}", path.display()))?,
+        )),
+        None => None,
+    };
+    for sample in 0..spp {
+        // The timer keeps its own cadence: every frame is bracketed, one in
+        // `PassTimer::BREAKDOWN_INTERVAL` is resolved kernel by kernel. So
+        // the frame times a benchmark reads are the renderer's, not the
+        // instrument's.
+        let started = Instant::now();
+        // Read before the wave: the candidate count is picked from the film's
+        // state going in, which this sample is about to change.
+        let candidates = renderer.candidate_count(film);
+        let passes = renderer.accumulate_timed(gpu, scene, film, timer.as_mut())?;
+        let frame = cenote::stats::Frame {
+            cpu: started.elapsed(),
+            passes,
+            size: (film.width(), film.height()),
+            samples: film.samples(),
+            candidates,
+        };
+        // Traced from this frame, not from the recorder's snapshot: a settle
+        // curve wants *this* sample's wall-clock, and the snapshot
+        // deliberately holds the last *instrumented* frame so its breakdown
+        // and its CPU time stay a matched pair. Reading it here would repeat
+        // one frame seven times in eight.
+        if let Some(trace) = trace.as_mut() {
+            writeln!(trace, "{}", frame.to_ron_line()?)?;
+        }
+        recorder.record(frame);
         // With --noise-threshold, stop as soon as enough of the image has
         // converged; --spp is the hard cap the loop bound already enforces.
         // Below CONVERGENCE_MIN_SAMPLES the metric is untrusted (D-094), so the
@@ -276,7 +367,27 @@ fn render_frame(
         {
             break;
         }
+        // The moving harness (M7 step 7a), after the sample is recorded so the
+        // frame it reports is the one that was rendered. `Film::reset` zeroes
+        // the sample count and nothing else — the reservoirs survive, which is
+        // what makes the next frame a *warm* restart rather than a cold one.
+        // Deliberately no `Recorder::restart`: the interactivity marks measure
+        // one interaction, and this loop is a thousand of them. Never after the
+        // last sample, so the film still holds one and there is an image to
+        // resolve.
+        if args.restart_every_sample && sample + 1 < spp {
+            film.reset();
+        }
     }
+    // A buffered write that fails only on drop fails silently; a stats file
+    // is worth knowing about.
+    if let Some(trace) = trace.as_mut() {
+        trace.flush().context("writing the stats trace")?;
+    }
+    // Memory is read once, at the end: this loop allocates nothing after
+    // the first sample, so a sampled reading would be the same number many
+    // times over.
+    recorder.memory(gpu.memory());
     let averages = film.averages(gpu)?;
     cenote::output::write_aov_exr(
         &args.out,
@@ -313,7 +424,110 @@ fn render_frame(
             started.elapsed().as_millis()
         );
     }
+    if !args.no_stats {
+        let report = recorder.report(
+            gpu.device_summary().to_owned(),
+            args.scene
+                .as_ref()
+                .map_or_else(|| "demo".to_owned(), |path| path.display().to_string()),
+        );
+        print_report(&report);
+        // The sidecar beside the image, so two runs diff as text and a rung
+        // of work is a readable change rather than a remembered impression.
+        let sidecar = args.out.with_extension("stats.ron");
+        std::fs::write(&sidecar, report.to_ron()?)
+            .with_context(|| format!("writing {}", sidecar.display()))?;
+        println!("wrote {}", sidecar.display());
+    }
     Ok(())
+}
+
+/// The end-of-render console block: the same [`Report`] the sidecar
+/// carries, laid out for a person. One struct, two renderings — a number
+/// on screen and the same number in the file can never drift.
+fn print_report(report: &cenote::stats::Report) {
+    let millis = |duration: std::time::Duration| duration.as_secs_f64() * 1000.0;
+    println!("\n  {}", report.device);
+    println!(
+        "  {} — {}×{}, {} spp in {:.2} s sampling ({:.2} s from launch)",
+        report.scene,
+        report.size.0,
+        report.size.1,
+        report.samples,
+        report.sampling.as_secs_f64(),
+        report.wall.as_secs_f64(),
+    );
+    println!(
+        "  frame  {:>8.2} ms mean   {:>8.2} median   {:>8.2} p95",
+        millis(report.mean_frame),
+        millis(report.smoothed.median),
+        millis(report.smoothed.p95),
+    );
+    // Which arm this run is, printed beside the numbers it explains: the same
+    // scene at the same size renders at two different speeds depending on the
+    // candidate count its frames were drawn with, and a frame time with no M
+    // beside it cannot say which.
+    if let Some(candidates) = report.candidates {
+        println!("  restir      M {candidates} at the last sample");
+    }
+    match report.bound {
+        cenote::stats::Bound::Unknown => println!("  gpu           — (no timestamps)"),
+        // Every sampled frame is bracketed, so this is the whole render's
+        // device time against the whole render's sampling wall-clock — not
+        // a subset scaled up. Dividing by `wall` instead would charge the
+        // dispatches for the scene load.
+        bound => println!(
+            "  gpu    {:>8.2} ms ({:.0}% of sampling, {bound})",
+            millis(report.gpu),
+            100.0 * report.gpu.as_secs_f64() / report.sampling.as_secs_f64().max(f64::EPSILON),
+        ),
+    }
+    if report.passes.has_breakdown() {
+        // Sorted by cost, because the only reason to read this list is to
+        // find out what to work on next.
+        let mut passes: Vec<_> = report.passes.iter().collect();
+        passes.sort_unstable_by_key(|pass| std::cmp::Reverse(pass.gpu));
+        println!(
+            "\n  kernel breakdown over {} of {} frames ({:.2} ms of the {:.2} ms above)",
+            report.breakdown_frames,
+            report.frames,
+            millis(report.passes.total()),
+            millis(report.gpu),
+        );
+        println!("  kernel                    total       per call   calls");
+        for pass in passes {
+            println!(
+                "  {:<22}{:>8.2} ms  {:>8.3} ms  {:>6}",
+                pass.label,
+                millis(pass.gpu),
+                millis(pass.gpu) / f64::from(pass.calls.max(1)),
+                pass.calls,
+            );
+        }
+    }
+    let marks = &report.interactivity;
+    let mark = |name: &str, value: Option<std::time::Duration>| match value {
+        Some(value) => println!("  {name:<22}{:>8.1} ms", millis(value)),
+        None => println!("  {name:<22}{:>8}", "—"),
+    };
+    println!();
+    mark("first ray", marks.to_first_ray);
+    mark("first pixel", marks.to_first_pixel);
+    mark(
+        &format!("{} spp", cenote::stats::READABLE_SAMPLES),
+        marks.to_readable,
+    );
+
+    let memory = &report.peak_memory;
+    let mib = |bytes: u64| bytes as f64 / f64::from(1u32 << 20);
+    println!("\n  peak memory            {:>8.1} MiB", mib(memory.total()));
+    for (name, value) in memory.buckets() {
+        println!("    {name:<20}{:>8.1} MiB", mib(value));
+    }
+    if let Some(budget) = memory.budget {
+        println!("    {:<20}{:>8.1} MiB", "device heap", mib(budget));
+    }
+    println!();
 }
 
 fn import(args: &ImportArgs) -> anyhow::Result<()> {

@@ -49,6 +49,10 @@ use crate::camera::OrbitCamera;
 use crate::ui::{FrameStats, Gui};
 
 fn main() -> anyhow::Result<()> {
+    // First statement in the process, so time-to-first-ray covers window
+    // and device bring-up, the scene load, and the acceleration-structure
+    // build — all the things a person actually waits through.
+    cenote::stats::mark_startup();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     // The one argument: a scene file to open and watch. Absent means the
     // bundled demo scene.
@@ -322,6 +326,7 @@ impl Viewer {
         });
         self.session.set_spatial_reuse(self.gui.spatial_reuse());
         self.session.set_temporal_reuse(self.gui.temporal_reuse());
+        self.session.set_cheap_restart(self.gui.cheap_restart());
         let debug_view = if restir {
             self.gui.debug_view()
         } else {
@@ -464,9 +469,7 @@ impl Viewer {
                 passthrough,
             )
             .context("tonemapping the frame")?;
-        self.stats.sample = frame.sample_time();
-        self.stats.size = (frame.width(), frame.height());
-        self.stats.samples = frame.samples();
+        self.stats.render = frame.stats().clone();
 
         self.window.pre_present_notify();
         let started = Instant::now();

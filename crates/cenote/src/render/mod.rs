@@ -53,9 +53,10 @@ use ash::vk;
 use bytemuck::{Pod, Zeroable};
 
 use crate::error::Result;
-use crate::gpu::{Bindings, Buffer, ComputePipeline, Context, MemoryLocation, Pass};
+use crate::gpu::{Bindings, Buffer, ComputePipeline, Context, MemoryLocation, Pass, PassTimer};
 use crate::scene::Scene;
 use crate::shaders::Kernels;
+use crate::stats::PassTimings;
 use crate::wavefront::{
     LightSampling, Reproject, ReprojectCamera, RestirInputs, TemporalReuse, Wavefront,
 };
@@ -145,6 +146,14 @@ struct ResolveParams {
 /// The renderer: the wavefront engine plus the film kernels, ready to
 /// render frames. Created from the embedded kernels; [`Renderer::reload`]
 /// swaps in a recompiled set.
+// The estimator switches are independent knobs on one pipeline, not a state:
+// every combination is a configuration someone renders on purpose, so an enum
+// would have to enumerate the product and a state machine would model
+// transitions that don't exist.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent estimator toggles, not a state to machine"
+)]
 pub struct Renderer {
     wavefront: Wavefront,
     accumulate: ComputePipeline,
@@ -187,6 +196,11 @@ pub struct Renderer {
     /// spatial reuse on (spatial-off configs shade the survivor regardless).
     /// Preserved across [`Renderer::reload`].
     cv_shading: bool,
+    /// Whether a restart frame may be drawn cheap (M7 step 7a) — on by default;
+    /// off pins M flat, the pre-7a renderer. One of the conjuncts in
+    /// [`Renderer::restir_candidates`], which is where the rest of the story is.
+    /// Preserved across [`Renderer::reload`].
+    cheap_restart: bool,
     /// Relative std-error below which the accumulate kernel counts a pixel as
     /// converged (M3 step 6b/6c) — the auto-stop metric's threshold. Defaults to
     /// [`Renderer::NOISE_THRESHOLD`]; the CLI `--noise-threshold` and the session's
@@ -273,6 +287,7 @@ impl Renderer {
             spatial_reuse: true,
             temporal_reuse: true,
             cv_shading: true,
+            cheap_restart: true,
             noise_threshold: Self::NOISE_THRESHOLD,
         })
     }
@@ -287,12 +302,21 @@ impl Renderer {
     ///
     /// Any [`crate::Error`] from pipeline or buffer creation.
     pub fn reload(&mut self, gpu: &Context, kernels: &Kernels) -> Result<()> {
-        let (render_mode, debug_view, spatial_reuse, temporal_reuse, cv_shading, noise_threshold) = (
+        let (
+            render_mode,
+            debug_view,
+            spatial_reuse,
+            temporal_reuse,
+            cv_shading,
+            cheap_restart,
+            noise_threshold,
+        ) = (
             self.render_mode,
             self.debug_view,
             self.spatial_reuse,
             self.temporal_reuse,
             self.cv_shading,
+            self.cheap_restart,
             self.noise_threshold,
         );
         *self = Self::from_kernels(gpu, kernels, self.max_bounces)?;
@@ -302,6 +326,7 @@ impl Renderer {
         self.spatial_reuse = spatial_reuse;
         self.temporal_reuse = temporal_reuse;
         self.cv_shading = cv_shading;
+        self.cheap_restart = cheap_restart;
         self.noise_threshold = noise_threshold;
         Ok(())
     }
@@ -380,6 +405,71 @@ impl Renderer {
         self.cv_shading
     }
 
+    /// Toggle the cheap restart frame (M7 step 7a) — on by default, and where a
+    /// moving camera's whole frame time is. Off is the pre-7a renderer, the arm
+    /// the saving is measured against. Takes effect on the next
+    /// [`Renderer::accumulate`], so the caller resets its film to switch
+    /// cleanly. See [`Renderer::restir_candidates`] for what it does.
+    pub fn set_cheap_restart(&mut self, enabled: bool) {
+        self.cheap_restart = enabled;
+    }
+
+    /// Whether the cheap restart frame is on.
+    #[must_use]
+    pub fn cheap_restart(&self) -> bool {
+        self.cheap_restart
+    }
+
+    /// [`Renderer::restir_candidates`] for a caller that does not know the mode
+    /// — `None` in [`RenderMode::PathTracer`], which has no reservoirs to fill.
+    ///
+    /// Reported per frame as [`crate::stats::Frame::candidates`], where it names
+    /// which arm produced a measurement. Takes the film rather than a sample
+    /// count so a caller cannot report an M the renderer did not use.
+    #[must_use]
+    pub fn candidate_count(&self, film: &Film) -> Option<u32> {
+        match self.render_mode {
+            RenderMode::PathTracer => None,
+            RenderMode::Restir => Some(self.restir_candidates(film)),
+        }
+    }
+
+    /// The initial-RIS candidate count M the next sample into `film` is drawn
+    /// with (M7 step 7a): the cheap one on a frame that restarts accumulation
+    /// onto a live temporal history, the full count everywhere else.
+    ///
+    /// Every conjunct is the premise, not a precaution. One candidate suffices
+    /// on a restart *because history already supplies the confidence a full
+    /// sweep would buy*, so the saving fires only where there is history being
+    /// read: reuse switched on, and reservoirs holding a committed frame. A cold
+    /// film has none — the opening sample of a batch render or a fresh viewport
+    /// pays in full, and in doing so commits the full-strength reservoir every
+    /// frame after it leans on.
+    ///
+    /// **Only sample 0, and only it can be.** A moving camera resets the film
+    /// every frame while the reservoirs survive, so sample 0 against a warm
+    /// history is the only frame it ever draws — the entire saving — and there
+    /// the film's average is that one frame, so leaning on history correlates
+    /// nothing. From sample 1 the average holds the frames history is made of,
+    /// and leaning on it correlates the very samples being averaged. Measured on
+    /// the many-lights reuse gate: climbing to the full count over the temporal
+    /// decay window instead of stepping there cost 43% more error at 8 spp,
+    /// erasing `ReSTIR`'s whole margin over brute force. Annealing that window
+    /// to zero is what *decorrelates* a settling still (D-094).
+    ///
+    /// Unbiased either way — M only ever trades variance for cost.
+    fn restir_candidates(&self, film: &Film) -> u32 {
+        let warm_restart = self.cheap_restart
+            && self.temporal_reuse
+            && film.samples == 0
+            && film.restir_history_is_warm();
+        if warm_restart {
+            Wavefront::RESTIR_RESTART_CANDIDATES
+        } else {
+            Wavefront::RESTIR_CANDIDATES
+        }
+    }
+
     /// Set the auto-stop noise threshold (M3 step 6c): the relative estimator
     /// standard error below which the accumulate kernel counts a pixel converged.
     /// Changes what [`Film::converged_fraction`] measures on the next
@@ -427,7 +517,9 @@ impl Renderer {
         assert!(width > 0 && height > 0, "zero-sized render target");
         let size = u64::from(width) * u64::from(height) * 4 * size_of::<f32>() as u64;
         let pixels = gpu.create_buffer(
-            "render.pixels",
+            // Staging for the trip back to the host, so it buckets with
+            // `download.staging` rather than with the film it carries.
+            "download.pixels",
             size,
             vk::BufferUsageFlags::STORAGE_BUFFER
                 | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
@@ -454,6 +546,25 @@ impl Renderer {
     ///
     /// Any [`crate::Error`] from submission.
     pub fn accumulate(&self, gpu: &Context, scene: &Scene, film: &mut Film) -> Result<()> {
+        self.accumulate_timed(gpu, scene, film, None).map(|_| ())
+    }
+
+    /// [`Renderer::accumulate`], reporting what the sample cost on the
+    /// device — and, on the frames the timer resolves, what each kernel
+    /// cost. Without a `timer` the submission is unchanged and the timings
+    /// come back empty — the two are the same code path, so a timed render
+    /// and an untimed one cannot diverge in what they draw.
+    ///
+    /// # Errors
+    ///
+    /// As [`Renderer::accumulate`].
+    pub fn accumulate_timed(
+        &self,
+        gpu: &Context,
+        scene: &Scene,
+        film: &mut Film,
+        timer: Option<&mut PassTimer>,
+    ) -> Result<PassTimings> {
         let accumulate = self.accumulate_params(film);
         // In ReSTIR mode the reservoir stages own bounce 0's direct lighting;
         // allocate this frame's reservoir (and, for a debug view, the debug
@@ -496,13 +607,16 @@ impl Renderer {
                         prev_same_scene: film.view().prev_epoch() == scene.epoch(),
                     }),
                     scratch: self.spatial_reuse.then(|| film.view().scratch()),
+                    // Resolved on the host (M7 step 7a), so the kernel sees only
+                    // a push constant's value change.
+                    candidates: self.restir_candidates(film),
                     cv_shading: self.cv_shading,
                     debug: debug.then(|| film.debug()),
                     debug_view: self.debug_view,
                 })
             }
         };
-        self.wavefront.trace_then(
+        let timings = self.wavefront.trace_then(
             gpu,
             scene,
             &film.beauty.sample,
@@ -523,6 +637,7 @@ impl Renderer {
                 },
                 self.accumulate_pass(&accumulate),
             ],
+            timer,
         )?;
         film.samples += 1;
         // Frame end: wind the temporal ping-pong so next frame's `prev` is this
@@ -544,7 +659,7 @@ impl Renderer {
                 forward: basis.forward,
             });
         }
-        Ok(())
+        Ok(timings)
     }
 
     /// This frame's `ReSTIR` debug false-colour buffer, once at least one

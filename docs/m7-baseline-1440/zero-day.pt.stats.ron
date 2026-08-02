@@ -1,0 +1,71 @@
+(
+    device: "NVIDIA GeForce RTX 4070 Ti SUPER (discrete GPU, NVIDIA 580.173.02, Vulkan 1.4)",
+    scene: "/home/wardle/Documents/cenote/scenes/corpus/zero-day.ron",
+    size: (2560, 1440),
+    samples: 64,
+    wall: 26504.959483,
+    sampling: 1723.683702,
+    gpu: 1649.9387840000002,
+    frames: 64,
+    breakdown_frames: 2,
+    passes: (
+        total: 51.84784,
+        entries: [
+            (
+                label: "fill",
+                gpu: 0.9337599999999999,
+                calls: 170,
+            ),
+            (
+                label: "raygen",
+                gpu: 0.7354240000000001,
+                calls: 8,
+            ),
+            (
+                label: "intersect",
+                gpu: 9.384191999999999,
+                calls: 40,
+            ),
+            (
+                label: "shade_miss",
+                gpu: 0.31315200000000004,
+                calls: 40,
+            ),
+            (
+                label: "shade_surface",
+                gpu: 29.970048,
+                calls: 40,
+            ),
+            (
+                label: "trace_shadow",
+                gpu: 8.514592,
+                calls: 40,
+            ),
+            (
+                label: "accumulate",
+                gpu: 1.9966720000000002,
+                calls: 2,
+            ),
+        ],
+    ),
+    smoothed: (
+        median: 26.802394,
+        p95: 27.414306999999997,
+    ),
+    mean_frame: 26.917867,
+    bound: Gpu,
+    interactivity: (
+        to_first_ray: Some(23928.124492),
+        to_first_pixel: Some(23928.124522000002),
+        to_readable: Some(24332.405421),
+    ),
+    peak_memory: (
+        scene: 563607720,
+        film: 457113644,
+        reservoirs: 0,
+        textures: 12814848,
+        scratch: 374226744,
+        budget: Some(17171480576),
+    ),
+    candidates: None,
+)

@@ -1,0 +1,71 @@
+(
+    device: "NVIDIA GeForce RTX 4070 Ti SUPER (discrete GPU, NVIDIA 580.173.02, Vulkan 1.4)",
+    scene: "/home/wardle/Documents/cenote/scenes/many-lights.ron",
+    size: (2560, 1440),
+    samples: 64,
+    wall: 1851.4708130000001,
+    sampling: 506.03508600000004,
+    gpu: 435.333312,
+    frames: 64,
+    breakdown_frames: 2,
+    passes: (
+        total: 13.174912,
+        entries: [
+            (
+                label: "fill",
+                gpu: 0.976,
+                calls: 266,
+            ),
+            (
+                label: "raygen",
+                gpu: 0.74208,
+                calls: 8,
+            ),
+            (
+                label: "intersect",
+                gpu: 1.498208,
+                calls: 64,
+            ),
+            (
+                label: "shade_miss",
+                gpu: 1.8513279999999999,
+                calls: 64,
+            ),
+            (
+                label: "shade_surface",
+                gpu: 4.948544,
+                calls: 64,
+            ),
+            (
+                label: "trace_shadow",
+                gpu: 1.267552,
+                calls: 64,
+            ),
+            (
+                label: "accumulate",
+                gpu: 1.8912,
+                calls: 2,
+            ),
+        ],
+    ),
+    smoothed: (
+        median: 7.906897,
+        p95: 8.199043,
+    ),
+    mean_frame: 7.9082159999999995,
+    bound: Cpu,
+    interactivity: (
+        to_first_ray: Some(561.6692989999999),
+        to_first_pixel: Some(561.669409),
+        to_readable: Some(681.295569),
+    ),
+    peak_memory: (
+        scene: 445248,
+        film: 457113644,
+        reservoirs: 0,
+        textures: 512,
+        scratch: 374226744,
+        budget: Some(17171480576),
+    ),
+    candidates: None,
+)

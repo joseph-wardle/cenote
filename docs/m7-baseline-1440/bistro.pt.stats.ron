@@ -1,0 +1,71 @@
+(
+    device: "NVIDIA GeForce RTX 4070 Ti SUPER (discrete GPU, NVIDIA 580.173.02, Vulkan 1.4)",
+    scene: "/home/wardle/Documents/cenote/scenes/corpus/bistro.ron",
+    size: (2560, 1440),
+    samples: 64,
+    wall: 14727.114829,
+    sampling: 1957.400499,
+    gpu: 1886.343488,
+    frames: 64,
+    breakdown_frames: 2,
+    passes: (
+        total: 57.693632,
+        entries: [
+            (
+                label: "fill",
+                gpu: 0.820896,
+                calls: 170,
+            ),
+            (
+                label: "raygen",
+                gpu: 0.916288,
+                calls: 8,
+            ),
+            (
+                label: "intersect",
+                gpu: 15.58272,
+                calls: 40,
+            ),
+            (
+                label: "shade_miss",
+                gpu: 2.04448,
+                calls: 40,
+            ),
+            (
+                label: "shade_surface",
+                gpu: 26.45248,
+                calls: 40,
+            ),
+            (
+                label: "trace_shadow",
+                gpu: 10.188799999999999,
+                calls: 40,
+            ),
+            (
+                label: "accumulate",
+                gpu: 1.687968,
+                calls: 2,
+            ),
+        ],
+    ),
+    smoothed: (
+        median: 30.5613,
+        p95: 31.345123,
+    ),
+    mean_frame: 30.605483999999997,
+    bound: Gpu,
+    interactivity: (
+        to_first_ray: Some(12144.230696999999),
+        to_first_pixel: Some(12144.230737000002),
+        to_readable: Some(12599.777489),
+    ),
+    peak_memory: (
+        scene: 528364100,
+        film: 457113644,
+        reservoirs: 0,
+        textures: 954227200,
+        scratch: 374226744,
+        budget: Some(17171480576),
+    ),
+    candidates: None,
+)

@@ -56,7 +56,7 @@ impl Scene {
         for (name, mesh) in &host.meshes {
             meshes.insert(
                 name.clone(),
-                upload_mesh(gpu, &format!("scene.mesh.{name}"), mesh)?,
+                upload_mesh(gpu, name, mesh)?,
             );
         }
         let textures = upload_textures(gpu, BTreeMap::new(), &host.textures)?;
@@ -172,7 +172,7 @@ impl Scene {
         for (name, mesh) in &host.meshes {
             self.meshes.insert(
                 name.clone(),
-                upload_mesh(gpu, &format!("scene.mesh.{name}"), mesh)?,
+                upload_mesh(gpu, name, mesh)?,
             );
         }
         self.textures = upload_textures(gpu, std::mem::take(&mut self.textures), &host.textures)?;

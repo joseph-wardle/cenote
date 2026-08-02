@@ -9,7 +9,11 @@
 //! - [`Context::submit_passes`] — a sequence of [`Pass`]es (buffer fills,
 //!   direct and indirect dispatches) in one submission, a full memory
 //!   barrier between each: the wavefront engine's stage chain, where every
-//!   stage's workgroup count is a number the previous stage wrote.
+//!   stage's workgroup count is a number the previous stage wrote. Its
+//!   [`Context::submit_passes_timed`] form brackets the submission with a
+//!   [`PassTimer`], and on the frames that ask for one stamps every span
+//!   boundary inside it; the two are one function, so an instrumented wave
+//!   cannot drift from an ordinary one.
 //!
 //! Cross-submission memory visibility is free with this shape: the fence
 //! signal makes all device writes available, so the next upload, dispatch,
@@ -28,7 +32,9 @@ use ash::prelude::VkResult;
 use ash::vk;
 
 use crate::error::Result;
-use crate::gpu::{Buffer, ComputePipeline, Context, SceneBindings};
+use crate::gpu::timing::Detail;
+use crate::gpu::{Buffer, ComputePipeline, Context, PassTimer, SceneBindings};
+use crate::stats::PassTimings;
 
 /// The device's single queue, wrapped so Vulkan's external-synchronization
 /// rule for submission is enforced by the type rather than by a comment.
@@ -173,6 +179,52 @@ pub enum Pass<'a> {
     },
 }
 
+impl Pass<'_> {
+    /// The name this pass reports itself under in [`crate::stats`].
+    ///
+    /// A dispatch borrows its kernel's entry-point name, which is already
+    /// unique per kernel and already `'static` — so the pass-ID registry is
+    /// the kernel list itself, with nothing to keep in sync. Split a kernel
+    /// in two and the two halves show up under their own names the moment
+    /// they exist; there is no table to remember to update.
+    ///
+    /// Fills and copies get one bucket apiece rather than one per buffer: a
+    /// wave's dozen fills are noise taken singly and a real line item taken
+    /// together, and which buffer was zeroed is not the question anyone
+    /// reading a stats line is asking.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match *self {
+            Pass::Fill { .. } => "fill",
+            Pass::CopyBuffer { .. } => "copy",
+            Pass::Dispatch { pipeline, .. } | Pass::DispatchIndirect { pipeline, .. } => {
+                pipeline.label
+            }
+        }
+    }
+}
+
+/// A submission's spans — maximal runs of consecutive passes under one
+/// label — as the label and how many passes ran under it.
+///
+/// This is the unit [`PassTimer`] brackets, and the reason is that
+/// [`PassTimings`] folds by label: a stamp between two consecutive passes
+/// that share one buys a number the fold sums straight back together, at
+/// the price of a real timestamp write. The wave has plenty of such runs —
+/// three queue-clearing fills open every bounce, and up to seven open the
+/// whole submission — so the saving is the difference between timing what
+/// is reported and timing what happens to be recorded.
+pub(super) fn spans<'a>(passes: &'a [Pass<'_>]) -> impl Iterator<Item = (&'static str, u32)> + 'a {
+    passes
+        .chunk_by(|left, right| left.label() == right.label())
+        .map(|run| {
+            (
+                run[0].label(),
+                u32::try_from(run.len()).unwrap_or(u32::MAX),
+            )
+        })
+}
+
 impl Context {
     /// Record commands with `record` into a fresh transient command buffer,
     /// submit it on the compute queue, and block until the GPU finishes.
@@ -279,17 +331,96 @@ impl Context {
     /// given two different scenes (it has one descriptor set, written once
     /// per submission), or a fill that is misaligned or out of bounds.
     pub fn submit_passes(&self, passes: &[Pass]) -> Result<()> {
+        self.submit_passes_timed(passes, None).map(|_| ())
+    }
+
+    /// [`Context::submit_passes`], timed when a `timer` is given.
+    ///
+    /// Without one this *is* [`Context::submit_passes`] — not a parallel
+    /// implementation of it but the same code with nothing extra recorded,
+    /// which is the only way a timed render and an untimed one are
+    /// guaranteed to submit the same work.
+    ///
+    /// With one, the timer decides how finely: every submission is
+    /// bracketed at its outer boundaries for its total, and one in
+    /// [`PassTimer::BREAKDOWN_INTERVAL`] is also stamped span by span. The
+    /// breakdown carries one entry per *distinct* pass label, in the order
+    /// the labels first appear: a wave that dispatches `intersect` once per
+    /// bounce reports one `intersect` line with the summed time and the
+    /// call count, which survives a kernel being split or a bounce count
+    /// changing. The timer's pool grows to fit a submission of more spans
+    /// than it has seen, so a deep-bounce scene is measured like any other
+    /// rather than silently going dark.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Vulkan`] if submission or the query readback fails.
+    ///
+    /// # Panics
+    ///
+    /// As [`Context::submit_passes`].
+    pub fn submit_passes_timed(
+        &self,
+        passes: &[Pass],
+        timer: Option<&mut PassTimer>,
+    ) -> Result<PassTimings> {
         for pass in passes {
             self.validate_and_write_descriptors(pass, passes);
         }
+        // Whether this submission is timed, and how finely, is settled once
+        // — here. An empty one has no boundaries worth stamping, so it is
+        // not. Asking again further down is how a stamp and a readback come
+        // to disagree about which queries were written.
+        let mut timer = timer.filter(|_| !passes.is_empty());
+        let detail = timer.as_deref_mut().map(PassTimer::detail);
+        let intervals = detail.map_or(0, |detail| detail.intervals(passes));
+        if let Some(timer) = timer.as_deref_mut() {
+            // A total spans one interval, which every pool has room for
+            // already, so this only ever grows for a breakdown.
+            timer.grow_to(intervals)?;
+        }
+        // Recording only needs the timer to read, which lets the mutable
+        // borrow resume for the readback once the closure is done.
+        let stamps = timer.as_deref();
+        let breakdown = detail == Some(Detail::Breakdown);
         self.submit_once(|device, cmd| {
+            if let Some(timer) = stamps {
+                timer.reset(cmd, intervals + 1);
+            }
+            // Passes are recorded one at a time and stamped a span at a
+            // time: the barrier goes between every consecutive pair, the
+            // timestamp only where the label changes. See [`spans`].
+            let mut span = 0;
+            let mut opening = true;
             for (index, pass) in passes.iter().enumerate() {
                 if index > 0 {
                     barrier_between_passes(device, cmd);
+                    opening = pass.label() != passes[index - 1].label();
+                    if opening {
+                        span += 1;
+                    }
+                }
+                // Between the barrier and the pass, where the GPU is
+                // already known to be quiet. A total stamps the opening
+                // boundary and nothing else until the closing one.
+                if let Some(timer) = stamps.filter(|_| opening && (breakdown || index == 0)) {
+                    timer.stamp(cmd, span);
                 }
                 record_pass(device, cmd, pass);
             }
-        })
+            // The closing boundary needs no barrier of its own: the stamp
+            // waits on `ALL_COMMANDS`, which is everything the submission
+            // could still be doing. Adding one would put a command in the
+            // instrumented submission that the ordinary one does not have
+            // — cost charged to the very frames being measured.
+            if let Some(timer) = stamps {
+                timer.stamp(cmd, intervals);
+            }
+        })?;
+        match timer.zip(detail) {
+            Some((timer, detail)) => timer.read(passes, detail),
+            None => Ok(PassTimings::default()),
+        }
     }
 
     /// The pre-recording half of [`Context::submit_passes`]: assert the

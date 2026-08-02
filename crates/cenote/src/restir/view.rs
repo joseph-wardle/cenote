@@ -121,6 +121,17 @@ pub struct ViewState {
     /// Starts at 0, matching a fresh scene's — harmless either way, since a
     /// fresh state's `prev` is empty.
     prev_epoch: u64,
+    /// Whether `prev` carries a committed frame yet — false on a freshly
+    /// allocated state, whose reservoirs are all zero-filled, and true from the
+    /// first [`Self::swap`] onward.
+    ///
+    /// The warm-start's precondition, made checkable (M7 step 7a). It lives here
+    /// rather than on the film because it must survive a film reset, exactly as
+    /// the reservoirs do: a moving camera restarts accumulation every frame onto
+    /// a history that is still there. What it rules out is the genuinely cold
+    /// film — a batch render's first frame, a viewport that just opened — where
+    /// an estimator leaning on history would be leaning on zeros.
+    warm: bool,
 }
 
 impl ViewState {
@@ -156,6 +167,7 @@ impl ViewState {
                 MemoryLocation::CpuToGpu,
             )?,
             prev_epoch: 0,
+            warm: false,
         };
 
         // An all-zero reservoir is the empty one: sample 0, W 0, and — the
@@ -196,11 +208,19 @@ impl ViewState {
         std::mem::swap(&mut self.prev, &mut self.curr);
         std::mem::swap(&mut self.gbuffer_prev, &mut self.gbuffer_curr);
         self.prev_epoch = epoch;
+        // A committed frame has landed in `prev`: from here the history is real
+        // and the warm-start has something to start from.
+        self.warm = true;
     }
 
     /// The scene build `prev` was rendered against — see the field.
     pub fn prev_epoch(&self) -> u64 {
         self.prev_epoch
+    }
+
+    /// Whether `prev` carries a committed frame — see the field.
+    pub fn warm(&self) -> bool {
+        self.warm
     }
 
     /// The view this state belongs to.

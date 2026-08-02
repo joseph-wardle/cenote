@@ -44,9 +44,12 @@ use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 
 use crate::error::Result;
-use crate::gpu::{Bindings, Buffer, ComputePipeline, Context, MemoryLocation, Pass, SceneBindings};
+use crate::gpu::{
+    Bindings, Buffer, ComputePipeline, Context, MemoryLocation, Pass, PassTimer, SceneBindings,
+};
 use crate::scene::{Scene, ray_mask};
 use crate::shaders::{Kernel, Kernels};
+use crate::stats::PassTimings;
 
 /// Threads per workgroup of every 1D path-stage kernel — must match
 /// `WORKGROUP_SIZE` in `shaders/pathstate.slang`.
@@ -813,6 +816,13 @@ pub struct RestirInputs<'a> {
     /// resolve shades it without a shadow ray). `None` is the step-3
     /// single-frame-RIS path.
     pub scratch: Option<&'a Buffer>,
+    /// How many light candidates initial RIS streams this frame (M). The caller
+    /// owns the policy, the same split `TemporalReuse::decay_frames` already
+    /// has: [`Renderer::restir_candidates`] is the shipping one, and a test
+    /// wanting a fixed cost per sample passes [`Wavefront::RESTIR_CANDIDATES`].
+    ///
+    /// [`Renderer::restir_candidates`]: crate::render::Renderer
+    pub candidates: u32,
     /// Whether resolve shades the spatial pass's control-variate lane rather
     /// than the survivor (`ReSTCV`, M6 steps 6a/6b-i). Acted on only when
     /// `scratch` is `Some` — spatial is the stage that combines the lane;
@@ -937,8 +947,24 @@ impl Wavefront {
     /// Initial-RIS candidate count M at the primary hit (D-088: ~16 emitter/env
     /// candidates, plus one internalized BSDF candidate the stage adds). Tuned
     /// in validation; the estimator is unbiased at any M ≥ 1, so this trades
-    /// variance for cost, never correctness.
+    /// variance for cost, never correctness. Every frame is drawn with it except
+    /// the one [`Renderer::restir_candidates`] cheapens.
+    ///
+    /// [`Renderer::restir_candidates`]: crate::render::Renderer
     pub const RESTIR_CANDIDATES: u32 = 16;
+
+    /// M on a frame that restarts accumulation onto a live temporal history —
+    /// which is every frame a moving camera renders (M7 step 7a). The history
+    /// already supplies the confidence a fresh sweep would buy; paying for
+    /// sixteen more is paying twice. Whether a given frame qualifies is
+    /// [`Renderer::restir_candidates`]' call.
+    ///
+    /// One, not zero: light sampling is the only technique covering the support
+    /// of *f* (see `_SUPPORT_COVERAGE`). If 1 proves too thin on a disocclusion,
+    /// 2 is one character away.
+    ///
+    /// [`Renderer::restir_candidates`]: crate::render::Renderer
+    pub const RESTIR_RESTART_CANDIDATES: u32 = 1;
 
     /// Spatial neighbours gathered per pixel (D-088: ~5). The estimator is
     /// unbiased at any k ≥ 0 — this trades variance (more reuse) for cost (a
@@ -966,10 +992,14 @@ impl Wavefront {
     /// confidence is clamped to `M_CAP · c_cand` before the combine, so history
     /// saturates at ~20 candidate-frames rather than growing without bound. A
     /// *multiplier*, not an absolute confidence — a candidates frame already
-    /// credits ~`RESTIR_CANDIDATES + 1` confidence, so an absolute cap near that
+    /// credits ~`M + 1` confidence, so an absolute cap near that
     /// would throttle history to nothing. Unbiased at any positive value (it only
     /// reweights the MIS); tuned for lag-vs-noise, not correctness — the shipping
     /// ~20 of the RTXDI lineage.
+    ///
+    /// Relative is what lets M vary per frame (M7 step 7a) with no compensating
+    /// retune: `c_cand` falls with M, so the capped prev:cand ratio is the same
+    /// ~20:1 at M = 1 as at M = 16.
     pub const RESTIR_TEMPORAL_M_CAP: f32 = 20.0;
 
     /// Temporal decay window (D-094): on a held camera the history confidence is
@@ -982,6 +1012,14 @@ impl Wavefront {
     /// motion→hold handoff has no visible pop; unbiased at any window (it only
     /// reweights the MIS), tuned for lag-vs-decorrelation. `0` disables the ramp —
     /// the pinned-temporal CI gate uses it to force temporal live to convergence.
+    ///
+    /// This window is where M must *not* be cut (M7 step 7a): annealing history
+    /// away is what decorrelates a settling still, and propping its confidence
+    /// back up with thin candidate frames works against exactly that. The
+    /// measurement is on [`Renderer::restir_candidates`], which is why only
+    /// sample 0 is ever cheapened.
+    ///
+    /// [`Renderer::restir_candidates`]: crate::render::Renderer
     pub const RESTIR_TEMPORAL_DECAY_FRAMES: u32 = 16;
 
     // k must fit the shader's fixed accepted-neighbour array — a build error,
@@ -1016,9 +1054,11 @@ impl Wavefront {
     // internalized BSDF candidate only sharpens variance; it cannot be the sole
     // cover. So a future candidate-budget edit that drops M to 0 would silently
     // bias the mean — this pins it as a build error instead, one of the two
-    // subtlest bias traps the reference course flags to bake in early.
+    // subtlest bias traps the reference course flags to bake in early. Both
+    // counts, since nothing orders them and either can be the one a frame is
+    // drawn with.
     const _SUPPORT_COVERAGE: () = assert!(
-        Self::RESTIR_CANDIDATES >= 1,
+        Self::RESTIR_CANDIDATES >= 1 && Self::RESTIR_RESTART_CANDIDATES >= 1,
         "ReSTIR needs at least one light candidate: it is the only technique \
          guaranteed to cover the support of the unshadowed target (M3 plan §2)"
     );
@@ -1191,7 +1231,8 @@ impl Wavefront {
         height: u32,
         sample: u32,
     ) -> Result<()> {
-        self.trace_then(gpu, scene, radiance, width, height, sample, None, None, &[])
+        self.trace_then(gpu, scene, radiance, width, height, sample, None, None, &[], None)
+            .map(|_| ())
     }
 
     /// [`Wavefront::trace`], then `trailing` — extra passes appended to the
@@ -1201,6 +1242,14 @@ impl Wavefront {
     /// the film's accumulate in here spends one GPU round-trip per sample
     /// instead of two — bit-for-bit as if they ran as separate submissions,
     /// since a barrier orders the same writes a fence does.
+    ///
+    /// With `timer`, the submission is bracketed and the returned
+    /// [`PassTimings`] say what the device spent — and, on the frames the
+    /// timer resolves, what each kernel spent. Without, the timings are
+    /// empty and the submission is byte-for-byte the one this always
+    /// recorded. Stamping is not free, which is why the fine-grained half
+    /// of it is rationed; see [`crate::gpu::PassTimer`] for the measurement
+    /// and what it cost the design.
     ///
     /// With `aovs`, the wave also feeds the film's AOV accumulators —
     /// zero-filled at wave start like radiance, written by the shading
@@ -1232,7 +1281,8 @@ impl Wavefront {
         aovs: Option<&AovTargets>,
         restir: Option<&RestirInputs>,
         trailing: &[Pass],
-    ) -> Result<()> {
+        timer: Option<&mut PassTimer>,
+    ) -> Result<PassTimings> {
         assert!(width > 0 && height > 0, "zero-sized trace target");
         let pixels = u64::from(width) * u64::from(height);
         assert!(
@@ -1261,7 +1311,7 @@ impl Wavefront {
         let params = self.wave_params(scene, radiance, aov_table, width, height, sample, restir);
         let mut passes = self.record_wave(scene, radiance, aovs, restir, pixels, &params);
         passes.extend_from_slice(trailing);
-        gpu.submit_passes(&passes)
+        gpu.submit_passes_timed(&passes, timer)
     }
 
     /// Every stage's push constants for one wave, built up front so the
@@ -1503,7 +1553,7 @@ impl Wavefront {
                 restir: restir_table,
                 reservoirs: candidate_reservoirs,
                 sample_index: sample,
-                candidates: Self::RESTIR_CANDIDATES,
+                candidates: restir.candidates,
                 width,
                 max_bounces: self.max_bounces,
             },
@@ -2570,6 +2620,7 @@ mod tests {
             reservoir: &reservoir,
             temporal: None,
             scratch: None,
+            candidates: Wavefront::RESTIR_CANDIDATES,
             cv_shading: true,
             debug: None,
             debug_view: DebugView::Off,
@@ -2578,6 +2629,7 @@ mod tests {
             reservoir: &reservoir,
             temporal: None,
             scratch: Some(&scratch),
+            candidates: Wavefront::RESTIR_CANDIDATES,
             cv_shading: true,
             debug: None,
             debug_view: DebugView::Off,
@@ -2588,7 +2640,7 @@ mod tests {
             for sample in 0..samples {
                 wavefront
                     .trace_then(
-                        &gpu, &scene, &radiance, width, height, sample, None, inputs, &[],
+                        &gpu, &scene, &radiance, width, height, sample, None, inputs, &[], None,
                     )
                     .expect("trace");
                 let pixels: Vec<f32> = bytemuck::pod_collect_to_vec(
@@ -3150,6 +3202,10 @@ mod tests {
                     reservoir: &curr,
                     temporal: None,
                     scratch: spatial,
+                    // Flat across the loop: this averages wall-clock over
+                    // `sample` 0..warmup + timed, and a per-sample cost that
+                    // varied with the index is not what the subtraction prices.
+                    candidates: Wavefront::RESTIR_CANDIDATES,
                     cv_shading: true,
                     debug: None,
                     debug_view: DebugView::Off,
@@ -3161,7 +3217,7 @@ mod tests {
                     }
                     wavefront
                         .trace_then(
-                            &gpu, scene, &radiance, width, height, sample, None, Some(&inputs), &[],
+                            &gpu, scene, &radiance, width, height, sample, None, Some(&inputs), &[], None,
                         )
                         .expect("trace");
                 }
@@ -3211,13 +3267,15 @@ mod tests {
                             prev_same_scene: true,
                         }),
                         scratch: Some(&scratch),
+                        // Flat, for the same reason `decay_frames` is 0 here.
+                        candidates: Wavefront::RESTIR_CANDIDATES,
                         cv_shading: true,
                         debug: None,
                         debug_view: DebugView::Off,
                     };
                     wavefront
                         .trace_then(
-                            &gpu, scene, &radiance, width, height, sample, None, Some(&inputs), &[],
+                            &gpu, scene, &radiance, width, height, sample, None, Some(&inputs), &[], None,
                         )
                         .expect("trace");
                     std::mem::swap(&mut prev, &mut curr);
@@ -3294,6 +3352,7 @@ mod tests {
             reservoir: &reservoir,
             temporal: None,
             scratch: None,
+            candidates: Wavefront::RESTIR_CANDIDATES,
             cv_shading: true,
             debug: None,
             debug_view: DebugView::Off,
@@ -3358,6 +3417,7 @@ mod tests {
                     None,
                     Some(&inputs),
                     &[],
+                    None,
                 )
                 .expect("trace");
             gpu.dispatch(
@@ -3562,6 +3622,7 @@ mod tests {
             reservoir: &reservoir,
             temporal: None,
             scratch: Some(&scratch),
+            candidates: Wavefront::RESTIR_CANDIDATES,
             cv_shading: true,
             debug: None,
             debug_view: DebugView::Off,
@@ -3572,7 +3633,7 @@ mod tests {
             for sample in 0..samples {
                 wavefront
                     .trace_then(
-                        gpu, scene, &radiance, width, height, sample, None, inputs, &[],
+                        gpu, scene, &radiance, width, height, sample, None, inputs, &[], None,
                     )
                     .expect("trace");
                 let pixels: Vec<f32> = bytemuck::pod_collect_to_vec(
@@ -3693,7 +3754,7 @@ mod tests {
             let mut total = 0.0_f64;
             for sample in 0..samples {
                 wavefront
-                    .trace_then(gpu, scene, &radiance, width, height, sample, None, None, &[])
+                    .trace_then(gpu, scene, &radiance, width, height, sample, None, None, &[], None)
                     .expect("trace");
                 let pixels: Vec<f32> = bytemuck::pod_collect_to_vec(
                     &gpu.download_buffer(&radiance).expect("download"),
@@ -3768,13 +3829,14 @@ mod tests {
                         prev_same_scene: true,
                     }),
                     scratch: scratch.as_ref(),
+                    candidates: Wavefront::RESTIR_CANDIDATES,
                     cv_shading: spatial_cv.unwrap_or(true),
                     debug: None,
                     debug_view: DebugView::Off,
                 };
                 wavefront
                     .trace_then(
-                        gpu, scene, &radiance, width, height, sample, None, Some(&inputs), &[],
+                        gpu, scene, &radiance, width, height, sample, None, Some(&inputs), &[], None,
                     )
                     .expect("trace");
                 let pixels: Vec<f32> = bytemuck::pod_collect_to_vec(
@@ -4044,13 +4106,14 @@ mod tests {
                 prev_same_scene: true,
             }),
             scratch: None,
+            candidates: Wavefront::RESTIR_CANDIDATES,
             cv_shading: true,
             debug: None,
             debug_view: DebugView::Off,
         };
         let radiance = radiance_buffer(&gpu, width, height);
         wavefront
-            .trace_then(&gpu, &scene, &radiance, width, height, 0, None, Some(&inputs), &[])
+            .trace_then(&gpu, &scene, &radiance, width, height, 0, None, Some(&inputs), &[], None)
             .expect("trace");
 
         let spirv = crate::shaders::compile_fixture("restir_gbuffer_test")
@@ -4247,12 +4310,13 @@ mod tests {
                     prev_same_scene: true,
                 }),
                 scratch: None,
+                candidates: Wavefront::RESTIR_CANDIDATES,
                 cv_shading: true,
                 debug: None,
                 debug_view: DebugView::Off,
             };
             wavefront
-                .trace_then(&gpu, &scene, &radiance, width, height, sample, None, Some(&inputs), &[])
+                .trace_then(&gpu, &scene, &radiance, width, height, sample, None, Some(&inputs), &[], None)
                 .expect("trace");
         };
 
@@ -4409,6 +4473,7 @@ mod tests {
             reservoir: &reservoir,
             temporal: None,
             scratch: None,
+            candidates: Wavefront::RESTIR_CANDIDATES,
             cv_shading: true,
             debug: None,
             debug_view: DebugView::Off,
@@ -4427,6 +4492,7 @@ mod tests {
                     None,
                     Some(&inputs),
                     &[],
+                    None,
                 )
                 .expect("trace");
             let pixels: Vec<f32> = bytemuck::pod_collect_to_vec(
@@ -4505,6 +4571,7 @@ mod tests {
             reservoir: &reservoir,
             temporal: None,
             scratch: None,
+            candidates: Wavefront::RESTIR_CANDIDATES,
             cv_shading: true,
             debug: None,
             debug_view: DebugView::Off,
@@ -4524,6 +4591,7 @@ mod tests {
                     None,
                     Some(&inputs),
                     &[],
+                    None,
                 )
                 .expect("trace");
             let pixels: Vec<f32> =
@@ -4617,13 +4685,14 @@ mod tests {
             reservoir: &reservoir,
             temporal: None,
             scratch: None,
+            candidates: Wavefront::RESTIR_CANDIDATES,
             cv_shading: true,
             debug: Some(&debug),
             debug_view: DebugView::SelectedLight,
         };
         wavefront
             .trace_then(
-                &gpu, &scene, &radiance, width, height, 0, None, Some(&inputs), &[],
+                &gpu, &scene, &radiance, width, height, 0, None, Some(&inputs), &[], None,
             )
             .expect("trace");
         let pixels: Vec<f32> =
@@ -4740,6 +4809,7 @@ mod tests {
                 reservoir: &reservoir,
                 temporal: None,
                 scratch: spatial.then_some(&scratch),
+                candidates: Wavefront::RESTIR_CANDIDATES,
                 cv_shading: true,
                 debug: None,
                 debug_view: DebugView::Off,
@@ -4749,7 +4819,7 @@ mod tests {
             for sample in 0..8 {
                 wavefront
                     .trace_then(
-                        &gpu, &scene, &radiance, width, height, sample, None, Some(&inputs), &[],
+                        &gpu, &scene, &radiance, width, height, sample, None, Some(&inputs), &[], None,
                     )
                     .expect("trace");
                 film.extend_from_slice(&gpu.download_buffer(&radiance).expect("download"));

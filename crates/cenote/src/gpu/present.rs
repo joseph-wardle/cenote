@@ -25,6 +25,7 @@ use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 use crate::error::{Error, Result};
 use crate::gpu::buffer::free_allocation;
+use crate::gpu::ledger::{Bucket, Ledger};
 use crate::gpu::image::image_barrier;
 use crate::gpu::overlay::{GuiFrame, OverlayRenderer};
 use crate::gpu::submit::Queue;
@@ -87,7 +88,16 @@ pub struct Presenter {
     queue: Queue,
     device: ash::Device,
     allocator: Arc<Mutex<Allocator>>,
+    /// The presenter allocates its transfer image straight from the
+    /// allocator rather than through [`Context::create_sampled_image`], so
+    /// it counts itself in and out — otherwise the one allocation the
+    /// viewer resizes most often would be the one missing from the total.
+    ledger: Arc<Ledger>,
 }
+
+/// The transfer image's allocation name, which is also its memory bucket —
+/// see [`super::ledger`], where the dotted prefix is what does the sorting.
+const TRANSFER_NAME: &str = "present.transfer";
 
 /// The sRGB RGBA8 image frames pass through between display buffer and
 /// swapchain, sized to the *render*, not the window — the blit rescales.
@@ -96,6 +106,11 @@ struct TransferImage {
     allocation: Allocation,
     width: u32,
     height: u32,
+    /// What the ledger was told this image costs, and where — kept so the
+    /// bytes come back out on the exact terms they went in, whatever the
+    /// driver padded the next one to.
+    bucket: Bucket,
+    bytes: u64,
 }
 
 impl Context {
@@ -164,6 +179,7 @@ impl Context {
             queue: self.queue_handle(),
             device: self.device.clone(),
             allocator: self.allocator_handle(),
+            ledger: self.ledger_handle(),
         };
         // From here, failure rolls back through Presenter's Drop, which
         // tolerates the null handles of whatever wasn't reached (Vulkan
@@ -703,7 +719,7 @@ impl Presenter {
             .lock()
             .expect("allocator mutex poisoned")
             .allocate(&AllocationCreateDesc {
-                name: "present.transfer",
+                name: TRANSFER_NAME,
                 requirements,
                 location: MemoryLocation::GpuOnly,
                 linear: false,
@@ -726,17 +742,24 @@ impl Presenter {
             return Err(err.into());
         }
 
+        // Counted only once the image is bound and kept: the two failure
+        // paths above free the allocation without it ever having existed as
+        // far as the ledger is concerned.
+        let bytes = requirements.size;
         self.transfer = Some(TransferImage {
             image,
             allocation,
             width,
             height,
+            bucket: self.ledger.add(TRANSFER_NAME, bytes),
+            bytes,
         });
         Ok(())
     }
 
     fn destroy_transfer_image(&mut self) {
         if let Some(transfer) = self.transfer.take() {
+            self.ledger.remove(transfer.bucket, transfer.bytes);
             unsafe { self.device.destroy_image(transfer.image, None) };
             free_allocation(&self.allocator, transfer.allocation, "transfer-image");
         }

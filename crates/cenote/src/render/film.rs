@@ -291,6 +291,14 @@ impl Film {
         }
     }
 
+    /// Whether the `ReSTIR` reservoirs carry a committed frame the next one can
+    /// warm-start from ([`ViewState::warm`]) — false before the first `ReSTIR`
+    /// wave with temporal reuse on, which is what commits one. Survives
+    /// [`Film::reset`], because the reservoirs do.
+    pub(super) fn restir_history_is_warm(&self) -> bool {
+        self.view.as_ref().is_some_and(ViewState::warm)
+    }
+
     /// The debug false-colour buffer, present after
     /// [`Film::ensure_restir`]`(gpu, true)` selected a view.
     ///

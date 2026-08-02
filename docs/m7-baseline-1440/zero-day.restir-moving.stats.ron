@@ -1,0 +1,96 @@
+(
+    device: "NVIDIA GeForce RTX 4070 Ti SUPER (discrete GPU, NVIDIA 580.173.02, Vulkan 1.4)",
+    scene: "/home/wardle/Documents/cenote/scenes/corpus/zero-day.ron",
+    size: (2560, 1440),
+    samples: 1,
+    wall: 34056.885936,
+    sampling: 8097.506732999999,
+    gpu: 7998.734112,
+    frames: 64,
+    breakdown_frames: 2,
+    passes: (
+        total: 221.492704,
+        entries: [
+            (
+                label: "fill",
+                gpu: 1.717632,
+                calls: 44,
+            ),
+            (
+                label: "raygen",
+                gpu: 0.70896,
+                calls: 8,
+            ),
+            (
+                label: "intersect",
+                gpu: 1.4319680000000001,
+                calls: 8,
+            ),
+            (
+                label: "shade_miss",
+                gpu: 0.030112,
+                calls: 8,
+            ),
+            (
+                label: "restir_candidates",
+                gpu: 56.785248,
+                calls: 8,
+            ),
+            (
+                label: "restir_temporal",
+                gpu: 32.07728,
+                calls: 8,
+            ),
+            (
+                label: "restir_spatial_gather",
+                gpu: 101.73712,
+                calls: 8,
+            ),
+            (
+                label: "restir_spatial",
+                gpu: 20.9552,
+                calls: 8,
+            ),
+            (
+                label: "restir_resolve",
+                gpu: 2.6987840000000003,
+                calls: 8,
+            ),
+            (
+                label: "shade_surface",
+                gpu: 2.062368,
+                calls: 8,
+            ),
+            (
+                label: "trace_shadow",
+                gpu: 0.022368,
+                calls: 8,
+            ),
+            (
+                label: "accumulate",
+                gpu: 1.265664,
+                calls: 2,
+            ),
+        ],
+    ),
+    smoothed: (
+        median: 126.94721,
+        p95: 127.86994199999998,
+    ),
+    mean_frame: 126.456094,
+    bound: Gpu,
+    interactivity: (
+        to_first_ray: Some(25233.013959),
+        to_first_pixel: Some(25233.013989),
+        to_readable: None,
+    ),
+    peak_memory: (
+        scene: 563607720,
+        film: 457113644,
+        reservoirs: 1769472096,
+        textures: 12814848,
+        scratch: 374226744,
+        budget: Some(17171480576),
+    ),
+    candidates: Some(1),
+)

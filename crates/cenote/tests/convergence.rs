@@ -32,9 +32,10 @@
 use cenote::environment::Environment;
 use cenote::gpu::Context;
 use cenote::material::Material;
-use cenote::render::{RenderMode, Renderer};
+use cenote::render::{Film, RenderMode, Renderer};
 use cenote::scene::{Camera, Object, Scene, ground_plane, icosphere};
 use glam::{Mat4, Vec3};
+use std::time::Instant;
 
 mod common;
 use common::{accumulate, test_context};
@@ -355,6 +356,163 @@ fn restir_floor_and_chroma_report() {
         &reference,
     );
     eprintln!("chroma brute  {HIGH_SPP:2} spp per-channel relMSE: R {r:.5}, G {g:.5}, B {b:.5}");
+}
+
+/// Resolution for the equal-time report below, and the reason it cannot
+/// borrow [`SIZE`]. What that report measures is per-sample *cost*, and cost
+/// is the one quantity 128² gets badly wrong: measured there, `ReSTIR` costs
+/// 1.67 ms/sample against brute force's 1.52 — a 1.1× ratio, because at
+/// sixteen thousand pixels neither estimator is pixel-bound and `ReSTIR`'s
+/// extra dispatches hide inside per-dispatch overhead. At a megapixel the
+/// same two are 22.0 and 4.4 ms, a 5.3× ratio — which is what the 1440p
+/// scoreboard independently measures on this scene (M7 §3.5.2). So the gates
+/// above are blind to reuse's price by construction: the right call for
+/// testing convergence, and the reason this report needs its own resolution.
+/// The ms/sample column keeps that cross-check reproducible.
+const TIME_SIZE: u32 = 1024;
+
+/// One estimator's error-against-wall-clock ladder: for each budget, a fresh
+/// film, the sample loop timed, and relMSE against `reference`. Film
+/// allocation and the readback sit outside the clock — they are paid once per
+/// session, not per sample, so counting them would flatter the estimator that
+/// takes fewer samples. Returns the (seconds, relMSE) points.
+fn efficiency_ladder(
+    gpu: &Context,
+    renderer: &Renderer,
+    scene: &Scene,
+    reference: &[f32],
+    budgets: &[u32],
+    label: &str,
+) -> Vec<(f64, f32)> {
+    budgets
+        .iter()
+        .map(|&spp| {
+            let mut film = Film::new(gpu, TIME_SIZE, TIME_SIZE).expect("film");
+            let start = Instant::now();
+            for _ in 0..spp {
+                renderer
+                    .accumulate(gpu, scene, &mut film)
+                    .expect("accumulate");
+            }
+            let seconds = start.elapsed().as_secs_f64();
+            let error = rel_mse(&film.beauty_average(gpu).expect("average"), reference);
+            // Monte Carlo efficiency, 1/(relMSE × seconds): a 1/N estimator
+            // holds it flat down the ladder, which is what makes it
+            // comparable between two ladders that never land on the same
+            // second.
+            eprintln!(
+                "{label} {spp:4} spp: {seconds:7.3} s ({:6.2} ms/sample), \
+                 relMSE {error:.5}, efficiency {:8.1}",
+                seconds * 1000.0 / f64::from(spp),
+                1.0 / (f64::from(error) * seconds)
+            );
+            (seconds, error)
+        })
+        .collect()
+}
+
+/// The equal-wall-clock efficiency report (M7 §3.5.3): the measurement
+/// [`assert_reuse_gate`] deliberately does not make.
+///
+/// That gate compares the estimators at a matched *sample* count, which is
+/// the right protocol for the claim it makes — resampling draws a better
+/// sample than one starved next-event draw does — and it is silent on whether
+/// a `ReSTIR` sample is worth what it costs. For a renderer that accumulates,
+/// and for interactivity, the question is error per *second*: the 1440p
+/// scoreboard prices a `ReSTIR` sample at 4.5–5× a path-traced one, and an
+/// estimator that costs 5× to carry 1.6× less error is a net loss to anyone
+/// who could have spent that time on more samples instead.
+///
+/// So: both ladders, wall-clock timed, on the two scenes the gate asserts the
+/// win on. Those are `ReSTIR`'s best cases — a starved many-light direct
+/// regime and a hard indirect one — so a loss here is a loss everywhere.
+/// Cross-referenced exactly as the floor report above, and for the same
+/// reason: accumulation replays one sample sequence, so an estimate sharing
+/// frames with a reference from its own estimator would be measuring its
+/// error against its own noise and would read low. A report, not a gate:
+///
+/// ```text
+/// cargo test -p cenote --release --test convergence -- \
+///     --ignored --test-threads=1 --nocapture
+/// ```
+fn report_equal_time(gpu: &Context, label: &str, scene: &Scene) {
+    // Overlapping in time, not in samples: at ~5× the per-sample cost,
+    // ReSTIR's deepest budget lands between brute's last two, so the
+    // equal-time comparison below is read off two rendered points rather
+    // than interpolated. References deep enough to sit well past both.
+    const BRUTE_BUDGETS: [u32; 6] = [16, 32, 64, 128, 256, 512];
+    const RESTIR_BUDGETS: [u32; 3] = [16, 32, 64];
+    const RESTIR_REFERENCE_FRAMES: u32 = 1024;
+    const BRUTE_REFERENCE_FRAMES: u32 = 4096;
+
+    // Shipping defaults on both sides — the configuration the gate measures
+    // and the viewer runs, temporal reuse included.
+    let mut restir = Renderer::new(gpu).expect("renderer");
+    restir.set_render_mode(RenderMode::Restir);
+    let brute = Renderer::new(gpu).expect("renderer");
+
+    let restir_reference = accumulate(gpu, &restir, scene, TIME_SIZE, RESTIR_REFERENCE_FRAMES);
+    let brute_reference = accumulate(gpu, &brute, scene, TIME_SIZE, BRUTE_REFERENCE_FRAMES);
+
+    let brute_points = efficiency_ladder(
+        gpu,
+        &brute,
+        scene,
+        &restir_reference,
+        &BRUTE_BUDGETS,
+        &format!("{label} brute "),
+    );
+    let restir_points = efficiency_ladder(
+        gpu,
+        &restir,
+        scene,
+        &brute_reference,
+        &RESTIR_BUDGETS,
+        &format!("{label} ReSTIR"),
+    );
+
+    // The headline: at the wall clock ReSTIR's deepest budget spends, where
+    // had the path tracer got to? Brute's nearest rendered point, with the
+    // time it was measured at printed beside it, so a reader can see how well
+    // the two line up instead of trusting a fitted number.
+    //
+    // Read it as a *floor* on the gap, not the gap. Brute's deep points are
+    // where its relMSE × N stops falling and starts climbing — it has run
+    // down to the reference's own residual and is being credited with error
+    // that is the reference's, while ReSTIR at a sixth the sample count is
+    // nowhere near that floor. The efficiency column at the shallow end,
+    // where both estimators are still on their 1/N trend, is the clean
+    // comparison; this line is the concrete one.
+    let (restir_seconds, restir_error) = *restir_points.last().expect("a ReSTIR point");
+    let (brute_seconds, brute_error) = brute_points
+        .iter()
+        .copied()
+        .min_by(|a, b| {
+            (a.0 - restir_seconds)
+                .abs()
+                .total_cmp(&(b.0 - restir_seconds).abs())
+        })
+        .expect("a brute point");
+    eprintln!(
+        "{label} equal time: ReSTIR relMSE {restir_error:.5} at {restir_seconds:.3} s, \
+         brute {brute_error:.5} at {brute_seconds:.3} s — brute carries {:.2}× \
+         ReSTIR's error for the same wall clock\n",
+        f64::from(brute_error) / f64::from(restir_error)
+    );
+}
+
+/// [`report_equal_time`] on the two scenes the reuse gates above assert the
+/// win on, so the equal-time question is asked of exactly the cases
+/// `ReSTIR` was accepted for.
+#[test]
+#[ignore = "a measurement report, not a gate — run explicitly for checkpoint numbers"]
+fn restir_equal_time_efficiency_report() {
+    let Some(gpu) = test_context() else {
+        return;
+    };
+    let many_lights = Scene::many_lights(&gpu).expect("many-lights scene");
+    report_equal_time(&gpu, "many-lights", &many_lights);
+    report_equal_time(&gpu, "indirect-glossy", &indirect_glossy_scene(&gpu));
 }
 
 /// Relative MSE against `reference`: the mean over every colour channel of

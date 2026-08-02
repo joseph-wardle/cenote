@@ -16,6 +16,7 @@ use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, 
 
 use crate::error::{Error, Result};
 use crate::gpu::buffer::free_allocation;
+use crate::gpu::ledger::{Bucket, Ledger};
 use crate::gpu::{Context, MemoryLocation};
 
 /// A 2D image with a view and its sampler, ready to bind for filtered
@@ -30,6 +31,11 @@ pub struct SampledImage {
     allocation: ManuallyDrop<Allocation>,
     device: ash::Device,
     allocator: Arc<Mutex<Allocator>>,
+    /// The memory ledger, this image's bucket in it, and the bytes it took
+    /// — counted out on drop exactly as they were counted in.
+    ledger: Arc<Ledger>,
+    bucket: Bucket,
+    bytes: u64,
 }
 
 impl SampledImage {
@@ -44,6 +50,7 @@ impl SampledImage {
 
 impl Drop for SampledImage {
     fn drop(&mut self) {
+        self.ledger.remove(self.bucket, self.bytes);
         unsafe {
             self.device.destroy_sampler(self.sampler, None);
             self.device.destroy_image_view(self.view, None);
@@ -236,6 +243,11 @@ impl Context {
                 allocation_scheme: AllocationScheme::GpuAllocatorManaged,
             })?;
         unsafe { device.bind_image_memory(image, allocation.memory(), allocation.offset())? };
+        // The allocated size, not the texel count: an optimally-tiled image
+        // is padded, and the padding is memory the device is holding.
+        let bytes = requirements.size;
+        let ledger = self.ledger_handle();
+        let bucket = ledger.add(name, bytes);
         // From here the allocation belongs to the SampledImage-in-progress;
         // build it now so its Drop is the single cleanup path.
         let mut sampled = SampledImage {
@@ -245,6 +257,9 @@ impl Context {
             allocation: ManuallyDrop::new(allocation),
             device: device.clone(),
             allocator: self.allocator_handle(),
+            ledger,
+            bucket,
+            bytes,
         };
 
         let view_info = vk::ImageViewCreateInfo::default()

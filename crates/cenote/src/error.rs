@@ -57,6 +57,12 @@ pub enum Error {
     #[error("scene file rejected: {0}")]
     SceneFormat(String),
 
+    /// A statistics report or trace line could not be rendered as RON. The
+    /// measurement itself is unaffected — only the writing of it — which is
+    /// why it is its own error and not the scene format's.
+    #[error("statistics could not be written: {0}")]
+    Stats(String),
+
     /// The render thread panicked. Its own errors are ordinary `Err`s that
     /// travel back through the join; this is the fallback for an actual
     /// panic — an assertion or `unwrap` on that thread — carrying whatever
@@ -70,6 +76,16 @@ pub enum Error {
     #[cfg(feature = "denoise")]
     #[error("denoise failed: {0}")]
     Denoise(String),
+}
+
+impl Error {
+    /// [`Error::Stats`] from whatever the serializer said. A named
+    /// constructor rather than a `#[from]` impl: `ron` errors also come out
+    /// of scene *loading*, where a blanket conversion would relabel a
+    /// rejected scene file as a failed stats write.
+    pub(crate) fn stats(error: impl std::fmt::Display) -> Self {
+        Error::Stats(error.to_string())
+    }
 }
 
 /// Crate-wide result alias.

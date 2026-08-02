@@ -13,6 +13,7 @@ use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, 
 
 use crate::error::Result;
 use crate::gpu::Context;
+use crate::gpu::ledger::{Bucket, Ledger};
 
 pub use gpu_allocator::MemoryLocation;
 
@@ -25,6 +26,10 @@ pub struct Buffer {
     address: Option<vk::DeviceAddress>,
     device: ash::Device,
     allocator: Arc<Mutex<Allocator>>,
+    /// The memory ledger and this buffer's bucket in it, so the bytes are
+    /// counted out on drop exactly as they were counted in.
+    ledger: Arc<Ledger>,
+    bucket: Bucket,
 }
 
 impl Buffer {
@@ -75,6 +80,7 @@ impl Buffer {
 
 impl Drop for Buffer {
     fn drop(&mut self) {
+        self.ledger.remove(self.bucket, self.size);
         unsafe { self.device.destroy_buffer(self.handle, None) };
         let allocation = unsafe { ManuallyDrop::take(&mut self.allocation) };
         free_allocation(&self.allocator, allocation, "buffer");
@@ -102,7 +108,9 @@ pub(super) fn free_allocation(
 
 impl Context {
     /// Create a buffer of `size` bytes. `name` labels the allocation in
-    /// gpu-allocator's bookkeeping and leak reports.
+    /// gpu-allocator's bookkeeping and leak reports — **and picks its
+    /// memory bucket**, so it is load-bearing, not decorative: see
+    /// [`super::ledger`] for the dotted prefixes and what each one means.
     ///
     /// # Errors
     ///
@@ -131,6 +139,8 @@ impl Context {
                         let info = vk::BufferDeviceAddressInfo::default().buffer(buffer);
                         unsafe { device.get_buffer_device_address(&info) }
                     });
+                let ledger = self.ledger_handle();
+                let bucket = ledger.add(name, size);
                 Ok(Buffer {
                     handle: buffer,
                     allocation: ManuallyDrop::new(allocation),
@@ -138,6 +148,8 @@ impl Context {
                     address,
                     device: device.clone(),
                     allocator: self.allocator_handle(),
+                    ledger,
+                    bucket,
                 })
             }
             Err(err) => {

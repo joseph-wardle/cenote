@@ -81,6 +81,9 @@ pub struct ComputePipeline {
     /// Present iff created with [`Bindings::Scene`].
     pub(super) scene: Option<SceneDescriptors>,
     pub(super) push_constant_size: u32,
+    /// The kernel's entry-point name, which is also the name it reports
+    /// itself under in [`crate::stats`] — see [`crate::gpu::Pass::label`].
+    pub(super) label: &'static str,
     device: ash::Device,
 }
 
@@ -124,6 +127,10 @@ impl Context {
     /// struct, enforced again at dispatch time; `bindings` says whether the
     /// kernel touches the scene's descriptor resources (TLAS, environment).
     ///
+    /// `entry` is `'static` because it doubles as the pipeline's timing
+    /// label ([`crate::gpu::Pass::label`]) — every caller already hands over
+    /// a literal or a [`crate::shaders::Kernel`]'s own name.
+    ///
     /// # Errors
     ///
     /// [`crate::Error::Vulkan`] if shader-module, descriptor, layout, or
@@ -131,12 +138,13 @@ impl Context {
     ///
     /// # Panics
     ///
-    /// If `spirv` is not valid SPIR-V or `push_constant_size` is not a
-    /// non-zero multiple of 4 — programmer bugs upstream of any GPU work.
+    /// If `spirv` is not valid SPIR-V, `entry` is not UTF-8, or
+    /// `push_constant_size` is not a non-zero multiple of 4 — programmer
+    /// bugs upstream of any GPU work.
     pub fn create_compute_pipeline(
         &self,
         spirv: &[u8],
-        entry: &CStr,
+        entry: &'static CStr,
         push_constant_size: u32,
         bindings: Bindings,
     ) -> Result<ComputePipeline> {
@@ -153,8 +161,9 @@ impl Context {
 
         // The module is only an input to pipeline creation — destroyed on
         // success and failure alike.
-        let result =
-            self.create_descriptors_and_pipeline(module, entry, push_constant_size, bindings);
+        let label = entry.to_str().expect("kernel entry name is not UTF-8");
+        let result = self
+            .create_descriptors_and_pipeline(module, entry, push_constant_size, bindings, label);
         unsafe { device.destroy_shader_module(module, None) };
         result
     }
@@ -165,6 +174,7 @@ impl Context {
         entry: &CStr,
         push_constant_size: u32,
         bindings: Bindings,
+        label: &'static str,
     ) -> Result<ComputePipeline> {
         let scene = match bindings {
             Bindings::None => None,
@@ -176,6 +186,7 @@ impl Context {
                 layout,
                 scene,
                 push_constant_size,
+                label,
                 device: self.device().clone(),
             }),
             Err(err) => {

@@ -214,6 +214,33 @@ cargo run --release -p cenote-cli -- render --spp 256 --out shot.exr
 cargo run --release -p cenote-cli -- import scene.pbrt --out scene.ron   # pbrt-v4 in, cenote scene out
 ```
 
+### Statistics
+
+Every `render` ends with a summary — per-kernel GPU time, how much of the
+frame was actually inside a dispatch, time-to-first-ray and
+time-to-first-pixel, and device memory in five buckets (scene, film, ReSTIR
+reservoirs, textures, scratch) — printed to the console and written beside
+the image as `shot.stats.ron` so two runs diff as text. The viewer shows the
+same numbers live, four lines plus three collapsing sections.
+
+```sh
+cargo run --release -p cenote-cli -- render --spp 64 --out shot.exr   # summary + shot.stats.ron
+cargo run --release -p cenote-cli -- render --spp 64 --out shot.exr --stats-trace settle.ron
+```
+
+GPU timing is split by what it costs to ask. Bracketing a submission at its
+two ends to learn *how long* the device was busy benchmarks at nothing
+measurable, so every frame carries it. Stamping *inside* the submission to
+learn *where* that time went costs ~15 µs a stamp — a real serialization
+point — so the per-kernel breakdown is sampled, one frame in 32, and stamps
+each run of same-named passes once rather than each pass. Together that puts
+the whole instrument at **+1.9%** on the cheapest frames, against +49.9% for
+stamping every boundary of every frame. The frame-time distribution is drawn
+from the frames carrying no breakdown, so it reports what the renderer costs
+when nothing is watching. `--no-gpu-timers` is the other arm of that A/B,
+`--no-stats` turns the output off, and `--stats-trace` adds one line per
+sample for plotting a settle curve.
+
 ### Denoising
 
 Builds with the `denoise` feature add [Open Image

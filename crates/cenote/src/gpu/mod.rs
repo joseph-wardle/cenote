@@ -24,10 +24,12 @@ mod accel;
 mod buffer;
 mod image;
 mod init;
+mod ledger;
 mod overlay;
 mod pipeline;
 mod present;
 mod submit;
+mod timing;
 
 pub use accel::{AccelerationStructure, TlasInstance};
 pub use buffer::{Buffer, MemoryLocation};
@@ -36,8 +38,10 @@ pub use overlay::GuiFrame;
 pub use pipeline::{Bindings, ComputePipeline, MAX_SCENE_TEXTURES, SceneBindings};
 pub use present::Presenter;
 pub use submit::Pass;
+pub use timing::PassTimer;
 
 use init::DebugMessenger;
+use ledger::Ledger;
 use submit::Queue;
 
 /// An initialized Vulkan device ready for compute dispatch.
@@ -51,6 +55,9 @@ pub struct Context {
     // gpu-allocator frees device memory. Buffers must not outlive the
     // Context (checked with a strong-count log in Drop).
     allocator: ManuallyDrop<Arc<Mutex<Allocator>>>,
+    /// Live bytes per [`crate::stats::Memory`] bucket, shared with every
+    /// resource that owns an allocation.
+    ledger: Arc<Ledger>,
     device: ash::Device,
     // Extension function table for VK_KHR_acceleration_structure; plain
     // function pointers, nothing to destroy.
@@ -61,6 +68,15 @@ pub struct Context {
     queue_family_index: u32,
     physical_device: vk::PhysicalDevice,
     device_type: vk::PhysicalDeviceType,
+    /// Nanoseconds a timestamp tick represents, and how many of the 64 bits
+    /// this queue family actually fills — everything [`PassTimer`] needs to
+    /// turn query results into durations. Zero either means no timestamps.
+    timestamp_period: f32,
+    timestamp_valid_bits: u32,
+    /// The device-local heap the memory buckets are spending against — a
+    /// constant of the device, so it is read once here and never again. See
+    /// [`ledger`], whose "reading it is five relaxed loads" depends on it.
+    device_local_heap: Option<u64>,
     /// Created via [`Context::presentable`], i.e. the surface and swapchain
     /// extensions are enabled and [`Context::create_presenter`] may be called.
     presentable: bool,
@@ -133,6 +149,14 @@ impl Context {
         let (physical_device, properties) = init::select_physical_device(instance, presentable)?;
         let queue_family_index = init::compute_queue_family(instance, physical_device)
             .expect("selection already verified a compute queue family");
+        // How well this queue can tell the time — read once here so the
+        // timing module never has to reach back to the instance.
+        let timestamp_valid_bits = unsafe {
+            instance.get_physical_device_queue_family_properties(physical_device)
+                [queue_family_index as usize]
+                .timestamp_valid_bits
+        };
+        let device_local_heap = ledger::device_local_heap(instance, physical_device);
         let summary = init::describe_device(instance, physical_device, &properties);
         log::info!("selected {summary}");
 
@@ -159,12 +183,16 @@ impl Context {
 
         Ok(Self {
             allocator: ManuallyDrop::new(Arc::new(Mutex::new(allocator))),
+            ledger: Arc::default(),
             device,
             accel_loader,
             queue: Queue::new(queue),
             queue_family_index,
             physical_device,
             device_type: properties.device_type,
+            timestamp_period: properties.limits.timestamp_period,
+            timestamp_valid_bits,
+            device_local_heap,
             presentable,
             summary,
             debug,

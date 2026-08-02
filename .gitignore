@@ -19,3 +19,8 @@
 # RONs are derived assets too — curate-<name>.py regenerates them locally
 /scenes/corpus/kroken.ron
 /scenes/corpus/watercolor.ron
+
+# Benchmark captures (docs/m7-baseline.sh): the RON sidecars are the record the
+# plan docs read from and are tracked; the EXRs beside them are hundreds of
+# megabytes of regenerable render.
+docs/m7-baseline*/*.exr

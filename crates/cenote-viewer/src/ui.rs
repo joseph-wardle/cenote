@@ -11,35 +11,33 @@ use cenote::gpu::GuiFrame;
 use cenote::render::DebugView;
 use cenote::scene::changeset::MaterialPatch;
 use cenote::scene::description::SceneDescription;
+use cenote::stats::{Bound, READABLE_SAMPLES, Stats};
 use winit::event::WindowEvent;
 use winit::window::Window;
 
 use crate::lookdev::Lookdev;
 
-/// Numbers the panel displays, measured by the redraw loop.
+/// Numbers the panel displays.
+///
+/// Almost all of it is the renderer's own [`Stats`], taken verbatim off the
+/// published frame — the viewer measures nothing the renderer already
+/// measures, so the overlay and a headless report can never disagree. The
+/// one number that is genuinely the viewer's own is `display`: the render
+/// thread has no idea what a present costs.
 #[derive(Default)]
 pub struct FrameStats {
-    /// The render thread's last sample — trace plus film accumulate, timed on
-    /// that thread — and the size it rendered at. The viewer's own tonemap and
-    /// present are not in here; the present is the `display` line below.
-    pub sample: Duration,
-    pub size: (u32, u32),
-    /// The last present.
+    /// What the renderer measured, as of the last frame we took.
+    pub render: Stats,
+    /// The last present — tonemap and blit, on this thread.
     pub display: Duration,
-    /// Samples in the film's average so far.
-    pub samples: u32,
 }
 
 /// The egui context/winit bridge and the panel's widget state.
 // The panel's toggles are independent orthogonal switches, not a state — a state
-// machine would model transitions that don't exist. Only trips with `denoise`,
-// which adds the fourth bool; cfg-gated so the expect isn't unfulfilled without it.
-#[cfg_attr(
-    feature = "denoise",
-    expect(
-        clippy::struct_excessive_bools,
-        reason = "independent UI toggles, not a state to machine"
-    )
+// machine would model transitions that don't exist.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent UI toggles, not a state to machine"
 )]
 pub struct Gui {
     state: egui_winit::State,
@@ -57,6 +55,17 @@ pub struct Gui {
     /// the same still (the decay ramp hands temporal off on hold — D-094). Only
     /// meaningful while `restir` is on.
     temporal_reuse: bool,
+    /// Draw the frame that restarts accumulation thin, leaning on the history
+    /// the reset kept (M7 step 7a). On by default; toggling it off pins M flat,
+    /// the pre-7a renderer. Only meaningful while `restir` and `temporal_reuse`
+    /// are both on — with no history being read there is nothing to lean on.
+    ///
+    /// This is the one estimator toggle a still image cannot settle. It acts
+    /// only on the frame that restarts accumulation, so a held camera stops
+    /// exercising it after one frame — the question it raises, *is a moving
+    /// preview at M = 1 acceptable on the disocclusions a held camera never
+    /// produces?*, is answered by orbiting with it and nowhere else.
+    cheap_restart: bool,
     /// Which D-092 debug view to false-colour (only while `restir` is on).
     debug_view: DebugView,
     /// Show the OIDN-denoised view instead of the raw average.
@@ -84,6 +93,7 @@ impl Gui {
             restir: false,
             spatial_reuse: true,
             temporal_reuse: true,
+            cheap_restart: true,
             debug_view: DebugView::Off,
             #[cfg(feature = "denoise")]
             denoise: false,
@@ -109,6 +119,12 @@ impl Gui {
     /// Whether temporal reuse is on (only acted on while [`Gui::restir`] is on).
     pub fn temporal_reuse(&self) -> bool {
         self.temporal_reuse
+    }
+
+    /// Whether the cheap restart frame is on (only acted on while
+    /// [`Gui::restir`] is on).
+    pub fn cheap_restart(&self) -> bool {
+        self.cheap_restart
     }
 
     /// The selected D-092 debug view — [`DebugView::Off`] unless the panel's
@@ -174,15 +190,7 @@ impl Gui {
             .resizable(false)
             .show(context, |ui| {
                 ui.label(egui::RichText::new(device).small());
-                let millis = |duration: Duration| duration.as_secs_f64() * 1000.0;
-                ui.monospace(format!(
-                    "sample  {:>6.2} ms  ({}×{})",
-                    millis(stats.sample),
-                    stats.size.0,
-                    stats.size.1,
-                ));
-                ui.monospace(format!("display {:>6.2} ms", millis(stats.display)));
-                ui.monospace(format!("spp     {}", stats.samples));
+                stats_lines(ui, stats);
 
                 ui.separator();
                 ui.add(egui::Slider::new(&mut self.exposure, -4.0..=4.0).text("exposure"));
@@ -196,6 +204,7 @@ impl Gui {
                 ui.add_enabled_ui(self.restir, |ui| {
                     ui.checkbox(&mut self.temporal_reuse, "temporal reuse");
                     ui.checkbox(&mut self.spatial_reuse, "spatial reuse");
+                    ui.checkbox(&mut self.cheap_restart, "cheap restart");
                     egui::ComboBox::from_label("debug view")
                         .selected_text(debug_view_label(self.debug_view))
                         .show_ui(ui, |ui| {
@@ -215,6 +224,108 @@ impl Gui {
                 });
             });
     }
+}
+
+/// Milliseconds, the one unit every time in this panel is shown in.
+fn millis(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
+/// Bytes, in the largest unit that keeps the number readable.
+fn bytes(count: u64) -> String {
+    // A display string: the low bits of a gigabyte are not the point.
+    let value = count as f64;
+    for (unit, scale) in [("GiB", 1u64 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10)] {
+        let scale = scale as f64;
+        if value >= scale {
+            return format!("{:>6.1} {unit}", value / scale);
+        }
+    }
+    format!("{count:>6} B  ")
+}
+
+/// The measurement block: four always-visible lines, then the detail behind
+/// collapsing headers.
+///
+/// The split is the editorial claim. A frame time, its spread, what the GPU
+/// actually did, and how far along the render is — those answer *is it
+/// fast* and *is it done*, and they are worth permanent screen space. The
+/// per-kernel breakdown, the startup marks, and the memory buckets answer
+/// *why*, which is a question you ask on purpose. Behind a header they are
+/// one click away and zero pixels of noise until then.
+fn stats_lines(ui: &mut egui::Ui, stats: &FrameStats) {
+    let frame = &stats.render.frame;
+    ui.monospace(format!(
+        "frame   {:>6.2} ms  ({}×{})",
+        millis(stats.render.smoothed.median),
+        frame.size.0,
+        frame.size.1,
+    ));
+    // The median is what the frame *usually* costs; the p95 beside it is
+    // the hitch. One number without the other reads as smoother than the
+    // render is.
+    ui.monospace(format!(
+        "  p95   {:>6.2} ms   display {:>5.2} ms",
+        millis(stats.render.smoothed.p95),
+        millis(stats.display),
+    ));
+    // The verdict, with both numbers that produced it: a summed GPU time
+    // well under the frame is the signature of a wave spending more on
+    // launching kernels than on running them.
+    match frame.bound() {
+        Bound::Unknown => ui.monospace("  gpu        —  (no timestamps)"),
+        bound => ui.monospace(format!("  gpu   {:>6.2} ms   {bound}", millis(frame.gpu()))),
+    };
+    // The sample count, and — in ReSTIR — the candidate count that sample was
+    // drawn with. M drops on every restart, so a frame time watched during an
+    // orbit is only readable beside the M that produced it.
+    match frame.candidates {
+        Some(candidates) => ui.monospace(format!("spp     {:>6}   M {candidates}", frame.samples)),
+        None => ui.monospace(format!("spp     {:>6}", frame.samples)),
+    };
+
+    if frame.passes.has_breakdown() {
+        egui::CollapsingHeader::new("kernels")
+            .id_salt("stats.kernels")
+            .show(ui, |ui| {
+                for pass in &frame.passes {
+                    ui.monospace(format!(
+                        "{:<22}{:>6.3} ms ×{}",
+                        pass.label,
+                        millis(pass.gpu),
+                        pass.calls,
+                    ));
+                }
+            });
+    }
+
+    let marks = &stats.render.interactivity;
+    egui::CollapsingHeader::new("latency")
+        .id_salt("stats.latency")
+        .show(ui, |ui| {
+            let mark = |ui: &mut egui::Ui, name: &str, value: Option<Duration>| {
+                ui.monospace(match value {
+                    Some(value) => format!("{name:<14}{:>8.1} ms", millis(value)),
+                    None => format!("{name:<14}{:>8}   ", "—"),
+                });
+            };
+            mark(ui, "first ray", marks.to_first_ray);
+            mark(ui, "first pixel", marks.to_first_pixel);
+            mark(ui, &format!("{READABLE_SAMPLES} spp"), marks.to_readable);
+        });
+
+    let memory = &stats.render.memory;
+    let headline = match memory.budget {
+        Some(budget) => format!("memory {} /{}", bytes(memory.total()), bytes(budget)),
+        None => format!("memory {}", bytes(memory.total())),
+    };
+    egui::CollapsingHeader::new(headline)
+        .id_salt("stats.memory")
+        .show(ui, |ui| {
+            for (name, value) in memory.buckets() {
+                ui.monospace(format!("{name:<12}{}", bytes(value)));
+            }
+        });
 }
 
 /// The panel's short name for each D-092 debug view.

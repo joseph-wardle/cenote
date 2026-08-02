@@ -60,6 +60,7 @@ pub mod render;
 mod restir;
 pub mod scene;
 pub mod shaders;
+pub mod stats;
 mod tables;
 mod texture;
 pub mod wavefront;

@@ -1,0 +1,71 @@
+(
+    device: "NVIDIA GeForce RTX 4070 Ti SUPER (discrete GPU, NVIDIA 580.173.02, Vulkan 1.4)",
+    scene: "/home/wardle/Documents/cenote/scenes/corpus/cornell-box.ron",
+    size: (2560, 1440),
+    samples: 64,
+    wall: 2856.4187370000004,
+    sampling: 1149.078666,
+    gpu: 860.3606080000001,
+    frames: 64,
+    breakdown_frames: 2,
+    passes: (
+        total: 29.813568,
+        entries: [
+            (
+                label: "fill",
+                gpu: 4.234048,
+                calls: 2090,
+            ),
+            (
+                label: "raygen",
+                gpu: 0.8143039999999999,
+                calls: 8,
+            ),
+            (
+                label: "intersect",
+                gpu: 4.401727999999999,
+                calls: 520,
+            ),
+            (
+                label: "shade_miss",
+                gpu: 3.971936,
+                calls: 520,
+            ),
+            (
+                label: "shade_surface",
+                gpu: 10.9128,
+                calls: 520,
+            ),
+            (
+                label: "trace_shadow",
+                gpu: 3.5140480000000003,
+                calls: 520,
+            ),
+            (
+                label: "accumulate",
+                gpu: 1.9647039999999998,
+                calls: 2,
+            ),
+        ],
+    ),
+    smoothed: (
+        median: 17.778311000000002,
+        p95: 18.434747,
+    ),
+    mean_frame: 17.879430000000003,
+    bound: Cpu,
+    interactivity: (
+        to_first_ray: Some(961.503259),
+        to_first_pixel: Some(961.503289),
+        to_readable: Some(1230.95857),
+    ),
+    peak_memory: (
+        scene: 99348,
+        film: 457113644,
+        reservoirs: 0,
+        textures: 512,
+        scratch: 374226744,
+        budget: Some(17171480576),
+    ),
+    candidates: None,
+)

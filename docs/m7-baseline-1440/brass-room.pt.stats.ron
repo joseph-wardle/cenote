@@ -1,0 +1,71 @@
+(
+    device: "NVIDIA GeForce RTX 4070 Ti SUPER (discrete GPU, NVIDIA 580.173.02, Vulkan 1.4)",
+    scene: "/home/wardle/Documents/cenote/scenes/brass-room.ron",
+    size: (2560, 1440),
+    samples: 64,
+    wall: 2286.742272,
+    sampling: 991.630809,
+    gpu: 926.452448,
+    frames: 64,
+    breakdown_frames: 2,
+    passes: (
+        total: 28.785695999999998,
+        entries: [
+            (
+                label: "fill",
+                gpu: 0.9713280000000001,
+                calls: 266,
+            ),
+            (
+                label: "raygen",
+                gpu: 0.682944,
+                calls: 8,
+            ),
+            (
+                label: "intersect",
+                gpu: 3.493344,
+                calls: 64,
+            ),
+            (
+                label: "shade_miss",
+                gpu: 0.22451200000000002,
+                calls: 64,
+            ),
+            (
+                label: "shade_surface",
+                gpu: 15.560671999999999,
+                calls: 64,
+            ),
+            (
+                label: "trace_shadow",
+                gpu: 5.913856,
+                calls: 64,
+            ),
+            (
+                label: "accumulate",
+                gpu: 1.9390399999999999,
+                calls: 2,
+            ),
+        ],
+    ),
+    smoothed: (
+        median: 15.482977,
+        p95: 15.992408,
+    ),
+    mean_frame: 15.490785,
+    bound: Gpu,
+    interactivity: (
+        to_first_ray: Some(541.7295829999999),
+        to_first_pixel: Some(541.729613),
+        to_readable: Some(774.911343),
+    ),
+    peak_memory: (
+        scene: 211660,
+        film: 457113644,
+        reservoirs: 0,
+        textures: 4608,
+        scratch: 374226744,
+        budget: Some(17171480576),
+    ),
+    candidates: None,
+)

@@ -66,10 +66,11 @@ use ash::vk;
 
 use super::{DebugView, Film, RenderMode, Renderer, ResolveTargets};
 use crate::error::{Error, Result};
-use crate::gpu::{Buffer, Context, MemoryLocation, Pass};
+use crate::gpu::{Buffer, Context, MemoryLocation, Pass, PassTimer};
 use crate::scene::changeset::{ChangeSet, Dirty, Kind};
 use crate::scene::description::SceneDescription;
 use crate::scene::{Camera, Scene};
+use crate::stats::{self, Recorder, Stats};
 
 /// The shortest gap between published frames, early in an accumulation. The
 /// render thread accumulates flat out but resolves and publishes at most this
@@ -94,6 +95,11 @@ const PUBLISH_INTERVAL_STEP: u32 = 64;
 /// re-reading its inputs — long enough not to spin, short enough to wake
 /// promptly when the window returns or the view changes.
 const IDLE_NAP: Duration = Duration::from_millis(16);
+
+/// How often the render thread re-reads device memory. The allocations move
+/// only when the scene or the target does, so a per-wave read would be
+/// precision theatre over numbers that did not change.
+const MEMORY_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// When the render thread stops accumulating and parks — a settled render must
 /// not pin the GPU forever (M3 step 6c, the D-089 interactivity bundle).
@@ -124,6 +130,13 @@ fn publish_interval(samples: u32) -> Duration {
 /// What the viewer feeds the render thread, latest-wins, snapshotted once per
 /// sample. No exposure: that is the consumer's view transform, applied
 /// downstream of the published frame.
+// Latest-wins scalars on one snapshot, not a state: the estimator toggles are
+// independent of each other and of `running`, and every combination is one
+// someone asks for on purpose.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent latest-wins inputs, not a state to machine"
+)]
 #[derive(Clone, Copy)]
 struct RenderInputs {
     /// The view to render. Applied to the scene when `generation` changes.
@@ -154,6 +167,12 @@ struct RenderInputs {
     /// decay ramp (D-094) anneals temporal off regardless, so on/off converge to
     /// the same still — this toggle is for watching the warm-start live.
     temporal_reuse: bool,
+    /// Whether a restart frame may be drawn cheap (M7 step 7a). Meaningful only
+    /// in [`RenderMode::Restir`]; a change restarts accumulation like the other
+    /// estimator switches, so a flip never blends two candidate policies into
+    /// one image. What it changes is visible only while the camera is moving,
+    /// which no still render reproduces — this is the toggle a person judges.
+    cheap_restart: bool,
     /// Hard cap on accumulated samples (M3 step 6c). At this count the render
     /// thread parks — stops accumulating and idles — until an input restarts the
     /// film, so a settled view stops pinning the GPU.
@@ -225,9 +244,10 @@ pub struct Frame {
     height: u32,
     /// Samples in the average, for the spp readout.
     samples: u32,
-    /// Wall-clock of the sample that preceded this publish — the render
-    /// thread's own timing, for the viewer's stats panel.
-    sample_time: Duration,
+    /// Everything [`crate::stats`] knows as of this publish. Metadata
+    /// beside the pixels, never mixed into them: a consumer that only wants
+    /// the image reads exactly the bytes it always did.
+    stats: Stats,
     /// The session epoch at the wave boundary this frame's accumulation
     /// last crossed — see [`Frame::epoch`].
     epoch: u64,
@@ -287,11 +307,12 @@ impl Frame {
         self.samples
     }
 
-    /// Wall-clock of the sample before this publish — the render thread's own
-    /// measurement, for the stats panel.
+    /// Everything measured as of this publish: the sample's per-kernel GPU
+    /// time, the interactivity marks, and where the memory went. The one
+    /// source every consumer reads — see [`crate::stats`].
     #[must_use]
-    pub fn sample_time(&self) -> Duration {
-        self.sample_time
+    pub fn stats(&self) -> &Stats {
+        &self.stats
     }
 
     /// Everything enqueued while [`Session::epoch`] read at most this value
@@ -351,6 +372,7 @@ impl Session {
                 debug_view: DebugView::Off,
                 spatial_reuse: true,
                 temporal_reuse: true,
+                cheap_restart: true,
                 max_samples: auto_stop.max_samples,
                 noise_threshold: auto_stop.noise_threshold,
                 running: true,
@@ -452,6 +474,23 @@ impl Session {
             .lock()
             .expect("inputs mutex poisoned")
             .temporal_reuse = enabled;
+    }
+
+    /// Toggle the cheap restart frame (M7 step 7a): a restart drawn thin,
+    /// leaning on the history the reset kept. Meaningful only in
+    /// [`RenderMode::Restir`]; the render thread adopts a change and restarts
+    /// accumulation, so a flip never mixes two candidate policies into one
+    /// image.
+    ///
+    /// # Panics
+    ///
+    /// If the render thread panicked while holding the input lock.
+    pub fn set_cheap_restart(&self, enabled: bool) {
+        self.lanes
+            .inputs
+            .lock()
+            .expect("inputs mutex poisoned")
+            .cheap_restart = enabled;
     }
 
     /// Note a new render-target size; the render thread rebuilds its film to
@@ -650,6 +689,7 @@ fn render_loop(
     let mut applied_render_mode = RenderMode::PathTracer;
     let mut applied_spatial_reuse = true;
     let mut applied_temporal_reuse = true;
+    let mut applied_cheap_restart = true;
     // The auto-stop threshold currently in the renderer (M3 step 6c). `None` =
     // the renderer's default; a change is adopted without a reset, since it only
     // moves what counts as converged, not the beauty.
@@ -658,9 +698,18 @@ fn render_loop(
     // The epoch stamped on the most recent successful publish, so a parked
     // thread can see the counter move past its settled frame and republish.
     let mut published_epoch = 0;
-    // Wall-clock of the most recent sample, reported with each publish — kept so
-    // the frame forced out when the render parks still carries a real timing.
-    let mut last_sample_time = Duration::ZERO;
+    // The measurement spine (see `crate::stats`). The recorder carries the
+    // running state across waves — so the frame forced out when the render
+    // parks still reports the last real sample — and the timer stamps the
+    // pass boundaries of the waves it samples. A device without queue
+    // timestamps hands back `None` and the loop runs exactly as it did
+    // before, reporting wall-clock alone.
+    let mut recorder = Recorder::new();
+    let mut timer = gpu.create_pass_timer(PassTimer::WAVE_CAPACITY)?;
+    let mut last_memory_sample: Option<Instant> = None;
+    // The film's sample count as of the previous wave; a drop means
+    // something restarted accumulation.
+    let mut last_samples = 0;
     // Whether accumulation has settled (hit the sample cap or converged) and the
     // thread is idling. Cleared whenever a reset below zeroes the film.
     let mut parked = false;
@@ -745,6 +794,27 @@ fn render_loop(
             film.reset();
             last_publish = None;
         }
+        // The cheap restart restarts too: it only ever acts on sample 0, so a
+        // flip mid-accumulation would land on nothing until the next reset, and
+        // the A/B would silently compare an arm against itself.
+        if input.cheap_restart != applied_cheap_restart {
+            log::debug!("cheap restart adopted; accumulation restarts");
+            renderer.set_cheap_restart(input.cheap_restart);
+            applied_cheap_restart = input.cheap_restart;
+            film.reset();
+            last_publish = None;
+        }
+        // Every restart above rewound the film's sample count, and that is
+        // the one signal all of them share — a resize, an edit, a camera
+        // move, either reuse toggle, the cheap restart. (It is also the signal
+        // the cheap restart reads, which is why one cheap frame covers all of
+        // them and not just camera motion.) Re-arming the interactivity marks off
+        // it keeps the measurement honest without seven call sites that would
+        // drift apart the first time an eighth reset is added — as one just was.
+        if film.samples() < last_samples {
+            recorder.restart();
+        }
+        last_samples = film.samples();
         renderer.set_debug_view(input.debug_view);
         // The auto-stop threshold changes only what the accumulate kernel counts
         // as converged, so it is adopted without a reset — the per-sample count
@@ -768,7 +838,7 @@ fn render_loop(
         // retries on the next nap.
         if parked {
             if epoch > published_epoch
-                && publish(gpu, &renderer, film, frames, lanes, last_sample_time, epoch)?
+                && publish(gpu, &renderer, film, frames, lanes, &recorder, epoch)?
             {
                 published_epoch = epoch;
             }
@@ -786,7 +856,7 @@ fn render_loop(
             // Force the settled image out once (past the throttle) so the
             // converged frame is definitely the latest, then park. If both slots
             // are busy the publish is retried on the next tick.
-            if publish(gpu, &renderer, film, frames, lanes, last_sample_time, epoch)? {
+            if publish(gpu, &renderer, film, frames, lanes, &recorder, epoch)? {
                 parked = true;
                 published_epoch = epoch;
             }
@@ -794,16 +864,35 @@ fn render_loop(
             continue;
         }
 
+        // Every frame is bracketed; one in `PassTimer::BREAKDOWN_INTERVAL`
+        // is also resolved kernel by kernel.
         let started = Instant::now();
-        renderer.accumulate(gpu, &scene, film)?;
-        last_sample_time = started.elapsed();
+        // Read before the wave, not after: the candidate count is picked from
+        // the film's state going in, and `accumulate_timed` has moved it on by
+        // the time it returns.
+        let candidates = renderer.candidate_count(film);
+        let passes = renderer.accumulate_timed(gpu, &scene, film, timer.as_mut())?;
+        // `stats::Frame` is the measurement of a sample; the `Frame` this
+        // module publishes is the pixels. Spelled out so the two never read
+        // as one.
+        recorder.record(stats::Frame {
+            cpu: started.elapsed(),
+            passes,
+            size: (film.width(), film.height()),
+            samples: film.samples(),
+            candidates,
+        });
+        if last_memory_sample.is_none_or(|at| at.elapsed() >= MEMORY_SAMPLE_INTERVAL) {
+            recorder.memory(gpu.memory());
+            last_memory_sample = Some(Instant::now());
+        }
 
         // Publish on the throttle — which widens as the image converges (see
         // `publish_interval`) — but only into a buffer no consumer still holds.
         // If both are busy, skip: the next tick catches up, and the renderer
         // never waits on the consumer.
         if last_publish.is_none_or(|at| at.elapsed() >= publish_interval(film.samples()))
-            && publish(gpu, &renderer, film, frames, lanes, last_sample_time, epoch)?
+            && publish(gpu, &renderer, film, frames, lanes, &recorder, epoch)?
         {
             last_publish = Some(Instant::now());
             published_epoch = epoch;
@@ -823,7 +912,7 @@ fn publish(
     film: &Film,
     frames: &[Arc<FrameBuffers>; 2],
     lanes: &Lanes,
-    sample_time: Duration,
+    recorder: &Recorder,
     epoch: u64,
 ) -> Result<bool> {
     let Some(free) = frames.iter().find(|frame| Arc::strong_count(frame) == 1) else {
@@ -854,7 +943,7 @@ fn publish(
         width: film.width(),
         height: film.height(),
         samples: film.samples(),
-        sample_time,
+        stats: recorder.stats(),
         epoch,
     };
     *lanes.published.lock().expect("published mutex poisoned") = Some(frame);
