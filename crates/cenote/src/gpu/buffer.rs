@@ -48,33 +48,10 @@ impl Buffer {
 
     /// The buffer's GPU address, for kernels that reach it through a
     /// push-constant pointer.
-    ///
-    /// # Panics
-    ///
-    /// If the buffer was created without `SHADER_DEVICE_ADDRESS` usage —
-    /// a programmer bug, not an environment failure.
     #[must_use]
     pub fn device_address(&self) -> vk::DeviceAddress {
         self.address
             .expect("buffer was created without SHADER_DEVICE_ADDRESS usage")
-    }
-
-    /// Overwrite the buffer's first `data.len()` bytes directly through its
-    /// host mapping — for small `CpuToGpu` constants rewritten each frame (the
-    /// temporal reprojection block), sparing the staging copy and its submit.
-    /// The host write is ordered before the next queue submission's reads, so a
-    /// caller that writes before recording is safe (the blocking-submit model,
-    /// [`Context::submit_passes`]).
-    ///
-    /// # Panics
-    ///
-    /// If the buffer is not host-mapped (created outside `CpuToGpu`), or `data`
-    /// is larger than the buffer — both programmer bugs.
-    pub fn write(&mut self, data: &[u8]) {
-        self.allocation
-            .mapped_slice_mut()
-            .expect("write() needs CpuToGpu (host-mapped) memory")[..data.len()]
-            .copy_from_slice(data);
     }
 }
 
@@ -186,16 +163,6 @@ impl Context {
 
     /// Create a device-local buffer holding `data`, moved through a transient
     /// staging buffer. `TRANSFER_DST` is added to `usage` automatically.
-    ///
-    /// # Errors
-    ///
-    /// As [`Context::create_buffer`], plus [`Error::Vulkan`] from the copy
-    /// submission.
-    ///
-    /// # Panics
-    ///
-    /// Only if the allocator breaks its contract that `CpuToGpu` memory is
-    /// host-mapped — a bug, not an environment failure.
     pub fn upload_buffer(
         &self,
         name: &str,
@@ -233,16 +200,6 @@ impl Context {
 
     /// Read a buffer's full contents back to the host through a transient
     /// staging buffer. The source must have `TRANSFER_SRC` usage.
-    ///
-    /// # Errors
-    ///
-    /// As [`Context::create_buffer`], plus [`Error::Vulkan`] from the copy
-    /// submission.
-    ///
-    /// # Panics
-    ///
-    /// Only if the allocator breaks its contract that `GpuToCpu` memory is
-    /// host-mapped — a bug, not an environment failure.
     pub fn download_buffer(&self, buffer: &Buffer) -> Result<Vec<u8>> {
         let staging = self.create_buffer(
             "download.staging",

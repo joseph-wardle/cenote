@@ -69,10 +69,6 @@ pub fn import(scene: &Path, generated: &Path) -> Result<Import> {
 /// the output that references them, and naming them after the input turns
 /// every Bitterli-style `<scene>/scene-v4.pbrt` into the same colliding
 /// `scene-v4-sky.exr`.
-///
-/// # Errors
-///
-/// As [`import`].
 pub fn import_as(scene: &Path, generated: &Path, stem: &str) -> Result<Import> {
     std::fs::create_dir_all(generated)?;
     let parser = parse::Parser::open(scene)?;
@@ -86,10 +82,6 @@ pub fn import_as(scene: &Path, generated: &Path, stem: &str) -> Result<Import> {
 /// both binaries turn a scene path into a change-set through, so the choice
 /// of importer-vs-native lives in one place rather than drifting between
 /// them.
-///
-/// # Errors
-///
-/// Whatever [`import`] or [`cenote::format::load`] raise for the path.
 pub fn load(scene: &Path) -> Result<Import> {
     if scene
         .extension()

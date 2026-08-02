@@ -6,10 +6,8 @@
 // RON was bootstrapped once by `cenote-cli import
 // sources/bitterli/teapot-full/scene-v4.pbrt` and is the source of
 // truth — re-imports diff into scratch, never over it. The octahedral
-// PFM sky (the image class the importer's PFM reader landed for, this
-// rung) resamples to the derived, gitignored `teapot-full-sky.exr`
-// beside this file (README.md's mechanics section has the regeneration
-// recipe).
+// PFM sky resamples to the derived, gitignored `teapot-full-sky.exr`
+// beside this file (the corpus README has the regeneration recipe).
 //
 // Import fidelity: two knowing gaps. The tea is a homogeneous
 // absorbing medium (MakeNamedMedium/MediumInterface) the renderer

@@ -4,7 +4,6 @@
 // the density a connection is drawn with and the weight it is combined with
 // can never drift apart into a silent bias.
 
-import environment;
 import lights;
 import openpbr;
 import scene;
@@ -23,14 +22,6 @@ public struct NeeCandidate {
     public float tmax;
     public uint light;        // shadow identity target (TLAS index), or LIGHT_NONE
     public uint primitive;
-    // The raw halves of the folded `unshadowed`, for a caller that must
-    // re-weight the connection later (the un-baked reconnection sample,
-    // D-137): the arriving radiance with any emission map applied, the
-    // selection-folded solid-angle pdf, and whether the light is a delta
-    // (whose MIS weight is 1 under every mode). Zero when `unshadowed` is.
-    public float3 radiance;
-    public float pdf;
-    public bool delta;
 };
 
 // Draw one next-event candidate: a direction toward the environment or a light
@@ -51,9 +42,6 @@ public NeeCandidate sampleNee(SceneTable* scene, SpawnPoint spawn, Frame frame,
     nee.tmax = 0.0;
     nee.light = LIGHT_NONE;
     nee.primitive = 0;
-    nee.radiance = float3(0.0);
-    nee.pdf = 0.0;
-    nee.delta = false;
 
     let envProb = scene.env.selectProb;
     if (uLight < envProb) {
@@ -76,8 +64,6 @@ public NeeCandidate sampleNee(SceneTable* scene, SpawnPoint spawn, Frame frame,
             nee.origin = throughSurface ? spawn.below : spawn.position;
             nee.direction = candidate.direction;
             nee.tmax = 1e30;
-            nee.radiance = candidate.radiance;
-            nee.pdf = neePdf;
         }
     } else {
         // A light from the list. Scene prep pins envProb to exactly 1
@@ -107,6 +93,15 @@ public NeeCandidate sampleNee(SceneTable* scene, SpawnPoint spawn, Frame frame,
             // sampling would give the direction — except at a delta
             // light, which BSDF sampling reaches with probability
             // zero: its weight is 1 under every mode.
+            //
+            // TODO: an emitter with opacity 0 belongs in that same
+            // exception. Its any-hit rejects every ray, so BSDF sampling
+            // can never reach it either, yet the heuristic still discounts
+            // this sample against a strategy that cannot fire — a fully
+            // invisible emitter lands at roughly half strength. Kroken's
+            // alpha-0 sun is the live case (scenes/corpus/curate-kroken.py).
+            // The fix needs the emitter's opacity here, which the light
+            // candidate does not carry today.
             let neePdf = (1.0 - envProb) * candidate.pdf;
             let weight = !candidate.delta
                       && lightSampling == LIGHT_SAMPLING_MIS
@@ -120,9 +115,6 @@ public NeeCandidate sampleNee(SceneTable* scene, SpawnPoint spawn, Frame frame,
             nee.tmax = candidate.tmax;
             nee.light = candidate.instance;
             nee.primitive = candidate.primitive;
-            nee.radiance = candidate.radiance;
-            nee.pdf = neePdf;
-            nee.delta = candidate.delta;
         }
     }
     return nee;
@@ -141,19 +133,4 @@ public float emitterHitNeePdf(SceneTable* scene, GeometryRecord mesh, uint primi
     return (1.0 - scene.env.selectProb)
          * scene.lights[mesh.light + primitive].pdf
          * dot(delta, delta) / cosLight;
-}
-
-// The power-heuristic weight of a BSDF-sampled escape to the sky — the
-// environment twin of the competition above: the next-event density of this
-// direction (choose the environment, then this direction from its tables)
-// against the scatter pdf that found it. With no environment sampling
-// (selectProb 0) no next-event draw competes and the weight is 1. One copy,
-// shared by the candidate walk and the replay shift, which must weigh the
-// same escape identically for the same-pixel bit-identity gate to hold.
-public float envEscapeMisWeight(SceneTable* scene, float3 direction, float scatterPdf) {
-    if (!(scene.env.selectProb > 0.0)) {
-        return 1.0;
-    }
-    return powerHeuristic(scatterPdf,
-                          scene.env.selectProb * scene.env.pdf(direction));
 }

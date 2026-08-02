@@ -1,6 +1,6 @@
 #usda 1.0
 (
-    """The step-1 checkpoint stage (and the seed of step 6's FLIP golden):
+    """The first checkpoint stage (and the seed of the FLIP golden):
     two cubes at different depths from a real camera, lit by one distant
     light — every prim type the delegate translates so far, nothing it
     does not. The near cube is warm and left of center, the far cube cool

@@ -41,7 +41,7 @@ impl Scene {
     /// description — not exactly one camera and settings, more than one
     /// environment, or a referenced file (PLY, texture, environment) that
     /// doesn't read or decode. A description with no instances is *not* an
-    /// error: it renders black (the M4 render server starts on one, and a
+    /// error: it renders black (the render server starts on one, and a
     /// live edit may delete the last instance). Any other error is a GPU
     /// fault from upload or acceleration-structure builds.
     #[expect(
@@ -616,7 +616,7 @@ mod tests {
         }
     }
 
-    /// The M4 render server stands up its `Session` on an empty scene —
+    /// The render server stands up its `Session` on an empty scene —
     /// camera and settings only — so zero instances must prep, trace
     /// (every ray misses the empty TLAS), and render black under the
     /// default black sky rather than reject.

@@ -10,7 +10,7 @@
 //! |-------------|------|
 //! | `gpu`       | Unsafe-Vulkan quarantine: device context, buffers, submits, pipelines, acceleration structures, window presentation, the viewer's egui overlay pass. Code outside this module does not touch raw `vk` handles. |
 //! | `shaders`   | Embedded SPIR-V registry, `slangc` runtime recompile, hot-reload watching |
-//! | `scene`     | The scene model — `scene::description` is the typed named-object schema, `scene::changeset` its only edit path — and the prep path that joins it to GPU residency: [`scene::Scene::prep`] builds a description fresh, and its dirty-driven update rebuilds only what an edit touched |
+//! | `scene`     | The scene model — `scene::description` is the typed named-object schema, `scene::changeset` its only edit path — and the prep path that joins it to GPU residency, rebuilding only what an edit dirtied |
 //! | `format`    | The `.ron` scene-file boundary: versioned RON serialization of change-sets |
 //! | `material`  | `OpenPBR` surface parameters — the host half of the material schema |
 //! | `lights`    | The light list — emissive triangles and delta lights — and its power-proportional alias table, built at prep |
@@ -20,17 +20,16 @@
 //! | `tables`    | The closure's baked lookup tables — GGX energy data (regenerable from its own QMC baker) and the vendored LTC sheen fit — embedded, uploaded with the scene's resident buffers |
 //! | `texture`   | Texture prep: decode → mip-cap → BC encode, cached as a DDS beside the source; scene prep uploads the results into the bindless table |
 //! | `wavefront` | The engine core: `SoA` path state, GPU stage queues, indirect dispatch — one [`wavefront::Wavefront::trace`] is one sample per pixel, written pixel-owned so renders are bitwise deterministic |
-//! | `render`    | Frame orchestration: one-shot linear frames for the CLI and tests, and the progressive path — [`render::Renderer`] accumulates samples into a [`render::Film`] and resolves the linear average. [`render::Session`] runs that loop on its own thread, publishes frames for a consumer to peek, and carries the edit channel: queued change-sets land at wave boundaries as stop → apply → minimal re-prep → restart. [`render::Tonemap`] is the consumer's downstream view transform (exposure + ACES), which the viewer owns and the CLI skips |
+//! | `render`    | Frame orchestration: [`render::Renderer`] accumulates samples into a [`render::Film`] and resolves the linear average; [`render::Session`] runs that loop on its own thread, publishes frames to peek at, and lands queued change-sets at wave boundaries; [`render::Tonemap`] is the consumer's downstream view transform |
 //! | `output`    | Linear EXR write + read (read exists for the golden-image tests and the demo environment) |
 //! | `denoise`   | OIDN denoising of the film's averages by host copy, guided by the albedo/normal AOVs — behind the `denoise` cargo feature |
 //! | `error`     | The crate-wide [`enum@Error`] |
 //!
-//! The GPU kernels themselves live in `shaders/` (Slang, compiled to SPIR-V
-//! by `build.rs`; the embedded/recompiled `Kernels` set is registered in
-//! `shaders.rs`). Their stage chain — raygen → intersect →
+//! The GPU kernels live in `shaders/` (Slang, compiled to SPIR-V by `build.rs`,
+//! registered in `shaders.rs`). Their stage chain — raygen → intersect →
 //! (`shade_miss` | `shade_surface`) → `trace_shadow`, then the `accumulate`,
-//! `resolve`, and `tonemap` film kernels — is mapped in [`wavefront`]'s
-//! module doc, and each `.slang` file's header states its own job.
+//! `resolve`, and `tonemap` film kernels — is mapped in [`wavefront`]'s module
+//! doc, and each `.slang` file's header states its own job.
 //!
 //! # Conventions
 //!

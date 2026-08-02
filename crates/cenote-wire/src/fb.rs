@@ -1,9 +1,8 @@
 //! The shared-memory framebuffer layout — the one deliberately
-//! platform-specific piece of the transport (POSIX `shm_open` + `mmap`;
-//! the Windows twin is a deferral). This module is layout only: the
-//! constants and arithmetic both sides map by. The writer lives in
-//! `cenote-server`, the readers are the integration test and, later, the
-//! C++ delegate's `HdRenderBuffer`.
+//! platform-specific piece of the transport (POSIX `shm_open` + `mmap`).
+//! This module is layout only: the constants and arithmetic both sides map
+//! by. The writer lives in `cenote-server`; the readers are the integration
+//! test and the C++ delegate's `HdRenderBuffer`.
 //!
 //! One segment per size, named `/cenote-<pid>-<generation>` and described
 //! in-band by `protocol::FbDesc`. Inside:
@@ -13,7 +12,7 @@
 //!   can't carry (`front_index`, `frame_counter`, `samples`, `converged`,
 //!   `rejected_edits`, `epoch`);
 //! - **two pixel buffers**, each a beauty plane (RGBA f32, row-major,
-//!   linear `Rec.709` — converted server-side, D-101) followed by a depth
+//!   linear `Rec.709` — converted server-side) followed by a depth
 //!   plane (f32, camera-plane z at the first hit, +∞ where every sample
 //!   missed).
 //!
@@ -82,7 +81,7 @@ pub mod header {
     pub const BEAUTY_OFFSET_1: u64 = 56;
     /// Byte offset of buffer 1's depth plane, u64.
     pub const DEPTH_OFFSET_1: u64 = 64;
-    /// The session epoch the front frame incorporates, u64 (D-113) —
+    /// The session epoch the front frame incorporates, u64 —
     /// written with the frame it stamps, so a reader that pairs it with
     /// `CONVERGED` can tell a settled *current* picture from a settled
     /// stale one.

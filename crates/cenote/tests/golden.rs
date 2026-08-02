@@ -169,7 +169,7 @@ fn update_or_path(name: &str, actual: &[f32]) -> Option<std::path::PathBuf> {
 /// already-clipped highlight) moves no pixel here and passes the pin. That
 /// class is caught instead by the white furnace (absolute energy) and the
 /// convergence gate (relMSE on the unclamped linear HDR), both of which see
-/// the full range — see D-096.
+/// the full range.
 fn flip_image(width: u32, height: u32, pixels: &[f32]) -> nv_flip::FlipImageRgb8 {
     let rgb: Vec<u8> = pixels
         .chunks_exact(4)

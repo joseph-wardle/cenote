@@ -90,7 +90,7 @@ pub struct Object {
     /// Object-to-world placement. Must be invertible — normals and ray
     /// offsets transform through the inverse.
     pub transform: Mat4,
-    /// The surface, constant across the mesh (per-face materials are M2+).
+    /// The surface, constant across the mesh (per-face materials are not modelled).
     pub material: Material,
 }
 
@@ -332,15 +332,6 @@ impl Scene {
     /// estimator tests speak. Production scenes go through
     /// [`Scene::prep`], which builds the same residency from a
     /// [`description::SceneDescription`].
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from upload or acceleration-structure builds.
-    ///
-    /// # Panics
-    ///
-    /// On an empty scene or a non-invertible object transform —
-    /// programmer bugs.
     pub fn new(
         gpu: &Context,
         objects: &[Object],
@@ -545,13 +536,6 @@ pub struct RayBasis {
 impl Camera {
     /// The ray-generation basis for a target with the given aspect ratio
     /// (width / height).
-    ///
-    /// # Panics
-    ///
-    /// On a degenerate camera — `position == look_at`, or `up` parallel
-    /// to the view axis. Both are programmer bugs: description-driven
-    /// cameras were validated at apply, and the viewer's orbit control
-    /// clamps away from the poles.
     #[must_use]
     pub fn basis(&self, aspect: f32) -> RayBasis {
         let forward = (self.look_at - self.position).normalize();

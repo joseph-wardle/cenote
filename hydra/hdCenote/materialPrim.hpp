@@ -8,7 +8,7 @@
 // The warn policy throughout: silent where the core's behavior is the
 // authored behavior, one warning naming the material and input where
 // fidelity is lost, and never an op the server would reject. Birth and
-// death walk the mesh registry (D-115): Hydra emits no binding dirt for
+// death walk the mesh registry: Hydra emits no binding dirt for
 // either, so each bound mesh repoints its own instance — onto this
 // material when it appears, back to its companion before the Remove
 // lands. Like every translator it never sends: wire ops go to the

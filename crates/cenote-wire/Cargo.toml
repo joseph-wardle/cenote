@@ -9,7 +9,7 @@ repository.workspace = true
 
 # Deliberately *not* a dependent of the renderer: the wire is the
 # cross-language contract, and keeping it USD-free and GPU-free is what
-# lets the byte-exact drift guard run in CI with neither (D-100). serde +
+# lets the byte-exact drift guard run in CI with neither. serde +
 # the MessagePack codec are the whole dependency budget.
 [dependencies]
 rmp-serde = "1.3.1"

@@ -17,7 +17,7 @@
     dark a copy's absence can leave is the sky itself. Copies sit at
     mirror-symmetric X and the three hues stack in Z, so the smoke reads
     them by colour and left/right, never by handedness — no pixel equality;
-    that stays step 6's FLIP golden. Authored against a Storm side-by-side."""
+    that stays the FLIP golden. Authored against a Storm side-by-side."""
     defaultPrim = "World"
     metersPerUnit = 1
     upAxis = "Z"

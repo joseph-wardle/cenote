@@ -1,9 +1,7 @@
 // 'Veach, Ajar' — Benedikt Bitterli (CC0, public domain; crediting the
 // artist encouraged). The door-ajar room: the sun enters only through a
 // barely-open door, so nearly everything is lit indirectly — the
-// difficult-light-transport standard, and this corpus's candidate to
-// take brass-room's reuse-gate role at the swap rung
-// (docs/corpus-plan.md, decision 6). Official pbrt-v4 export from
+// difficult-light-transport standard. Official pbrt-v4 export from
 // https://benedikt-bitterli.me/resources/ — `scenes/corpus/fetch.sh
 // veach-ajar` materializes the source (its TGA textures decode via the
 // extension-hinted path texture.rs grew for this scene); this RON was

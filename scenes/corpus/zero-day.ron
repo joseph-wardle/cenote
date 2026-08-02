@@ -11,13 +11,10 @@
 // pbrt volpath (its default), maxdepth 5, halton; compared at 256 spp
 // (1024 renders indistinguishable at eighth-res — converged).
 //
-// This scene earned its rung: nearly everything in it is authored
-// through mirrored transform chains, which exposed the renderer's
-// wrong-side emission under negative-determinant instances — fixed at
-// this rung ("An emitter keeps its face through every mirror";
-// docs/corpus-plan.md rung-4 notes tell the story). The eyeball the
-// recon scheduled is resolved: all 283 emissive meshes wind with
-// their authored normals.
+// Nearly everything in it is authored through mirrored transform chains,
+// which exposed the renderer's wrong-side emission under
+// negative-determinant instances — fixed when this scene landed. All 283
+// emissive meshes now wind with their authored normals.
 //
 // Import fidelity: eighth-res RMSE 0.035 against pbrt with its film
 // simulation stripped — and the film IS the headline knowing gap. The

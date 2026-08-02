@@ -9,7 +9,7 @@
     from a: green/blue cells alternate and the texture's four corner cells
     are transparent, so the color path, the alpha source channel, and the
     authored tints are all separately visible to a coarse patch check
-    (tests/usdrecord_smoke.py). No pixel equality; that is step 6's FLIP
+    (tests/usdrecord_smoke.py). No pixel equality; that is the FLIP
     golden."""
     defaultPrim = "World"
     metersPerUnit = 1

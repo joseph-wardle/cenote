@@ -25,15 +25,6 @@ const ACESCG_CHROMATICITIES: exr::meta::attribute::Chromaticities =
 /// Write row-major RGBA `f32` pixels (pixel (0, 0) top-left, the crate-wide
 /// convention) to `path` as a linear EXR tagged with the `ACEScg`
 /// chromaticities.
-///
-/// # Errors
-///
-/// [`crate::Error::Image`] if encoding or the underlying I/O fails.
-///
-/// # Panics
-///
-/// If `pixels` doesn't hold exactly `width × height` RGBA quads — a
-/// programmer bug.
 pub fn write_exr(path: &Path, width: u32, height: u32, pixels: &[f32]) -> Result<()> {
     use exr::prelude::{Image, SpecificChannels, Vec2, WritableImage};
     assert_eq!(
@@ -65,15 +56,6 @@ pub fn write_exr(path: &Path, width: u32, height: u32, pixels: &[f32]) -> Result
 /// `Z` stays f32 (depths span orders of magnitude, and +∞ marks the sky).
 /// `beauty`/`albedo`/`normal` are row-major RGBA `f32` quads, `depth` one
 /// `f32` per pixel — exactly [`crate::render::FilmAverages`]'s layout.
-///
-/// # Errors
-///
-/// [`crate::Error::Image`] if encoding or the underlying I/O fails.
-///
-/// # Panics
-///
-/// If any slice doesn't hold exactly `width × height` of its layout — a
-/// programmer bug.
 pub fn write_aov_exr(
     path: &Path,
     width: u32,
@@ -139,21 +121,12 @@ pub fn write_aov_exr(
 /// Read an EXR's first layer back as `(width, height, pixels)` in the same
 /// row-major RGBA `f32` layout that [`write_exr`] takes — `f32` channels
 /// round-trip losslessly.
-///
-/// # Errors
-///
-/// [`crate::Error::Io`] if the file can't be read, [`crate::Error::Image`]
-/// if it can't be decoded.
 pub fn read_exr(path: &Path) -> Result<(u32, u32, Vec<f32>)> {
     read_exr_bytes(&std::fs::read(path)?)
 }
 
 /// [`read_exr`] from an in-memory EXR — how the embedded demo environment
 /// loads. A missing alpha channel reads as 1.
-///
-/// # Errors
-///
-/// [`crate::Error::Image`] if `bytes` don't decode as an EXR.
 pub fn read_exr_bytes(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>)> {
     use exr::prelude::{ReadChannels, ReadLayers};
     let image = exr::prelude::read()
@@ -201,8 +174,8 @@ mod tests {
         assert_eq!(read_back, pixels);
     }
 
-    /// The multi-layer EXR carries exactly the channels the plan names, in
-    /// the types it names: beauty as bare `R/G/B/A` and the guides as
+    /// The multi-layer EXR carries exactly the named channels, in the named
+    /// types: beauty as bare `R/G/B/A` and the guides as
     /// `albedo.*`/`normal.*` in f16, depth as the bare f32 `Z` — where +∞
     /// (a sky pixel) must survive the trip exactly. And the header still
     /// declares `ACEScg`, like every file this module writes.

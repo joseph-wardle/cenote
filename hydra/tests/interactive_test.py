@@ -3,13 +3,13 @@
 asserting what a user at the viewport would live through. Three legs:
 
   1. Edit honesty — a real edit through the stage handle drops IsConverged
-     (the epoch bar rising past the front frame, D-113) and reconverges
+     (the epoch bar rising past the front frame) and reconverges
      with different pixels; a visually inert edit still travels the wire
      and comes back converged — a wedged epoch would time out right there.
   2. Kill-survive — SIGKILL the spawned cenote-server mid-session: the app
      survives, the client degrades (observed as the corpse being reaped),
      converged reads true so hosts do not spin, and the warning naming the
-     recovery gesture reaches stderr (D-099).
+     recovery gesture reaches stderr.
   3. Toggle-recover — that very gesture: switch the renderer away and
      back, and a fresh delegate spawns a fresh server with the whole stage
      replayed; the cubes must come back.

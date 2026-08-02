@@ -1,6 +1,6 @@
-//! The out-of-process render server (D-100, D-101): a loopback-TCP
+//! The out-of-process render server : a loopback-TCP
 //! request/response loop and a shared-memory framebuffer wrapped around
-//! `render::Session`. Spawned per client by a scene-graph host (the M4
+//! `render::Session`. Spawned per client by a scene-graph host (the
 //! Hydra delegate); driven by the wire vocabulary in `cenote-wire`.
 //!
 //! The process contract, which the spawner and the integration test both
@@ -21,7 +21,7 @@
 //!   anything before `Hello` — is a failure, not a negotiation.
 //! - `CENOTE_SERVER_MAX_SAMPLES` (default 4096) caps accumulation; the
 //!   shm header's `converged` flag reports reaching it. A finer
-//!   convergence surface is step 2's business.
+
 //!
 //! Camera ownership: the session's inputs-lane camera overwrites the
 //! scene camera at every wave, so the *only* way to move the view is the
@@ -181,7 +181,7 @@ fn main() -> anyhow::Result<()> {
 
 /// 128 bits from the OS, hex — the spawn-time secret that closes the
 /// any-local-process gap loopback TCP leaves open. `/dev/urandom` because
-/// the framebuffer already makes this binary POSIX-only (D-101).
+/// the framebuffer already makes this binary POSIX-only.
 fn generate_token() -> anyhow::Result<String> {
     let mut bytes = [0u8; 16];
     std::fs::File::open("/dev/urandom")
@@ -278,7 +278,7 @@ fn serve(stream: &mut TcpStream, state: &Mutex<Shared>, token: &str) -> anyhow::
 
 /// The `Ack`, carrying every rejection accumulated since the last
 /// response — a receipt, not a validation (edits land at wave boundaries)
-/// — and the session epoch after the request (D-113). The epoch is read
+/// — and the session epoch after the request. The epoch is read
 /// *last*, after every session call the request caused (including the
 /// internal camera re-assert, which bumps harmlessly), so the first frame
 /// stamped at or past it provably incorporates this request.
@@ -310,7 +310,7 @@ fn ensure_singletons(set: &mut ChangeSet) {
 
 /// The frame pump: poll the session at the throttle, download the newest
 /// frame, convert the beauty to linear `Rec.709` (the one 3×3, hoisted —
-/// D-101's silent-gamut defence), and publish into shm. Also the faults
+/// the silent-gamut defence), and publish into shm. Also the faults
 /// lane: a dead render thread or a failed download records the fault and
 /// shuts the socket down, which unblocks `serve` and ends the process
 /// nonzero.
@@ -384,8 +384,8 @@ fn fail(shared: &mut Shared, socket: &TcpStream, message: String) {
 /// usdrecord, and husk read — a consumer's transfer curve raises each
 /// component to a power, and `powf` of a negative is `NaN`. A display cannot
 /// emit negative light, so clamping to zero is the honest gamut clip and the
-/// completion of D-101's silent-gamut defence: without it a saturated primary
-/// riddles the frame with `NaN` (the failure step 6's end-to-end golden
+/// completion of the silent-gamut defence: without it a saturated primary
+/// riddles the frame with `NaN` (the failure the end-to-end golden
 /// surfaced). In-gamut colour is untouched, and highlights above one stay —
 /// only the below-zero out-of-gamut lobe is clipped.
 fn rec709_texels(matrix: &glam::Mat3, acescg: &[u8]) -> Vec<f32> {
@@ -417,7 +417,7 @@ mod tests {
     /// `3x3` sends two of its components below zero; the conversion must clamp
     /// them away rather than publish negative light a consumer's transfer curve
     /// would turn into `NaN` (the step-6 golden's failure mode). The clamp is
-    /// the completion of `D-101`'s silent-gamut defence.
+    /// the completion of the silent-gamut defence.
     #[test]
     fn saturated_primaries_clamp_to_nonnegative() {
         let matrix = cenote::color::rec709_from_acescg();

@@ -1835,7 +1835,7 @@ fn non_finite_contributions_are_dropped() {
     assert!((moment2[3] - 2.0 * clean_l2).abs() < 1e-7);
 }
 
-/// The variance substrate's headline property (M3 step 6a): on a static
+/// The variance substrate's headline property: on a static
 /// scene the estimator standard error `sqrt(Var / N)` falls as `1/sqrt(N)`,
 /// because the per-sample luminance variance `Var` is a fixed property of the
 /// pixel that the growing sample count only measures better. Rendering is
@@ -1895,7 +1895,7 @@ fn standard_error_falls_as_one_over_sqrt_samples() {
     );
 }
 
-/// The global auto-stop metric (M3 step 6b): the converged tally tracks real
+/// The global auto-stop metric: the converged tally tracks real
 /// per-pixel noise, not the sample count. It is exactly zero below the metric's
 /// trust floor (`CONVERGENCE_MIN_SAMPLES`), reads a near-exact image as fully
 /// converged, and reads a noisier one at the same sample count as less. And the
@@ -1980,7 +1980,7 @@ fn converged_fraction_tracks_the_noise() {
     );
 }
 
-/// The runtime auto-stop threshold (M3 step 6c) reaches the kernel: on one noisy
+/// The runtime auto-stop threshold reaches the kernel: on one noisy
 /// film, loosening [`Renderer::set_noise_threshold`] counts strictly more pixels
 /// as converged than tightening it. Were the setter ignored, both would render
 /// at the 6b default and read identical — so the strict inequality proves the

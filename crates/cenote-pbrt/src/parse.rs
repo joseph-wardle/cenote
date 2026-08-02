@@ -60,10 +60,6 @@ pub(crate) struct Param {
 
 impl Param {
     /// The values as numbers.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::SceneFormat`] when the values are strings or bools.
     pub fn as_floats(&self) -> Result<&[f64]> {
         match &self.value {
             Value::Numbers(numbers) => Ok(numbers),
@@ -75,11 +71,6 @@ impl Param {
     }
 
     /// The single scalar value.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::SceneFormat`] when the values aren't numeric or aren't
-    /// exactly one.
     pub fn as_scalar(&self) -> Result<f32> {
         match self.as_floats()? {
             [value] => Ok(*value as f32),
@@ -90,11 +81,6 @@ impl Param {
     /// Exactly three values as an RGB triple — pbrt's `rgb`/`color` always
     /// carry three; a lone value is a `float` slot's job, broadcast by the
     /// caller (or [`Param::as_rgb_broadcast`]).
-    ///
-    /// # Errors
-    ///
-    /// [`Error::SceneFormat`] when the values aren't numeric or aren't
-    /// exactly three.
     pub fn as_rgb(&self) -> Result<[f32; 3]> {
         match self.as_floats()? {
             [r, g, b] => Ok([*r as f32, *g as f32, *b as f32]),
@@ -105,11 +91,6 @@ impl Param {
     /// One or three values as RGB, a single value broadcasting to all three
     /// — the leniency pbrt grants where a `constant` or `scale` texture
     /// takes a color but a float was written.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::SceneFormat`] when the values aren't numeric or number
-    /// neither one nor three.
     pub fn as_rgb_broadcast(&self) -> Result<[f32; 3]> {
         match self.as_floats()? {
             [value] => Ok([*value as f32; 3]),
@@ -126,10 +107,6 @@ impl Param {
     }
 
     /// The single string value.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::SceneFormat`] when the value is not exactly one string.
     pub fn as_string(&self) -> Result<&str> {
         match &self.value {
             Value::Strings(strings) if strings.len() == 1 => Ok(&strings[0]),
@@ -169,10 +146,6 @@ impl Params {
     }
 
     /// A single float (an `integer` converts).
-    ///
-    /// # Errors
-    ///
-    /// [`Error::SceneFormat`] on a type or arity mismatch.
     pub fn float(&self, name: &str) -> Result<Option<f32>> {
         let Some(param) = self.take(name, &["float", "integer"])? else {
             return Ok(None);
@@ -187,10 +160,6 @@ impl Params {
     }
 
     /// A single integer.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::SceneFormat`] on a type or arity mismatch.
     pub fn integer(&self, name: &str) -> Result<Option<i64>> {
         let Some(param) = self.take(name, &["integer"])? else {
             return Ok(None);
@@ -205,10 +174,6 @@ impl Params {
     }
 
     /// A single string.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::SceneFormat`] on a type or arity mismatch.
     pub fn string(&self, name: &str) -> Result<Option<&str>> {
         let Some(param) = self.take(name, &["string", "texture"])? else {
             return Ok(None);
@@ -217,10 +182,6 @@ impl Params {
     }
 
     /// A single bool. Accepts pbrt-v3's quoted `"true"` spelling too.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::SceneFormat`] on a type or arity mismatch.
     pub fn boolean(&self, name: &str) -> Result<Option<bool>> {
         let Some(param) = self.take(name, &["bool"])? else {
             return Ok(None);
@@ -318,10 +279,6 @@ pub(crate) struct Parser {
 
 impl Parser {
     /// Open the top-level scene file.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::SceneFormat`] when the file can't be read.
     pub fn open(path: &Path) -> Result<Self> {
         let absolute = std::path::absolute(path).map_err(|error| {
             Error::SceneFormat(format!("can't resolve \"{}\": {error}", path.display()))

@@ -55,11 +55,11 @@ HEADER = """\
 //    window directions (kroken leaks ~15% extra env light without it), so
 //    the two env domains genuinely differ.
 //  - the invisible sun ball (alpha 0 sphere, scale 50) imports faithfully
-//    through the rung-7 cutout fork (geometry_opacity 0 + emission), but
+//    through the cutout fork (geometry_opacity 0 + emission), but
 //    cenote's MIS discounts NEE against a BSDF strategy that can never hit
 //    an invisible emitter — the sun lands at HALF strength (microtest:
 //    2.160 vs pbrt 4.213, which matches its own visible-emitter case to 3
-//    decimals). Renderer fix candidate in docs/corpus-plan.md (rung 8).
+//    decimals). Renderer fix candidate.
 //  - coateddiffuse is the dominant material family (36 of 59) — pbrt's
 //    stochastically simulated coat darkens this white GI box 19% of scene
 //    mean vs OpenPBR's analytic 4.4% (the bistro model gap, GI-amplified);

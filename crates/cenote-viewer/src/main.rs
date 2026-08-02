@@ -170,7 +170,7 @@ struct Viewer {
     cursor: Option<PhysicalPosition<f64>>,
 }
 
-/// Sample cap the viewer hands the render session (M3 step 6c): once a held
+/// Sample cap the viewer hands the render session: once a held
 /// view reaches it the render thread parks, so a converged scene left on screen
 /// stops pinning the GPU. High enough that the image is long since visually
 /// settled by the time it fires — a backstop, not a quality limit.
@@ -342,7 +342,7 @@ impl Viewer {
             // still reject a scene apply accepted (a present-but-corrupt
             // asset), leaving the replica ahead of what actually renders
             // until the next good reload. It is logged below, not yet
-            // reconciled — the deferral ledger tracks the fix.
+            // reconciled.
             let reloaded = load_scene(&watch.path).and_then(|set| {
                 let mut fresh = SceneDescription::new();
                 fresh.apply(&set)?;

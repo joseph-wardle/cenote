@@ -58,7 +58,7 @@ inline constexpr std::uint64_t DEPTH_OFFSET_0 = 48;
 inline constexpr std::uint64_t BEAUTY_OFFSET_1 = 56;
 /// Byte offset of buffer 1's depth plane, u64.
 inline constexpr std::uint64_t DEPTH_OFFSET_1 = 64;
-/// The session epoch the front frame incorporates, u64 (D-113) —
+/// The session epoch the front frame incorporates, u64 —
 /// written with the frame it stamps, so a reader that pairs it with
 /// CONVERGED can tell a settled *current* picture from a settled stale
 /// one.
@@ -66,7 +66,7 @@ inline constexpr std::uint64_t EPOCH = 72;
 } // namespace header
 
 /// Bytes of one beauty plane: RGBA f32 per pixel, row-major, linear
-/// Rec.709 (converted server-side, D-101).
+/// Rec.709 (converted server-side).
 constexpr std::uint64_t beauty_bytes(std::uint32_t width, std::uint32_t height) {
     return std::uint64_t{width} * height * 16;
 }

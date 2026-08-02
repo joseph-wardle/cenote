@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The end-to-end FLIP golden (step 6 T4): renders stages/golden-stage.usda
+"""The end-to-end FLIP golden: renders stages/golden-stage.usda
 through the Cenote renderer with usdrecord — the full USD → delegate → server
 → EXR path — and FLIP-compares the result against the reference EXR checked in
 at tests/golden/golden-stage.exr, shelling out to the `cenote-flip` binary.

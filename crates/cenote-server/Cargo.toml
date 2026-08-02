@@ -9,7 +9,7 @@ repository.workspace = true
 
 # The server is the one place the renderer and the wire are both in
 # scope — the exhaustive wire→Op translation lives here for that reason.
-# `libc` is for the framebuffer's `shm_open`/`mmap` twenty lines (D-101),
+# `libc` is for the framebuffer's `shm_open`/`mmap` twenty lines,
 # not an IPC framework; the control transport is std::net.
 [dependencies]
 anyhow = "1.0.103"

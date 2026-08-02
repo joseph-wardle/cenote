@@ -14,7 +14,7 @@
 //! Pacing matches the crate's blocking-submit model: one frame in flight,
 //! fence-waited before [`Presenter::present`] returns. Overlapping frames
 //! with timeline-semaphore pacing waits until the render loop is fast
-//! enough to be bound by it — not this milestone.
+//! enough to be bound by it.
 
 use std::slice;
 use std::sync::{Arc, Mutex};
@@ -123,11 +123,6 @@ impl Context {
     /// [`crate::Error::Vulkan`] if surface or swapchain creation fails;
     /// [`crate::Error::NoCapableGpu`] if the selected device cannot present
     /// to this surface.
-    ///
-    /// # Panics
-    ///
-    /// If `self` was not created with [`Context::presentable`] — the
-    /// required extensions aren't enabled, a programmer bug.
     pub fn create_presenter(
         &self,
         display: RawDisplayHandle,
@@ -214,10 +209,6 @@ impl Presenter {
     /// fails; [`crate::Error::Overlay`] from the UI renderer. An out-of-date
     /// swapchain is not an error: the frame is skipped and the swapchain
     /// rebuilt for the next one.
-    ///
-    /// # Panics
-    ///
-    /// If `pixels` is smaller than `width`×`height` RGBA8 texels.
     pub fn present(
         &mut self,
         pixels: &Buffer,

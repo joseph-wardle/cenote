@@ -2636,10 +2636,9 @@ Translate 1 0 0
     /// pbrt keeps `float` and `spectrum` textures in disjoint namespaces,
     /// so one name may denote a `float` mask in one include file and a
     /// `spectrum` reflectance in another — sanmiguel's `Map #483` is
-    /// exactly this collision, and importing it used to fail "defined
-    /// twice". Each slot now resolves against its own kind: the reflectance
-    /// (spectrum) takes the color image, the alpha (float) the mask, though
-    /// both name `"Map"`, and nothing warns of a redefinition.
+    /// exactly this collision. Each slot resolves against its own kind: the
+    /// reflectance (spectrum) takes the color image, the alpha (float) the
+    /// mask, though both name `"Map"`.
     #[test]
     fn float_and_spectrum_textures_share_a_name_without_colliding() {
         let source = "WorldBegin\n\

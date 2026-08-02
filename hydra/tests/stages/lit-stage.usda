@@ -13,7 +13,7 @@
     (tests/usdrecord_smoke.py). Intensities are spec-scale radiance —
     unnormalized area lights in the tens against a sub-unit sky, hot
     enough that each pool wins its patch of ground from the sun's
-    ambient. No pixel equality; that is step 6's FLIP golden."""
+    ambient. No pixel equality; that is the FLIP golden's job."""
     defaultPrim = "World"
     metersPerUnit = 1
     upAxis = "Z"

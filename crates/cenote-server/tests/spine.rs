@@ -1,4 +1,4 @@
-//! The step-0 checkpoint (m4-plan §4): spawn the real `cenote-server`
+//! Spawn the real `cenote-server`
 //! binary, drive it over TCP exactly as the C++ delegate will, and read a
 //! correct frame out of shared memory — the whole transport proven with
 //! no Hydra in sight. The saturated primary is the anti-regression tooth:
@@ -208,7 +208,7 @@ fn assert_primary(snapshot: &Snapshot, texel: usize, hot: usize, what: &str) {
 /// it: handshake, resize, camera, genesis, convergence, a live edit, a
 /// visual no-op, a rejected edit surfacing through the header counter
 /// and `Ping`, and EOF as shutdown. Threaded through it all, the epoch
-/// contract (D-113): every picture-changing reply carries the session
+/// contract: every picture-changing reply carries the session
 /// epoch, the shm header's stamp reaches it — even when nothing restarts
 /// — and convergence is honest only under a stamp at or past the ack.
 #[test]
@@ -239,7 +239,7 @@ fn the_transport_spine_renders_over_the_wire() {
     // Resize: a new segment, immediately mappable; the old one survives
     // until the next request proves this reply was processed. The reply
     // carries the post-request epoch — resize is a picture-changing verb
-    // (D-113), so the counter has moved off its starting zero.
+    // so the counter has moved off its starting zero.
     let Response::Resized {
         fb: resized,
         epoch: resize_epoch,
@@ -332,7 +332,7 @@ fn the_transport_spine_renders_over_the_wire() {
     // The same patch again — a visual no-op: the equality gate dirties
     // nothing, nothing restarts, yet the epoch still advances and the
     // parked render thread republishes the settled image under the fresh
-    // stamp (D-113's delivery guarantee). Without the republish, honest
+    // stamp (the epoch's delivery guarantee). Without the republish, honest
     // convergence would wedge here.
     let Response::Ack {
         rejected,

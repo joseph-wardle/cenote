@@ -23,7 +23,7 @@ pub fn acescg_from_rec709(rec709: Vec3) -> Vec3 {
 }
 
 /// The `ACEScg` → linear `Rec.709` matrix — the way *out*, for a consumer
-/// (the M4 render server) whose display path expects `Rec.709` primaries.
+/// (the render server) whose display path expects `Rec.709` primaries.
 /// Computed as the runtime inverse of the one authored constant, so a
 /// second hand-typed matrix never exists to drift; returned as the matrix
 /// (rather than converting one color) so a pixel loop hoists it.

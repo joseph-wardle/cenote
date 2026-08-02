@@ -1,5 +1,5 @@
 //! Wire → renderer translation, in the one crate where both vocabularies
-//! are in scope (D-100). Every function here **exhaustively destructures**
+//! are in scope. Every function here **exhaustively destructures**
 //! its wire struct — no `..`, no `_` on a data-bearing field — so a field
 //! added to either side is a compile error in this file, never a value
 //! silently dropped on the floor. The byte-exact corpus guards the

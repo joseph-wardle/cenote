@@ -131,7 +131,7 @@ pub enum Response {
     Ack {
         /// Rejection messages accumulated since the last response.
         rejected: Vec<String>,
-        /// The session epoch after this request was placed (D-113), read
+        /// The session epoch after this request was placed, read
         /// server-side after every session call the request caused —
         /// including internal ones like the camera re-assert. The first
         /// shm frame whose header epoch reaches this value incorporates
@@ -161,20 +161,12 @@ pub fn encode<T: Serialize>(message: &T) -> io::Result<Vec<u8>> {
 }
 
 /// Deserialize one wire payload (no length prefix).
-///
-/// # Errors
-///
-/// `io::ErrorKind::InvalidData` when the bytes are not the expected type.
 pub fn decode<T: DeserializeOwned>(payload: &[u8]) -> io::Result<T> {
     rmp_serde::from_slice(payload)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 /// Write one framed message: u32-LE length, then the payload.
-///
-/// # Errors
-///
-/// Encoding failures as [`encode`]; otherwise whatever the writer raises.
 pub fn write_message<T: Serialize>(writer: &mut impl Write, message: &T) -> io::Result<()> {
     let payload = encode(message)?;
     let length = u32::try_from(payload.len())

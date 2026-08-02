@@ -56,7 +56,7 @@ public:
     [[nodiscard]] const View* view() const { return view_.get(); }
 
     /// Whether the server's accumulation has settled at a picture that
-    /// is also *current* (D-113): the shm header's converged flag counts
+    /// is also *current*: the shm header's converged flag counts
     /// only once the front frame's epoch has reached the one the last
     /// Ack or Resized carried — a settled stale picture is not
     /// converged. True when degraded: the picture will never improve,
@@ -89,15 +89,15 @@ public:
     bool set_camera(const wire::Camera& camera);
 
     /// The between-requests health probe, for once per host frame.
-    /// Strict request/response (D-100) means the socket is silent
+    /// Strict request/response means the socket is silent
     /// between calls, so anything readable outside one — bytes or a
     /// hangup — is server death or a protocol violation: degrade, with
-    /// the one warning that names the recovery gesture (D-099).
+    /// the one warning that names the recovery gesture.
     void check_liveness();
 
     /// Collects rejection messages an otherwise-idle client would never
     /// see: when the header's rejected-edit counter moves off what was
-    /// last seen, one Ping fetches the strings riding its Ack (D-100).
+    /// last seen, one Ping fetches the strings riding its Ack.
     void collect_rejections();
 
     /// One request out, one response back. Any transport failure — a

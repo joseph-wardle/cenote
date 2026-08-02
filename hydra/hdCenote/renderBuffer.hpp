@@ -3,7 +3,7 @@
 // same planes the shm framebuffer carries, so Map() refreshes the pixels
 // with one tear-protocol plane copy. Color crosses untouched; depth is
 // remapped from the server's camera-plane meters into the projection's
-// [0, 1], the semantic Hydra's depth consumers assume (D-110).
+// [0, 1], the semantic Hydra's depth consumers assume.
 // Allocation doubles as the resize lane: usdview allocates viewport-sized
 // buffers, and the server's framebuffer follows (Allocate → Resize → remap).
 #pragma once

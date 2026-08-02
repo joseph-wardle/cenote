@@ -5,9 +5,7 @@
 // force-non-opaque TLAS flag, and each candidate crossing passes through
 // with probability 1 − opacity — resolving transparency during traversal,
 // so a pass-through never costs a path bounce. No other shading here —
-// traversal is the layer that later learns procedural primitives, and the
-// queue boundaries on both sides are where GRIS candidate/visibility
-// passes insert.
+// traversal is the layer that later learns procedural primitives.
 
 import pathstate;
 import rng;

@@ -281,7 +281,7 @@ pub struct Instance {
     /// Name of the [`Material`] on its surface (same rule as `mesh`).
     pub material: String,
     /// Object-to-world placements, one per copy — the array-instancer
-    /// shape (D-073): every element places the same mesh in the same
+    /// shape: every element places the same mesh in the same
     /// material. Empty is legal and places nothing; the instance stays
     /// resident, ready for its next placements (a host's fully-masked
     /// instancer needs no remove/re-create round trip).
@@ -309,7 +309,7 @@ impl Default for Instance {
 /// An `OpenPBR` surface. Field names and defaults mirror the `OpenPBR`
 /// v1.1.1 slugs exactly — interop alignment as a commitment. This is the
 /// authoring-side schema; `crate::material::Material` is its GPU-resident
-/// counterpart, and prep maps one onto the other (the M2 closure work
+/// counterpart, and prep maps one onto the other (the closure work
 /// widens that mapping lobe by lobe).
 ///
 /// All colors are linear `Rec.709` (module doc); weights live in [0, 1].

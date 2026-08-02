@@ -1,8 +1,6 @@
 //! Command submission: record work into a command buffer, run it on the
 //! compute queue, block on a fence. Two entry points, both blocking — each
-//! submitting thread keeps one submission in flight and waits its own fence
-//! (timeline-semaphore pacing is deferred to the measured pre-M3
-//! performance pass):
+//! submitting thread keeps one submission in flight and waits its own fence:
 //!
 //! - [`Context::submit_once`] — one transient command buffer for a single
 //!   recorded job: uploads, readbacks, acceleration-structure builds.
@@ -139,16 +137,6 @@ pub enum Pass<'a> {
         /// The `u32` repeated across the range.
         value: u32,
     },
-    /// Copy a byte range from one buffer to another (`vkCmdCopyBuffer`) — how
-    /// a single-shot buffer is lifted somewhere else without a resolve pass.
-    CopyBuffer {
-        /// Source (needs `TRANSFER_SRC` usage).
-        src: &'a Buffer,
-        /// Destination (needs `TRANSFER_DST` usage).
-        dst: &'a Buffer,
-        /// Bytes to copy, from offset 0 of each; must fit both buffers.
-        size: u64,
-    },
     /// A compute dispatch with host-chosen workgroup counts.
     Dispatch {
         /// The pipeline to run.
@@ -187,15 +175,14 @@ impl Pass<'_> {
     /// in two and the two halves show up under their own names the moment
     /// they exist; there is no table to remember to update.
     ///
-    /// Fills and copies get one bucket apiece rather than one per buffer: a
-    /// wave's dozen fills are noise taken singly and a real line item taken
-    /// together, and which buffer was zeroed is not the question anyone
-    /// reading a stats line is asking.
+    /// Fills get one bucket rather than one per buffer: a wave's dozen
+    /// fills are noise taken singly and a real line item taken together,
+    /// and which buffer was zeroed is not the question anyone reading a
+    /// stats line is asking.
     #[must_use]
     pub fn label(&self) -> &'static str {
         match *self {
             Pass::Fill { .. } => "fill",
-            Pass::CopyBuffer { .. } => "copy",
             Pass::Dispatch { pipeline, .. } | Pass::DispatchIndirect { pipeline, .. } => {
                 pipeline.label
             }
@@ -227,11 +214,6 @@ pub(super) fn spans<'a>(passes: &'a [Pass<'_>]) -> impl Iterator<Item = (&'stati
 impl Context {
     /// Record commands with `record` into a fresh transient command buffer,
     /// submit it on the compute queue, and block until the GPU finishes.
-    ///
-    /// # Errors
-    ///
-    /// [`crate::Error::Vulkan`] if pool/buffer creation, submission, or the
-    /// fence wait fails.
     pub fn submit_once<F>(&self, record: F) -> Result<()>
     where
         F: FnOnce(&ash::Device, vk::CommandBuffer),
@@ -286,14 +268,6 @@ impl Context {
     /// constants, dispatch `group_counts` workgroups, and block until the
     /// GPU finishes. The fence wait makes the kernel's writes available, so
     /// a subsequent [`Context::download_buffer`] needs no barrier.
-    ///
-    /// # Errors
-    ///
-    /// [`crate::Error::Vulkan`] if submission fails.
-    ///
-    /// # Panics
-    ///
-    /// As [`Context::submit_passes`].
     pub fn dispatch(
         &self,
         pipeline: &ComputePipeline,
@@ -313,22 +287,8 @@ impl Context {
     /// block until the GPU finishes. A full memory barrier sits between
     /// consecutive passes, so each pass sees every prior pass's writes —
     /// including indirect dispatches reading workgroup counts a previous
-    /// pass wrote. (Full flushes between stages are the simple-and-correct
-    /// baseline; overlapping independent stages is a measured optimization
-    /// for later.) The fence wait makes all writes available, so a
+    /// pass wrote. The fence wait makes all writes available, so a
     /// subsequent [`Context::download_buffer`] needs no barrier.
-    ///
-    /// # Errors
-    ///
-    /// [`crate::Error::Vulkan`] if submission fails.
-    ///
-    /// # Panics
-    ///
-    /// On programmer bugs, all checked before anything is recorded: push
-    /// constants not matching a pipeline's declared size, a scene argument
-    /// not matching a pipeline's [`crate::gpu::Bindings`], the same pipeline
-    /// given two different scenes (it has one descriptor set, written once
-    /// per submission), or a fill that is misaligned or out of bounds.
     pub fn submit_passes(&self, passes: &[Pass]) -> Result<()> {
         self.submit_passes_timed(passes, None).map(|_| ())
     }
@@ -350,14 +310,6 @@ impl Context {
     /// changing. The timer's pool grows to fit a submission of more spans
     /// than it has seen, so a deep-bounce scene is measured like any other
     /// rather than silently going dark.
-    ///
-    /// # Errors
-    ///
-    /// [`crate::Error::Vulkan`] if submission or the query readback fails.
-    ///
-    /// # Panics
-    ///
-    /// As [`Context::submit_passes`].
     pub fn submit_passes_timed(
         &self,
         passes: &[Pass],
@@ -441,13 +393,6 @@ impl Context {
                 assert!(
                     offset + size <= buffer.size(),
                     "fill reaches past the end of the buffer"
-                );
-                return;
-            }
-            Pass::CopyBuffer { src, dst, size } => {
-                assert!(
-                    size <= src.size() && size <= dst.size(),
-                    "copy reaches past the end of a buffer"
                 );
                 return;
             }
@@ -566,10 +511,6 @@ fn record_pass(device: &ash::Device, cmd: vk::CommandBuffer, pass: &Pass) {
             value,
         } => unsafe {
             device.cmd_fill_buffer(cmd, buffer.handle(), offset, size, value);
-        },
-        Pass::CopyBuffer { src, dst, size } => unsafe {
-            let region = vk::BufferCopy::default().size(size);
-            device.cmd_copy_buffer(cmd, src.handle(), dst.handle(), &[region]);
         },
         Pass::Dispatch {
             pipeline,

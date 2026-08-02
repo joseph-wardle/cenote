@@ -1,12 +1,12 @@
 //! The shared-memory framebuffer — the POSIX half of the pixel transport
-//! (D-101). The *layout* (header fields, plane offsets, tear protocol)
+//!. The *layout* (header fields, plane offsets, tear protocol)
 //! lives in [`cenote_wire::fb`] where both languages can mirror it; this
 //! module is the ~twenty deliberately platform-specific lines that
 //! create, map, and unlink a segment, plus the writer and reader that
 //! follow that layout. [`Segment`] is the server's writer; [`View`] is
 //! the reader — used by the integration test today, and the executable
 //! specification of what the C++ delegate's `HdRenderBuffer::Map` does
-//! in step 2.
+
 //!
 //! This file is the crate's unsafe quarantine (the `gpu` module's rule,
 //! applied here): raw `libc` calls and raw-pointer stores stay inside,
@@ -215,13 +215,8 @@ impl Segment {
     /// [`cenote_wire::fb`]'s writer steps, verbatim). `beauty` is RGBA
     /// f32 — already linear `Rec.709`, the conversion is the caller's —
     /// and `depth` crosses as the bytes the download produced. `epoch` is
-    /// the frame's session-epoch stamp (D-113), stored with the status
+    /// the frame's session-epoch stamp, stored with the status
     /// fields so a reader sees it released by the same counter advance.
-    ///
-    /// # Panics
-    ///
-    /// If a plane's length doesn't match this segment's dimensions — the
-    /// caller gates on matching sizes, so a mismatch is a bug, not data.
     #[expect(
         clippy::cast_ptr_alignment,
         reason = "plane offsets are the page plus multiples of 4 — f32-aligned by the layout"
@@ -288,7 +283,7 @@ pub struct Snapshot {
     pub samples: u32,
     /// Whether accumulation had settled when this frame published.
     pub converged: bool,
-    /// The session epoch this frame incorporates (D-113) — everything
+    /// The session epoch this frame incorporates — everything
     /// acknowledged at or below this value is in the picture, applied or
     /// rejected.
     pub epoch: u64,
@@ -361,7 +356,7 @@ impl View {
             .load(Ordering::Relaxed)
     }
 
-    /// The session epoch the front frame incorporates (D-113) — 0 before
+    /// The session epoch the front frame incorporates — 0 before
     /// the first publish. Paired with [`Self::converged`], this is the
     /// honest convergence read: settled *and* current.
     #[must_use]

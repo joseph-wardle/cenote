@@ -69,10 +69,6 @@ impl Denoiser {
     ///
     /// [`Error::Denoise`] carrying OIDN's diagnostic when the filter
     /// setup or execution fails.
-    ///
-    /// # Panics
-    ///
-    /// When a slice isn't `width × height` RGBA texels.
     pub fn denoise(
         &mut self,
         width: u32,

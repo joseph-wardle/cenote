@@ -9,7 +9,7 @@
 //! - `tables/ggx_energy.bin` is **baked here**, by [`bake`], against this
 //!   kernel's exact integrand (GGX with `alpha = roughness²`, separable
 //!   Smith `G1·G1`, spherical-caps VNDF sampling, exact dielectric
-//!   Fresnel) — the same rule the M1 albedo fits followed. Regenerate
+//!   Fresnel) — the same rule the albedo fits follow. Regenerate
 //!   with `cargo test -p cenote --release regenerate_closure_tables --
 //!   --ignored` after changing any of that math; the spot-check tests
 //!   below fail loudly if the blob and the integrand drift apart.
@@ -82,10 +82,6 @@ const LTC_SHEEN_LEN: usize = 3 * SHEEN_SIZE * SHEEN_SIZE;
 /// Upload the concatenated table buffer — called once per scene build
 /// (the scene's resident buffers own it, and its address rides the scene
 /// table).
-///
-/// # Errors
-///
-/// Any [`crate::Error`] from the upload.
 pub(crate) fn upload(gpu: &Context) -> Result<Buffer> {
     assert_eq!(GGX_ENERGY.len(), GGX_ENERGY_LEN * 4, "ggx_energy.bin size");
     assert_eq!(LTC_SHEEN.len(), LTC_SHEEN_LEN * 4, "ltc_sheen.bin size");

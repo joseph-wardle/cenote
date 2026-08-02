@@ -1,5 +1,5 @@
 // The delegate shell: zero Rprims — scene geometry reaches cenote through the
-// scene index, never through Rprim hydration (D-098) — plus the two prims the
+// scene index, never through Rprim hydration — plus the two prims the
 // viewer side genuinely needs: the camera Sprim (stock HdCamera) and the
 // renderBuffer Bprim the render task draws from. Everything the base class
 // defaults sensibly stays defaulted: GetRenderParam() is nullptr, the

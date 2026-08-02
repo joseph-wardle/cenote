@@ -1,4 +1,4 @@
-// The OpenPBR surface model, M2 closure cut: an EON diffuse base under a
+// The OpenPBR surface model: an EON diffuse base under a
 // dielectric GGX interface at a variable IOR — reflection only when opaque,
 // coupled reflection + refraction as `transmissionWeight` rises — blended
 // toward a conductor by `metalness`, under an optional clear coat and a
@@ -283,9 +283,10 @@ float4 refractDirection(float3 wo, float3 h, float eta) {
 // OpenPBR's reduction), the multiple-scattering scales, and the
 // one-sample-MIS technique weights.
 
-// Which technique scattered — the path-state lobe tag. Feeds the AOV
-// specular pass-through ramp and M3's GRIS replay; until those land it
-// is a free debugging channel.
+// Which technique scattered. Read at the scattering vertex itself — by the
+// AOV specular pass-through ramp, to decide how much of the open denoiser
+// guides this surface records, and by the medium update, which only a
+// transmission moves.
 public static const uint LOBE_DIFFUSE = 0;
 public static const uint LOBE_SPECULAR = 1;     // any base reflection
 public static const uint LOBE_TRANSMISSION = 2; // through the surface
@@ -811,7 +812,7 @@ public float bsdfPdf(Closure c, float3 wi, float3 wo) {
 public struct BsdfSample {
     public float3 wi;
     public float pdf; // 0 marks a rejected sample — the path terminates
-    public uint lobe; // LOBE_*, recorded into path state
+    public uint lobe; // LOBE_*: which technique scattered
 };
 
 // A scatter worth tracing: a real draw (positive pdf, off the horizon) whose

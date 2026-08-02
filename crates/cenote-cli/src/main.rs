@@ -367,7 +367,7 @@ fn render_frame(
                 .map_or_else(|| "demo".to_owned(), |path| path.display().to_string()),
         );
         print_report(&report);
-        // The sidecar beside the image, so two runs diff as text and a rung
+        // The sidecar beside the image, so two runs diff as text and a change
         // of work is a readable change rather than a remembered impression.
         let sidecar = args.out.with_extension("stats.ron");
         std::fs::write(&sidecar, report.to_ron()?)

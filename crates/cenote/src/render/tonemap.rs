@@ -50,10 +50,6 @@ impl Tonemap {
     /// Build the view transform from the embedded tonemap kernel. The
     /// display buffer is allocated lazily by [`Tonemap::apply`], since its
     /// size is the frame's, not known here.
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from pipeline creation.
     pub fn new(gpu: &Context) -> Result<Self> {
         let kernels = Kernels::embedded();
         Ok(Self {
@@ -71,16 +67,6 @@ impl Tonemap {
     /// exposure (in stops), the ACES display transform, sRGB encode, RGBA8
     /// pack — everything [`crate::gpu::Presenter::present`] needs. Read the
     /// result with [`Tonemap::display`].
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from buffer creation or submission.
-    ///
-    /// # Panics
-    ///
-    /// On a zero-sized frame, or an `average` buffer smaller than
-    /// `width`×`height` RGBA f32 texels — callers validate their inputs, so
-    /// both are programmer bugs.
     pub fn apply(
         &mut self,
         gpu: &Context,
@@ -114,10 +100,6 @@ impl Tonemap {
     /// The last tonemapped frame — packed RGBA8, sRGB-encoded, exactly what
     /// [`crate::gpu::Presenter::present`] expects. Hand it over right after
     /// [`Tonemap::apply`].
-    ///
-    /// # Panics
-    ///
-    /// Before the first [`Tonemap::apply`], when no frame exists yet.
     #[must_use]
     pub fn display(&self) -> &Buffer {
         self.display.as_ref().expect("apply has not run yet")
@@ -127,10 +109,6 @@ impl Tonemap {
     /// [`Tonemap::apply`] can read — the road back onto the GPU for a
     /// frame that left it to be processed on the host, like the viewer's
     /// denoised beauty.
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from buffer creation or the staging copy.
     pub fn upload_average(gpu: &Context, name: &str, texels: &[f32]) -> Result<Buffer> {
         gpu.upload_buffer(
             name,
@@ -207,7 +185,6 @@ mod tests {
             assert_eq!(texel[3], 255, "display frames are opaque");
         }
     }
-
 
     // -- CPU mirror of shaders/tonemap.slang, same constants, same order --
 

@@ -96,11 +96,6 @@ impl Kernels {
     /// [`Error::ShaderCompile`] with `slangc`'s diagnostics if any kernel's
     /// source doesn't compile — the caller keeps its current pipelines — or
     /// [`Error::Io`] if compiled SPIR-V can't be read back.
-    ///
-    /// # Panics
-    ///
-    /// Only if a compile thread itself panics — a bug, not an environment
-    /// failure (compiler problems come back as errors above).
     pub fn recompile() -> Result<Self> {
         // Destructured in KERNELS order — the one place that order matters.
         let [
@@ -206,10 +201,6 @@ pub struct ShaderWatcher {
 
 impl ShaderWatcher {
     /// Start watching the crate's shader sources.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Watch`] if the OS file watch can't be established.
     pub fn new() -> Result<Self> {
         Self::watching(&shader_dir())
     }
@@ -233,10 +224,6 @@ impl ShaderWatcher {
     /// Block until a shader source changes. An editor save arrives as a
     /// burst of events (write, rename, metadata); this coalesces the burst
     /// so one save means one wake-up.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Watch`] if the watcher backend shut down.
     pub fn wait(&self) -> Result<()> {
         self.events
             .recv()

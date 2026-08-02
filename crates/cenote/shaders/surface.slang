@@ -129,17 +129,6 @@ public SpawnPoint spawnPoint(GeometryRecord mesh, Hit hit, float3 rayDirection) 
     return spawn;
 }
 
-// The world-space point of a reconnection vertex, independent of the ray that
-// found it: `spawnPoint`'s two offset points straddle the raw reconstructed
-// position, so their midpoint recovers it without the direction-dependent
-// nudge. Candidate, resolve, and every reusing neighbour recover the exact same
-// x₂ from its `Hit` this way, keeping the reconnection direction — and so the
-// shift's target and Jacobian — bit-identical across the stages (D-134).
-public float3 reconnectionPoint(GeometryRecord mesh, Hit hit) {
-    let spawn = spawnPoint(mesh, hit, float3(0.0, 0.0, 1.0));
-    return 0.5 * (spawn.position + spawn.below);
-}
-
 // The shading normal under a tangent-space normal map. The tangent frame
 // derives per hit from the triangle's positions and UVs (no authored tangents
 // until anisotropy demands them): solve the triangle's 2×2 UV system for the

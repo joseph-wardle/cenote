@@ -71,14 +71,6 @@ impl Context {
     /// `[f32; 3]` positions in `vertices`, `u32` index triples in `indices`.
     /// Both buffers need `ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR`
     /// and `SHADER_DEVICE_ADDRESS` usage.
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from allocation or the build submission.
-    ///
-    /// # Panics
-    ///
-    /// On an empty mesh — a programmer bug.
     pub fn build_blas(
         &self,
         name: &str,
@@ -106,7 +98,7 @@ impl Context {
             .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
             .geometry(vk::AccelerationStructureGeometryDataKHR { triangles })
             // No any-hit logic anywhere on the roadmap; alpha
-            // testing (M2 textures) revisits this flag.
+            // testing revisits this flag.
             .flags(vk::GeometryFlagsKHR::OPAQUE);
         self.build_structure(
             name,
@@ -118,15 +110,6 @@ impl Context {
 
     /// Build a TLAS over `instances`. Blocks until the build completes,
     /// so the instance staging buffer is transient.
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from allocation or the build submission.
-    ///
-    /// # Panics
-    ///
-    /// If an instance's `custom_index` exceeds 24 bits — Vulkan would
-    /// silently truncate it.
     pub fn build_tlas(
         &self,
         name: &str,

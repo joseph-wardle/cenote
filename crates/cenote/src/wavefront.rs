@@ -73,7 +73,7 @@ struct PathsAddrs {
     pixel: vk::DeviceAddress,
     hit: vk::DeviceAddress,
     throughput: vk::DeviceAddress,
-    state: vk::DeviceAddress,
+    medium: vk::DeviceAddress,
 }
 
 /// A queue as kernels see it — `struct Queue<T>` in
@@ -226,12 +226,9 @@ struct PathPool {
     /// scatter that produced this ray (0 on camera rays), kept for the next
     /// vertex's MIS weight; 16 B/path.
     throughput: Buffer,
-    /// The scatter's packed state (`packPathState` in
-    /// `shaders/pathstate.slang`): the sampled-lobe tag — the record the
-    /// AOV specular pass-through ramp and M3's GRIS replay consume — and
-    /// the interior medium's instance, which refraction sets and the next
+    /// The interior medium's instance, which refraction sets and the next
     /// vertex's Beer–Lambert absorption reads; 4 B/path.
-    state: Buffer,
+    medium: Buffer,
 }
 
 impl PathPool {
@@ -270,8 +267,8 @@ impl PathPool {
                 storage,
                 MemoryLocation::GpuOnly,
             )?,
-            state: gpu.create_buffer(
-                "wavefront.state",
+            medium: gpu.create_buffer(
+                "wavefront.medium",
                 paths * 4,
                 storage,
                 MemoryLocation::GpuOnly,
@@ -286,7 +283,7 @@ impl PathPool {
             pixel: self.pixel.device_address(),
             hit: self.hit.device_address(),
             throughput: self.throughput.device_address(),
-            state: self.state.device_address(),
+            medium: self.medium.device_address(),
         }
     }
 }
@@ -396,10 +393,6 @@ pub struct AovTargets<'a> {
 /// Upload an [`AovTable`](AovTableData) pointing at the film's per-pixel
 /// AOV buffers (`albedo`/`normal` RGBA f32, `depth` f32, `guide` RGBA f32
 /// scratch), for [`AovTargets::table`].
-///
-/// # Errors
-///
-/// Any [`crate::Error`] from buffer creation.
 pub(crate) fn upload_aov_table(
     gpu: &Context,
     albedo: &Buffer,
@@ -479,15 +472,6 @@ impl Wavefront {
     /// Each wave shades at most `max_bounces` bounces per path and reaches
     /// lights via `light_sampling` (always [`LightSampling::Mis`] outside
     /// the MIS-agreement test).
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from pipeline or buffer creation.
-    ///
-    /// # Panics
-    ///
-    /// On zero capacity or a bounce cap outside 1..=255 (the cap shares a
-    /// packed push-constant byte) — programmer bugs.
     pub fn new(
         gpu: &Context,
         kernels: &Kernels,
@@ -561,15 +545,6 @@ impl Wavefront {
     /// Bitwise deterministic: the same `sample` re-traces the same wave bit
     /// for bit. Queue push order varies run to run, but radiance writes are
     /// pixel-owned, so the image never sees it.
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from submission.
-    ///
-    /// # Panics
-    ///
-    /// On a zero-sized target or a `radiance` buffer smaller than it —
-    /// programmer bugs.
     pub fn trace(
         &self,
         gpu: &Context,
@@ -604,19 +579,8 @@ impl Wavefront {
     /// kernels (first-hit depth, and the albedo/normal denoiser guides
     /// with their specular pass-through). Without, the kernels skip every
     /// AOV read and write.
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from submission.
-    ///
-    /// # Panics
-    ///
-    /// As [`Wavefront::trace`]: on a zero-sized target or a `radiance`
-    /// buffer smaller than it.
-    // The target (radiance, width, height), which sample, and the AOV and
-    // trailing extensions: exactly `trace`'s parameters plus two. A struct
-    // would only scatter the call — every caller already hands these same
-    // values to `trace`.
+    // `trace`'s parameters plus two extensions; a struct would only scatter
+    // the call, since every caller already hands these values to `trace`.
     #[allow(clippy::too_many_arguments)]
     pub fn trace_then(
         &self,

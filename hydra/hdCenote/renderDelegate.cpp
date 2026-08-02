@@ -14,7 +14,7 @@
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-// Zero Rprims by design (D-098): with no Rprim types advertised, the render
+// Zero Rprims by design: with no Rprim types advertised, the render
 // index never hydrates geometry, and the Rprim factory below stays
 // unreachable. (The instancer factory does not: the scene-index bridge
 // inserts instancer prims regardless, so CreateInstancer returns an inert
@@ -23,7 +23,7 @@ PXR_NAMESPACE_OPEN_SCOPE
 // gates population: distant and dome also satisfy HdxTaskController's
 // built-in-light check, which demands domeLight AND a camera light type before
 // it injects usdview's default camera light, without which every frame is
-// black (D-108); rect, disk, sphere, and cylinder are step 4's area lights —
+// black; rect, disk, sphere, and cylinder are the area lights —
 // plus material, the honest contract for a delegate that reads materials (it
 // is also what gates population on any non-scene-index path). The light and
 // material sprims themselves are inert; the translators read the same prims
@@ -38,7 +38,7 @@ PXR_NAMESPACE_OPEN_SCOPE
 // (sceneIndexPlugins.cpp) collapses onto the all-purpose slot the mesh
 // translator reads — and GetMaterialRenderContexts() returns the universal
 // empty token, exactly the context the material translator asks each network
-// for (D-102).
+// for.
 static const TfTokenVector kNoTypes;
 
 namespace {

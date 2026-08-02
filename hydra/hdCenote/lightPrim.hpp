@@ -1,6 +1,6 @@
 // The UsdLux light translator: one scene-index light prim becomes the
 // server objects its wire spelling needs. Distant lights — usdview's
-// camera light among them (D-108) — and spheres marked treatAsPoint
+// camera light among them — and spheres marked treatAsPoint
 // collapse to one delta Light; rect, disk, sphere, and cylinder lights
 // synthesize the area triple — a mesh with the dimensions baked into its
 // vertices, a black-absorber material carrying the emission, and a
@@ -62,10 +62,10 @@ private:
 
     /// Which lanes a change touches, from the dirty locators. Params and
     /// transform both reshape the one payload — total re-read, total
-    /// resend (D-113/D-115) — so they share a lane.
+    /// resend  — so they share a lane.
     struct _Dirt {
         bool light;      //< params or transform → the whole spelling resends
-        bool visibility; //< visible ⟺ the objects exist (D-109's spirit)
+        bool visibility; //< visible ⟺ the objects exist 
     };
 
     /// One-shot latches for the approximations that degrade under a

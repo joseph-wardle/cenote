@@ -117,11 +117,6 @@ pub fn from_ron(text: &str) -> Result<ChangeSet> {
 /// Read a scene file and rebase its relative paths against the file's own
 /// directory — the only place relative paths gain a meaning, which is why
 /// apply refuses them.
-///
-/// # Errors
-///
-/// [`Error::Io`] if the file cannot be read, or anything [`from_ron`]
-/// returns.
 pub fn load(path: &Path) -> Result<ChangeSet> {
     let text = std::fs::read_to_string(path)?;
     let mut set = from_ron(&text)?;

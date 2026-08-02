@@ -35,11 +35,6 @@ impl Scene {
     /// matte spheres on a Lambert floor, under a black sky (no
     /// environment) so the emitters are the scene's only light — the
     /// convergence harness's many-light subject.
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from prep — upload, decode, or
-    /// acceleration-structure builds.
     #[expect(
         clippy::missing_panics_doc,
         reason = "the expect guards the built-in change-set applying to an empty \

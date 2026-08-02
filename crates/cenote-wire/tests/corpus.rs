@@ -1,4 +1,4 @@
-//! The byte-exact drift guard (D-100): the golden corpus that pins the
+//! The byte-exact drift guard: the golden corpus that pins the
 //! wire's encoded bytes across languages, with Rust as the authority.
 //!
 //! Every case here encodes to a checked-in golden in `tests/golden/`. The

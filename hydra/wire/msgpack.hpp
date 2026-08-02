@@ -1,7 +1,7 @@
 // The MessagePack layer of the C++ wire mirror: a Writer covering exactly
 // the encodings the wire uses, a Reader sufficient to decode the response
 // envelope, and the u32-LE frame prefix. Hand-rolled because every C++
-// dependency in this tree is a host-ABI liability (docs/m4-plan.md §2).
+// dependency in this tree is a host-ABI liability.
 //
 // The byte shapes are not this file's to choose: `rmp-serde` defaults on
 // the Rust side are the authority, pinned by the golden corpus in

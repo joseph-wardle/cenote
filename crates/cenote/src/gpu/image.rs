@@ -77,11 +77,6 @@ impl Context {
     /// (linear filtering of `f32` textures is universal on ray-tracing
     /// hardware but formally optional, so it's checked, not assumed); other
     /// [`crate::Error`]s from creation, allocation, or the copy submission.
-    ///
-    /// # Panics
-    ///
-    /// On zero dimensions or a texel slice that doesn't match them —
-    /// programmer bugs.
     pub fn upload_sampled_image(
         &self,
         name: &str,
@@ -114,15 +109,6 @@ impl Context {
     /// texture: BC blocks over block-padded rows (`padded` names the
     /// texel extent the rows actually span), wrapping bilinear sampler —
     /// texture coordinates tile.
-    ///
-    /// # Errors
-    ///
-    /// As [`Context::upload_sampled_image`].
-    ///
-    /// # Panics
-    ///
-    /// On zero dimensions or data that doesn't match them — programmer
-    /// bugs (prep validated the cache before handing it over).
     pub fn upload_texture(
         &self,
         name: &str,

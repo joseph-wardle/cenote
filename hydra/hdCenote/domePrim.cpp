@@ -292,7 +292,7 @@ void HdCenoteDomePrim::_Refresh(const HdSceneIndexPrim& prim, const _Dirt dirt, 
     _eligible = _ReadVisibility(prim);
     const bool rebuilt = born || dirt.light;
     if (rebuilt) {
-        // Total re-read, total resend (D-113/D-115): any dirt in the
+        // Total re-read, total resend : any dirt in the
         // lane rebuilds the whole payload, every field explicitly set —
         // path included, Set or Clear, so a de-authored texture really
         // clears server-side.
@@ -351,7 +351,7 @@ std::optional<std::string> HdCenoteDomePrim::_SkyImage(const HdContainerDataSour
     }
     // Ar has already run; the server additionally demands the resolved
     // path be absolute and an existing file, checked here where failing
-    // costs one sky instead of the flush (D-117).
+    // costs one sky instead of the flush.
     const std::string& resolved = asset.GetResolvedPath();
     std::error_code unused;
     if (resolved.empty() || !std::filesystem::path(resolved).is_absolute() ||
@@ -366,7 +366,7 @@ std::optional<std::string> HdCenoteDomePrim::_SkyImage(const HdContainerDataSour
     }
     // Float formats only — the exact inverse of the rect light's rule:
     // the environment is radiance, decoded server-side as .exr or
-    // Radiance .hdr, and an LDR sky is deferred beyond M4.
+    // Radiance .hdr, and LDR skies are not supported.
     std::string extension = std::filesystem::path(resolved).extension().string();
     std::transform(extension.begin(), extension.end(), extension.begin(),
                    [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -382,7 +382,7 @@ std::optional<std::string> HdCenoteDomePrim::_SkyImage(const HdContainerDataSour
     // texture:format gates last, once a file is actually at stake:
     // latlong is the mapping the server implements, and automatic
     // resolves to it for the equirect files admitted above. The ball,
-    // angular, and cube-cross unwraps are deferred beyond M4.
+    // angular, and cube-cross unwraps are not supported.
     const TfToken format = _TokenOr(light, HdLightTokens->textureFormat, UsdLuxTokens->automatic);
     if (format != UsdLuxTokens->latlong && format != UsdLuxTokens->automatic) {
         if (!_warned.format) {

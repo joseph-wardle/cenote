@@ -25,6 +25,12 @@ module_name_repetitions = "allow"
 cast_possible_truncation = "allow"
 cast_precision_loss = "allow"
 cast_sign_loss = "allow"
+# The panic contract lives in the assertion message that fires it, and the error
+# contract in the signature's single `Error` enum; a prose copy of either drifts
+# without a compiler to catch it. Both sections are still written where they say
+# something the code cannot.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
 
 # Every test that builds the demo scene decodes its 43 MB environment EXR;
 # unoptimized, that decompression dominates the debug test suite.

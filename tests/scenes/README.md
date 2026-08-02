@@ -42,19 +42,12 @@ import clean; a `twosided` light would warn that its back faces stay dark.
 
 ## The comparison caveat
 
-pbrt renders **spectrally**; cenote renders **RGB in ACEScg**, with its
-own photometric conventions. Corpus goldens are therefore *cenote's own
-renders* — they pin the importer + renderer against regression, not
-against pbrt pixel-for-pixel. For manual side-by-side comparisons, the
-reference implementation is pbrt-v4 at commit
+pbrt renders **spectrally**; cenote renders **RGB in ACEScg**. Corpus goldens
+are therefore *cenote's own renders* — they pin the importer and renderer
+against regression, not against pbrt pixel-for-pixel. A manual side-by-side
+should expect agreement in layout, materials, and lighting, not in pixel
+values; the semantics here were verified against pbrt-v4 at
 [`5f7a606`](https://github.com/mmp/pbrt-v4/commit/5f7a606806a4ac7b939131ded9d7a30ebd02416e)
-(the commit this importer's semantics were verified against, 2026-07-10);
-expect perceptual agreement in layout, materials, and lighting, not
-matching pixel values.
+(2026-07-10).
 
-## Tier 2: showcase scenes
-
-Heavier scenes live in the research-scene corpus now —
-`scenes/corpus/` holds the curated RONs (the BMW M6 among them) and
-`scenes/corpus/fetch.sh` pulls their sources at the same pinned commit
-this tier's `fetch-showcase.sh` used before the corpus absorbed it.
+Heavier scenes live in `scenes/corpus/` — see its README.

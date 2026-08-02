@@ -47,7 +47,7 @@ public:
     /// first publish.
     [[nodiscard]] bool converged() const;
 
-    /// The session epoch the front frame incorporates (D-113); 0 before
+    /// The session epoch the front frame incorporates; 0 before
     /// the first publish. Convergence is honest only when this has
     /// reached the epoch the last picture-changing reply carried —
     /// converged() alone can describe a stale picture.

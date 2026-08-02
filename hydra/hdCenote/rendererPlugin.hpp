@@ -21,7 +21,7 @@ public:
     HdRenderDelegate* CreateRenderDelegate(HdRenderSettingsMap const& settingsMap) override;
     void DeleteRenderDelegate(HdRenderDelegate* renderDelegate) override;
     // The pure IsSupported override differs by USD version; the parameter
-    // list comes from usdCompat.hpp (D-122).
+    // list comes from usdCompat.hpp.
     bool IsSupported(CENOTE_ISSUPPORTED_PARAMS) const override;
 };
 

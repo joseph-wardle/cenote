@@ -4,7 +4,7 @@
 //! custom index, and adding a parameter touches those two definitions and
 //! nothing else.
 //!
-//! The M2 closure set: an EON diffuse base under a dielectric GGX specular
+//! The closure: an EON diffuse base under a dielectric GGX specular
 //! layer at a variable IOR, blended toward a conductor by `metalness` and
 //! toward rough glass by `transmission_weight`, under an optional clear
 //! coat and a fuzz (sheen) layer, plus emission, fractional opacity, and

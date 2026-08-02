@@ -15,8 +15,8 @@
 // accumulated. Each pixel has one path, so any one dispatch performs at
 // most one read-modify-write per pixel, and the barriers between stages
 // order the adds across dispatches into a fixed sequence. That is what
-// makes renders bitwise reproducible, which the replay guarantee (and
-// later GRIS shift mappings) depend on.
+// makes renders bitwise reproducible, which the replay guarantee depends
+// on.
 
 // Threads per workgroup of every 1D path-stage kernel — must match
 // `WORKGROUP_SIZE` in `wavefront.rs`.
@@ -30,8 +30,8 @@ public struct Hit {
     public float2 barycentrics;
 };
 
-// No instance's TLAS custom index: a path traveling vacuum. 24 bits —
-// the width of a custom index — so the medium packs beside the lobe tag.
+// No instance's TLAS custom index: a path traveling vacuum. A custom index
+// is 24 bits wide, so no instance can ever claim this value.
 public static const uint MEDIUM_NONE = 0xffffff;
 
 // Bounces before this always survive — they carry most of the image's energy,
@@ -40,22 +40,6 @@ public static const uint MEDIUM_NONE = 0xffffff;
 // reweighted to keep the estimate unbiased. Integrator policy, not schema, but
 // it lives with the other every-kernel constants.
 public static const uint ROULETTE_START = 3;
-
-// The scatter state packed into one word: the sampled-lobe tag (`LOBE_*`
-// in openpbr.slang) in the top byte, the interior medium's instance in
-// the low 24 bits. Packing keeps every kernel's push constants inside
-// Vulkan's guaranteed 128 bytes.
-public uint packPathState(uint lobe, uint medium) {
-    return (lobe << 24) | (medium & 0xffffff);
-}
-
-public uint pathStateMedium(uint state) {
-    return state & 0xffffff;
-}
-
-public uint pathStateLobe(uint state) {
-    return state >> 24;
-}
 
 // The SoA path pool: one pointer per logical field, indexed by path slot.
 public struct Paths {
@@ -73,16 +57,13 @@ public struct Paths {
     // scatter that produced this ray, which the next vertex's emission
     // needs for MIS (0 on camera rays: no light-sampling strategy competed).
     public float4* throughput;
-    // The scatter's packed state (see packPathState): which technique
-    // made this ray — the per-bounce record the AOV specular pass-through
-    // ramp and M3's GRIS replay consume — and the instance whose interior
-    // it travels ([`MEDIUM_NONE`] in vacuum), set when a refraction enters
-    // a closed surface, cleared when one leaves, and read at the next
-    // vertex for Beer–Lambert absorption over the segment. One medium
-    // slot — nested media are a later, wider seam. Written only by
-    // scatters: bounce 0 knows a camera ray starts in vacuum with no lobe,
-    // so raygen never touches it.
-    public uint* state;
+    // The instance whose interior this ray travels ([`MEDIUM_NONE`] in
+    // vacuum), set when a refraction enters a closed surface, cleared when
+    // one leaves, and read at the next vertex for Beer–Lambert absorption
+    // over the segment. One medium slot — nested media are a later, wider
+    // seam. Written only by scatters: bounce 0 knows a camera ray starts in
+    // vacuum, so raygen never touches it.
+    public uint* medium;
 };
 
 // The wave's AOV targets, one indirection behind the shading kernels'

@@ -60,7 +60,7 @@ public:
 private:
     /// Which lanes a change touches, from the dirty locators. Params and
     /// transform both reshape the one payload — total re-read, total
-    /// resend (D-113/D-115) — so they share a lane.
+    /// resend  — so they share a lane.
     struct _Dirt {
         bool light;      //< params or transform → the payload rebuilds
         bool visibility; //< visible ⟺ eligible for the slot

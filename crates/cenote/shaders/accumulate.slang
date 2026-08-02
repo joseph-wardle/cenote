@@ -1,35 +1,19 @@
 // Accumulation kernel: add one rendered sample — beauty and the three
-// AOVs — into the film's running f32 sums. `reset` makes the sample
-// overwrite instead, so starting a fresh accumulation needs no separate
-// clear pass — the first sample is the clear. The host tracks the sample
-// count (uniform across pixels by construction); the resolve kernel and
-// the host readback divide.
+// AOVs — into the film's running f32 sums, plus the second moment of beauty
+// luminance that the variance and auto-stop metrics are built on. The host
+// tracks the sample count (uniform across pixels by construction); the
+// resolve kernel and the host readback divide.
 //
-// Alongside the sums it folds the second moment of beauty luminance — a
-// single f32 per pixel, Σ luminance² — the variance substrate (M3 step 6a).
-// The first moment is already free in the beauty sum (luminance is a linear
-// functional of RGB, so mean luminance = luminance of the mean RGB), so this
-// one extra buffer is all the per-pixel sample variance needs:
-// Var = mean(L²) − mean(L)². It is taken over the *same* guarded beauty
-// sample the beauty sum sees, so the two moments always agree on which
-// samples were accepted and Var can't go negative from a mismatch.
+// Three things here are load-bearing and not local:
 //
-// From that substrate it also computes the global auto-stop metric (M3 step
-// 6b): each pixel's relative estimator standard error e = sqrt(Var/N) /
-// max(mean L, floor), and a single global tally of how many pixels fell below
-// the noise threshold. The host reads the tally back (one u32) and stops the
-// render once the converged fraction crosses its target — cheaper by far than
-// downloading the whole variance field every frame. The tally is zero-filled
-// before this kernel each sample, so it is a fresh snapshot, not a running
-// count; and no pixel counts until N passes `minSamples`, below which a
-// handful of samples make Var meaningless.
-//
-// Every contribution is finite-guarded before it lands: a NaN or Inf in
-// any channel drops that buffer's whole sample for the pixel — one bad
-// sample must not poison the film forever (the m1-plan's unconditional
-// robustness rule). Each of the four buffers is guarded on its own, so a
-// glitch in one AOV never censors the others — and depth is the deliberate
-// exception: +inf *is* its miss value, so only NaN is dropped there.
+// - `reset` overwrites instead of adding, so a fresh accumulation needs no
+//   clear pass — the first sample *is* the clear.
+// - Every contribution is finite-guarded, per buffer, so one NaN sample
+//   can't poison the film forever and a glitch in one AOV never censors the
+//   others. Depth is the deliberate exception: +inf *is* its miss value.
+// - The converged tally is zero-filled by the host before each dispatch, so
+//   it is a fresh snapshot rather than a running count. The host reads back
+//   that one u32 instead of the whole variance field.
 
 import color;
 
@@ -82,9 +66,10 @@ void accumulate(uint3 tid: SV_DispatchThreadID) {
     }
     uint pixel = tid.y * params.width + tid.x;
 
-    // Beauty: guard the sample once, then fold it into both the running sum
-    // (the first moment, free) and the luminance second moment — same accepted
-    // sample for both, so Var = mean(L²) − mean(L)² stays consistent.
+    // Guard once, then fold into both the running sum and the luminance second
+    // moment. The first moment is free in the beauty sum (luminance is linear
+    // in RGB), and both moments see the *same* accepted sample, so
+    // Var = mean(L²) − mean(L)² can't go negative from a mismatch.
     let beauty = guarded(params.sample[pixel]);
     let beautySum = params.reset != 0 ? beauty : params.sum[pixel] + beauty;
     params.sum[pixel] = beautySum;
@@ -94,11 +79,11 @@ void accumulate(uint3 tid: SV_DispatchThreadID) {
     params.moment2Sum[pixel] = moment2;
 
     // Auto-stop metric: count this pixel if its relative estimator standard
-    // error has fallen below the threshold. Skipped below minSamples, where
-    // Var is too noisy to trust (see the header). Var = mean(L²) − mean(L)²,
-    // clamped against the rounding that can drive it a hair negative; the
-    // relative error divides the standard error by the mean luminance, floored
-    // so a near-black pixel doesn't read as infinitely noisy.
+    // error sqrt(Var/N)/mean(L) has fallen below the threshold. Skipped below
+    // minSamples, where a handful of samples make Var meaningless. Var is
+    // clamped against the rounding that can drive it a hair negative, and the
+    // denominator floored so a near-black pixel doesn't read as infinitely
+    // noisy.
     if (params.samples >= params.minSamples) {
         let n = float(params.samples);
         let meanL = luminance(beautySum.rgb) / n;

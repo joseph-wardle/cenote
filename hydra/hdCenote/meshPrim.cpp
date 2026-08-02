@@ -525,7 +525,7 @@ void HdCenoteMeshPrim::_Place() {
             .transforms = std::move(placements)});
         _instanceLive = true;
     } else {
-        // The whole array replaces (D-073); the mesh and the binding
+        // The whole array replaces; the mesh and the binding
         // stay put.
         _pending->ops.push_back(
             cenote::wire::InstancePatch{.name = _name, .transforms = std::move(placements)});

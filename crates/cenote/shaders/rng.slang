@@ -5,7 +5,7 @@
 // Stateless by design: every value is a pure function of (pixel, sample
 // index, dimension), so path state carries no RNG state and any decision
 // can be replayed by re-asking with the same keys — the property bitwise
-// determinism and, later, GRIS shift mappings rest on.
+// determinism rests on.
 //
 // Rather than assigning each named dimension its own high-order Sobol
 // dimension, every dimension gets an independently shuffled and scrambled
@@ -65,7 +65,7 @@ static const uint SOBOL_DIM1[32] = {
 
 // lowbias32 (the Hash Prospector search): a fast, well-mixed 32-bit hash.
 // Derives the mutually independent seeds each (pixel, dimension) key needs.
-public uint lowbias32(uint x) {
+uint lowbias32(uint x) {
     x ^= x >> 16;
     x *= 0x21f0aaadu;
     x ^= x >> 15;
@@ -132,12 +132,11 @@ public float hashUniform(uint pixel, uint sampleIndex, uint bounce, uint crossin
 }
 
 // A dimension's Owen-scrambled point at an *explicit* sample index — the
-// scramble half of the sampler, split from the choice of *which* index so that
-// choice is pluggable: the per-dimension padding shuffle of sample_2d/1d, or
-// the shared blue-noise ranking of sample_ranked_2d/1d (D-095). The scramble is
-// keyed per (pixel, dimension) either way — the padding that decorrelates the
-// axes and neighbouring pixels' point *values*. The hex salts only separate
-// each axis's scramble stream.
+// scramble half of the sampler, split from the per-dimension shuffle of
+// *which* index sample_2d/1d ask for. The scramble is keyed per (pixel,
+// dimension): the padding that decorrelates the axes and neighbouring
+// pixels' point *values*. The hex salts only separate each axis's scramble
+// stream.
 float2 scrambledPoint2d(uint pixel, uint index, uint dimension) {
     let seed = lowbias32(pixel ^ lowbias32(dimension));
     return float2(scrambledSobol(index, 0, lowbias32(seed ^ 0xe0aaaf76u)),

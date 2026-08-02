@@ -127,7 +127,7 @@ GfMatrix4d _WorldMatrix(const HdSceneIndexPrim& prim) {
 
 /// The radiometric inputs every UsdLux light shares (Q8): the linear
 /// Rec.709 tint — color times the luminance-normalized blackbody when
-/// color temperature is enabled — and intensity·2^exposure, D-108's
+/// color temperature is enabled — and intensity·2^exposure, the light schema's
 /// scale. Fallbacks are the UsdLux schema defaults; intensity is the one
 /// that differs per type, so the caller names it.
 struct _Common {
@@ -472,7 +472,7 @@ void HdCenoteLightPrim::_Reconcile(const HdSceneIndexPrim& prim, const _Dirt dir
         // A visibility wobble around objects already standing.
         return;
     }
-    // Total re-read, total resend (D-113/D-115): any dirt in the lane
+    // Total re-read, total resend : any dirt in the lane
     // rebuilds the whole payload — no per-field diffing, no
     // identical-patch suppression — and a spelling flip (a sphere
     // toggling treatAsPoint) withdraws the old objects in the same
@@ -617,7 +617,7 @@ HdCenoteLightPrim::_TextureFile(const HdContainerDataSourceHandle& light) {
     }
     // Ar has already run; the server additionally demands the resolved
     // path be absolute and an existing file, checked here where failing
-    // costs one texture instead of the flush (D-117).
+    // costs one texture instead of the flush.
     const std::string& resolved = asset.GetResolvedPath();
     std::error_code unused;
     if (resolved.empty() || !std::filesystem::path(resolved).is_absolute() ||
@@ -632,7 +632,7 @@ HdCenoteLightPrim::_TextureFile(const HdContainerDataSourceHandle& light) {
     }
     // LDR only: the emission slot rides the BC7 color pipeline, which
     // would clip a float source to display range rather than reject it.
-    // HDR emission maps are deferred beyond M4.
+    // HDR emission maps are not supported.
     std::string extension = std::filesystem::path(resolved).extension().string();
     std::transform(extension.begin(), extension.end(), extension.begin(),
                    [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });

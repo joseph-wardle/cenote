@@ -1,20 +1,11 @@
 //! GPU timing: two timestamps around every submission, and more inside the
 //! ones that ask.
 //!
-//! The write is a *command*, not shader code — it never enters a kernel, so
-//! it cannot cost a register, change occupancy, or otherwise perturb the
-//! thing it is measuring. Deep counters that do live inside kernels are the
-//! other tier's problem (see [`crate::stats`]).
-//!
-//! # What it costs, measured
-//!
-//! Costing nothing was the hypothesis, on the reasoning that
-//! [`Context::submit_passes`] already places a full memory barrier between
-//! consecutive passes, so the clock is read where the GPU is already known
-//! to be quiet. The measurement disagreed, and kept disagreeing. On an
-//! RTX 4070 Ti SUPER (NVIDIA 580.173), brass-room at 512² with the plain
-//! path tracer — 71 passes over a 2.3 ms frame, the worst case in this
-//! renderer — eight interleaved 800-sample runs per arm say:
+//! The write is a *command*, not shader code — it never enters a kernel, so it
+//! cannot cost a register, change occupancy, or otherwise perturb the thing it
+//! is measuring. It is not free anyway. On an RTX 4070 Ti SUPER (NVIDIA
+//! 580.173), brass-room at 512² — 71 passes over a 2.3 ms frame, the worst case
+//! in this renderer — eight interleaved 800-sample runs per arm say:
 //!
 //! | what is stamped | vs `--no-gpu-timers` |
 //! |---|---:|
@@ -23,39 +14,32 @@
 //! | every *span* boundary, one frame in 32, plus the two outer stamps every frame | **+1.9%** |
 //! | the two outer stamps alone, every frame | **±0%**, inside the noise |
 //!
-//! That last row is the finding the design rests on. An interior stamp
-//! costs ~15 µs — it is a real serialization point, and the barrier in
-//! front of it evidently is not — while the two that bracket a submission
-//! cost nothing measurable, because the GPU is already draining at both
-//! ends. *Where* the time went is expensive; *how much* there was is free.
+//! That last row is what the design rests on. An interior stamp costs ~15 µs —
+//! a real serialization point, which the memory barrier already in front of it
+//! evidently does not absorb — while the two bracketing a submission cost
+//! nothing measurable, because the GPU is draining at both ends anyway.
+//! *Where* the time went is expensive; *how much* there was is free.
 //!
-//! So they are asked separately. Every submission is bracketed, which is
-//! what lets [`crate::stats::Report`] weigh device time against wall-clock
-//! over every frame rather than over a sample of them; the per-kernel
-//! breakdown runs one frame in [`PassTimer::BREAKDOWN_INTERVAL`], where its
-//! cost amortizes to under two percent. [`crate::stats::Recorder`] keeps
-//! the two populations apart: the frame-time distribution comes from the
-//! frames that carried no breakdown, so the number a person reads is what
-//! the renderer costs when nobody is looking.
+//! So they are asked separately. Every submission is bracketed, which is what
+//! lets [`crate::stats::Report`] weigh device time against wall clock over
+//! every frame rather than a sample of them; the per-kernel breakdown runs one
+//! frame in [`PassTimer::BREAKDOWN_INTERVAL`]. [`crate::stats::Recorder`] keeps
+//! the two populations apart, so the frame-time distribution reports what the
+//! renderer costs when nobody is looking.
 //!
-//! Two hypotheses died on the way, and both are worth not re-testing.
-//! Resetting the query pool from the host (`hostQueryReset`) instead of in
-//! the command buffer changed nothing, so the reset is not the cost.
-//! Neither did the stamp's stage mask, in any of its three spellings — the
-//! cost is the write, not the wait in front of it.
+//! Two hypotheses died here and are worth not re-testing: resetting the query
+//! pool from the host (`hostQueryReset`) rather than in the command buffer
+//! changed nothing, and neither did the stamp's stage mask in any of its three
+//! spellings. The cost is the write, not the wait in front of it.
 //!
 //! `cenote-cli --no-gpu-timers` is the A/B arm, kept so the claim stays
-//! re-checkable rather than remembered. Re-check it before trusting the
-//! table: the same `off` arm that reads 1.85 s here read 1.38 s in an
-//! earlier session on the same machine and the same command, so absolute
-//! figures travel badly between sittings and only interleaved arms compare.
+//! re-checkable. Re-check before trusting the table: absolute figures travel
+//! badly between sittings on this machine, so only interleaved arms compare.
 //!
-//! A [`PassTimer`] owns one `VkQueryPool`, grown to fit the most spans it
-//! has been handed. Recording it into a submission is
-//! [`Context::submit_passes_timed`]'s job, over in `submit.rs`, so there is
-//! exactly one place that knows how a wave is recorded. Submission is
-//! blocking, so results are read straight back after the fence with no
-//! staging and no second round-trip.
+//! A [`PassTimer`] owns one `VkQueryPool`, grown to fit the most spans it has
+//! been handed; [`Context::submit_passes_timed`] is the one place that knows
+//! how a wave is recorded. Submission blocks, so results are read straight back
+//! after the fence.
 
 use std::time::Duration;
 
@@ -186,10 +170,6 @@ impl PassTimer {
     /// difference them into device time. Call only after the submission's
     /// fence has signalled — every query is then available and the wait
     /// flag never blocks.
-    ///
-    /// # Errors
-    ///
-    /// [`crate::Error::Vulkan`] if the readback fails.
     pub(super) fn read(&mut self, passes: &[Pass], detail: Detail) -> Result<PassTimings> {
         let intervals = detail.intervals(passes) as usize;
         self.raw.clear();
@@ -268,10 +248,6 @@ impl Context {
     /// `None` where the device's compute queue does not support timestamps
     /// (some transfer-only and virtualized queues report zero valid bits).
     /// Callers treat `None` as "this build measures nothing" and carry on.
-    ///
-    /// # Errors
-    ///
-    /// [`crate::Error::Vulkan`] if query-pool creation fails.
     pub fn create_pass_timer(&self, intervals: u32) -> Result<Option<PassTimer>> {
         if self.timestamp_valid_bits == 0 || self.timestamp_period == 0.0 {
             log::info!("device reports no queue timestamps; GPU pass timing is off");
@@ -305,7 +281,7 @@ mod tests {
     use bytemuck::{Pod, Zeroable};
 
     use super::*;
-    use crate::gpu::{Bindings, MemoryLocation};
+    use crate::gpu::{Bindings, Buffer, ComputePipeline, MemoryLocation};
 
     /// Mirrors `struct Params` in `shaders/rng_test.slang` — borrowed here
     /// as a kernel that does real, sizeable work with no scene behind it.
@@ -318,6 +294,77 @@ mod tests {
         dimension: u32,
         count: u32,
         _pad0: u32,
+    }
+
+    /// The `rng_test` dispatch both tests below measure, holding the pipeline
+    /// and the two buffers it writes — one fixture because a [`Pass::Dispatch`]
+    /// borrows the pipeline and the push constants borrow the addresses, so all
+    /// three have to outlive the submission together.
+    struct RngDispatch {
+        pipeline: ComputePipeline,
+        points: Buffer,
+        values: Buffer,
+    }
+
+    impl RngDispatch {
+        /// Points per dispatch — enough work that the span is measurable.
+        const COUNT: u32 = 64;
+        /// Byte size of the `float2` point buffer, which is also what the
+        /// tests' `Pass::Fill` clears.
+        const POINT_BYTES: u64 = Self::COUNT as u64 * 8;
+
+        fn new(gpu: &Context) -> Self {
+            let spirv = crate::shaders::compile_fixture("rng_test").expect("compile rng_test");
+            let usage = vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                | vk::BufferUsageFlags::TRANSFER_DST;
+            let buffer = |name, bytes| {
+                gpu.create_buffer(name, bytes, usage, MemoryLocation::GpuOnly)
+                    .expect("fixture buffer")
+            };
+            Self {
+                pipeline: gpu
+                    .create_compute_pipeline(
+                        &spirv,
+                        c"rng_test",
+                        size_of::<DumpParams>() as u32,
+                        Bindings::None,
+                    )
+                    .expect("pipeline"),
+                points: buffer("test.timing.points", Self::POINT_BYTES),
+                values: buffer("test.timing.values", u64::from(Self::COUNT) * 4),
+            }
+        }
+
+        /// Push constants aimed at this fixture's buffers.
+        fn params(&self) -> DumpParams {
+            DumpParams {
+                points: self.points.device_address(),
+                values: self.values.device_address(),
+                pixel: 0,
+                dimension: 0,
+                count: Self::COUNT,
+                _pad0: 0,
+            }
+        }
+
+        /// The dispatch pass, and the fill that clears what it writes.
+        fn passes<'a>(&'a self, params: &'a DumpParams) -> (Pass<'a>, Pass<'a>) {
+            (
+                Pass::Dispatch {
+                    pipeline: &self.pipeline,
+                    scene: None,
+                    push_constants: bytemuck::bytes_of(params),
+                    group_counts: [1, 1, 1],
+                },
+                Pass::Fill {
+                    buffer: &self.points,
+                    offset: 0,
+                    size: Self::POINT_BYTES,
+                    value: 0,
+                },
+            )
+        }
     }
 
     /// The whole instrument, end to end on the GPU it ships on: a pool is
@@ -334,8 +381,6 @@ mod tests {
     /// timer.
     #[test]
     fn a_timed_submission_reports_per_kernel_durations() {
-        const COUNT: u32 = 64;
-
         let Some(gpu) = crate::gpu::test_context() else {
             return;
         };
@@ -344,44 +389,9 @@ mod tests {
             return;
         };
 
-        let spirv = crate::shaders::compile_fixture("rng_test").expect("compile rng_test");
-        let pipeline = gpu
-            .create_compute_pipeline(
-                &spirv,
-                c"rng_test",
-                size_of::<DumpParams>() as u32,
-                Bindings::None,
-            )
-            .expect("pipeline");
-        let usage = vk::BufferUsageFlags::STORAGE_BUFFER
-            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-            | vk::BufferUsageFlags::TRANSFER_DST;
-        let points = gpu
-            .create_buffer("test.timing.points", u64::from(COUNT) * 8, usage, MemoryLocation::GpuOnly)
-            .expect("points buffer");
-        let values = gpu
-            .create_buffer("test.timing.values", u64::from(COUNT) * 4, usage, MemoryLocation::GpuOnly)
-            .expect("values buffer");
-        let params = DumpParams {
-            points: points.device_address(),
-            values: values.device_address(),
-            pixel: 0,
-            dimension: 0,
-            count: COUNT,
-            _pad0: 0,
-        };
-        let dispatch = Pass::Dispatch {
-            pipeline: &pipeline,
-            scene: None,
-            push_constants: bytemuck::bytes_of(&params),
-            group_counts: [1, 1, 1],
-        };
-        let clear = Pass::Fill {
-            buffer: &points,
-            offset: 0,
-            size: u64::from(COUNT) * 8,
-            value: 0,
-        };
+        let fixture = RngDispatch::new(&gpu);
+        let params = fixture.params();
+        let (dispatch, clear) = fixture.passes(&params);
         // A fill, then the kernel twice — the shape a wave has, where one
         // kernel runs once per bounce.
         let passes = [clear, dispatch, dispatch];
@@ -482,32 +492,18 @@ mod tests {
         let Some(mut timer) = gpu.create_pass_timer(1).expect("timer") else {
             return;
         };
-        let usage = vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::TRANSFER_SRC;
-        let src = gpu
-            .create_buffer("test.timing.src", 256, usage, MemoryLocation::GpuOnly)
-            .expect("source buffer");
-        let dst = gpu
-            .create_buffer("test.timing.dst", 256, usage, MemoryLocation::GpuOnly)
-            .expect("destination buffer");
-        // Alternating kinds, so every pass opens its own span.
-        let fill = Pass::Fill {
-            buffer: &src,
-            offset: 0,
-            size: 256,
-            value: 0,
-        };
-        let copy = Pass::CopyBuffer {
-            src: &src,
-            dst: &dst,
-            size: 256,
-        };
+        let fixture = RngDispatch::new(&gpu);
+        let params = fixture.params();
+        // Alternating kinds, so every pass opens its own span — the shape a
+        // wave has, where fills separate the stages they reset.
+        let (dispatch, fill) = fixture.passes(&params);
         let timings = gpu
-            .submit_passes_timed(&[fill, copy, fill, copy], Some(&mut timer))
+            .submit_passes_timed(&[fill, dispatch, fill, dispatch], Some(&mut timer))
             .expect("the passes run");
         let entries: Vec<_> = timings.iter().collect();
         assert_eq!(entries.len(), 2, "one bucket per kind: {entries:?}");
         assert_eq!(entries[0].calls, 2, "both fills were measured");
-        assert_eq!(entries[1].calls, 2, "and both copies");
+        assert_eq!(entries[1].calls, 2, "and both dispatches");
         assert!(timer.capacity() >= 4, "and the pool kept the room");
     }
 

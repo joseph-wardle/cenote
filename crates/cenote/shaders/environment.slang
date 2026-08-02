@@ -34,9 +34,6 @@ public struct EnvironmentSample {
     public float3 direction; // unit, world space
     public float3 radiance;  // ACEScg, read from the texture
     public float pdf;        // solid-angle pdf of `direction`; 0 = invalid
-    public float2 uv;        // the image point the direction maps to — the
-                             //   env's reconnection coordinate, the analogue of
-                             //   a triangle's barycentrics (see `connect`)
 };
 
 // One row or column draw from a piecewise-constant CDF: the largest index
@@ -85,7 +82,7 @@ public struct Environment {
     // conventions hold. Normalized, so a scaled or sheared placement still
     // yields a lookup direction (Storm's dome behavior). Under such a
     // non-orthogonal linear part the pdfs below are approximate — but
-    // `sample`, `connect`, and `pdf` all pass through here, so the drawn
+    // `sample`, `radiance`, and `pdf` all pass through here, so the drawn
     // and evaluated densities stay mutually consistent.
     float3 envFromWorld(float3 d) {
         return normalize(float3(dot(worldToEnv[0].xyz, d),
@@ -132,34 +129,7 @@ public struct Environment {
         s.pdf = sinTheta > 0.0
               ? pdfs[row.index * width + col.index] / (2.0 * PI * PI * sinTheta)
               : 0.0;
-        s.uv = uv;
         return s;
-    }
-
-    // Reconnect to a stored image point: the direction, radiance, and
-    // solid-angle pdf for a candidate held as `uv` rather than a primary draw.
-    // Two sources share one reconstruction: a next-event draw (via `sample`,
-    // which fills `uv`) and a BSDF-sampled ray that escaped to the sky (via
-    // `locate`, which inverts its direction to `uv`). The texel indices recover
-    // from `uv` exactly as `pdf` below.
-    public EnvironmentSample connect(float2 uv) {
-        let sinTheta = sin(PI * uv.y);
-        let col = min(uint(uv.x * float(width)), width - 1);
-        let row = min(uint(uv.y * float(height)), height - 1);
-        EnvironmentSample s;
-        s.direction = worldFromEnv(directionFromUv(uv));
-        s.radiance = tint * environmentTexture.SampleLevel(uv, 0.0).xyz;
-        s.pdf = sinTheta > 0.0 ? pdfs[row * width + col] / (2.0 * PI * PI * sinTheta) : 0.0;
-        s.uv = uv;
-        return s;
-    }
-
-    // The image point a world direction maps to — the inverse of the
-    // `worldFromEnv(directionFromUv(...))` that `sample`/`connect` build
-    // directions with, so a BSDF-sampled ray escaping to the sky can be
-    // stored as an env candidate and reconnected exactly.
-    public float2 locate(float3 d) {
-        return uvFromDirection(envFromWorld(d));
     }
 
     // The solid-angle pdf `sample` would report for world direction `d` —

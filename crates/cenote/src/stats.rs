@@ -1,42 +1,27 @@
 //! What a frame cost, how the render is progressing, and where the memory
 //! went — the renderer's one measurement surface.
 //!
-//! # Two tiers
+//! Everything here is **tier one**: always on, and cheap enough that leaving it
+//! on cannot meaningfully change the number it reports. That constraint is what
+//! admits each entry. GPU times come from timestamps written at pass
+//! boundaries, by a command that never enters a kernel; bracketing a submission
+//! for its total is free, stamping *inside* it is not, which is why only the
+//! per-kernel breakdown is rationed (see [`crate::gpu::PassTimer`]). The
+//! interactivity marks are host `Instant` differences off events the render loop
+//! already has. Memory is a running total of allocations the renderer already
+//! makes, sampled rather than recomputed.
 //!
-//! Everything in this module is **tier one**: always on, and cheap enough
-//! that leaving it on cannot meaningfully change the number it reports.
-//! That is a real constraint, not an aspiration, and it is what admits each
-//! entry:
-//!
-//! - GPU times come from timestamps written at pass boundaries, by a
-//!   command that never enters a kernel — so it cannot cost a register or
-//!   change an occupancy. Bracketing a submission for its total is free;
-//!   stamping *inside* it for the per-kernel breakdown is not, which is why
-//!   only the breakdown is rationed. See [`crate::gpu::PassTimer`] for the
-//!   measurement and what it cost the design.
-//! - The interactivity marks are host `Instant` differences off events the
-//!   render loop already has.
-//! - Memory is a running total of allocations the renderer already makes,
-//!   sampled rather than recomputed.
-//!
-//! Anything that would cost a register, a reduction pass, or a readback per
-//! frame — actual ray counts, per-pixel variance, reuse acceptance rates —
-//! is **tier two**: opt-in, compiled out by default, and honest about the
-//! overhead it adds. It does not live here.
-//!
-//! What is deliberately absent: occupancy, register pressure, and cache
-//! throughput. Vulkan cannot portably report them, and re-deriving them
-//! would mean rebuilding a fraction of Nsight Graphics or the Radeon GPU
-//! Profiler badly. When a decision needs those numbers, attach the real
-//! tool.
-//!
-//! # The one struct
+//! Anything costing a register, a reduction pass, or a readback per frame —
+//! ray counts, per-pixel variance — is tier two: opt-in, compiled out by
+//! default, and not here. Occupancy, register pressure, and cache throughput
+//! are absent on purpose: Vulkan cannot portably report them, and re-deriving
+//! them means rebuilding Nsight or the Radeon GPU Profiler badly. When a
+//! decision needs those numbers, attach the real tool.
 //!
 //! [`Recorder`] owns the running state; [`Stats`] is the plain snapshot it
-//! produces. That snapshot is the single source of truth for every
-//! consumer — the viewer's overlay, the CLI's end-of-render report, the
-//! Hydra delegate — so a number can never mean two things in two places.
-//! It travels beside the pixels, never inside them.
+//! produces, and the single source every consumer reads — the viewer's overlay,
+//! the CLI's report, the Hydra delegate — so a number cannot mean two things in
+//! two places. It travels beside the pixels, never inside them.
 
 use std::collections::VecDeque;
 use std::sync::OnceLock;
@@ -276,10 +261,6 @@ impl Frame {
     /// One line of a per-frame trace: compact RON, one value per line, so a
     /// settle curve is a file you can `grep` and a plotter can read a line
     /// at a time without holding the run in memory.
-    ///
-    /// # Errors
-    ///
-    /// As [`Report::to_ron`].
     pub fn to_ron_line(&self) -> crate::Result<String> {
         ron::ser::to_string(self).map_err(crate::Error::stats)
     }
@@ -385,7 +366,7 @@ pub struct Stats {
 /// did.
 ///
 /// Written beside the image as RON — the format the rest of the renderer
-/// already speaks — so two runs diff as text and a rung of work is a
+/// already speaks — so two runs diff as text and a piece of work is a
 /// readable change rather than a remembered impression.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Report {

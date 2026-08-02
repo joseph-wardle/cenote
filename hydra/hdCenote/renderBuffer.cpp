@@ -73,7 +73,7 @@ void HdCenoteRenderBuffer::Resolve() {}
 // final picture — true, so a render-until-converged host (usdrecord) never
 // spins against a dead server. A segment that trails the allocation is a
 // resize still settling: frames are coming, not converged. Past those
-// guards, the client's verdict (D-113): settled, at a frame that has
+// guards, the client's verdict: settled, at a frame that has
 // incorporated everything sent.
 bool HdCenoteRenderBuffer::IsConverged() const {
     const cenote::transport::View* view = _client->view();
@@ -107,7 +107,7 @@ void HdCenoteRenderBuffer::_Refresh() {
         view->copy_depth(plane);
         // The shm plane holds camera-plane z in meters, +inf where every
         // sample missed; Hydra's depth semantic is the projection's
-        // [0, 1] (D-110). Only z is needed — the plane already carries
+        // [0, 1]. Only z is needed — the plane already carries
         // camera-forward distance, so the remap is the projection's z/w
         // rows and a divide, hdEmbree's conversion without the full
         // point transform. Misses land exactly on the 1.0 clear value.

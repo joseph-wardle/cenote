@@ -1,6 +1,6 @@
 //! The render server's wire — everything that crosses the process
-//! boundary between a scene-graph host (the M4 Hydra delegate) and
-//! `cenote-server`, spelled out as explicit types (D-100).
+//! boundary between a scene-graph host (the Hydra delegate) and
+//! `cenote-server`, spelled out as explicit types.
 //!
 //! Three pieces, one per module:
 //!

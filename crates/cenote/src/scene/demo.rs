@@ -37,11 +37,6 @@ impl Scene {
     /// estimation resolves), and the bundled Kloofendal sky fills, backs,
     /// and reflects — its unclipped sun is the importance-sampling stress
     /// case the environment tables exist for.
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from prep — upload, decode, or
-    /// acceleration-structure builds.
     #[expect(
         clippy::missing_panics_doc,
         reason = "the expect guards the built-in change-set applying to an empty \

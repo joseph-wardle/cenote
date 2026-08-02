@@ -1,7 +1,6 @@
 #!/usr/bin/env sh
 # Fetch research-corpus scene sources into scenes/corpus/sources/ (which
-# stays untracked — only the curated .ron files and README.md are in git;
-# docs/corpus-plan.md is the campaign plan).
+# stays untracked — only the curated .ron files and README.md are in git).
 #
 #   ./fetch.sh                # everything (~8.5 GB, mostly pbrt-v4-scenes)
 #   ./fetch.sh veach-ajar     # just the named scenes

@@ -318,7 +318,7 @@ pub(super) fn create_device(
 
     // Enable exactly the baseline `missing_requirements` verified — keep in
     // lockstep. Descriptor indexing is enabled-but-unused until the bindless
-    // texture table arrives (M2).
+    // texture table arrives.
     let mut vk12 = vk::PhysicalDeviceVulkan12Features::default()
         .buffer_device_address(true)
         .descriptor_indexing(true)

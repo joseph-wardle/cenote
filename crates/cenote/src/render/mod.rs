@@ -2,44 +2,26 @@
 //! manage the film. Orchestration only — Vulkan stays behind [`crate::gpu`],
 //! tracing behind [`crate::wavefront`].
 //!
-//! The estimator ends at a *linear average*, and the view transform is a
-//! separate, downstream step — the split every production renderer draws
-//! between the render buffer and its color pipeline:
+//! The estimator ends at a *linear average*; the view transform is a separate
+//! downstream step, the split every production renderer draws between the
+//! render buffer and its color pipeline.
 //!
-//! - **One-shot** ([`Renderer::render`]): allocate a buffer, trace one
-//!   wave, read the linear pixels back — the test and hot-reload-probe
-//!   path.
-//! - **Progressive** ([`Renderer::accumulate`]): each call traces one
-//!   sample into the [`Film`]'s running sums. [`Renderer::resolve`] then
-//!   divides those sums by the sample count into a caller-owned linear
-//!   average — the estimator's current best image. The CLI resolves on the
-//!   host with [`Film::beauty_average`] and writes the batch EXR; the [`Session`]
-//!   resolves on the GPU into a published frame and hands it to a consumer's
-//!   [`Tonemap`] view transform. Batch output and the viewer's converged
-//!   image are the same estimator by construction — they share the film.
+//! - **One-shot** ([`Renderer::render`]): trace one wave, read the linear
+//!   pixels back — the test and hot-reload-probe path.
+//! - **Progressive** ([`Renderer::accumulate`]): each call traces one sample
+//!   into the [`Film`]'s running sums, which [`Renderer::resolve`] divides by
+//!   the sample count. The CLI resolves on the host and writes the batch EXR;
+//!   the [`Session`] resolves on the GPU and hands the frame to a consumer's
+//!   [`Tonemap`]. Batch output and the viewer's converged image are the same
+//!   estimator by construction — they share the film.
 //!
-//! [`Tonemap`] is the other half of that split: exposure, the ACES display
-//! transform, and the sRGB pack that turn a linear average into the frame
-//! the presenter blits. The viewer owns one and drives it each frame; the
-//! CLI never touches it, since EXR output stays linear.
+//! The film carries four buffers: beauty plus the denoiser's albedo and normal
+//! guides and first-hit depth. All four share the accumulate/resolve path and
+//! the pixel-owned determinism invariant, and the CLI writes them as one
+//! multi-layer EXR.
 //!
-//! The film carries four buffers, not one: beauty plus the AOVs — the
-//! denoiser's albedo and normal guides (with their specular pass-through:
-//! mirrors record what they show) and first-hit depth. All four share the
-//! accumulate/resolve path and the pixel-owned determinism invariant; the
-//! CLI writes them as one multi-layer EXR, and OIDN consumes the guides.
-//!
-//! Every sample is a full path-traced estimate — jittered camera ray,
-//! MIS-weighted direct light sampling at every bounce (emissive geometry,
-//! delta lights, and the importance-sampled environment), `OpenPBR`
-//! bounces — keyed by the
-//! film's sample count, so accumulation converges toward the true render:
-//! edges anti-alias, noise settles into soft shadows, color bleed, and
-//! contact darkening.
-//!
-//! [`Session`] wraps this progressive path in a render thread, so the viewer
-//! and a future scene-graph delegate consume published frames without pacing
-//! the renderer to their own refresh — the actor that decouples the render loop.
+//! [`Session`] wraps the progressive path in a render thread, so consumers read
+//! published frames without pacing the renderer to their own refresh.
 
 mod film;
 mod session;
@@ -65,9 +47,8 @@ use crate::wavefront::{LightSampling, Wavefront};
 /// a different value governing a different kernel family.
 const FILM_WORKGROUP_SIZE: u32 = 8;
 
-/// Size of the film's auto-stop tally (step 6b): one `u32` the accumulate
-/// kernel atomically counts converged pixels into. Shared by the film's
-/// allocation and the per-sample zero-fill.
+/// Size of the film's auto-stop tally: one `u32` the accumulate kernel
+/// atomically counts converged pixels into.
 pub(super) const CONVERGED_COUNT_BYTES: u64 = 4;
 
 /// Push constants for the accumulation kernel; mirrors `struct Params` in
@@ -76,9 +57,7 @@ pub(super) const CONVERGED_COUNT_BYTES: u64 = 4;
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct AccumulateParams {
-    /// Device address of the new beauty sample (`float4*`).
     sample: vk::DeviceAddress,
-    /// Device address of the film's running beauty sums (`float4*`).
     sum: vk::DeviceAddress,
     albedo_sample: vk::DeviceAddress,
     albedo_sum: vk::DeviceAddress,
@@ -92,10 +71,9 @@ struct AccumulateParams {
     /// from the beauty sample, since the first moment is already the beauty
     /// sum (luminance is linear).
     moment2_sum: vk::DeviceAddress,
-    /// The auto-stop convergence tally (`Atomic<uint>*`, step 6b): pixels whose
-    /// relative estimator standard error fell below `noise_threshold` this
-    /// sample. Zero-filled before the kernel each accumulate, so it is a fresh
-    /// snapshot; read back by [`Film::converged_fraction`].
+    /// The auto-stop tally (`Atomic<uint>*`): pixels whose relative estimator
+    /// standard error fell below `noise_threshold` this sample. Zero-filled
+    /// before each accumulate, so it is a fresh snapshot.
     converged_count: vk::DeviceAddress,
     width: u32,
     height: u32,
@@ -119,9 +97,7 @@ struct AccumulateParams {
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct ResolveParams {
-    /// Device address of the film's running beauty sums (`float4*`).
     sum: vk::DeviceAddress,
-    /// Device address of the linear beauty average target (`float4*`).
     average: vk::DeviceAddress,
     albedo_sum: vk::DeviceAddress,
     albedo_average: vk::DeviceAddress,
@@ -149,19 +125,15 @@ pub struct Renderer {
     /// The path-length cap the wavefront was built with, kept so
     /// [`Renderer::reload`] rebuilds an identical engine.
     max_bounces: u32,
-    /// Relative std-error below which the accumulate kernel counts a pixel as
-    /// converged (M3 step 6b/6c) — the auto-stop metric's threshold. Defaults to
-    /// [`Renderer::NOISE_THRESHOLD`]; the CLI `--noise-threshold` and the session's
-    /// convergence-idle set it via [`Renderer::set_noise_threshold`]. Preserved
-    /// across [`Renderer::reload`].
+    /// Relative std-error below which the accumulate kernel counts a pixel
+    /// converged. Preserved across [`Renderer::reload`].
     noise_threshold: f32,
 }
 
 impl Renderer {
-    /// Auto-stop noise threshold (M3 step 6b): a pixel counts as converged once
-    /// its relative estimator standard error — `sqrt(Var/N) / max(mean L, floor)`
-    /// — falls below this. 1% relative error is a perceptually tight default; the
-    /// interactive `--noise-threshold` (step 6c) overrides it.
+    /// Default auto-stop threshold: a pixel counts as converged once its
+    /// relative estimator standard error — `sqrt(Var/N) / max(mean L, floor)` —
+    /// falls below this. 1% is perceptually tight.
     pub const NOISE_THRESHOLD: f32 = 0.01;
 
     /// Luminance floor in the relative-error denominator, so a near-black pixel
@@ -172,33 +144,19 @@ impl Renderer {
     /// samples make `Var` meaningless, which `sqrt(Var/N)` assumes away.
     pub const CONVERGENCE_MIN_SAMPLES: u32 = 16;
 
-    /// Fraction of pixels that must be converged for the global auto-stop to fire
-    /// (step 6b). Held short of 1 so a few slow firefly pixels can't hold the whole
-    /// render open forever; the consumer (step 6c) reads
-    /// [`Film::converged_fraction`] against it.
+    /// Fraction of pixels that must be converged for the global auto-stop to
+    /// fire. Held short of 1 so a few slow firefly pixels can't hold the render
+    /// open forever.
     pub const CONVERGENCE_TARGET: f32 = 0.98;
 
     /// Create the renderer from the embedded kernels, at the default
     /// path-length cap.
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from pipeline or buffer creation.
     pub fn new(gpu: &Context) -> Result<Self> {
         Self::with_max_bounces(gpu, Wavefront::DEFAULT_MAX_BOUNCES)
     }
 
     /// [`Renderer::new`] with an explicit path-length cap — the CLI's
     /// `--depth`.
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from pipeline or buffer creation.
-    ///
-    /// # Panics
-    ///
-    /// On zero bounces — callers validate their inputs, so this is a
-    /// programmer bug.
     pub fn with_max_bounces(gpu: &Context, max_bounces: u32) -> Result<Self> {
         Self::from_kernels(gpu, &Kernels::embedded(), max_bounces)
     }
@@ -236,10 +194,6 @@ impl Renderer {
     /// push-constant layouts are pinned by the embedded build — hot reload
     /// covers kernel *body* edits; changing a params struct or the
     /// path-state schema needs a `cargo build`.
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from pipeline or buffer creation.
     pub fn reload(&mut self, gpu: &Context, kernels: &Kernels) -> Result<()> {
         let noise_threshold = self.noise_threshold;
         *self = Self::from_kernels(gpu, kernels, self.max_bounces)?;
@@ -248,16 +202,9 @@ impl Renderer {
         Ok(())
     }
 
-    /// Set the auto-stop noise threshold (M3 step 6c): the relative estimator
-    /// standard error below which the accumulate kernel counts a pixel converged.
-    /// Changes what [`Film::converged_fraction`] measures on the next
-    /// [`Renderer::accumulate`]; beauty is untouched, so no reset is needed. The
-    /// CLI `--noise-threshold` and the session's convergence-idle drive it.
-    ///
-    /// # Panics
-    ///
-    /// On a non-positive or non-finite threshold — callers validate their inputs,
-    /// so this is a programmer bug.
+    /// Set the auto-stop noise threshold. Changes what
+    /// [`Film::converged_fraction`] measures on the next
+    /// [`Renderer::accumulate`]; beauty is untouched, so no reset is needed.
     pub fn set_noise_threshold(&mut self, threshold: f32) {
         assert!(
             threshold > 0.0 && threshold.is_finite(),
@@ -276,15 +223,6 @@ impl Renderer {
     /// pixel's sequence, a single path-traced estimate per pixel — and
     /// return it as row-major RGBA `f32` with pixel (0, 0) top-left, the
     /// crate-wide image convention.
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from buffer creation or submission.
-    ///
-    /// # Panics
-    ///
-    /// On a zero-sized target — callers validate their inputs, so this is a
-    /// programmer bug.
     pub fn render(
         &self,
         gpu: &Context,
@@ -319,10 +257,6 @@ impl Renderer {
     /// (beauty and the three AOVs), then the accumulation kernel, with its
     /// unconditional NaN/Inf guard, folded into the same fence, into the
     /// sums.
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from submission.
     pub fn accumulate(&self, gpu: &Context, scene: &Scene, film: &mut Film) -> Result<()> {
         self.accumulate_timed(gpu, scene, film, None).map(|_| ())
     }
@@ -332,10 +266,6 @@ impl Renderer {
     /// cost. Without a `timer` the submission is unchanged and the timings
     /// come back empty — the two are the same code path, so a timed render
     /// and an untimed one cannot diverge in what they draw.
-    ///
-    /// # Errors
-    ///
-    /// As [`Renderer::accumulate`].
     pub fn accumulate_timed(
         &self,
         gpu: &Context,
@@ -352,9 +282,9 @@ impl Renderer {
             film.height,
             film.samples,
             Some(&film.aov_targets()),
-            // Zero the auto-stop tally (step 6b) before the kernel folds this
-            // sample's converged pixels into it — a fresh per-sample snapshot,
-            // ordered ahead of the accumulate by submit_passes' barrier.
+            // Zero the auto-stop tally before the kernel folds this sample's
+            // converged pixels into it — ordered ahead of the accumulate by
+            // submit_passes' barrier.
             &[
                 Pass::Fill {
                     buffer: &film.converged,
@@ -377,16 +307,6 @@ impl Renderer {
     /// film keeps accumulating. Separate from [`Renderer::accumulate`] on
     /// purpose, too: the render thread accumulates flat out and resolves
     /// only when it publishes, so resolving must not ride every sample.
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from submission.
-    ///
-    /// # Panics
-    ///
-    /// If the film has no samples — there is no average to resolve, so
-    /// calling order is a programmer bug — or if any target is smaller than
-    /// the film's `width`×`height` at its texel size.
     pub fn resolve(&self, gpu: &Context, film: &Film, targets: &ResolveTargets) -> Result<()> {
         assert!(film.samples > 0, "resolving an empty film");
         let texels = u64::from(film.width) * u64::from(film.height);
@@ -411,8 +331,7 @@ impl Renderer {
     }
 
     /// The accumulation kernel's push constants: each film buffer's sample into
-    /// its sums (overwriting when the film is empty), plus this renderer's live
-    /// auto-stop threshold, which the CLI/session may have moved off the default.
+    /// its sums, overwriting when the film is empty.
     fn accumulate_params(&self, film: &Film) -> AccumulateParams {
         AccumulateParams {
             sample: film.beauty.sample.device_address(),

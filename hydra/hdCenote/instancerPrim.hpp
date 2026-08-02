@@ -1,6 +1,6 @@
 // The instancer translator: unlike every other prim, it puts nothing on
 // the wire. cenote has no instancer object — an instance is a mesh plus a
-// placements array (D-073) — so a Hydra instancer becomes pure arithmetic
+// placements array — so a Hydra instancer becomes pure arithmetic
 // the mesh translators consume. Its whole job is ComputePlacements: given
 // one of its prototypes, return the world-space placement matrices that
 // prototype's prims should be copied to, with the instance-rate transforms
@@ -12,7 +12,7 @@
 // Because an instancer edit dirties the instancer prim but not the
 // prototype prims it moves (their flattened transform is prototype-root
 // relative and never sees the instancer), the translator pokes its
-// dependents the way a material does (D-115): birth, edit, and death all
+// dependents the way a material does: birth, edit, and death all
 // walk the mesh registry so every instanced mesh recomposes. Removal is
 // RAII, but there is nothing to remove server-side — the destructor only
 // pokes.

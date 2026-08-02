@@ -18,7 +18,7 @@ add_library(hdCenote MODULE
 # "lib" prefix.
 set_target_properties(hdCenote PROPERTIES PREFIX "")
 # cenote_usd is the flavor-neutral USD handle chosen at the top level
-# (stock OpenUSD 26.05 or the HDK's own USD, D-122); usdLux rides inside it
+# (stock OpenUSD 26.05 or the HDK's own USD); usdLux rides inside it
 # for UsdLuxBlackbodyTemperatureAsRgb, the one spot of USD outside imaging
 # the delegate touches (the light translator's color temperature).
 target_link_libraries(hdCenote PRIVATE cenote-transport cenote_usd)

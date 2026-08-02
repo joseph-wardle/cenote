@@ -1,8 +1,7 @@
 // The flagship scene — a small room lit almost entirely indirectly. One
 // warm lamp hangs above and behind the camera, facing away from it, so
 // the only light the room receives has bounced off the brass panel
-// standing against the back wall: the glossy-GI regime where path reuse
-// pays (D-139's gate scene, dressed). Open it live:
+// standing against the back wall. Open it live:
 //
 //     cargo run -p cenote-viewer -- scenes/brass-room.ron
 //
@@ -2708,8 +2707,7 @@
 
         // The brass panel — the room's real light fixture. Metal reads
         // base_color as F0; roughness 0.2 keeps the reflected lamp a
-        // broad glossy wash rather than a mirror spot (and keeps the
-        // panel's pixels in the shift's reconnection regime at 512²).
+        // broad glossy wash rather than a mirror spot.
         Material((
             name: "brass",
             base_color: Some(Constant((0.90, 0.75, 0.45))),

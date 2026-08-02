@@ -184,7 +184,7 @@ GfVec4f _TextureFallback(const HdMaterialNodeSchema& node) {
 /// normal remap, auto color space), one warning naming the material and
 /// input where fidelity is lost — and never a path the server's
 /// validate_path would reject, since one rejected op takes the whole
-/// atomic flush down with it (D-117).
+/// atomic flush down with it.
 struct _Texture {
     std::optional<cenote::wire::TextureRef> ref;
     GfVec4f fallback;
@@ -432,7 +432,7 @@ cenote::wire::MaterialPatch _ReadMaterial(const SdfPath& path, const HdSceneInde
     };
     // The network at the explicit universal render context — 26.03
     // removed cross-context fallback, so the empty token is the one
-    // correct read (Q4, D-102).
+    // correct read.
     const HdMaterialNetworkSchema network =
         HdMaterialSchema::GetFromParent(prim.dataSource)
             .GetMaterialNetwork(HdMaterialSchemaTokens->universalRenderContext);
@@ -459,7 +459,7 @@ cenote::wire::MaterialPatch _ReadMaterial(const SdfPath& path, const HdSceneInde
         patch.specular_roughness = std::move(*roughness);
     }
     if (_AsInt(_ParameterOr(surface, _tokens->useSpecularWorkflow)).value_or(0) == 1) {
-        // D-117 amends D-102: no specular tint crosses the wire, so the
+        // No specular tint crosses the wire, so the
         // legacy direct-F0 workflow collapses to specularColor's
         // luminance, re-expressed as the IOR with that reflectivity —
         // F0 = ((ior−1)/(ior+1))², inverted — and clamped to a plausible
@@ -598,7 +598,7 @@ void HdCenoteMaterialPrim::_Reconcile(const HdSceneIndexPrim& prim) {
     _pending->ops.push_back(_ReadMaterial(_path, prim));
     _sent = true;
     if (born) {
-        // The birth hook (D-115): a material arriving after the meshes
+        // The birth hook: a material arriving after the meshes
         // that bind it generates no binding dirt, so the waiting meshes
         // repoint themselves now.
         _RepointMeshes();

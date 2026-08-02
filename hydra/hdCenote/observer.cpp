@@ -42,7 +42,7 @@ public:
 /// translator; instancers get the instancer translator, which puts
 /// nothing on the wire and only feeds the meshes their placements; five
 /// of the six UsdLux types the wire can spell — distant (usdview's camera
-/// light among them, per D-108), rect, disk, sphere, cylinder — get the
+/// light among them), rect, disk, sphere, cylinder — get the
 /// light translator; domes get their own, which arbitrates the one
 /// environment slot among themselves (usdview's dome-toggle dome contends
 /// like any other); materials get the material translator.

@@ -25,10 +25,11 @@ use crate::gpu::{AccelerationStructure, Context, SampledImage};
 
 /// The descriptor bindings a kernel needs. Buffers travel as device
 /// addresses in push constants, so the only question is whether the kernel
-/// touches the two resources that must be descriptors — the TLAS and the
-/// environment texture. One shared layout for both keeps the binding model
-/// a single small set; a kernel that statically uses only one of them is
-/// fine, Vulkan only requires that what it *uses* is bound.
+/// touches the resources that must be descriptors — the TLAS, the
+/// environment texture, and the bindless material-texture array. One shared
+/// layout for all three keeps the binding model a single small set; a kernel
+/// that statically uses only one of them is fine, Vulkan only requires that
+/// what it *uses* is bound.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Bindings {
     /// Push constants only — no descriptor set.
@@ -118,17 +119,6 @@ impl Context {
     /// `entry` is `'static` because it doubles as the pipeline's timing
     /// label ([`crate::gpu::Pass::label`]) — every caller already hands over
     /// a literal or a [`crate::shaders::Kernel`]'s own name.
-    ///
-    /// # Errors
-    ///
-    /// [`crate::Error::Vulkan`] if shader-module, descriptor, layout, or
-    /// pipeline creation fails.
-    ///
-    /// # Panics
-    ///
-    /// If `spirv` is not valid SPIR-V, `entry` is not UTF-8, or
-    /// `push_constant_size` is not a non-zero multiple of 4 — programmer
-    /// bugs upstream of any GPU work.
     pub fn create_compute_pipeline(
         &self,
         spirv: &[u8],
@@ -229,9 +219,6 @@ impl Context {
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .descriptor_count(1 + MAX_SCENE_TEXTURES),
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(2),
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(1)

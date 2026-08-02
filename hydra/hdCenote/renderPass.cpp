@@ -41,7 +41,7 @@ HdCenoteRenderPass::HdCenoteRenderPass(HdRenderIndex* index, HdRprimCollection c
     : HdRenderPass(index, collection), _client(client) {}
 
 // Convergence, read live from the shm header and qualified by the epoch
-// (D-113): settled counts only once the front frame has incorporated
+//: settled counts only once the front frame has incorporated
 // everything this client sent, so a stale picture never claims to be
 // final — or the client is degraded and the picture will never improve.
 // The bound buffers answer the same question with a resize guard on top.
@@ -57,7 +57,7 @@ void HdCenoteRenderPass::_Execute(HdRenderPassStateSharedPtr const& renderPassSt
     _client->collect_rejections();
     // Mark the bound AOVs: exactly the buffers the viewer reads pull
     // pixels from the server's framebuffer in Map(). Each also learns the
-    // frame's projection, which the depth remap reads (D-110).
+    // frame's projection, which the depth remap reads.
     const GfMatrix4d projection = renderPassState->GetProjectionMatrix();
     for (HdRenderPassAovBinding const& binding : renderPassState->GetAovBindings()) {
         HdRenderBuffer* buffer = binding.renderBuffer;
@@ -83,9 +83,9 @@ void HdCenoteRenderPass::_UpdateCamera(HdRenderPassStateSharedPtr const& renderP
         return;
     }
     // The vertical field of view comes from the *conformed* projection —
-    // the same matrix the depth remap reads (D-110) — so the frame the
+    // the same matrix the depth remap reads — so the frame the
     // server renders and the depth read back from it share one camera
-    // (D-114). HdCamera still supplies what a projection cannot: the
+    //. HdCamera still supplies what a projection cannot: the
     // transform, the perspective check, and the lens (focus distance,
     // fStop, focal length — the last only to turn f-number into an
     // aperture radius).

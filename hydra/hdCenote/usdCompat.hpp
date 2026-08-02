@@ -1,4 +1,4 @@
-// The one place two USD versions are allowed to differ (D-122). cenote's
+// The one place two USD versions are allowed to differ. cenote's
 // delegate is a single source that must compile against both stock OpenUSD
 // 26.05 (the everyday build and the pixel oracle) and the USD 25.05 baked
 // into Houdini's HDK (so the same .so loads inside husk). Where an imaging

@@ -87,10 +87,6 @@ pub(crate) fn resample_octahedral(
 /// Write the constant-radiance sky an image-less `infinite` light
 /// becomes. `radiance` is linear `Rec.709`, photometric scale already
 /// applied.
-///
-/// # Errors
-///
-/// Whatever the EXR write returns.
 pub(crate) fn write_constant(radiance: [f32; 3], out: &Path) -> Result<()> {
     let texel = [radiance[0], radiance[1], radiance[2], 1.0];
     let pixels: Vec<f32> = texel.repeat(2);

@@ -1,6 +1,6 @@
 /target
 
-# CMake build trees and the installed hdCenote plugin (hydra/README.md)
+# CMake build trees and the installed hdCenote plugin (see hydra/README.md)
 /build/
 /hydra/dist/
 
@@ -20,7 +20,7 @@
 /scenes/corpus/kroken.ron
 /scenes/corpus/watercolor.ron
 
-# Benchmark captures (docs/m7-baseline.sh): the RON sidecars are the record the
-# plan docs read from and are tracked; the EXRs beside them are hundreds of
-# megabytes of regenerable render.
-docs/m7-baseline*/*.exr
+# Render output: scripts/benchmark.sh writes EXRs and stats sidecars wherever it
+# is pointed. /restir-baselines/ holds captures from the removed ReSTIR
+# estimator — nothing reads them; delete the directory to reclaim ~800 MB.
+/restir-baselines/

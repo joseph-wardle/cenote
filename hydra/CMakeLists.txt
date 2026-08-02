@@ -1,5 +1,5 @@
-# The C++ half of M4: the wire mirror and the hdCenote delegate plugin.
-# Lives outside the Cargo workspace; see docs/m4-plan.md.
+# The wire mirror and the hdCenote delegate plugin. Lives outside the Cargo
+# workspace; see hydra/README.md.
 cmake_minimum_required(VERSION 3.24)
 
 project(cenote-hydra LANGUAGES CXX)
@@ -16,7 +16,7 @@ add_compile_options(-Wall -Wextra -Werror)
 
 enable_testing()
 
-# USD enters exactly here, in one of two flavors (D-122). The delegate is
+# USD enters exactly here, in one of two flavors. The delegate is
 # one source; only which USD it binds to changes. `stock` is OpenUSD 26.05
 # on CMAKE_PREFIX_PATH (or pxr_DIR) — the everyday build and the pixel
 # oracle. `hdk` is Houdini's own USD, so the same .so loads inside husk.

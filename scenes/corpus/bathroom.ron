@@ -16,7 +16,7 @@
 // brighter than pbrt; strip displacement from the pbrt reference and
 // the foam agrees to 2%. The rug's cutout silhouette — a shape
 // `alpha` texture, a gap when this landed — imports since the bistro
-// rung landed shape-alpha, and is curated onto the Rug material's
+// shape-alpha landed, and is curated onto the Rug material's
 // geometry_opacity below (a small-in-frame effect either way). What
 // remains after both is a ~10% room-wide brightness surplus, the same
 // Schlick-vs-exact-Fresnel model class veach-ajar documented. The ×10
@@ -67,7 +67,7 @@
             emission_luminance: None,
             emission_color: None,
             // Curated: the shape's alpha cutout, importable since the
-            // bistro rung landed shape-alpha (a fresh bootstrap forks
+            // bistro landed shape-alpha (a fresh bootstrap forks
             // this onto a "Rug-cutout-0" — folded here, the rug being
             // this material's only wearer).
             geometry_opacity: Some(Texture((

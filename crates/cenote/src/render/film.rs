@@ -80,7 +80,7 @@ pub struct Film {
     /// Camera-plane z at the first hit, f32; +∞ on miss.
     pub(super) depth: Accumulation,
     /// The variance substrate: Σ luminance² of the guarded beauty sample, one
-    /// `f32` per pixel (M3 step 6a). A lone sum — no wave-written sample pair —
+    /// `f32` per pixel. A lone sum — no wave-written sample pair —
     /// because the accumulate kernel derives it from the beauty sample it
     /// already reads; the first moment is the beauty sum itself (luminance is a
     /// linear functional of RGB). Together they give the per-pixel sample
@@ -88,7 +88,7 @@ pub struct Film {
     /// `sqrt(Var / N)` — [`Film::standard_error`]. Overwritten on the first
     /// sample after a reset like the sums, so it needs no separate clear.
     pub(super) moment2: Buffer,
-    /// The auto-stop tally (M3 step 6b): a single `u32` the accumulate kernel
+    /// The auto-stop tally: a single `u32` the accumulate kernel
     /// atomically counts each sample's converged pixels into — those whose
     /// relative estimator standard error fell below the noise threshold. Zeroed
     /// before every accumulate (so it is a fresh snapshot, not a running total)
@@ -114,15 +114,6 @@ impl Film {
     /// Create a film for `width`×`height` renders. Starts empty: the first
     /// [`Renderer::accumulate`](super::Renderer::accumulate) initializes the
     /// sums, so no clear pass runs.
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from buffer creation.
-    ///
-    /// # Panics
-    ///
-    /// On zero dimensions — callers validate their inputs, so this is a
-    /// programmer bug.
     pub fn new(gpu: &Context, width: u32, height: u32) -> Result<Self> {
         assert!(width > 0 && height > 0, "zero-sized film");
         let texels = u64::from(width) * u64::from(height);
@@ -202,15 +193,6 @@ impl Film {
     /// row-major, pixel (0, 0) top-left. Each channel is its sum divided
     /// by the sample count, so alpha comes out exactly 1 and a one-sample
     /// average is bit-identical to the sample.
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from the readback.
-    ///
-    /// # Panics
-    ///
-    /// If the film has no samples — there is no average yet, so calling
-    /// order is a programmer bug.
     pub fn beauty_average(&self, gpu: &Context) -> Result<Vec<f32>> {
         assert!(self.samples > 0, "averaging an empty film");
         self.averaged(gpu, &self.beauty)
@@ -220,15 +202,6 @@ impl Film {
     /// [`Film::beauty_average`] plus the three AOVs, all in the same
     /// row-major layout (RGBA quads except depth, one `f32` per pixel) —
     /// what the batch CLI writes as one multi-layer EXR.
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from the readbacks.
-    ///
-    /// # Panics
-    ///
-    /// If the film has no samples — there is no average yet, so calling
-    /// order is a programmer bug.
     pub fn averages(&self, gpu: &Context) -> Result<FilmAverages> {
         assert!(self.samples > 0, "averaging an empty film");
         Ok(FilmAverages {
@@ -247,26 +220,12 @@ impl Film {
 
     /// Read back the per-pixel estimator standard error of beauty luminance —
     /// `sqrt(Var / N)`, row-major, one `f32` per pixel — the raw convergence
-    /// metric the auto-stop policy (step 6b) and the validation harness (step
-    /// 7) read. `Var = mean(L²) − mean(L)²` is the per-sample luminance
-    /// variance, from the second-moment buffer (`mean(L²)`) and the beauty sum
-    /// (`mean(L)`, since luminance is linear); `N` is the sample count.
-    ///
-    /// The `sqrt(Var / N)` standard-error reading assumes independent samples,
-    /// which only holds once the temporal decay has handed off (D-094); the
-    /// substrate accumulates from frame 0 regardless, so the *consumer* — not
-    /// this raw readback — is responsible for ignoring it until then. Var is
-    /// clamped at zero against the rounding that can drive `mean(L²) − mean(L)²`
-    /// a hair negative on a noise-free pixel.
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from the readbacks.
-    ///
-    /// # Panics
-    ///
-    /// If the film has no samples — there is no variance yet, so calling order
-    /// is a programmer bug.
+    /// metric the auto-stop policy and the validation harness read.
+    /// `Var = mean(L²) − mean(L)²` is the per-sample luminance variance, from
+    /// the second-moment buffer (`mean(L²)`) and the beauty sum (`mean(L)`,
+    /// since luminance is linear); `N` is the sample count. Var is clamped at
+    /// zero against the rounding that can drive it a hair negative on a
+    /// noise-free pixel.
     pub fn standard_error(&self, gpu: &Context) -> Result<Vec<f32>> {
         assert!(self.samples > 0, "no samples to measure variance over");
         let n = self.samples as f32;
@@ -291,7 +250,7 @@ impl Film {
 
     /// The fraction of pixels the last [`Renderer::accumulate`](super::Renderer::accumulate)
     /// found converged — relative estimator standard error below the noise
-    /// threshold — as its cheap global auto-stop signal (M3 step 6b). The
+    /// threshold — as its cheap global auto-stop signal. The
     /// accumulate kernel counts them into a single `u32` (a 4-byte readback, not
     /// the whole variance field), zeroed before every sample so this is a fresh
     /// snapshot. The global auto-stop policy stops once it crosses
@@ -301,15 +260,6 @@ impl Film {
     /// [`Renderer::CONVERGENCE_MIN_SAMPLES`](super::Renderer::CONVERGENCE_MIN_SAMPLES):
     /// the kernel counts no pixel below that floor, where the variance
     /// estimate is untrusted.
-    ///
-    /// # Errors
-    ///
-    /// Any [`crate::Error`] from the readback.
-    ///
-    /// # Panics
-    ///
-    /// If the film has no samples — the tally reflects an accumulate that has
-    /// not run — so calling order is a programmer bug.
     pub fn converged_fraction(&self, gpu: &Context) -> Result<f32> {
         assert!(self.samples > 0, "no accumulate has filled the converged tally");
         let tally: Vec<u32> =

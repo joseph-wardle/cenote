@@ -86,9 +86,8 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     // this medium's target color, folded into the throughput before
     // anything at this vertex spends it. A zero transmission depth means
     // no interior — the tint sat on the interface instead. Camera rays
-    // start in vacuum, so bounce 0 never reads the (unwritten) state.
-    var medium = bounce == 0 ? MEDIUM_NONE
-               : pathStateMedium(params.paths.state[path]);
+    // start in vacuum, so bounce 0 never reads the (unwritten) slot.
+    var medium = bounce == 0 ? MEDIUM_NONE : params.paths.medium[path];
     if (medium != MEDIUM_NONE) {
         throughput.xyz *= interiorTransmittance(params.scene, medium,
                                                 origin, spawn.position);
@@ -261,7 +260,7 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     params.paths.origin[path] = float4(transmitted ? spawn.below : spawn.position, 0.0);
     params.paths.direction[path] = float4(wiWorld, 0.0);
     params.paths.throughput[path] = float4(scattered, scatter.pdf);
-    params.paths.state[path] = packPathState(scatter.lobe, medium);
+    params.paths.medium[path] = medium;
     params.rays.push(path);
 
     // The path continues, but its pixel keeps the emission found here.

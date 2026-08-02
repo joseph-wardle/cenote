@@ -33,7 +33,7 @@ HEADER = """\
 // bakes beside it) with scenes/corpus/curate-watercolor.py. Oracle: pbrt
 // volpath maxdepth 15, 1920x1080... (1920x1440).
 //
-// This rung's evidence landed the UV feature the campaign had parked: the
+// This scene's evidence landed the UV feature: the
 // easel drawing's affine remap, 28 texture value scales, and the three
 // paint-splatter bilinear decals all import faithfully now.
 //

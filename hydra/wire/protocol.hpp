@@ -106,7 +106,7 @@ struct Welcome {
 /// Ping. A receipt, not a validation — edits apply at the next wave
 /// boundary, and `rejected` carries every rejection message accumulated
 /// since the last response. `epoch` is the session epoch after this
-/// request (D-113): the first shm frame whose header stamp reaches it
+/// request: the first shm frame whose header stamp reaches it
 /// incorporates everything sent so far, applied or rejected.
 struct Ack {
     std::vector<std::string> rejected;

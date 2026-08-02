@@ -58,11 +58,6 @@ impl Environment {
 
     /// An equirect environment from raw RGBA texels, already in `ACEScg` —
     /// procedural skies, and tests that pin exact radiance per texel.
-    ///
-    /// # Panics
-    ///
-    /// On zero dimensions or a texel count that doesn't match them —
-    /// programmer bugs.
     #[must_use]
     pub fn equirect(width: u32, height: u32, texels: Vec<f32>) -> Self {
         assert!(width > 0 && height > 0, "zero-sized environment");
@@ -84,10 +79,6 @@ impl Environment {
     /// texture's IDT, matching how authored colors enter at prep. Radiance
     /// is sanitized while it's cheap: negatives (out-of-gamut conversion
     /// residue) clamp to zero, non-finite texels drop to black.
-    ///
-    /// # Errors
-    ///
-    /// [`crate::Error::Image`] if `bytes` don't decode as an EXR.
     pub fn from_equirect_exr(bytes: &[u8]) -> Result<Self> {
         let (width, height, mut texels) = crate::output::read_exr_bytes(bytes)?;
         convert_to_acescg(&mut texels);
@@ -103,10 +94,6 @@ impl Environment {
     /// sanitization as [`Environment::from_equirect_exr`]. RGBE's shared
     /// exponent can't encode a NaN, but negatives arrive all the same
     /// once the gamut conversion runs, so the paths share one sanitizer.
-    ///
-    /// # Errors
-    ///
-    /// [`crate::Error::Scene`] if `bytes` don't decode as Radiance HDR.
     pub fn from_equirect_hdr(bytes: &[u8]) -> Result<Self> {
         let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Hdr)
             .map_err(|error| crate::Error::Scene(format!("not a Radiance HDR image: {error}")))?

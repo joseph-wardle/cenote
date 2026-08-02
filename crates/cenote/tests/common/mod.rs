@@ -21,7 +21,7 @@ pub fn test_context() -> Option<Context> {
 
 /// Accumulate `spp` samples of `scene` through `renderer` into a fresh
 /// `size`×`size` film and return its linear beauty average — exactly the image
-/// `cenote-cli --spp spp` writes for that render mode.
+/// `cenote-cli --spp spp` writes.
 pub fn accumulate(
     gpu: &Context,
     renderer: &Renderer,

@@ -847,7 +847,7 @@ mod tests {
         assert!(error.to_string().contains("exactly one camera"), "{error}");
     }
 
-    /// The empty scene is renderable, not rejected: the M4 render server
+    /// The empty scene is renderable, not rejected: the render server
     /// stands up its session on camera + settings alone, and a live edit
     /// may delete the last instance. The host phase lowers it to zero
     /// instances, zero lights, and the black default sky.
