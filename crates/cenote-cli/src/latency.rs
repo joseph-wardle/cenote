@@ -92,11 +92,13 @@ pub struct LatencyArgs {
     #[arg(long, value_name = "MOVES", value_parser = clap::value_parser!(u32).range(2..))]
     drag: Option<u32>,
 
-    /// Let the render drop resolution while the view is moving, at the
-    /// session's interactive target. Only with `--drag`: the walk's edits
-    /// land on a settled image, where nothing is moving to drop for.
+    /// Let the render drop resolution while the picture is changing, at the
+    /// session's interactive target. Applied to both measurements: it
+    /// shortens the frame time through the drag, and the wait for the first
+    /// frame after each edit of the walk. Watch the `size` column — a row
+    /// that answers sooner because it holds fewer pixels says so there.
     #[arg(long)]
-    motion: bool,
+    preview: bool,
 
     /// Walk only these edits, comma separated (`--only material,transform`).
     /// Note that later edits in the walk target what earlier ones left
@@ -583,6 +585,17 @@ enum Outcome {
         millis: f64,
         /// The breakdown the renderer handed back.
         phases: Phases,
+        /// What the answering frame rendered at. A frame that arrives sooner
+        /// because it holds fewer pixels is not the same result as one that
+        /// arrives sooner, and the total alone cannot tell them apart — so
+        /// the two travel together, as the drag's `sizes` does.
+        size: (u32, u32),
+        /// The same verb to a readable full-resolution image, milliseconds,
+        /// or `None` when the mark did not land — a settle count short of
+        /// [`cenote::stats::READABLE_SAMPLES`] parks the render before it.
+        /// The counter-metric to `millis`: anything that buys a first pixel
+        /// by rendering less of the image pays for it here.
+        readable_millis: Option<f64>,
     },
     /// The scene had nothing for this edit to target.
     Skipped(String),
@@ -592,6 +605,14 @@ enum Outcome {
     NoOp,
     /// The renderer rejected it.
     Rejected(String),
+}
+
+/// The last value the walk saw of each interaction mark, carried between
+/// edits. A mark that did not move is how the harness tells a frame
+/// answering *this* verb from one answering the last — see [`walk_one`].
+struct Marks {
+    first_pixel: Option<Duration>,
+    readable: Option<Duration>,
 }
 
 /// One row of the walk.
@@ -607,7 +628,7 @@ struct DragReport {
     moves: u32,
     /// Whether the render was allowed to drop resolution during the motion —
     /// a condition of the measurement, like the texture-cache state.
-    motion: bool,
+    preview: bool,
     /// Median interval between published frames, milliseconds. The cadence,
     /// and the one number a resolution change has to move.
     frame_millis: f64,
@@ -645,11 +666,6 @@ struct LatencyReport {
 /// Walk `args.scene` through the edit vocabulary, printing each result and
 /// leaving a RON sidecar.
 pub fn run(args: &LatencyArgs) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        args.drag.is_some() || !args.motion,
-        "--motion needs --drag: the walk's edits land on a settled image, \
-         where the view is not moving and the setting would do nothing"
-    );
     let gpu = Arc::new(cenote::gpu::Context::new()?);
     let set = crate::load_scene(&args.scene)?;
     let mut description = SceneDescription::new();
@@ -693,6 +709,11 @@ pub fn run(args: &LatencyArgs) -> anyhow::Result<()> {
         },
         load,
     );
+    // Applied here rather than inside `drag`, because the walk needs it too:
+    // a reduced frame now follows an edit as well as a camera move.
+    if args.preview {
+        session.set_preview_target(Some(Session::PREVIEW_TARGET));
+    }
 
     println!(
         "\n  {} — {}×{}, settling at {} spp, textures {}",
@@ -704,7 +725,7 @@ pub fn run(args: &LatencyArgs) -> anyhow::Result<()> {
     );
     // Wait out the first accumulation: the render parks at its cap, so the
     // first edit below lands on a settled image like every one after it.
-    let settled = wait_for(&mut session, "a settled frame", |frame| {
+    let (settled, settled_size) = wait_for(&mut session, "a settled frame", |frame| {
         frame.samples() >= args.settle
     })?;
     let first_ray = settled
@@ -718,7 +739,13 @@ pub fn run(args: &LatencyArgs) -> anyhow::Result<()> {
         .load
         .context("the first frame carried no load breakdown")?;
     print_header();
-    print_row("first ray", millis(first_ray), &load);
+    print_row(
+        "first ray",
+        millis(first_ray),
+        &load,
+        settled_size,
+        settled.interactivity.to_readable.map(millis),
+    );
 
     // Filled by whichever measurement this run is: the walk or the drag.
     let mut report = LatencyReport {
@@ -734,36 +761,59 @@ pub fn run(args: &LatencyArgs) -> anyhow::Result<()> {
     };
 
     if let Some(moves) = args.drag {
-        let dragged = drag(&mut session, camera, moves, args.motion)?;
+        let dragged = drag(&mut session, camera, moves, args.preview)?;
         print_drag(&dragged);
         report.drag = Some(dragged);
         return write_report(args, &report);
     }
 
+    report.edits = walk(&mut session, &mut replica, camera, args, &settled)?;
+    write_report(args, &report)
+}
+
+/// One pass down the edit vocabulary, printing each row as it lands.
+///
+/// `settled` is the frame the walk starts from: its marks are what the first
+/// edit has to move.
+fn walk(
+    session: &mut Session,
+    replica: &mut SceneDescription,
+    camera: Camera,
+    args: &LatencyArgs,
+    settled: &Stats,
+) -> anyhow::Result<Vec<Measurement>> {
     let kinds = args
         .only
         .clone()
         .unwrap_or_else(|| <EditKind as clap::ValueEnum>::value_variants().to_vec());
-    // The mark each edit has to move for its frame to be its own.
-    let mut mark = settled.interactivity.to_first_pixel;
+    // The marks each edit has to move for its frame to be its own.
+    let mut marks = Marks {
+        first_pixel: settled.interactivity.to_first_pixel,
+        readable: settled.interactivity.to_readable,
+    };
+    let mut edits = Vec::new();
     for kind in kinds {
-        let outcome = walk_one(&mut session, &mut replica, camera, kind, &mut mark)?;
+        let outcome = walk_one(session, replica, camera, kind, args.settle, &mut marks)?;
         let label = kind.label();
         match &outcome {
-            Outcome::Measured { millis, phases } => print_row(&label, *millis, phases),
+            Outcome::Measured {
+                millis,
+                phases,
+                size,
+                readable_millis,
+            } => print_row(&label, *millis, phases, *size, *readable_millis),
             Outcome::Skipped(why) => println!("  {label:<LABEL_WIDTH$}skipped — {why}"),
             Outcome::NoOp => {
                 println!("  {label:<LABEL_WIDTH$}no-op — every value it set was already in place");
             }
             Outcome::Rejected(why) => println!("  {label:<LABEL_WIDTH$}rejected — {why}"),
         }
-        report.edits.push(Measurement { kind, outcome });
+        edits.push(Measurement { kind, outcome });
         // Between edits, so a failure in the render thread surfaces as
         // itself rather than as the next wait timing out.
         session.check()?;
     }
-
-    write_report(args, &report)
+    Ok(edits)
 }
 
 /// Leave the RON sidecar and say where it went.
@@ -787,15 +837,15 @@ fn write_report(args: &LatencyArgs, report: &LatencyReport) -> anyhow::Result<()
 ///
 /// Medians, not means: the first move pays for waking the parked render this
 /// drag starts from, and that outlier should not move the figure.
+///
+/// `preview` is recorded as a condition of the measurement, like the
+/// texture-cache state; the caller applies it, because the walk needs it too.
 fn drag(
     session: &mut Session,
     view: Camera,
     moves: u32,
-    motion: bool,
+    preview: bool,
 ) -> anyhow::Result<DragReport> {
-    if motion {
-        session.set_motion_target(Some(Session::MOTION_TARGET));
-    }
     let mut camera = view;
     let mut intervals = Vec::new();
     let mut first_pixels = Vec::new();
@@ -833,7 +883,7 @@ fn drag(
     let marks = first_pixels.iter().copied().map(millis).collect();
     Ok(DragReport {
         moves,
-        motion,
+        preview,
         frame_millis: median(&mut intervals),
         first_pixel_millis: median(&mut first_pixels),
         first_pixels: marks,
@@ -869,7 +919,8 @@ fn walk_one(
     replica: &mut SceneDescription,
     view: Camera,
     kind: EditKind,
-    mark: &mut Option<Duration>,
+    settle: u32,
+    marks: &mut Marks,
 ) -> anyhow::Result<Outcome> {
     let verb = match kind.synthesize(replica, view) {
         Ok(verb) => verb,
@@ -888,39 +939,62 @@ fn walk_one(
         Verb::Move(camera) => session.set_camera(camera),
     }
     let target = session.epoch();
-    let stats = wait_for(session, "the edited frame", |frame| frame.epoch() >= target)?;
+    let (stats, size) = wait_for(session, "the edited frame", |frame| frame.epoch() >= target)?;
     if let Some(error) = session.take_edit_error() {
         return Ok(Outcome::Rejected(error.to_string()));
     }
-    if stats.interactivity.to_first_pixel == *mark {
+    if stats.interactivity.to_first_pixel == marks.first_pixel {
         return Ok(Outcome::NoOp);
     }
-    *mark = stats.interactivity.to_first_pixel;
+    marks.first_pixel = stats.interactivity.to_first_pixel;
     let phases = stats
         .interactivity
         .interaction
         .context("the edited frame carried no breakdown")?;
+    // Then wait out the accumulation this edit restarted. Two things need
+    // it: the readable mark below is not this edit's until the image it
+    // measures has arrived, and the *next* edit only lands on a settled
+    // image — the claim `--settle` makes — if this one finished first.
+    // Skipped for the outcomes above, where nothing restarted and the render
+    // is still parked with no further frame to wait for.
+    let (settled, _) = wait_for(session, "the edit to settle", |frame| {
+        frame.samples() >= settle
+    })?;
+    // A mark that did not move did not land: below `READABLE_SAMPLES` the
+    // render parks before it, and reporting the previous edit's number would
+    // be a lie in the shape of a measurement.
+    let readable = settled.interactivity.to_readable;
+    let landed = if readable == marks.readable {
+        None
+    } else {
+        readable
+    };
+    marks.readable = readable;
     Ok(Outcome::Measured {
         millis: millis(phases.total()),
         phases,
+        size,
+        readable_millis: landed.map(millis),
     })
 }
 
 /// Poll published frames until one satisfies `accept`, and hand back its
-/// statistics. Frames are dropped as they are read: the render thread has
-/// two publish slots and holding one stalls it.
+/// statistics and the size it rendered at. Frames are dropped as they are
+/// read: the render thread has two publish slots and holding one stalls it —
+/// which is also why the size is copied out here rather than the frame
+/// handed back.
 fn wait_for(
     session: &mut Session,
     what: &str,
     accept: impl Fn(&Frame) -> bool,
-) -> anyhow::Result<Stats> {
+) -> anyhow::Result<(Stats, (u32, u32))> {
     let deadline = Instant::now() + WAIT_LIMIT;
     loop {
         session.check()?;
         if let Some(frame) = session.take_frame()
             && accept(&frame)
         {
-            return Ok(frame.stats().clone());
+            return Ok((frame.stats().clone(), (frame.width(), frame.height())));
         }
         anyhow::ensure!(
             Instant::now() < deadline,
@@ -943,7 +1017,7 @@ fn print_header() {
     for (name, _) in Phases::default().named() {
         print!("{name:>9}");
     }
-    println!();
+    println!("{:>12}{:>11}", "size", "readable");
 }
 
 /// The drag's three lines, in the same column as the walk's numbers.
@@ -954,9 +1028,9 @@ fn print_drag(report: &DragReport) {
         .map(|(width, height)| format!("{width}×{height}"))
         .collect();
     println!(
-        "\n  {} moves, never settling, motion resolution {}",
+        "\n  {} moves, never settling, preview resolution {}",
         report.moves,
-        if report.motion { "on" } else { "off" },
+        if report.preview { "on" } else { "off" },
     );
     println!(
         "  {:<LABEL_WIDTH$}{:>9.2}",
@@ -969,11 +1043,17 @@ fn print_drag(report: &DragReport) {
     println!("  {:<LABEL_WIDTH$}{:>9}", "frame size", sizes.join(", "));
 }
 
-/// One row, in the same order the header came out in.
-fn print_row(label: &str, total: f64, phases: &Phases) {
+/// One row, in the same order the header came out in. The two trailing
+/// columns are the conditions the total has to be read against: what it
+/// rendered, and what waiting for the readable image after it cost.
+fn print_row(label: &str, total: f64, phases: &Phases, size: (u32, u32), readable: Option<f64>) {
     print!("  {label:<LABEL_WIDTH$}{total:>9.2}");
     for (_, value) in phases.named() {
         print!("{:>9.2}", millis(value));
     }
-    println!();
+    print!("{:>12}", format!("{}×{}", size.0, size.1));
+    match readable {
+        Some(readable) => println!("{readable:>11.2}"),
+        None => println!("{:>11}", "—"),
+    }
 }

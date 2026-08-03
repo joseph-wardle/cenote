@@ -392,10 +392,10 @@ impl Viewer {
             &self.stats,
             &self.ui_desc,
         );
-        self.session.set_motion_target(
+        self.session.set_preview_target(
             self.gui
-                .motion()
-                .then_some(cenote::render::Session::MOTION_TARGET),
+                .preview()
+                .then_some(cenote::render::Session::PREVIEW_TARGET),
         );
         // A lookdev widget moved: apply the patch to the replica first — it
         // must accept a value change to a material it already holds — then

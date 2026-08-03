@@ -314,6 +314,9 @@ fn render_frame(
             passes,
             size: (film.width(), film.height()),
             samples: film.samples(),
+            // An offline render has one resolution and renders every sample
+            // at it.
+            preview: false,
         };
         // Traced from this frame, not from the recorder's snapshot: a settle
         // curve wants *this* sample's wall-clock, and the snapshot

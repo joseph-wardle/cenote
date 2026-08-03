@@ -39,8 +39,9 @@ pub struct Gui {
     /// Show the OIDN-denoised view instead of the raw average.
     #[cfg(feature = "denoise")]
     denoise: bool,
-    /// Render at reduced resolution while the view is moving.
-    motion: bool,
+    /// Render at reduced resolution while the picture is changing — through
+    /// a camera move, and for the first frame after an edit.
+    preview: bool,
     /// The material inspector — its own window, driven each frame off the
     /// scene replica the viewer passes to [`Gui::run`].
     lookdev: Lookdev,
@@ -62,7 +63,7 @@ impl Gui {
             exposure: 0.0,
             #[cfg(feature = "denoise")]
             denoise: false,
-            motion: false,
+            preview: false,
             lookdev: Lookdev::default(),
         }
     }
@@ -78,9 +79,10 @@ impl Gui {
         self.denoise
     }
 
-    /// Whether the panel asks for reduced resolution while the view moves.
-    pub fn motion(&self) -> bool {
-        self.motion
+    /// Whether the panel asks for reduced resolution while the picture is
+    /// changing.
+    pub fn preview(&self) -> bool {
+        self.preview
     }
 
     /// Feed a window event to egui. `consumed` in the response means the UI
@@ -140,7 +142,7 @@ impl Gui {
                 ui.add(egui::Slider::new(&mut self.exposure, -4.0..=4.0).text("exposure"));
                 #[cfg(feature = "denoise")]
                 ui.checkbox(&mut self.denoise, "denoise");
-                ui.checkbox(&mut self.motion, "lower res while moving");
+                ui.checkbox(&mut self.preview, "lower res while changing");
             });
     }
 }

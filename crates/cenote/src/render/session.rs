@@ -100,17 +100,18 @@ const PUBLISH_INTERVAL_STEP: u32 = 64;
 /// promptly when the window returns or the view changes.
 const IDLE_NAP: Duration = Duration::from_millis(16);
 
-/// How long after the last camera move the view still counts as moving —
-/// long enough to outlast the gap between two moves of a travelling mouse.
-/// A hold rather than a flag from the consumer because there is no verb
-/// meaning "stopped": a mouse wheel has no release event, so a dolly would
-/// need a timeout beside its flag anyway.
-const MOTION_HOLD: Duration = Duration::from_millis(50);
+/// How long after the last change the picture still counts as unsettled —
+/// long enough to outlast the gap between two moves of a travelling mouse,
+/// or between two edits of a dragged slider. A hold rather than a flag from
+/// the consumer because there is no verb meaning "stopped": a mouse wheel
+/// has no release event, so a dolly would need a timeout beside its flag
+/// anyway, and neither does the edit API.
+const CHANGE_HOLD: Duration = Duration::from_millis(50);
 
-/// The most a moving view will divide its resolution by. Past a quarter of
-/// the window's width a blit stops reading as a soft image and starts
-/// reading as a broken one.
-const MOTION_DIVISOR_MAX: u32 = 4;
+/// The most an unsettled picture will divide its resolution by. Past a
+/// quarter of the window's width a blit stops reading as a soft image and
+/// starts reading as a broken one.
+const PREVIEW_DIVISOR_MAX: u32 = 4;
 
 /// How often the render thread re-reads device memory. The allocations move
 /// only when the scene or the target does, so a per-wave read would be
@@ -165,9 +166,10 @@ struct RenderInputs {
     /// pixels reach it; adopted into the renderer, so it is what the accumulate
     /// kernel counts and [`Film::converged_fraction`] reads.
     noise_threshold: Option<f32>,
-    /// The frame time a moving view aims at, or `None` — the default — to
-    /// always render at full resolution. See [`Session::set_motion_target`].
-    motion_target: Option<Duration>,
+    /// The frame time a changing picture aims at, or `None` — the default —
+    /// to always render at full resolution. See
+    /// [`Session::set_preview_target`].
+    preview_target: Option<Duration>,
     /// When the verb that last wrote this struct happened — the origin the
     /// latency of a camera move or a resize is measured from. Latest-wins
     /// like the rest of the struct: a move that lands while the previous
@@ -357,9 +359,9 @@ pub struct Session {
 }
 
 impl Session {
-    /// The frame time to hand [`Session::set_motion_target`] unless there is
+    /// The frame time to hand [`Session::set_preview_target`] unless there is
     /// a reason to want another: one vsync at 60 Hz.
-    pub const MOTION_TARGET: Duration = Duration::from_millis(16);
+    pub const PREVIEW_TARGET: Duration = Duration::from_millis(16);
 
     /// Spawn the render thread. It takes ownership of `description`,
     /// `scene` (its prepped residency), `renderer`, and a [`Context`]
@@ -398,7 +400,7 @@ impl Session {
                 generation: 0,
                 max_samples: auto_stop.max_samples,
                 noise_threshold: auto_stop.noise_threshold,
-                motion_target: None,
+                preview_target: None,
                 stamped: Instant::now(),
                 running: true,
             }),
@@ -446,21 +448,28 @@ impl Session {
         self.lanes.epoch.fetch_add(1, Ordering::Release);
     }
 
-    /// Trade resolution for cadence while the view is moving: a render whose
-    /// camera moved within the last `MOTION_HOLD` draws a smaller rectangle
-    /// aimed at `target`, which a consumer scales up to its window, and
-    /// returns to full resolution once the motion stops.
+    /// Trade resolution for cadence while the picture is changing: a render
+    /// that restarted within the last `CHANGE_HOLD` — a camera move, a scene
+    /// edit — draws a smaller rectangle aimed at `target`, which a consumer
+    /// scales up to its window, and returns to full resolution once the
+    /// changes stop. So it shortens the wait for the first frame after a
+    /// single edit as well as the frame time through a drag.
+    ///
+    /// A resize arms the hold like the others, but its first sample is always
+    /// full size and a window being dragged larger gets no reduction at all:
+    /// the divisor divides a measured cost, a new rectangle invalidates that
+    /// cost, and every wave of a drag-resize brings another new rectangle.
     ///
     /// Off by default, because a reduced frame is a *smaller* frame — its
     /// size is [`Frame::width`] and [`Frame::height`], and a consumer that
     /// assumes every frame fills its window would drop or misread it. Not a
     /// picture-changing verb: no epoch bump, no restart, nothing to wait on.
-    pub fn set_motion_target(&self, target: Option<Duration>) {
+    pub fn set_preview_target(&self, target: Option<Duration>) {
         self.lanes
             .inputs
             .lock()
             .expect("inputs mutex poisoned")
-            .motion_target = target;
+            .preview_target = target;
     }
 
     /// Queue a change-set to overlay onto the scene — the lookdev shape.
@@ -636,10 +645,11 @@ fn render_loop(
     // moves what counts as converged, not the beauty.
     let mut applied_noise_threshold: Option<f32> = None;
     let mut last_publish: Option<Instant> = None;
-    // The whole of the motion state: the view is moving if this is inside
-    // `MOTION_HOLD`.
-    let mut last_view_change: Option<Instant> = None;
-    // What a sample costs at full resolution — the reference the motion
+    // The whole of the preview state: the picture is still changing if this
+    // is inside `CHANGE_HOLD`. Stamped by the one re-arm below, so every
+    // rewind arms it — a camera move, an edit, a resize alike.
+    let mut last_change: Option<Instant> = None;
+    // What a sample costs at full resolution — the reference the preview
     // divisor is measured against.
     let mut full_sample: Option<Duration> = None;
     // The epoch stamped on the most recent successful publish, so a parked
@@ -723,9 +733,6 @@ fn render_loop(
             film.reset();
             last_publish = None;
             applied_generation = input.generation;
-            // Stamped at the verb, not here, so a wave boundary reached late
-            // does not spend the hold before the motion has been drawn once.
-            last_view_change = Some(input.stamped);
             restart.get_or_insert_with(|| Restart::waited(input.stamped));
         }
         // The verb every branch above left behind is what re-arms the
@@ -735,6 +742,17 @@ fn render_loop(
         // would report the first move for the rest of a drag.
         if let Some(Restart { origin, phases }) = restart {
             recorder.restart(origin, phases);
+            // And the same rewind arms the preview — each one is a wait for
+            // a new first frame and the rectangle below shortens them alike,
+            // so there is nothing to sort by kind here. Stamped now rather
+            // than at the verb, unlike the mark: the mark measures what a
+            // person waited for, while the hold asks whether the picture is
+            // still changing, which starts when the film is actually
+            // rewound. Stamping the verb instead measured inert — a scene
+            // heavy enough to want a divisor above 1 preps for longer than
+            // the hold, so the preview was never drawn on exactly the scenes
+            // that need one.
+            last_change = Some(Instant::now());
         }
         // The auto-stop threshold changes only what the accumulate kernel counts
         // as converged, so it is adopted without a reset — the per-sample count
@@ -745,14 +763,14 @@ fn render_loop(
             );
             applied_noise_threshold = input.noise_threshold;
         }
-        // Resolution follows the view: smaller while it moves, full size
-        // once the hold expires. Deliberately below the re-arm above, being
-        // the one rewind with no verb behind it — arming the interactivity
-        // marks here would report a latency nobody waited for and overwrite
-        // the mark of the camera move still being answered.
-        let moving = last_view_change.is_some_and(|at| at.elapsed() < MOTION_HOLD);
-        let rectangle = match input.motion_target {
-            Some(target) if moving => divided(input.size, motion_divisor(full_sample, target)),
+        // Resolution follows the picture: smaller while it is still
+        // changing, full size once the hold expires. Deliberately below the
+        // re-arm above, being the one rewind with no verb behind it — arming
+        // the interactivity marks here would report a latency nobody waited
+        // for and overwrite the mark of the change still being answered.
+        let unsettled = last_change.is_some_and(|at| at.elapsed() < CHANGE_HOLD);
+        let rectangle = match input.preview_target {
+            Some(target) if unsettled => divided(input.size, preview_divisor(full_sample, target)),
             _ => input.size,
         };
         if (film.width(), film.height()) != rectangle {
@@ -804,6 +822,10 @@ fn render_loop(
         let started = Instant::now();
         let passes = renderer.accumulate_timed(gpu, &scene, film, timer.as_mut())?;
         let cpu = started.elapsed();
+        // Read once for the two things that care whether this sample is the
+        // window's own resolution: the readable mark, which a reduced sample
+        // must not close, and the divisor's reference below.
+        let full_size = (film.width(), film.height()) == input.size;
         // `stats::Frame` is the measurement of a sample; the `Frame` this
         // module publishes is the pixels. Spelled out so the two never read
         // as one.
@@ -812,11 +834,12 @@ fn render_loop(
             passes,
             size: (film.width(), film.height()),
             samples: film.samples(),
+            preview: !full_size,
         });
         // Only full-resolution samples set the reference, so the divisor
         // divides the still image measured before the drag and cannot chase
         // its own output.
-        if (film.width(), film.height()) == input.size {
+        if full_size {
             full_sample = Some(cpu);
         }
         if last_memory_sample.is_none_or(|at| at.elapsed() >= MEMORY_SAMPLE_INTERVAL) {
@@ -838,14 +861,14 @@ fn render_loop(
 }
 
 /// The smallest divisor that brings a sample costing `full_sample` inside
-/// `target`, capped at [`MOTION_DIVISOR_MAX`]. Divides by 1 when the scene
+/// `target`, capped at [`PREVIEW_DIVISOR_MAX`]. Divides by 1 when the scene
 /// is already fast enough, or when nothing has been measured yet.
 ///
 /// Powers of two only: cost is near-linear in pixel count, so the
 /// arithmetic would support any real number, but a divisor drifting with
 /// every measurement changes the softness of the image mid-drag and reads
 /// as the render malfunctioning.
-fn motion_divisor(full_sample: Option<Duration>, target: Duration) -> u32 {
+fn preview_divisor(full_sample: Option<Duration>, target: Duration) -> u32 {
     let Some(full_sample) = full_sample else {
         return 1;
     };
@@ -853,7 +876,7 @@ fn motion_divisor(full_sample: Option<Duration>, target: Duration) -> u32 {
     // By area: dividing each axis by `d` leaves 1/d² of the pixels.
     // Multiplying the target rather than dividing the sample keeps this in
     // integers and cannot round a duration to zero.
-    while divisor < MOTION_DIVISOR_MAX && full_sample > target * (divisor * divisor) {
+    while divisor < PREVIEW_DIVISOR_MAX && full_sample > target * (divisor * divisor) {
         divisor *= 2;
     }
     divisor
@@ -1398,30 +1421,74 @@ mod tests {
         assert!(error.to_string().contains("no-such-material"), "{error}");
     }
 
-    /// The three states in order: no target (motion changes nothing), target
-    /// and moving (the smaller rectangle), and motion stopped (full size
-    /// once the hold expires).
+    /// Walk a session through the three preview states, `nudge` supplying
+    /// whichever verb the calling test is about: no target (a change reduces
+    /// nothing — the default `cenote-server` relies on), target and
+    /// unsettled (the smaller rectangle), and changes stopped (full size
+    /// once the hold expires). One body for both verbs because there is one
+    /// mechanism: what the hold is armed by is the only difference between
+    /// them.
     ///
-    /// The target is a nanosecond rather than [`Session::MOTION_TARGET`]
+    /// Sizes rather than frames, all the way through: the publish pool is
+    /// two deep and the render thread cannot resolve into a slot a consumer
+    /// still holds, so a test that keeps two frames alive stops the renderer
+    /// it is waiting on.
+    ///
+    /// The target is a nanosecond rather than [`Session::PREVIEW_TARGET`]
     /// because a 64×64 demo scene samples so far inside 16 ms that its
     /// honest divisor is 1; a target nothing can meet pins the reduction at
-    /// [`MOTION_DIVISOR_MAX`] on any machine. The moves come in a loop
-    /// because the hold is wall-clock: one move on a slow machine could
-    /// expire before a frame answering it is published.
+    /// [`PREVIEW_DIVISOR_MAX`] on any machine. The verbs come in a loop
+    /// because the hold is wall-clock: one of them on a slow machine could
+    /// expire before a frame answering it is published. Waiting out a
+    /// full-resolution sample first is what gives the divisor a cost to
+    /// divide — until then it is 1, which is why startup needs no special
+    /// case.
+    fn preview_follows(gpu: Context, mut nudge: impl FnMut(&Session)) {
+        const SIZE: u32 = 64;
+        let session = demo_session(&Arc::new(gpu), SIZE);
+        let size = |frame: &Frame| (frame.width(), frame.height());
+        assert_eq!(size(&wait_for_frame(&session)), (SIZE, SIZE));
+
+        for _ in 0..8 {
+            nudge(&session);
+            if let Some(frame) = session.take_frame() {
+                assert_eq!(size(&frame), (SIZE, SIZE), "reduced without being asked");
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        session.set_preview_target(Some(Duration::from_nanos(1)));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let reduced = loop {
+            nudge(&session);
+            if let Some(frame) = session.take_frame()
+                && size(&frame) != (SIZE, SIZE)
+            {
+                break size(&frame);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the change never dropped resolution"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        assert_eq!(
+            reduced,
+            (SIZE / PREVIEW_DIVISOR_MAX, SIZE / PREVIEW_DIVISOR_MAX)
+        );
+
+        let full = wait_for(&session, "full size once the changes stop", |frame| {
+            size(frame) == (SIZE, SIZE)
+        });
+        assert!(full.samples() > 0);
+    }
+
+    /// The camera half: a view being dragged renders reduced and recovers.
     #[test]
     fn a_moving_view_renders_reduced_and_recovers() {
-        const SIZE: u32 = 64;
         let Some(gpu) = crate::gpu::test_context() else {
             return;
         };
-        let gpu = Arc::new(gpu);
-        let session = demo_session(&gpu, SIZE);
-        // Sizes rather than frames, all the way through: the publish pool is
-        // two deep and the render thread cannot resolve into a slot a
-        // consumer still holds, so a test that keeps two frames alive stops
-        // the renderer it is waiting on.
-        let size = |frame: &Frame| (frame.width(), frame.height());
-        assert_eq!(size(&wait_for_frame(&session)), (SIZE, SIZE));
         let mut view = Camera {
             position: Vec3::new(0.0, 1.0, 4.0),
             look_at: Vec3::ZERO,
@@ -1429,38 +1496,42 @@ mod tests {
             vfov_degrees: 45.0,
             lens: None,
         };
-
-        for _ in 0..8 {
+        preview_follows(gpu, |session| {
             view.position.x += 0.01;
             session.set_camera(view);
-            if let Some(frame) = session.take_frame() {
-                assert_eq!(size(&frame), (SIZE, SIZE), "reduced without being asked");
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-
-        session.set_motion_target(Some(Duration::from_nanos(1)));
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let reduced = loop {
-            view.position.x += 0.01;
-            session.set_camera(view);
-            if let Some(frame) = session.take_frame()
-                && size(&frame) != (SIZE, SIZE)
-            {
-                break size(&frame);
-            }
-            assert!(Instant::now() < deadline, "the view never dropped resolution");
-            std::thread::sleep(Duration::from_millis(2));
-        };
-        assert_eq!(
-            reduced,
-            (SIZE / MOTION_DIVISOR_MAX, SIZE / MOTION_DIVISOR_MAX)
-        );
-
-        let full = wait_for(&session, "full size once the view holds still", |frame| {
-            size(frame) == (SIZE, SIZE)
         });
-        assert!(full.samples() > 0);
+    }
+
+    /// The edit half: the camera never moves and the same reduction follows
+    /// a *scene edit*, the hold being armed by the rewind rather than by the
+    /// verb behind it.
+    ///
+    /// The patch alternates its colour because an edit that changes nothing
+    /// visible restarts nothing, and every pass of the loop needs a restart.
+    ///
+    /// The rejection check leads rather than follows: a rejected patch
+    /// restarts nothing, so it would surface as the helper's "never dropped
+    /// resolution" deadline and name the wrong culprit. Checked before each
+    /// patch, the previous one's rejection fails the test where it happened.
+    #[test]
+    fn an_edit_renders_reduced_and_recovers() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let mut hot = false;
+        preview_follows(gpu, |session| {
+            if let Some(error) = session.take_edit_error() {
+                panic!("the patch was rejected: {error}");
+            }
+            hot = !hot;
+            let colour = if hot { [0.9, 0.1, 0.1] } else { [0.1, 0.1, 0.9] };
+            session.apply(ChangeSet {
+                ops: vec![Op::Material(Box::new(MaterialPatch {
+                    base_color: Some(Texturable::Constant(colour)),
+                    ..MaterialPatch::new("floor")
+                }))],
+            });
+        });
     }
 
     /// A window can legitimately be a few pixels across, and a zero-sized
@@ -1475,23 +1546,23 @@ mod tests {
     /// How many halvings the sample needs to fit the target, by area: each
     /// one buys a factor of four.
     #[test]
-    fn the_motion_divisor_is_the_halving_that_fits_the_target() {
+    fn the_preview_divisor_is_the_halving_that_fits_the_target() {
         let target = Duration::from_millis(16);
         let sample = |ms| Some(Duration::from_millis(ms));
         // Inside the target, and exactly on it: no reduction.
-        assert_eq!(motion_divisor(sample(8), target), 1);
-        assert_eq!(motion_divisor(sample(16), target), 1);
+        assert_eq!(preview_divisor(sample(8), target), 1);
+        assert_eq!(preview_divisor(sample(16), target), 1);
         // One halving covers up to 4× the target — sanmiguel's measured
         // 29 ms sits here — and each boundary belongs to the cheaper
         // divisor.
-        assert_eq!(motion_divisor(sample(17), target), 2);
-        assert_eq!(motion_divisor(sample(29), target), 2);
-        assert_eq!(motion_divisor(sample(64), target), 2);
-        assert_eq!(motion_divisor(sample(65), target), 4);
+        assert_eq!(preview_divisor(sample(17), target), 2);
+        assert_eq!(preview_divisor(sample(29), target), 2);
+        assert_eq!(preview_divisor(sample(64), target), 2);
+        assert_eq!(preview_divisor(sample(65), target), 4);
         // The cap holds however heavy the scene.
-        assert_eq!(motion_divisor(sample(1_000), target), 4);
+        assert_eq!(preview_divisor(sample(1_000), target), 4);
         // Nothing measured yet: full resolution rather than a guess.
-        assert_eq!(motion_divisor(None, target), 1);
+        assert_eq!(preview_divisor(None, target), 1);
     }
 
     /// The publish gap widens with the sample count and clamps at both ends

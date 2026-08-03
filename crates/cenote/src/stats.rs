@@ -254,6 +254,11 @@ pub struct Frame {
     pub size: (u32, u32),
     /// Samples in the film's average after it.
     pub samples: u32,
+    /// Whether `size` is a reduced rectangle rather than the target's own
+    /// resolution. Only the render thread knows — [`Frame::size`] alone
+    /// cannot say, the target size not being in here — and only
+    /// [`Recorder::record`]'s readable mark reads it.
+    pub preview: bool,
 }
 
 impl Frame {
@@ -407,8 +412,8 @@ pub struct Interactivity {
     /// inside the number rather than in front of it.
     #[serde(with = "millis::option")]
     pub to_first_pixel: Option<Duration>,
-    /// That same verb to [`READABLE_SAMPLES`] samples. The readability
-    /// stand-in — see the constant.
+    /// That same verb to [`READABLE_SAMPLES`] samples of the full-resolution
+    /// image. The readability stand-in — see the constant.
     #[serde(with = "millis::option")]
     pub to_readable: Option<Duration>,
     /// Where [`Interactivity::to_first_ray`] went. `None` until the first
@@ -712,7 +717,14 @@ impl Recorder {
             self.interactivity.interaction = Some(close(self.pending, frame.cpu, mark));
             self.awaiting_first_pixel = false;
         }
-        if self.awaiting_readable && frame.samples >= READABLE_SAMPLES {
+        // A reduced sample does not carry this mark. The asymmetry with the
+        // first-pixel mark above is deliberate: a preview frame genuinely is
+        // the first thing seen, so it closes that one, but sixteen samples of
+        // a quarter-resolution image is not the image readability is defined
+        // against — see [`READABLE_SAMPLES`]. Stamping it there would report
+        // a wait a quarter of the true one, and report it as the render
+        // getting faster.
+        if self.awaiting_readable && !frame.preview && frame.samples >= READABLE_SAMPLES {
             self.interactivity.to_readable = Some(self.reset.elapsed());
             self.awaiting_readable = false;
         }
@@ -888,6 +900,7 @@ mod tests {
             passes,
             size: (8, 8),
             samples,
+            preview: false,
         }
     }
 
@@ -940,6 +953,7 @@ mod tests {
             passes: breakdown(&[("intersect", 1000)]),
             size: (64, 64),
             samples: 1,
+            preview: false,
         };
         assert_eq!(frame.bound(), Bound::Cpu);
         assert_eq!(frame.gpu(), Duration::from_millis(1));
@@ -959,6 +973,7 @@ mod tests {
             passes: PassTimings::default(),
             size: (64, 64),
             samples: 1,
+            preview: false,
         };
         assert_eq!(frame.bound(), Bound::Unknown);
     }
@@ -986,6 +1001,40 @@ mod tests {
             "startup is not re-measured"
         );
         assert!(second.to_readable.is_some(), "the readable mark landed");
+    }
+
+    /// The two interaction marks disagree about a reduced sample, on purpose.
+    /// It is the first thing a person saw, so it closes the first-pixel mark;
+    /// it is not the image readability is defined against, so no number of
+    /// samples closes the other one. Without the second half, dropping
+    /// resolution reads as the render reaching readable four times sooner.
+    #[test]
+    fn a_preview_sample_is_a_first_pixel_but_never_readable() {
+        let mut recorder = Recorder::new();
+        recorder.record(sample(5, PassTimings::default(), 1));
+        recorder.restart(Instant::now(), Phases::default());
+
+        recorder.record(Frame {
+            preview: true,
+            ..sample(5, PassTimings::default(), READABLE_SAMPLES * 4)
+        });
+        let marks = recorder.stats().interactivity;
+        assert!(
+            marks.to_first_pixel.is_some(),
+            "a preview is still the first thing seen"
+        );
+        assert!(
+            marks.to_readable.is_none(),
+            "however many samples it carries"
+        );
+
+        // Still armed, so the full-resolution image that follows closes it —
+        // the mark is deferred, not lost.
+        recorder.record(sample(5, PassTimings::default(), READABLE_SAMPLES));
+        assert!(
+            recorder.stats().interactivity.to_readable.is_some(),
+            "the full-resolution image closes it"
+        );
     }
 
     /// A breakdown costs the frame it is taken on, so the frame-time
