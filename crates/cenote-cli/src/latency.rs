@@ -9,6 +9,10 @@
 //! result off the frame that answers it. A number in the sidecar and the
 //! same number in the viewer's overlay therefore cannot disagree.
 //!
+//! `--drag` swaps the walk for the other half of interactivity: not one verb
+//! against a settled image but a sustained one, the view moving as fast as
+//! the renderer can answer it. See [`drag`].
+//!
 //! The edits are synthesized from whatever the scene already holds, with
 //! targets picked in name order — the determinism rule the rest of the
 //! renderer runs on, applied to choosing what to edit, so the same scene
@@ -21,7 +25,7 @@
 //! hand-authored against the demo and checks *correctness*; it shares this
 //! vocabulary and none of its code.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -80,6 +84,19 @@ pub struct LatencyArgs {
     /// reproducible.
     #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(u32).range(1..))]
     settle: u32,
+
+    /// Drag the view instead of walking the edits: this many camera moves
+    /// back to back, each issued as soon as a frame carrying the last one
+    /// arrives, so the render never settles. Reports the cadence during the
+    /// motion — the number a person feels while orbiting.
+    #[arg(long, value_name = "MOVES", value_parser = clap::value_parser!(u32).range(2..))]
+    drag: Option<u32>,
+
+    /// Let the render drop resolution while the view is moving, at the
+    /// session's interactive target. Only with `--drag`: the walk's edits
+    /// land on a settled image, where nothing is moving to drop for.
+    #[arg(long)]
+    motion: bool,
 
     /// Walk only these edits, comma separated (`--only material,transform`).
     /// Note that later edits in the walk target what earlier ones left
@@ -584,6 +601,27 @@ struct Measurement {
     outcome: Outcome,
 }
 
+/// What the renderer did while the view kept moving — see [`drag`].
+#[derive(Debug, Serialize)]
+struct DragReport {
+    moves: u32,
+    /// Whether the render was allowed to drop resolution during the motion —
+    /// a condition of the measurement, like the texture-cache state.
+    motion: bool,
+    /// Median interval between published frames, milliseconds. The cadence,
+    /// and the one number a resolution change has to move.
+    frame_millis: f64,
+    /// Median verb-to-first-pixel across the moves, milliseconds.
+    first_pixel_millis: f64,
+    /// Every move's verb-to-first-pixel, in order. The sequence and not just
+    /// its middle, because a drag whose marks are all *identical* is one
+    /// where the renderer stopped re-arming them between waves.
+    first_pixels: Vec<f64>,
+    /// Every size a frame came back at. One entry unless the renderer
+    /// changed resolution during the drag.
+    sizes: BTreeSet<(u32, u32)>,
+}
+
 /// The sidecar: what was measured, on what, under which conditions.
 #[derive(Debug, Serialize)]
 struct LatencyReport {
@@ -597,12 +635,21 @@ struct LatencyReport {
     /// Process start to the first ray, milliseconds, and where it went.
     load_millis: f64,
     load: Phases,
+    /// The edit walk, or empty under `--drag`: a run measures one or the
+    /// other, never both, because the drag leaves the view somewhere the
+    /// walk did not put it.
     edits: Vec<Measurement>,
+    drag: Option<DragReport>,
 }
 
 /// Walk `args.scene` through the edit vocabulary, printing each result and
 /// leaving a RON sidecar.
 pub fn run(args: &LatencyArgs) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        args.drag.is_some() || !args.motion,
+        "--motion needs --drag: the walk's edits land on a settled image, \
+         where the view is not moving and the setting would do nothing"
+    );
     let gpu = Arc::new(cenote::gpu::Context::new()?);
     let set = crate::load_scene(&args.scene)?;
     let mut description = SceneDescription::new();
@@ -673,13 +720,32 @@ pub fn run(args: &LatencyArgs) -> anyhow::Result<()> {
     print_header();
     print_row("first ray", millis(first_ray), &load);
 
+    // Filled by whichever measurement this run is: the walk or the drag.
+    let mut report = LatencyReport {
+        device: gpu.device_summary().to_owned(),
+        scene: args.scene.display().to_string(),
+        size: (width, height),
+        settle: args.settle,
+        texture_cache,
+        load_millis: millis(first_ray),
+        load,
+        edits: Vec::new(),
+        drag: None,
+    };
+
+    if let Some(moves) = args.drag {
+        let dragged = drag(&mut session, camera, moves, args.motion)?;
+        print_drag(&dragged);
+        report.drag = Some(dragged);
+        return write_report(args, &report);
+    }
+
     let kinds = args
         .only
         .clone()
         .unwrap_or_else(|| <EditKind as clap::ValueEnum>::value_variants().to_vec());
     // The mark each edit has to move for its frame to be its own.
     let mut mark = settled.interactivity.to_first_pixel;
-    let mut edits = Vec::new();
     for kind in kinds {
         let outcome = walk_one(&mut session, &mut replica, camera, kind, &mut mark)?;
         let label = kind.label();
@@ -691,27 +757,94 @@ pub fn run(args: &LatencyArgs) -> anyhow::Result<()> {
             }
             Outcome::Rejected(why) => println!("  {label:<LABEL_WIDTH$}rejected — {why}"),
         }
-        edits.push(Measurement { kind, outcome });
+        report.edits.push(Measurement { kind, outcome });
         // Between edits, so a failure in the render thread surfaces as
         // itself rather than as the next wait timing out.
         session.check()?;
     }
 
-    let report = LatencyReport {
-        device: gpu.device_summary().to_owned(),
-        scene: args.scene.display().to_string(),
-        size: (width, height),
-        settle: args.settle,
-        texture_cache,
-        load_millis: millis(first_ray),
-        load,
-        edits,
-    };
-    let text = ron::ser::to_string_pretty(&report, ron::ser::PrettyConfig::default())
+    write_report(args, &report)
+}
+
+/// Leave the RON sidecar and say where it went.
+fn write_report(args: &LatencyArgs, report: &LatencyReport) -> anyhow::Result<()> {
+    let text = ron::ser::to_string_pretty(report, ron::ser::PrettyConfig::default())
         .context("serializing the latency report")?;
     std::fs::write(&args.out, text).with_context(|| format!("writing {}", args.out.display()))?;
     println!("\nwrote {}\n", args.out.display());
     Ok(())
+}
+
+/// Drag the view: `moves` camera changes issued back to back, each as soon
+/// as a frame carrying the last one arrives, so the render never settles and
+/// never naps.
+///
+/// Deliberately not a row of the walk. The walk times one verb against a
+/// *parked* render, where the idle nap is on the critical path and a change
+/// in what a sample costs arrives diluted by it — the wrong instrument for
+/// anything that makes samples cheaper. Sustained motion is what a person
+/// orbiting does, and where the resolution divisor has to show itself.
+///
+/// Medians, not means: the first move pays for waking the parked render this
+/// drag starts from, and that outlier should not move the figure.
+fn drag(
+    session: &mut Session,
+    view: Camera,
+    moves: u32,
+    motion: bool,
+) -> anyhow::Result<DragReport> {
+    if motion {
+        session.set_motion_target(Some(Session::MOTION_TARGET));
+    }
+    let mut camera = view;
+    let mut intervals = Vec::new();
+    let mut first_pixels = Vec::new();
+    let mut sizes = BTreeSet::new();
+    let mut last_frame = Instant::now();
+    for _ in 0..moves {
+        camera.position.x = stepped(camera.position.x);
+        session.set_camera(camera);
+        let target = session.epoch();
+        // Per move, as the walk allows per edit: a long drag on a heavy
+        // scene is slow, not stuck.
+        let deadline = Instant::now() + WAIT_LIMIT;
+        loop {
+            session.check()?;
+            if let Some(frame) = session.take_frame() {
+                // Every published frame is a tick of the cadence, including
+                // the ones still carrying the previous move: the consumer
+                // paints those too.
+                intervals.push(last_frame.elapsed());
+                last_frame = Instant::now();
+                sizes.insert((frame.width(), frame.height()));
+                if frame.epoch() >= target {
+                    first_pixels.extend(frame.stats().interactivity.to_first_pixel);
+                    break;
+                }
+            }
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "gave up waiting {} s for one move of the drag to answer",
+                WAIT_LIMIT.as_secs()
+            );
+            std::thread::sleep(POLL);
+        }
+    }
+    let marks = first_pixels.iter().copied().map(millis).collect();
+    Ok(DragReport {
+        moves,
+        motion,
+        frame_millis: median(&mut intervals),
+        first_pixel_millis: median(&mut first_pixels),
+        first_pixels: marks,
+        sizes,
+    })
+}
+
+/// The middle of `values`, in milliseconds — zero if there are none.
+fn median(values: &mut [Duration]) -> f64 {
+    values.sort_unstable();
+    values.get(values.len() / 2).copied().map_or(0.0, millis)
 }
 
 /// Issue one edit and read back what it cost. `mark` is the last
@@ -811,6 +944,29 @@ fn print_header() {
         print!("{name:>9}");
     }
     println!();
+}
+
+/// The drag's three lines, in the same column as the walk's numbers.
+fn print_drag(report: &DragReport) {
+    let sizes: Vec<_> = report
+        .sizes
+        .iter()
+        .map(|(width, height)| format!("{width}×{height}"))
+        .collect();
+    println!(
+        "\n  {} moves, never settling, motion resolution {}",
+        report.moves,
+        if report.motion { "on" } else { "off" },
+    );
+    println!(
+        "  {:<LABEL_WIDTH$}{:>9.2}",
+        "frame interval", report.frame_millis
+    );
+    println!(
+        "  {:<LABEL_WIDTH$}{:>9.2}",
+        "to first pixel", report.first_pixel_millis
+    );
+    println!("  {:<LABEL_WIDTH$}{:>9}", "frame size", sizes.join(", "));
 }
 
 /// One row, in the same order the header came out in.

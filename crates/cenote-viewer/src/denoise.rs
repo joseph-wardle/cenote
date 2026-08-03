@@ -117,12 +117,13 @@ impl DenoiseView {
         }
         let due = self.submitted.is_none_or(|at| at.elapsed() >= CADENCE);
         if !self.busy && due {
+            let floats = frame.width() as usize * frame.height() as usize * 4;
             let job = Job {
                 width: frame.width(),
                 height: frame.height(),
-                beauty: as_f32(&gpu.download_buffer(frame.beauty())?),
-                albedo: as_f32(&gpu.download_buffer(frame.albedo())?),
-                normal: as_f32(&gpu.download_buffer(frame.normal())?),
+                beauty: as_f32(&gpu.download_buffer(frame.beauty())?, floats),
+                albedo: as_f32(&gpu.download_buffer(frame.albedo())?, floats),
+                normal: as_f32(&gpu.download_buffer(frame.normal())?, floats),
             };
             // The worker owns its end until we drop ours; send can't fail.
             let _ = self.jobs.send(job);
@@ -165,10 +166,15 @@ fn filter(denoiser: &mut Option<cenote::denoise::Denoiser>, job: &Job) -> cenote
     })
 }
 
-/// Reinterpret downloaded bytes as the f32 texels they are.
-fn as_f32(bytes: &[u8]) -> Vec<f32> {
+/// Reinterpret the leading `floats` of downloaded bytes as the f32 texels
+/// they are. The cut matters: a publish buffer is sized for the window and
+/// may hold the smaller rectangle a moving view renders, and OIDN asserts
+/// its inputs are exactly `width × height` — on the worker thread, where a
+/// panic would strand the job channel for the rest of the session.
+fn as_f32(bytes: &[u8], floats: usize) -> Vec<f32> {
     bytes
         .chunks_exact(4)
+        .take(floats)
         .map(|lanes| f32::from_ne_bytes([lanes[0], lanes[1], lanes[2], lanes[3]]))
         .collect()
 }

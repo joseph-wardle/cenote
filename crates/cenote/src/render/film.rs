@@ -14,14 +14,14 @@
 use ash::vk;
 
 use crate::error::Result;
+use crate::gpu::{Buffer, Context, MemoryLocation};
+use crate::wavefront::{AovTargets, upload_aov_table};
 
 /// Relative luminance of a linear `ACEScg` (AP1) colour — the CIE Y row of
 /// the AP1→XYZ matrix. Identical to `luminance` in `accumulate.slang`, so the
 /// host's standard-error readback weighs brightness exactly as the kernel that
 /// filled the second-moment buffer did.
 const LUMINANCE_AP1: [f32; 3] = [0.272_228_72, 0.674_081_74, 0.053_689_517];
-use crate::gpu::{Buffer, Context, MemoryLocation};
-use crate::wavefront::{AovTargets, upload_aov_table};
 
 /// One film buffer's accumulation pair: the per-pixel target a wave writes
 /// its sample into (`TRANSFER_DST`: each wave starts by zero-filling it),
@@ -31,10 +31,13 @@ use crate::wavefront::{AovTargets, upload_aov_table};
 pub(super) struct Accumulation {
     pub(super) sample: Buffer,
     pub(super) sum: Buffer,
+    /// Floats per pixel: 4 for an RGBA average, 1 for depth.
+    channels: usize,
 }
 
 impl Accumulation {
-    fn new(gpu: &Context, name: &str, bytes: u64) -> Result<Self> {
+    fn new(gpu: &Context, name: &str, texels: u64, channels: usize) -> Result<Self> {
+        let bytes = texels * channels as u64 * 4;
         let storage =
             vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
         Ok(Self {
@@ -50,25 +53,18 @@ impl Accumulation {
                 storage | vk::BufferUsageFlags::TRANSFER_SRC,
                 MemoryLocation::GpuOnly,
             )?,
+            channels,
         })
     }
 }
 
 /// Progressive accumulation state for one render-target size: per-pixel
-/// linear f32 sums and the samples the current wave writes — beauty plus
-/// the three AOVs (the denoiser's albedo and normal guides and first-hit
-/// depth), each its own pixel-owned pair so the bitwise-determinism
-/// invariant covers them all. The sample count lives on the host — it is
-/// uniform across pixels and buffers by construction.
+/// linear f32 sums and the samples the current wave writes.
 ///
-/// The resolved averages — the sums divided by the count — are written into
-/// caller-owned buffers ([`Renderer::resolve`](super::Renderer::resolve))
-/// rather than held here, so the [`Session`](super::Session) can
-/// double-buffer its published frames while the film keeps accumulating
-/// into these sums.
-///
-/// Sized at creation; a resize means a new `Film`. A view change means
-/// [`Film::reset`].
+/// Allocated at creation for the largest rectangle it will ever render; a
+/// window resize means a new `Film`. Within that allocation the rendered
+/// rectangle can shrink and grow again ([`Film::rescale`]). A view change
+/// means [`Film::reset`].
 pub struct Film {
     /// One sample's radiance, RGBA f32.
     pub(super) beauty: Accumulation,
@@ -107,6 +103,9 @@ pub struct Film {
     aov_table: Buffer,
     pub(super) width: u32,
     pub(super) height: u32,
+    /// Texels the buffers above were allocated for — the ceiling
+    /// [`Film::rescale`] may not pass.
+    capacity: u64,
     pub(super) samples: u32,
 }
 
@@ -117,9 +116,9 @@ impl Film {
     pub fn new(gpu: &Context, width: u32, height: u32) -> Result<Self> {
         assert!(width > 0 && height > 0, "zero-sized film");
         let texels = u64::from(width) * u64::from(height);
-        let albedo = Accumulation::new(gpu, "film.albedo", texels * 16)?;
-        let normal = Accumulation::new(gpu, "film.normal", texels * 16)?;
-        let depth = Accumulation::new(gpu, "film.depth", texels * 4)?;
+        let albedo = Accumulation::new(gpu, "film.albedo", texels, 4)?;
+        let normal = Accumulation::new(gpu, "film.normal", texels, 4)?;
+        let depth = Accumulation::new(gpu, "film.depth", texels, 1)?;
         // Just the sum: the kernel derives Σ luminance² from the beauty sample,
         // so there is no wave-written sample half. STORAGE (kernel writes it) +
         // TRANSFER_SRC (the standard-error readback).
@@ -152,7 +151,7 @@ impl Film {
         let aov_table =
             upload_aov_table(gpu, &albedo.sample, &normal.sample, &depth.sample, &guide)?;
         Ok(Self {
-            beauty: Accumulation::new(gpu, "film", texels * 16)?,
+            beauty: Accumulation::new(gpu, "film", texels, 4)?,
             albedo,
             normal,
             depth,
@@ -162,6 +161,7 @@ impl Film {
             aov_table,
             width,
             height,
+            capacity: texels,
             samples: 0,
         })
     }
@@ -181,6 +181,32 @@ impl Film {
     /// instead of adding, so nothing needs clearing now.
     pub fn reset(&mut self) {
         self.samples = 0;
+    }
+
+    /// Render a smaller rectangle into the buffers already allocated, and
+    /// restart. The picture packs at the front of every buffer, so a reduced
+    /// render is the same kernels on fewer texels and the stale tail past
+    /// the new rectangle is never read.
+    ///
+    /// Nothing is freed or reallocated: a film and its publish slots are
+    /// hundreds of megabytes at window size, and building them at both ends
+    /// of every drag would land that cost on the frames this exists to make
+    /// cheaper. The allocation therefore stays sized for the largest
+    /// rectangle asked for.
+    ///
+    /// # Panics
+    ///
+    /// If the rectangle is empty, or larger than the film was allocated for
+    /// — the buffers do not grow, so a bigger window needs a new [`Film`].
+    pub fn rescale(&mut self, width: u32, height: u32) {
+        assert!(width > 0 && height > 0, "zero-sized film");
+        assert!(
+            u64::from(width) * u64::from(height) <= self.capacity,
+            "a film cannot render more texels than it was allocated for"
+        );
+        self.width = width;
+        self.height = height;
+        self.reset();
     }
 
     /// Samples accumulated since creation or the last [`Film::reset`].
@@ -212,10 +238,19 @@ impl Film {
         })
     }
 
-    /// One buffer's sums, downloaded and divided by the sample count.
+    fn texels(&self) -> usize {
+        self.width as usize * self.height as usize
+    }
+
+    /// One buffer's sums divided by the sample count, cut to the rendered
+    /// rectangle — which may be smaller than the allocation.
     fn averaged(&self, gpu: &Context, accumulation: &Accumulation) -> Result<Vec<f32>> {
         let sums: Vec<f32> = bytemuck::pod_collect_to_vec(&gpu.download_buffer(&accumulation.sum)?);
-        Ok(sums.iter().map(|sum| sum / self.samples as f32).collect())
+        Ok(sums
+            .iter()
+            .take(self.texels() * accumulation.channels)
+            .map(|sum| sum / self.samples as f32)
+            .collect())
     }
 
     /// Read back the per-pixel estimator standard error of beauty luminance —
@@ -235,6 +270,7 @@ impl Film {
             bytemuck::pod_collect_to_vec(&gpu.download_buffer(&self.moment2)?);
         Ok(moment2
             .iter()
+            .take(self.texels())
             .zip(beauty.chunks_exact(4))
             .map(|(sum_l2, rgba)| {
                 let mean_l = (rgba[0] * LUMINANCE_AP1[0]

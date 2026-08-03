@@ -1693,6 +1693,48 @@ fn reset_restarts_the_accumulation() {
     assert_eq!(download_f32(&gpu, &film.beauty.sum), single);
 }
 
+/// A rescaled film is the same renderer on fewer pixels, not a second
+/// rendering path: shrunk to 32×32 it must be bit-identical to a film
+/// created at 32×32, and taken back up to 64×64 the stale tail the reduced
+/// render left behind must not survive into the full-size picture.
+#[test]
+fn a_rescaled_film_renders_what_a_smaller_one_does() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let scene = Scene::demo(&gpu).expect("demo scene");
+    let renderer = Renderer::new(&gpu).expect("renderer");
+    let mut film = Film::new(&gpu, 64, 64).expect("film");
+    // Fill at full size first, so the tail past the reduced rectangle holds
+    // real pixels: a leak is then a visible image, not zeros.
+    renderer
+        .accumulate(&gpu, &scene, &mut film)
+        .expect("accumulate");
+
+    film.rescale(32, 32);
+    assert_eq!((film.width(), film.height(), film.samples()), (32, 32, 0));
+    let mut native = Film::new(&gpu, 32, 32).expect("film");
+    for _ in 0..2 {
+        for target in [&mut film, &mut native] {
+            renderer
+                .accumulate(&gpu, &scene, target)
+                .expect("accumulate");
+        }
+    }
+    let rescaled = film.beauty_average(&gpu).expect("average");
+    assert_eq!(rescaled.len(), 32 * 32 * 4, "the readback is the picture's");
+    assert_eq!(rescaled, native.beauty_average(&gpu).expect("average"));
+
+    // Back up: the first sample after a rescale overwrites every texel of
+    // the larger rectangle, so this is a fresh single frame again.
+    film.rescale(64, 64);
+    renderer
+        .accumulate(&gpu, &scene, &mut film)
+        .expect("accumulate");
+    let single = renderer.render(&gpu, &scene, 64, 64).expect("render");
+    assert_eq!(download_f32(&gpu, &film.beauty.sum), single);
+}
+
 /// The GPU resolve must land the same average as the host
 /// [`Film::average`] readback — same sums, same divisor. GPU division is
 /// only correctly rounded to a couple of ULP (Vulkan's precision floor),

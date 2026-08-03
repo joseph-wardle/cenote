@@ -392,6 +392,11 @@ impl Viewer {
             &self.stats,
             &self.ui_desc,
         );
+        self.session.set_motion_target(
+            self.gui
+                .motion()
+                .then_some(cenote::render::Session::MOTION_TARGET),
+        );
         // A lookdev widget moved: apply the patch to the replica first — it
         // must accept a value change to a material it already holds — then
         // hand the same set to the render session (stop, apply, restart), so
@@ -406,8 +411,7 @@ impl Viewer {
             }
         }
 
-        //
-        // Otherwise the denoise toggle swaps which buffer the tonemap reads —
+        // The denoise toggle swaps which buffer the tonemap reads —
         // raw average or the denoised view — and nothing upstream notices.
         // Until the first filtered result lands (or right after a resize), the
         // raw frame stands in.
