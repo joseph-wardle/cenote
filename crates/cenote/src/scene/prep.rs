@@ -10,6 +10,13 @@
 //! everywhere is name order, so an incremental update lands the exact scene
 //! a fresh build would — the determinism invariant extends through editing.
 //!
+//! Both paths report where their time went, in the four [`Phases`] a build
+//! spends it in — the measurement that turns "cheap over a scene's handful
+//! of instances" from a claim into a number. Host `Instant`s are
+//! exact here rather than approximate: every GPU call below blocks on a
+//! fence before returning, so nothing this module starts is still running
+//! when the clock is read.
+//!
 //! The fallible host-side lowering both paths run first — and the
 //! [`Error::Scene`](crate::Error) contract that keeps a live session's last
 //! good scene when an edit can't render — lives in [`super::lower`]:
@@ -18,6 +25,7 @@
 //! the render anyway.
 
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 use super::changeset::Dirty;
 use super::description::SceneDescription;
@@ -29,6 +37,7 @@ use super::{
 };
 use crate::error::Result;
 use crate::gpu::Context;
+use crate::stats::Phases;
 use crate::texture;
 
 impl Scene {
@@ -44,13 +53,41 @@ impl Scene {
     /// error: it renders black (the render server starts on one, and a
     /// live edit may delete the last instance). Any other error is a GPU
     /// fault from upload or acceleration-structure builds.
+    pub fn prep(gpu: &Context, description: &mut SceneDescription) -> Result<Self> {
+        Self::prep_timed(gpu, description).map(|(scene, _)| scene)
+    }
+
+    /// [`Scene::prep`], reporting where a load's time went — ready to hand
+    /// to [`Recorder::attribute_load`](crate::stats::Recorder::attribute_load)
+    /// as it stands.
+    ///
+    /// [`Phases::before`] is process start to this call: the device
+    /// creation, the shader compile, and the scene file read that a load
+    /// waits through before any of the work below can begin. It is origined
+    /// where the [`Recorder`](crate::stats::Recorder) origins
+    /// time-to-first-ray, which is what makes the phases add up to that
+    /// mark. A second build in the same process is not a startup and its
+    /// `before` says nothing; that caller wants [`Scene::prep`].
+    ///
+    /// The two are the same code path, so a timed build and an untimed one
+    /// cannot diverge in what they produce. Every stamp is a host `Instant`,
+    /// which is exact here rather than approximate: every GPU call below
+    /// blocks on a fence before returning, so the host clock and the device
+    /// agree about when each phase ended.
+    ///
+    /// # Errors
+    ///
+    /// As [`Scene::prep`].
     #[expect(
         clippy::missing_panics_doc,
         reason = "the expects state all-dirty invariants — a fresh build always carries \
                   its environment and camera — not reachable panics"
     )]
-    pub fn prep(gpu: &Context, description: &mut SceneDescription) -> Result<Self> {
+    pub fn prep_timed(gpu: &Context, description: &mut SceneDescription) -> Result<(Self, Phases)> {
+        let before = crate::stats::startup().elapsed();
+        let lowering = Instant::now();
         let host = host_phase(description, &all_dirty(description), true, &BTreeMap::new(), None)?;
+        let uploading = Instant::now();
         let mut meshes = BTreeMap::new();
         for (name, mesh) in &host.meshes {
             meshes.insert(
@@ -63,6 +100,7 @@ impl Scene {
             .values()
             .map(|texture| texture.image.descriptor())
             .collect();
+        let texture_params = upload_texture_params(gpu, textures.keys())?;
         let spec = host
             .environment
             .as_ref()
@@ -78,8 +116,10 @@ impl Scene {
             pdfs,
             power,
         } = upload_environment(gpu, environment)?;
+        let building = Instant::now();
         let placements = placements(&meshes, &host.instances);
         let tlas = build_scene_tlas(gpu, &placements)?;
+        let tabling = Instant::now();
         let (geometry, materials, lights) =
             upload_instance_tables(gpu, &placements, &host.triangle_lights, &host.delta_lights)?;
         drop(placements);
@@ -88,7 +128,7 @@ impl Scene {
             geometry,
             materials,
             lights,
-            upload_texture_params(gpu, textures.keys())?,
+            texture_params,
             marginal,
             conditional,
             pdfs,
@@ -105,7 +145,7 @@ impl Scene {
             host.light_count(),
         )?;
         description.take_dirty();
-        Ok(Self {
+        let scene = Self {
             tlas,
             environment: image,
             table,
@@ -120,11 +160,23 @@ impl Scene {
             env_tint: spec.tint,
             env_to_world: spec.to_world,
             env_from_world: spec.from_world,
-        })
+        };
+        let phases = Phases {
+            before,
+            ..phases(lowering, uploading, building, tabling)
+        };
+        Ok((scene, phases))
     }
 
     /// Rebuild exactly what `dirty` names, leaving the rest of the
     /// residency in place — the wave-boundary half of the edit channel.
+    ///
+    /// Returns where the rebuild's time went, in the four [`Phases`] it can
+    /// spend it in; the rest of the struct is the caller's to fill. A phase
+    /// an edit did not touch reads as very nearly zero rather than as
+    /// absent, which is what makes two edit kinds comparable — and what
+    /// makes "the tables cost this much on an edit that touched no
+    /// instance" a number rather than an argument.
     ///
     /// # Errors
     ///
@@ -138,7 +190,8 @@ impl Scene {
         gpu: &Context,
         description: &SceneDescription,
         dirty: &Dirty,
-    ) -> Result<()> {
+    ) -> Result<Phases> {
+        let lowering = Instant::now();
         let resident_hashes = self
             .textures
             .iter()
@@ -151,6 +204,7 @@ impl Scene {
             &resident_hashes,
             self.env_source.as_deref(),
         )?;
+        let uploading = Instant::now();
         // Only device faults from here on — the untouched-on-Scene-error
         // contract holds because everything fallible already ran.
         for name in &host.removed_meshes {
@@ -183,10 +237,12 @@ impl Scene {
             self.env_to_world = spec.to_world;
             self.env_from_world = spec.from_world;
         }
+        let building = Instant::now();
         let placements = placements(&self.meshes, &host.instances);
         if host.tlas_dirty {
             self.tlas = build_scene_tlas(gpu, &placements)?;
         }
+        let tabling = Instant::now();
         let (geometry, materials, lights) =
             upload_instance_tables(gpu, &placements, &host.triangle_lights, &host.delta_lights)?;
         drop(placements);
@@ -206,7 +262,29 @@ impl Scene {
         if let Some(camera) = host.camera {
             self.camera = camera;
         }
-        Ok(())
+        Ok(phases(lowering, uploading, building, tabling))
+    }
+}
+
+/// The four phases a build or a rebuild spends its time in, from the stamps
+/// at their shared boundaries.
+///
+/// Shared boundaries are the whole trick, and the one [`PassTimings`] uses:
+/// each phase ends where the next begins, so the four telescope to the
+/// interval from `lowering` to now with nothing between them to lose. The
+/// closing stamp is taken here rather than passed in for the same reason —
+/// one place decides where the last phase ends.
+///
+/// [`PassTimings`]: crate::stats::PassTimings
+fn phases(lowering: Instant, uploading: Instant, building: Instant, tabling: Instant) -> Phases {
+    Phases {
+        lower: uploading - lowering,
+        upload: building - uploading,
+        // The placement list is built here too: it is the TLAS's input, and
+        // at a scene's instance count it is not free.
+        tlas: tabling - building,
+        tables: tabling.elapsed(),
+        ..Phases::default()
     }
 }
 

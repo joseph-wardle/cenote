@@ -110,7 +110,10 @@ fn main() -> anyhow::Result<()> {
             ],
         })
         .expect("the empty scene's singletons are valid");
-    let scene = Scene::prep(&gpu, &mut description).context("preparing the empty scene")?;
+    // The empty scene the server starts on: the load worth measuring is the
+    // first `replace` a client sends, which the edit path already covers.
+    let (scene, load) =
+        Scene::prep_timed(&gpu, &mut description).context("preparing the empty scene")?;
     let camera = *scene.camera();
     let renderer = Renderer::new(&gpu).context("creating the renderer")?;
     let [width, height] = Settings::default().resolution;
@@ -126,6 +129,7 @@ fn main() -> anyhow::Result<()> {
             max_samples,
             noise_threshold: None,
         },
+        load,
     );
     let fb = shm::Segment::create(1, width, height).context("allocating the framebuffer")?;
     let state = Arc::new(Mutex::new(Shared {

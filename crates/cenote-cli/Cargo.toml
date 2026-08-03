@@ -22,6 +22,11 @@ log = "0.4.33"
 # harness FLIP-compares usdrecord's EXR against the checked-in golden through
 # the same code the in-process goldens use — no second FLIP dependency.
 nv-flip = "0.1.2"
+# The `edit-latency` sidecar, in the format every other file the repo writes
+# is in. Pinned to the core's exact ron for the same reason it is pinned
+# there: minor releases have shipped breaking changes.
+ron = "=0.12.2"
+serde = { version = "1.0.228", features = ["derive"] }
 
 [features]
 # Builds `render --denoise` (the flag itself always parses, and names

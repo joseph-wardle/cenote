@@ -8,8 +8,18 @@
 //! for its total is free, stamping *inside* it is not, which is why only the
 //! per-kernel breakdown is rationed (see [`crate::gpu::PassTimer`]). The
 //! interactivity marks are host `Instant` differences off events the render loop
-//! already has. Memory is a running total of allocations the renderer already
-//! makes, sampled rather than recomputed.
+//! already has, and the [`Phases`] beneath them are a handful more of the same,
+//! taken at boundaries the update path already crosses — some hundreds of
+//! nanoseconds against a mark measured in tens of milliseconds. Memory is a
+//! running total of allocations the renderer already makes, sampled rather than
+//! recomputed.
+//!
+//! [`Phases`] is also where the tier-one line falls for latency, and it falls at
+//! *per phase*. Per-object attribution — which mesh, which texture, which of
+//! sixty-nine thousand instances — is a span per object, and a span per object at
+//! that scale is milliseconds of instrument inside the thing it measures. When a
+//! phase comes back bad and the next question is *which one*, the answer is an
+//! opt-in trace, not an always-on one.
 //!
 //! Anything costing a register, a reduction pass, or a readback per frame —
 //! ray counts, per-pixel variance — is tier two: opt-in, compiled out by
@@ -62,8 +72,11 @@ pub fn mark_startup() {
 }
 
 /// Process start if [`mark_startup`] was called, else now — and now becomes
-/// the origin for everyone after, so one run never mixes two origins.
-fn startup() -> Instant {
+/// the origin for everyone after, so one run never mixes two origins. The
+/// one zero in the crate: [`Recorder::new`] origins time-to-first-ray here,
+/// and [`Scene::prep_timed`](crate::scene::Scene::prep_timed) origins the
+/// wait in front of a load here, which is why the two add up.
+pub(crate) fn startup() -> Instant {
     *STARTUP.get_or_init(Instant::now)
 }
 
@@ -266,6 +279,119 @@ impl Frame {
     }
 }
 
+/// Where an update's latency went, in the phases worth naming.
+///
+/// A fixed struct rather than the labelled list [`PassTimings`] carries, for
+/// the reason [`Memory`]'s buckets are fixed: these eight *are* the
+/// editorial claim about where an update's time can go, so a reader learns
+/// the shape of the update path from this file, and a ninth span has to be
+/// argued for here rather than added at a call site.
+///
+/// The phases account for their mark **exactly**. Seven are clocked at the
+/// boundaries of the work they name; [`Phases::other`] is whatever the mark
+/// covers that they do not, filled in when the mark lands. So
+/// [`Phases::total`] equals the [`Interactivity`] mark it explains by
+/// construction, and a phase that quietly stopped covering its work shows up
+/// as `other` growing rather than as a total that no longer adds up.
+///
+/// Every phase is a host `Instant`, and that is exact rather than
+/// approximate because every GPU call the update path makes blocks on a
+/// fence — see [`Context::submit_once`](crate::gpu::Context). Nothing here
+/// needs a query pool.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct Phases {
+    /// Before any of the work below could begin: an edit's wait for the next
+    /// wave boundary, or — for a scene load — process start to the first
+    /// prep call. Invisible from inside the renderer, and on a busy sample
+    /// the largest term a person actually feels.
+    #[serde(with = "millis")]
+    pub before: Duration,
+    /// Applying the change-set to the description: the clone it takes for
+    /// atomicity, the patch, and validation. Zero for a load or a camera
+    /// move, and the one phase here that is pure host work.
+    #[serde(with = "millis")]
+    pub apply: Duration,
+    /// Host-side lowering: PLY reads, texture decode and block compression,
+    /// the environment's sampling tables. Everything that can fail on user
+    /// data happens in here, before the first GPU call.
+    #[serde(with = "millis")]
+    pub lower: Duration,
+    /// Getting it onto the device: mesh buffers and the bottom-level
+    /// acceleration structures over them, textures, the environment image.
+    #[serde(with = "millis")]
+    pub upload: Duration,
+    /// The top-level acceleration structure over the instances, and the
+    /// placement list it is built from. Zero on an edit that moved nothing.
+    #[serde(with = "millis")]
+    pub tlas: Duration,
+    /// The instance tables (geometry, materials, lights) and the scene
+    /// table. These rebuild wholesale on any edit, whatever it touched, so
+    /// this phase is where a scene's instance count shows up whether or not
+    /// the edit had anything to do with instances.
+    #[serde(with = "millis")]
+    pub tables: Duration,
+    /// The first sample after the restart — the accumulate whose completion
+    /// *is* the mark.
+    #[serde(with = "millis")]
+    pub sample: Duration,
+    /// The remainder: whatever the mark covers that the phases above do not
+    /// name. On an edit it is loop overhead and should stay near zero, so a
+    /// large one means a phase has stopped covering its work. On a load it
+    /// is honest bulk — the shader compile and pipeline creation that happen
+    /// outside prep — and showing it beats hiding it in a phase that would
+    /// then be lying.
+    #[serde(with = "millis")]
+    pub other: Duration,
+    /// How many queued edits this drain covered. Zero for a load or a camera
+    /// move; above one when a burst landed on the same wave boundary, in
+    /// which case `before` is the *oldest* edit's wait — the longest anyone
+    /// waited, which is the one worth reporting.
+    pub batched: u32,
+}
+
+impl Phases {
+    /// The interval these phases account for, which is the mark they
+    /// explain.
+    #[must_use]
+    pub fn total(&self) -> Duration {
+        self.measured() + self.other
+    }
+
+    /// The clocked phases alone — what [`Phases::other`] is the remainder
+    /// of.
+    fn measured(&self) -> Duration {
+        self.before + self.apply + self.lower + self.upload + self.tlas + self.tables + self.sample
+    }
+
+    /// The phases in the order they run, for display.
+    #[must_use]
+    pub fn named(&self) -> [(&'static str, Duration); 8] {
+        [
+            ("before", self.before),
+            ("apply", self.apply),
+            ("lower", self.lower),
+            ("upload", self.upload),
+            ("tlas", self.tlas),
+            ("tables", self.tables),
+            ("sample", self.sample),
+            ("other", self.other),
+        ]
+    }
+}
+
+/// Close a breakdown against the mark it explains: the sample that landed it
+/// is the accumulate just recorded, and whatever the named phases still do
+/// not cover is the remainder.
+///
+/// Saturating, because a breakdown claiming more time than its mark is a
+/// caller whose clocks overlap, and a zero remainder beside an inflated
+/// total is the reading that shows it.
+fn close(mut phases: Phases, sample: Duration, mark: Duration) -> Phases {
+    phases.sample = sample;
+    phases.other = mark.saturating_sub(phases.measured());
+    phases
+}
+
 /// How long the renderer took to become useful — the numbers a person
 /// waiting on it actually feels.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -275,14 +401,24 @@ pub struct Interactivity {
     /// build all land in here. Measured once per scene load, not per frame.
     #[serde(with = "millis::option")]
     pub to_first_ray: Option<Duration>,
-    /// Interaction: the last camera or edit reset to the first frame
-    /// published after it. What a click costs.
+    /// Interaction: the camera move, edit, or resize that last restarted
+    /// accumulation, to the first sample completed after it. What a click
+    /// costs — origined at the *verb*, so the wait for the wave boundary is
+    /// inside the number rather than in front of it.
     #[serde(with = "millis::option")]
     pub to_first_pixel: Option<Duration>,
-    /// That same reset to [`READABLE_SAMPLES`] samples. The readability
+    /// That same verb to [`READABLE_SAMPLES`] samples. The readability
     /// stand-in — see the constant.
     #[serde(with = "millis::option")]
     pub to_readable: Option<Duration>,
+    /// Where [`Interactivity::to_first_ray`] went. `None` until the first
+    /// sample lands, and on a caller that did not hand over a breakdown.
+    pub load: Option<Phases>,
+    /// Where the most recent [`Interactivity::to_first_pixel`] went. `None`
+    /// until the first sample lands; after that it stays the last
+    /// *completed* breakdown while the next one is in flight, so a consumer
+    /// reading it never finds it blanked.
+    pub interaction: Option<Phases>,
 }
 
 /// Where the device memory went, in the five buckets worth naming.
@@ -434,8 +570,9 @@ pub struct Recorder {
     /// When the recorder was created, i.e. as close to process start as the
     /// caller could put it. The origin for [`Interactivity::to_first_ray`].
     origin: Instant,
-    /// When accumulation last restarted — a camera move, an edit, a resize.
-    /// The origin for the two per-interaction marks.
+    /// When the interaction that last restarted accumulation began — a
+    /// camera move, an edit, a resize. The origin for the two
+    /// per-interaction marks.
     reset: Instant,
     interactivity: Interactivity,
     /// Which of the two per-interaction marks the current reset still owes.
@@ -444,6 +581,15 @@ pub struct Recorder {
     /// blanking out for the duration of the next one.
     awaiting_first_pixel: bool,
     awaiting_readable: bool,
+    /// The breakdown of the restart in flight, not yet closed: neither the
+    /// sample nor the remainder is known until the mark it explains lands.
+    /// Written by [`Recorder::restart`] and only there, so it can never
+    /// describe a restart other than the current one.
+    pending: Phases,
+    /// The same for the load, kept separate because its mark is the
+    /// once-only `to_first_ray` — which the same record can land alongside
+    /// the first interaction's.
+    pending_load: Option<Phases>,
     memory: Memory,
     peak_memory: Memory,
     // The two populations are kept apart deliberately. A breakdown costs a
@@ -490,6 +636,8 @@ impl Recorder {
             interactivity: Interactivity::default(),
             awaiting_first_pixel: true,
             awaiting_readable: true,
+            pending: Phases::default(),
+            pending_load: None,
             memory: Memory::default(),
             peak_memory: Memory::default(),
             window: VecDeque::with_capacity(WINDOW),
@@ -504,11 +652,34 @@ impl Recorder {
     }
 
     /// Note that accumulation restarted: a camera move, an edit, a resize.
-    /// The per-interaction marks re-arm from here.
-    pub fn restart(&mut self) {
-        self.reset = Instant::now();
+    /// The per-interaction marks re-arm from `origin`, and `phases` says
+    /// where the time up to here went — as far as the caller has clocked
+    /// it, since [`Phases::sample`] and [`Phases::other`] are not known
+    /// until the mark lands.
+    ///
+    /// `origin` is when the *verb* happened, not when the restart did. An
+    /// edit queued while the wave was mid-sample waits for the next wave
+    /// boundary, and that wait is latency someone felt: origining here is
+    /// what puts it inside [`Interactivity::to_first_pixel`] instead of in
+    /// front of it. A caller with no verb to point at passes
+    /// `Instant::now()`, which reports exactly what this measured before it
+    /// took an origin.
+    ///
+    /// The origin and the breakdown arrive together because a breakdown
+    /// adopted against the wrong restart would charge one interaction for
+    /// another's cost — so a restart supersedes an in-flight breakdown by
+    /// construction rather than by a rule someone has to remember.
+    pub fn restart(&mut self, origin: Instant, phases: Phases) {
+        self.reset = origin;
         self.awaiting_first_pixel = true;
         self.awaiting_readable = true;
+        self.pending = phases;
+    }
+
+    /// The breakdown of the scene load, whose mark is
+    /// [`Interactivity::to_first_ray`] and which happens once.
+    pub fn attribute_load(&mut self, phases: Phases) {
+        self.pending_load = Some(phases);
     }
 
     /// Record one finished sample.
@@ -524,12 +695,21 @@ impl Recorder {
     /// reason in the struct's fields.
     pub fn record(&mut self, frame: Frame) {
         // The first frame to complete is the first ray traced, and startup
-        // is only ever measured once.
+        // is only ever measured once. Each mark closes its own breakdown
+        // against itself — the first record lands both, and they are
+        // different intervals over the same sample.
         if self.interactivity.to_first_ray.is_none() {
-            self.interactivity.to_first_ray = Some(self.origin.elapsed());
+            let mark = self.origin.elapsed();
+            self.interactivity.to_first_ray = Some(mark);
+            self.interactivity.load = self
+                .pending_load
+                .take()
+                .map(|phases| close(phases, frame.cpu, mark));
         }
         if self.awaiting_first_pixel {
-            self.interactivity.to_first_pixel = Some(self.reset.elapsed());
+            let mark = self.reset.elapsed();
+            self.interactivity.to_first_pixel = Some(mark);
+            self.interactivity.interaction = Some(close(self.pending, frame.cpu, mark));
             self.awaiting_first_pixel = false;
         }
         if self.awaiting_readable && frame.samples >= READABLE_SAMPLES {
@@ -798,7 +978,7 @@ mod tests {
             "one sample is not yet readable"
         );
 
-        recorder.restart();
+        recorder.restart(Instant::now(), Phases::default());
         recorder.record(sample(5, PassTimings::default(), READABLE_SAMPLES));
         let second = recorder.stats().interactivity;
         assert_eq!(
@@ -878,6 +1058,89 @@ mod tests {
             "while the breakdown stays what it can answer for"
         );
         assert_eq!(report.bound, Bound::Gpu);
+    }
+
+    /// The phases account for the mark exactly, and the remainder is what
+    /// makes that true: hand over a breakdown that names most of an
+    /// interaction, and `other` closes the gap so the total *is* the number
+    /// the mark reports. This is the property the whole struct exists for —
+    /// a breakdown that only roughly added up would answer "where did the
+    /// time go" with "somewhere near here".
+    #[test]
+    fn a_breakdown_accounts_for_the_mark_it_explains() {
+        let mut recorder = Recorder::new();
+        // An interaction that began 40 ms ago and named 25 ms of itself.
+        let origin = Instant::now()
+            .checked_sub(Duration::from_millis(40))
+            .expect("the clock is not 40 ms old");
+        recorder.restart(
+            origin,
+            Phases {
+                before: Duration::from_millis(10),
+                apply: Duration::from_millis(3),
+                lower: Duration::from_millis(2),
+                upload: Duration::from_millis(4),
+                tlas: Duration::from_millis(1),
+                tables: Duration::from_millis(5),
+                batched: 2,
+                ..Phases::default()
+            },
+        );
+        recorder.record(sample(8, PassTimings::default(), 1));
+
+        let interactivity = recorder.stats().interactivity;
+        let mark = interactivity.to_first_pixel.expect("the mark landed");
+        let phases = interactivity.interaction.expect("and carried its phases");
+        assert_eq!(phases.total(), mark, "the phases are the mark, exactly");
+        assert_eq!(
+            phases.sample,
+            Duration::from_millis(8),
+            "the sample phase is the accumulate that landed the mark"
+        );
+        assert!(
+            phases.other >= Duration::from_millis(7),
+            "the unnamed remainder is real time, not rounding: {:?}",
+            phases.other
+        );
+        assert_eq!(phases.batched, 2, "the batch count rides along");
+        // The load's mark is the same sample over a different interval, and
+        // its breakdown closes against that one instead.
+        assert!(interactivity.load.is_none(), "no load breakdown was offered");
+    }
+
+    /// A restart supersedes the breakdown of the one it overtook. The work
+    /// that one described never got its mark, and reporting it against the
+    /// newer mark would charge one click for another's cost.
+    #[test]
+    fn an_overtaken_breakdown_is_dropped_rather_than_re_used() {
+        let mut recorder = Recorder::new();
+        recorder.restart(
+            Instant::now(),
+            Phases {
+                tables: Duration::from_millis(20),
+                ..Phases::default()
+            },
+        );
+        recorder.restart(
+            Instant::now(),
+            Phases {
+                apply: Duration::from_millis(1),
+                ..Phases::default()
+            },
+        );
+        recorder.record(sample(5, PassTimings::default(), 1));
+
+        let phases = recorder
+            .stats()
+            .interactivity
+            .interaction
+            .expect("the mark still lands, and carries a breakdown");
+        assert_eq!(
+            phases.tables,
+            Duration::ZERO,
+            "the overtaken interaction's phases are gone, not folded into this one"
+        );
+        assert_eq!(phases.apply, Duration::from_millis(1), "these are the new ones");
     }
 
     /// Peaks are per bucket and never fall, so a report says what the run

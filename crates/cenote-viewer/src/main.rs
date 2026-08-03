@@ -199,8 +199,10 @@ impl Viewer {
         // reach). Both start from `set`, so they begin identical.
         let mut ui_desc = SceneDescription::new();
         ui_desc.apply(&set).context("scene rejected")?;
-        let scene =
-            cenote::scene::Scene::prep(&gpu, &mut description).context("preparing the scene")?;
+        // The render thread cannot measure a load it arrived after, so the
+        // breakdown is carried to it rather than taken there.
+        let (scene, load) = cenote::scene::Scene::prep_timed(&gpu, &mut description)
+            .context("preparing the scene")?;
         let camera = OrbitCamera::framing(scene.camera());
         // Prep guaranteed exactly one settings object; the viewer honors
         // its path-length cap (spp and resolution govern batch renders).
@@ -235,6 +237,7 @@ impl Viewer {
                 max_samples: VIEWER_MAX_SAMPLES,
                 noise_threshold: None,
             },
+            load,
         );
         // Not every platform sends an initial redraw request unprompted.
         window.request_redraw();

@@ -36,6 +36,14 @@
 //! without reaching into the renderer. See
 //! [`Lanes::epoch`] for the counting rules.
 //!
+//! Beside the epoch rides a timestamp, for the other half of the same
+//! question. Every verb records when it happened, and the wave boundary that
+//! acts on it measures its latency from *there* rather than from the
+//! boundary — so the wait for the boundary, which can be a whole sample and
+//! is invisible from inside the renderer, is part of what a click costs
+//! rather than something in front of it. What the wave then does with the
+//! verb it reports as [`stats::Phases`]. See [`Restart`].
+//!
 //! Two frame buffers, not a triple-buffered mailbox: the render thread
 //! resolves only into a buffer no one else references (a strong-count of one
 //! means "in the pool alone"), and if both are busy it simply skips that
@@ -66,7 +74,7 @@ use crate::gpu::{Buffer, Context, MemoryLocation, PassTimer};
 use crate::scene::changeset::{ChangeSet, Dirty, Kind};
 use crate::scene::description::SceneDescription;
 use crate::scene::{Camera, Scene};
-use crate::stats::{self, Recorder, Stats};
+use crate::stats::{self, Phases, Recorder, Stats};
 
 /// The shortest gap between published frames, early in an accumulation. The
 /// render thread accumulates flat out but resolves and publishes at most this
@@ -145,17 +153,65 @@ struct RenderInputs {
     /// pixels reach it; adopted into the renderer, so it is what the accumulate
     /// kernel counts and [`Film::converged_fraction`] reads.
     noise_threshold: Option<f32>,
+    /// When the verb that last wrote this struct happened — the origin the
+    /// latency of a camera move or a resize is measured from. Latest-wins
+    /// like the rest of the struct: a move that lands while the previous
+    /// one is still waiting for the wave boundary supersedes it, and it is
+    /// the newer one the person is waiting on.
+    stamped: Instant,
     /// Cleared to stop the thread; checked at the top of every iteration.
     running: bool,
 }
 
-/// One queued scene edit — the two verbs a change-set can arrive as.
+/// One queued scene edit — the two verbs a change-set can arrive as, each
+/// carrying when it was queued so the wait for the next wave boundary lands
+/// inside the latency it caused rather than in front of it.
 enum SceneEdit {
     /// Overlay onto the current description ([`SceneDescription::apply`]).
-    Apply(ChangeSet),
+    Apply { at: Instant, set: ChangeSet },
     /// The set describes the whole scene from empty; the description
     /// becomes it, diffing for dirt ([`SceneDescription::replace`]).
-    Replace(ChangeSet),
+    Replace { at: Instant, set: ChangeSet },
+}
+
+impl SceneEdit {
+    /// When this edit was queued.
+    fn at(&self) -> Instant {
+        match self {
+            SceneEdit::Apply { at, .. } | SceneEdit::Replace { at, .. } => *at,
+        }
+    }
+}
+
+/// A restart and what it cost to get to: the verb behind it, and the phases
+/// of the work the render thread did before the first sample could start.
+///
+/// One per wave at most. Every reset the loop can take produces one — an
+/// edit drain fills the prep phases, a camera move or a resize leaves them
+/// zero because it does none of that work, and both carry the origin that
+/// makes the wait for this boundary part of the measurement.
+struct Restart {
+    /// When the verb happened. Handed to
+    /// [`Recorder::restart`](crate::stats::Recorder::restart) as the origin.
+    origin: Instant,
+    /// What has been clocked so far. The sample and the remainder are the
+    /// recorder's to fill once the mark lands.
+    phases: Phases,
+}
+
+impl Restart {
+    /// A restart with a verb behind it but no prep to report: a camera move
+    /// or a resize, whose whole cost before the sample is the wait for this
+    /// wave boundary.
+    fn waited(origin: Instant) -> Self {
+        Self {
+            origin,
+            phases: Phases {
+                before: origin.elapsed(),
+                ..Phases::default()
+            },
+        }
+    }
 }
 
 /// The four lanes between a consumer and the render thread — one shared
@@ -293,6 +349,12 @@ impl Session {
     /// marks the first frame ready. `auto_stop` bounds accumulation: the
     /// thread parks at its sample cap (and optional convergence threshold)
     /// so a settled view releases the GPU.
+    ///
+    /// `load` is where the time before this call went, as
+    /// [`Scene::prep_timed`] reports it. The render thread has no way to
+    /// measure a load it arrived after, so it is handed the breakdown
+    /// instead; pass [`Phases::default`] when there was no load to speak of
+    /// and the startup mark should stay unattributed.
     #[must_use]
     #[expect(
         clippy::too_many_arguments,
@@ -308,6 +370,7 @@ impl Session {
         width: u32,
         height: u32,
         auto_stop: AutoStop,
+        load: Phases,
     ) -> Self {
         let lanes = Arc::new(Lanes {
             inputs: Mutex::new(RenderInputs {
@@ -316,6 +379,7 @@ impl Session {
                 generation: 0,
                 max_samples: auto_stop.max_samples,
                 noise_threshold: auto_stop.noise_threshold,
+                stamped: Instant::now(),
                 running: true,
             }),
             edits: Mutex::new(Vec::new()),
@@ -327,7 +391,7 @@ impl Session {
             let lanes = Arc::clone(&lanes);
             std::thread::Builder::new()
                 .name("cenote-render".into())
-                .spawn(move || render_loop(&gpu, description, scene, renderer, &lanes))
+                .spawn(move || render_loop(&gpu, description, scene, renderer, &lanes, load))
                 .expect("spawning the render thread")
         };
         Self {
@@ -345,6 +409,7 @@ impl Session {
             let mut inputs = self.lanes.inputs.lock().expect("inputs mutex poisoned");
             inputs.camera = camera;
             inputs.generation += 1;
+            inputs.stamped = Instant::now();
         }
         self.lanes.epoch.fetch_add(1, Ordering::Release);
     }
@@ -353,11 +418,11 @@ impl Session {
     /// match on the next sample. Bumps the epoch — even for a size the render
     /// already has, so a consumer waiting on the verb's frame never wedges.
     pub fn resize(&self, width: u32, height: u32) {
-        self.lanes
-            .inputs
-            .lock()
-            .expect("inputs mutex poisoned")
-            .size = (width, height);
+        {
+            let mut inputs = self.lanes.inputs.lock().expect("inputs mutex poisoned");
+            inputs.size = (width, height);
+            inputs.stamped = Instant::now();
+        }
         self.lanes.epoch.fetch_add(1, Ordering::Release);
     }
 
@@ -373,7 +438,10 @@ impl Session {
             .edits
             .lock()
             .expect("edits mutex poisoned")
-            .push(SceneEdit::Apply(set));
+            .push(SceneEdit::Apply {
+                at: Instant::now(),
+                set,
+            });
         self.lanes.epoch.fetch_add(1, Ordering::Release);
     }
 
@@ -388,7 +456,10 @@ impl Session {
             .edits
             .lock()
             .expect("edits mutex poisoned")
-            .push(SceneEdit::Replace(set));
+            .push(SceneEdit::Replace {
+                at: Instant::now(),
+                set,
+            });
         self.lanes.epoch.fetch_add(1, Ordering::Release);
     }
 
@@ -500,12 +571,20 @@ fn join_render_thread(thread: JoinHandle<Result<()>>) -> Result<()> {
 /// latest inputs, folding queued edits in at wave boundaries and publishing
 /// a resolved average on the throttle. Returns when the running flag clears,
 /// or early on the first device fault.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one wave's decision sequence, in the order the decisions must happen: \
+              each step is guarded by state the next one reads, and carving out a \
+              middle would hand the piece half a dozen mutable bindings and hide \
+              the ordering that is the whole content of the loop"
+)]
 fn render_loop(
     gpu: &Context,
     mut description: SceneDescription,
     mut scene: Scene,
     mut renderer: Renderer,
     lanes: &Lanes,
+    load: Phases,
 ) -> Result<()> {
     log::debug!("render thread started");
     // The render target: the film and its pair of publish buffers, sized
@@ -530,6 +609,10 @@ fn render_loop(
     // timestamps hands back `None` and the loop runs exactly as it did
     // before, reporting wall-clock alone.
     let mut recorder = Recorder::new();
+    // The load happened before this thread existed, so the breakdown for it
+    // is handed in rather than measured here; it closes against
+    // time-to-first-ray when the first sample lands.
+    recorder.attribute_load(load);
     let mut timer = gpu.create_pass_timer(PassTimer::WAVE_CAPACITY)?;
     let mut last_memory_sample: Option<Instant> = None;
     // The film's sample count as of the previous wave; a drop means
@@ -550,6 +633,10 @@ fn render_loop(
         // undercount a racing verb, never claim one it missed.
         let epoch = lanes.epoch.load(Ordering::Acquire);
         let input = *lanes.inputs.lock().expect("inputs mutex poisoned");
+        // The restart this wave is about to make, if any: filled by whichever
+        // branch below rewinds the film, and consumed by the one place that
+        // re-arms the interactivity marks.
+        let mut restart: Option<Restart> = None;
         if !input.running {
             log::debug!("render thread stopping");
             return Ok(());
@@ -574,28 +661,42 @@ fn render_loop(
             applied_size = input.size;
             applied_generation = input.generation;
             last_publish = None;
+            restart = Some(Restart::waited(input.stamped));
         }
         let (film, frames) = target.as_mut().expect("sized by the resize branch above");
         // Queued edits land here, at the wave boundary: stop, apply,
         // re-prep, restart accumulation from sample 0.
-        if apply_edits(gpu, lanes, &mut description, &mut scene, &mut stale)? {
+        if let Some(edits) = apply_edits(gpu, lanes, &mut description, &mut scene, &mut stale)? {
             film.reset();
             last_publish = None;
+            // An edit that arrived in the same wave as a resize supersedes
+            // it: the resize did no prep, so the edit's breakdown is the one
+            // with something to say about where the time went.
+            restart = Some(edits);
         }
         // A plain view change resets the existing film instead.
         if input.generation != applied_generation {
             log::debug!("camera adopted; accumulation restarts");
             *scene.camera_mut() = input.camera;
             film.reset();
+            last_publish = None;
             applied_generation = input.generation;
+            restart.get_or_insert_with(|| Restart::waited(input.stamped));
         }
         // Every restart above rewound the film's sample count, and that is
         // the one signal all of them share — a resize, an edit, a camera move.
         // Re-arming the interactivity marks off it keeps the measurement honest
         // without a call site per reset, which would drift apart the first time
         // another reset is added.
+        //
+        // A rewind with no `restart` beside it is one of those additions
+        // arriving early: it origins at now, which is what this measured
+        // before it took an origin, and reports an empty breakdown — the
+        // mark stays exact, and every millisecond of it lands unnamed.
         if film.samples() < last_samples {
-            recorder.restart();
+            let Restart { origin, phases } =
+                restart.unwrap_or_else(|| Restart::waited(Instant::now()));
+            recorder.restart(origin, phases);
         }
         last_samples = film.samples();
         // The auto-stop threshold changes only what the accumulate kernel counts
@@ -728,27 +829,37 @@ fn auto_stopped(gpu: &Context, film: &Film, threshold: Option<f32>) -> Result<bo
     Ok(film.converged_fraction(gpu)? >= Renderer::CONVERGENCE_TARGET)
 }
 
-/// Drain and apply the queued edits, re-prepping what they dirtied. True
-/// means the visible scene changed and accumulation must restart. A
-/// rejected change-set or re-prep posts to the edit-error lane and keeps
-/// the previous scene; the dirt it left in `stale` retries after the next
-/// edit that applies. Only device faults return `Err`.
+/// Drain and apply the queued edits, re-prepping what they dirtied. A
+/// [`Restart`] means the visible scene changed and accumulation must restart,
+/// and carries where the drain's time went; `None` means nothing visible
+/// happened and the accumulation stands. A rejected change-set or re-prep
+/// posts to the edit-error lane and keeps the previous scene; the dirt it
+/// left in `stale` retries after the next edit that applies. Only device
+/// faults return `Err`.
+///
+/// The batch's origin is its *oldest* edit — the longest anyone in it
+/// waited. A burst that lands on one boundary is one restart and one
+/// measurement, with `batched` saying how many verbs it covered, because
+/// that is what actually happened: they cost one re-prep between them.
 fn apply_edits(
     gpu: &Context,
     lanes: &Lanes,
     description: &mut SceneDescription,
     scene: &mut Scene,
     stale: &mut Dirty,
-) -> Result<bool> {
+) -> Result<Option<Restart>> {
     let edits = std::mem::take(&mut *lanes.edits.lock().expect("edits mutex poisoned"));
-    if edits.is_empty() {
-        return Ok(false);
-    }
+    let Some(origin) = edits.iter().map(SceneEdit::at).min() else {
+        return Ok(None);
+    };
+    let batched = u32::try_from(edits.len()).unwrap_or(u32::MAX);
+    let before = origin.elapsed();
+    let applying = Instant::now();
     let mut applied = false;
     for edit in edits {
         let result = match edit {
-            SceneEdit::Apply(set) => description.apply(&set),
-            SceneEdit::Replace(set) => {
+            SceneEdit::Apply { set, .. } => description.apply(&set),
+            SceneEdit::Replace { set, .. } => {
                 let mut fresh = SceneDescription::new();
                 fresh.apply(&set).map(|()| description.replace(fresh))
             }
@@ -759,8 +870,9 @@ fn apply_edits(
         }
     }
     stale.merge(description.take_dirty());
+    let apply = applying.elapsed();
     if !applied || stale.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     // Settings carry no residency, so a settings-only edit must not throw
     // away the accumulated image.
@@ -770,16 +882,24 @@ fn apply_edits(
         .chain(&stale.removed)
         .any(|(kind, _)| *kind != Kind::Settings);
     match scene.update(gpu, description, stale) {
-        Ok(()) => {
+        Ok(phases) => {
             log::debug!("scene edits applied; accumulation restarts");
             *stale = Dirty::default();
-            Ok(visual)
+            Ok(visual.then_some(Restart {
+                origin,
+                phases: Phases {
+                    before,
+                    apply,
+                    batched,
+                    ..phases
+                },
+            }))
         }
         // This build can't render the edited description; the previous
         // residency keeps rendering and `stale` holds the backlog.
         Err(error @ Error::Scene(_)) => {
             post_edit_error(lanes, error);
-            Ok(false)
+            Ok(None)
         }
         Err(fatal) => Err(fatal),
     }
@@ -841,7 +961,7 @@ mod tests {
     fn demo_session_with(gpu: &Arc<Context>, size: u32, auto_stop: AutoStop) -> Session {
         let mut description = SceneDescription::new();
         description.apply(&ChangeSet::demo()).expect("demo applies");
-        let scene = Scene::prep(gpu, &mut description).expect("demo preps");
+        let (scene, load) = Scene::prep_timed(gpu, &mut description).expect("demo preps");
         let camera = *scene.camera();
         let renderer = Renderer::new(gpu).expect("renderer");
         Session::new(
@@ -853,6 +973,7 @@ mod tests {
             size,
             size,
             auto_stop,
+            load,
         )
     }
 
@@ -930,6 +1051,51 @@ mod tests {
             high = high.max(frame.samples());
             assert!(Instant::now() < deadline, "the edit never landed");
         }
+        assert!(session.take_edit_error().is_none());
+    }
+
+    /// An edit's latency arrives broken down, and the breakdown accounts for
+    /// the mark exactly. This is the end of the wire the phases exist for:
+    /// the origin is the `apply` call rather than the wave boundary that
+    /// drained it, so the wait for that boundary is inside the number a
+    /// person feels instead of in front of it.
+    ///
+    /// The `tables` assertion is the standing claim about the update path,
+    /// pinned here so it stays a measurement: a material edit touches no
+    /// instance, and the instance tables rebuild for it anyway.
+    #[test]
+    fn an_edit_reports_where_its_latency_went() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let gpu = Arc::new(gpu);
+        let session = demo_session(&gpu, 64);
+        wait_for_frame(&session);
+
+        session.apply(ChangeSet {
+            ops: vec![Op::Material(Box::new(MaterialPatch {
+                base_color: Some(Texturable::Constant([0.9, 0.1, 0.1])),
+                ..MaterialPatch::new("floor")
+            }))],
+        });
+        let frame = wait_for(&session, "a frame carrying the edit's breakdown", |frame| {
+            frame.stats().interactivity.interaction.is_some()
+        });
+
+        let interactivity = frame.stats().interactivity;
+        let phases = interactivity.interaction.expect("waited for it");
+        assert_eq!(
+            Some(phases.total()),
+            interactivity.to_first_pixel,
+            "the phases are the mark, exactly: {:?}",
+            phases.named()
+        );
+        assert_eq!(phases.batched, 1, "one edit drained");
+        assert!(phases.apply > Duration::ZERO, "the description was patched");
+        assert!(
+            phases.tables > Duration::ZERO,
+            "a material edit rebuilds the instance tables it did not touch"
+        );
         assert!(session.take_edit_error().is_none());
     }
 

@@ -9,7 +9,11 @@
 //! pbrt-v4 scene to a `.ron` scene file, printing every fidelity warning
 //! the importer raises. `render --watch` stays alive and re-renders on
 //! every shader edit: recompile via `slangc`, swap the pipeline on
-//! success, keep the last good image on failure.
+//! success, keep the last good image on failure. `edit-latency` drives a
+//! live session instead of a batch render, timing how long each kind of
+//! scene edit takes to reach the screen.
+
+mod latency;
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -25,6 +29,8 @@ enum Command {
     Render(RenderArgs),
     /// Convert a pbrt-v4 scene to a cenote .ron scene file.
     Import(ImportArgs),
+    /// Time how long each kind of scene edit takes to reach the screen.
+    EditLatency(latency::LatencyArgs),
 }
 
 // The flags are independent orthogonal switches, not a state — a state machine
@@ -132,6 +138,7 @@ fn main() -> anyhow::Result<()> {
     match Command::parse() {
         Command::Render(args) => render(&args),
         Command::Import(args) => import(&args),
+        Command::EditLatency(args) => latency::run(&args),
     }
 }
 
@@ -158,7 +165,7 @@ fn render(args: &RenderArgs) -> anyhow::Result<()> {
     // The scene and the settings that fill in unspecified flags: the
     // named file's, or the demo with its schema defaults (which match
     // the flags' historical defaults).
-    let (scene, settings) = match &args.scene {
+    let (scene, settings, load) = match &args.scene {
         Some(path) => {
             let set = load_scene(path)?;
             let mut description = cenote::scene::description::SceneDescription::new();
@@ -169,13 +176,14 @@ fn render(args: &RenderArgs) -> anyhow::Result<()> {
                 .next()
                 .cloned()
                 .unwrap_or_default();
-            let scene = cenote::scene::Scene::prep(&gpu, &mut description)
+            let (scene, load) = cenote::scene::Scene::prep_timed(&gpu, &mut description)
                 .context("preparing the scene")?;
-            (scene, settings)
+            (scene, settings, load)
         }
         None => (
             cenote::scene::Scene::demo(&gpu)?,
             cenote::scene::description::Settings::default(),
+            cenote::stats::Phases::default(),
         ),
     };
     let width = args.width.unwrap_or(settings.resolution[0]);
@@ -206,6 +214,7 @@ fn render(args: &RenderArgs) -> anyhow::Result<()> {
         #[cfg(feature = "denoise")]
         denoiser.as_mut(),
         None,
+        load,
     )?;
     if !args.watch {
         return Ok(());
@@ -238,6 +247,10 @@ fn render(args: &RenderArgs) -> anyhow::Result<()> {
             #[cfg(feature = "denoise")]
             denoiser.as_mut(),
             Some(start),
+            // A reload re-preps nothing: the scene is already resident, and
+            // the recompile it waited on lands in the breakdown's remainder,
+            // which is where an unnamed cost belongs.
+            cenote::stats::Phases::default(),
         )?;
         println!("reloaded in {} ms", start.elapsed().as_millis());
     }
@@ -252,7 +265,13 @@ fn render(args: &RenderArgs) -> anyhow::Result<()> {
 ///
 /// `origin` is where the statistics' time-to-first-ray counts from: `None`
 /// for the first render, meaning process start, and the moment the edit
-/// landed for a `--watch` re-render.
+/// landed for a `--watch` re-render. `load` says where the time up to that
+/// point went, as far as the caller could see it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the batch render's whole configuration, already assembled by the caller; \
+              a struct here would only rename the argument list"
+)]
 fn render_frame(
     gpu: &cenote::gpu::Context,
     scene: &cenote::scene::Scene,
@@ -262,11 +281,13 @@ fn render_frame(
     args: &RenderArgs,
     #[cfg(feature = "denoise")] denoiser: Option<&mut cenote::denoise::Denoiser>,
     origin: Option<Instant>,
+    load: cenote::stats::Phases,
 ) -> anyhow::Result<()> {
     // A hot-reload re-render measures its own startup — what a person
     // waited through is the recompile, not the launch an hour ago.
     let mut recorder =
         origin.map_or_else(cenote::stats::Recorder::new, cenote::stats::Recorder::since);
+    recorder.attribute_load(load);
     // `--no-gpu-timers` is the A/B: no pool, no timestamps, a submission
     // byte-identical to a build with no stats code in it at all.
     let mut timer = if args.no_gpu_timers {

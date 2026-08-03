@@ -216,6 +216,17 @@ fn stats_lines(ui: &mut egui::Ui, stats: &FrameStats) {
             mark(ui, "first ray", marks.to_first_ray);
             mark(ui, "first pixel", marks.to_first_pixel);
             mark(ui, &format!("{READABLE_SAMPLES} spp"), marks.to_readable);
+            // Where the most recent first-pixel went. The marks above say
+            // how long the last edit took to show; these say what took it,
+            // and they sum to the mark by construction — so a phase that
+            // stopped covering its work shows up here as `other` growing
+            // rather than as a total that no longer adds up.
+            if let Some(phases) = marks.interaction {
+                ui.separator();
+                for (name, value) in phases.named() {
+                    ui.monospace(format!("  {name:<12}{:>8.1} ms", millis(value)));
+                }
+            }
         });
 
     let memory = &stats.render.memory;
