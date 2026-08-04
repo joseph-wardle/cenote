@@ -30,6 +30,7 @@ mod pipeline;
 mod present;
 mod submit;
 mod timing;
+mod upload;
 
 pub use accel::{AccelerationStructure, TlasInstance};
 pub use buffer::{Buffer, MemoryLocation};
@@ -39,6 +40,7 @@ pub use pipeline::{Bindings, ComputePipeline, MAX_SCENE_TEXTURES, SceneBindings}
 pub use present::Presenter;
 pub use submit::Pass;
 pub use timing::PassTimer;
+pub use upload::Upload;
 
 use init::DebugMessenger;
 use ledger::Ledger;
@@ -68,6 +70,10 @@ pub struct Context {
     queue_family_index: u32,
     physical_device: vk::PhysicalDevice,
     device_type: vk::PhysicalDeviceType,
+    /// The device's minimum alignment for acceleration-structure build
+    /// scratch — a constant, read once at bring-up rather than once per
+    /// build. See [`accel::scratch_alignment`].
+    scratch_alignment: vk::DeviceSize,
     /// Nanoseconds a timestamp tick represents, and how many of the 64 bits
     /// this queue family actually fills — everything [`PassTimer`] needs to
     /// turn query results into durations. Zero either means no timestamps.
@@ -190,6 +196,7 @@ impl Context {
             queue_family_index,
             physical_device,
             device_type: properties.device_type,
+            scratch_alignment: accel::scratch_alignment(instance, physical_device),
             timestamp_period: properties.limits.timestamp_period,
             timestamp_valid_bits,
             device_local_heap,

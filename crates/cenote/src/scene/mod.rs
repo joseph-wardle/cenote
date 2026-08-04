@@ -42,7 +42,7 @@ use glam::{Mat3, Mat4, Vec2, Vec3};
 use crate::color::luminance;
 use crate::environment::Environment;
 use crate::error::{Error, Result};
-use crate::gpu::{AccelerationStructure, Buffer, Context, SampledImage, TlasInstance};
+use crate::gpu::{AccelerationStructure, Buffer, Context, SampledImage, TlasInstance, Upload};
 use crate::lights::{DeltaLight, LIGHT_NONE, TriangleLight};
 use crate::material::{Material, TEXTURE_NONE};
 use crate::texture;
@@ -339,11 +339,16 @@ impl Scene {
         environment: &Environment,
     ) -> Result<Self> {
         assert!(!objects.is_empty(), "a scene needs at least one object");
+        let mut upload = gpu.upload()?;
         let meshes = objects
             .iter()
             .enumerate()
-            .map(|(index, object)| upload_mesh(gpu, &format!("object{index}"), &object.mesh))
+            .map(|(index, object)| {
+                upload_mesh(&mut upload, &format!("object{index}"), &object.mesh)
+            })
             .collect::<Result<Vec<GpuMesh>>>()?;
+        // Before the TLAS below, which is the first thing to read them.
+        upload.finish()?;
         // The light list: every triangle of every emissive object, in
         // world space. The procedural path has no delta lights — those
         // are description objects, exercised through prep.
@@ -823,11 +828,15 @@ fn transform_rows(transform: Mat4) -> [[f32; 4]; 3] {
     ]
 }
 
-/// Upload one mesh's buffers and build its BLAS. `name` is the mesh's bare
-/// name — the `scene.mesh.` prefix that puts the bytes in the right memory
-/// bucket ([`crate::gpu`]'s ledger) is added here, once, so no caller has to
-/// remember it and no caller can add it twice.
-fn upload_mesh(gpu: &Context, name: &str, mesh: &Mesh) -> Result<GpuMesh> {
+/// Queue one mesh's buffers and its BLAS build on `upload`. `name` is the
+/// mesh's bare name — the `scene.mesh.` prefix that puts the bytes in the
+/// right memory bucket ([`crate::gpu`]'s ledger) is added here, once, so no
+/// caller has to remember it and no caller can add it twice.
+///
+/// The returned [`GpuMesh`] is resident only once the caller's
+/// [`Upload::finish`] returns; every caller finishes before the TLAS build
+/// that first reads these BLASes.
+fn upload_mesh(upload: &mut Upload, name: &str, mesh: &Mesh) -> Result<GpuMesh> {
     assert_eq!(
         mesh.normals.len(),
         mesh.positions.len(),
@@ -843,27 +852,27 @@ fn upload_mesh(gpu: &Context, name: &str, mesh: &Mesh) -> Result<GpuMesh> {
     let usage = vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
         | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
         | vk::BufferUsageFlags::STORAGE_BUFFER;
-    let vertices = gpu.upload_buffer(
+    let vertices = upload.buffer(
         &format!("scene.mesh.{name}.vertices"),
         bytemuck::cast_slice(&mesh.positions),
         usage,
     )?;
-    let normals = gpu.upload_buffer(
+    let normals = upload.buffer(
         &format!("scene.mesh.{name}.normals"),
         bytemuck::cast_slice(&mesh.normals),
         usage,
     )?;
-    let uvs = gpu.upload_buffer(
+    let uvs = upload.buffer(
         &format!("scene.mesh.{name}.uvs"),
         bytemuck::cast_slice(&mesh.uvs),
         usage,
     )?;
-    let indices = gpu.upload_buffer(
+    let indices = upload.buffer(
         &format!("scene.mesh.{name}.indices"),
         bytemuck::cast_slice(&mesh.triangles),
         usage,
     )?;
-    let blas = gpu.build_blas(
+    let blas = upload.blas(
         &format!("scene.mesh.{name}.blas"),
         &vertices,
         mesh.positions.len() as u32,

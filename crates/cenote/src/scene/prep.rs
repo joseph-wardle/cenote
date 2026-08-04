@@ -88,13 +88,12 @@ impl Scene {
         let lowering = Instant::now();
         let host = host_phase(description, &all_dirty(description), true, &BTreeMap::new(), None)?;
         let uploading = Instant::now();
+        let mut upload = gpu.upload()?;
         let mut meshes = BTreeMap::new();
         for (name, mesh) in &host.meshes {
-            meshes.insert(
-                name.clone(),
-                upload_mesh(gpu, name, mesh)?,
-            );
+            meshes.insert(name.clone(), upload_mesh(&mut upload, name, mesh)?);
         }
+        upload.finish()?;
         let textures = upload_textures(gpu, BTreeMap::new(), &host.textures)?;
         let descriptors = textures
             .values()
@@ -210,12 +209,12 @@ impl Scene {
         for name in &host.removed_meshes {
             self.meshes.remove(name);
         }
+        let mut upload = gpu.upload()?;
         for (name, mesh) in &host.meshes {
-            self.meshes.insert(
-                name.clone(),
-                upload_mesh(gpu, name, mesh)?,
-            );
+            self.meshes
+                .insert(name.clone(), upload_mesh(&mut upload, name, mesh)?);
         }
+        upload.finish()?;
         self.textures = upload_textures(gpu, std::mem::take(&mut self.textures), &host.textures)?;
         self.rebuild_texture_descriptors();
         self.resident.texture_params = upload_texture_params(gpu, self.textures.keys())?;

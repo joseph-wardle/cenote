@@ -1,11 +1,17 @@
 //! Acceleration-structure builds: a BLAS per triangle mesh, one TLAS over
 //! placed instances.
 //!
-//! Builds run as blocking one-shot submits, so scratch memory and
-//! the instance staging buffer live only for the call. The shape is
-//! deliberately minimal — no compaction, no refits — because every
-//! structure is built exactly once; rebuilds only become interesting with
-//! dynamic scenes, which nothing on the roadmap requires.
+//! Creation and building are two steps, split at the one seam that matters:
+//! a structure's storage, handle, and *device address* are all valid the
+//! moment it is created, and only the traversal data has to wait for a
+//! build. So [`Context::create_structure`] hands back a finished
+//! [`AccelerationStructure`] plus a [`BuildJob`] describing the work still
+//! owed, and the caller decides when to record it —
+//! [`Context::build_blas`] immediately, on its own blocking submit;
+//! [`Upload`](super::Upload) batched with a chunk's worth of others. The
+//! shape is otherwise deliberately minimal — no compaction, no refits —
+//! because every structure is built exactly once; rebuilds only become
+//! interesting with dynamic scenes, which nothing on the roadmap requires.
 
 use std::slice;
 
@@ -14,6 +20,12 @@ use glam::Mat4;
 
 use crate::error::Result;
 use crate::gpu::{Buffer, Context, MemoryLocation};
+
+/// One build policy for every structure Cenote makes: trace fast, build
+/// once. Shared by the size query and the recording, which Vulkan requires
+/// to agree.
+const BUILD_FLAGS: vk::BuildAccelerationStructureFlagsKHR =
+    vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE;
 
 /// A built BLAS or TLAS, destroyed on drop (before its [`Context`], like
 /// every `gpu` resource).
@@ -44,6 +56,121 @@ impl Drop for AccelerationStructure {
     }
 }
 
+/// The build a freshly created [`AccelerationStructure`] still owes, and
+/// the scratch memory it will need to pay it.
+///
+/// Holds no borrows: the geometry it describes is a pair of device
+/// addresses, so a job can outlive the buffers' Rust bindings and sit in a
+/// queue until someone records it. What it *does* hold is a raw handle to
+/// the structure it fills — whose owner must therefore still be alive when
+/// the recording happens — and the scratch buffer, whose lifetime is
+/// exactly this job's.
+pub(super) struct BuildJob {
+    ty: vk::AccelerationStructureTypeKHR,
+    geometry: vk::AccelerationStructureGeometryKHR<'static>,
+    primitive_count: u32,
+    dst: vk::AccelerationStructureKHR,
+    scratch: Buffer,
+    /// The alignment-corrected address inside `scratch`.
+    scratch_address: vk::DeviceAddress,
+}
+
+impl BuildJob {
+    /// Bytes of scratch this job holds — what a batching caller budgets
+    /// against, beside its staging.
+    pub(super) fn scratch_size(&self) -> vk::DeviceSize {
+        self.scratch.size()
+    }
+}
+
+/// Record `jobs` into `cmd` as one batched build. Per-job scratch means no
+/// barriers between them: nothing two builds touch is shared, so the driver
+/// is free to run them together.
+///
+/// The caller owes the usual guarantee that the geometry buffers are
+/// readable by the time this executes — within a submission that is a
+/// barrier, across one the fence.
+pub(super) fn record_builds(
+    loader: &ash::khr::acceleration_structure::Device,
+    cmd: vk::CommandBuffer,
+    jobs: &[BuildJob],
+) {
+    let infos: Vec<_> = jobs
+        .iter()
+        .map(|job| {
+            vk::AccelerationStructureBuildGeometryInfoKHR::default()
+                .ty(job.ty)
+                .flags(BUILD_FLAGS)
+                .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
+                .geometries(slice::from_ref(&job.geometry))
+                .dst_acceleration_structure(job.dst)
+                .scratch_data(vk::DeviceOrHostAddressKHR {
+                    device_address: job.scratch_address,
+                })
+        })
+        .collect();
+    let ranges: Vec<_> = jobs
+        .iter()
+        .map(|job| {
+            vk::AccelerationStructureBuildRangeInfoKHR::default()
+                .primitive_count(job.primitive_count)
+        })
+        .collect();
+    // One single-element range list per build info, as the entry point's
+    // array-of-arrays shape wants.
+    let per_build: Vec<&[_]> = ranges.iter().map(slice::from_ref).collect();
+    unsafe { loader.cmd_build_acceleration_structures(cmd, &infos, &per_build) };
+}
+
+/// The triangle geometry a BLAS is built over: tightly packed `[f32; 3]`
+/// positions in `vertices`, `u32` index triples in `indices`. Both buffers
+/// need `ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR` and
+/// `SHADER_DEVICE_ADDRESS` usage.
+///
+/// `'static` is not a widening: the returned struct holds two device
+/// addresses and no pointers, so it borrows the buffers only for the
+/// duration of this call.
+pub(super) fn triangle_geometry(
+    vertices: &Buffer,
+    vertex_count: u32,
+    indices: &Buffer,
+) -> vk::AccelerationStructureGeometryKHR<'static> {
+    assert!(vertex_count > 0, "cannot build a BLAS over an empty mesh");
+    let triangles = vk::AccelerationStructureGeometryTrianglesDataKHR::default()
+        .vertex_format(vk::Format::R32G32B32_SFLOAT)
+        .vertex_data(vk::DeviceOrHostAddressConstKHR {
+            device_address: vertices.device_address(),
+        })
+        .vertex_stride(3 * size_of::<f32>() as vk::DeviceSize)
+        .max_vertex(vertex_count - 1)
+        .index_type(vk::IndexType::UINT32)
+        .index_data(vk::DeviceOrHostAddressConstKHR {
+            device_address: indices.device_address(),
+        });
+    vk::AccelerationStructureGeometryKHR::default()
+        .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
+        .geometry(vk::AccelerationStructureGeometryDataKHR { triangles })
+        // No any-hit logic anywhere on the roadmap; alpha
+        // testing revisits this flag.
+        .flags(vk::GeometryFlagsKHR::OPAQUE)
+}
+
+/// The device's minimum alignment for build scratch addresses, read once at
+/// bring-up and kept on the [`Context`].
+///
+/// It is a constant of the device, and the query behind it is a full
+/// `vkGetPhysicalDeviceProperties2` round trip — asked per build it cost
+/// one of those for every mesh in the scene.
+pub(super) fn scratch_alignment(
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+) -> vk::DeviceSize {
+    let mut accel_props = vk::PhysicalDeviceAccelerationStructurePropertiesKHR::default();
+    let mut props = vk::PhysicalDeviceProperties2::default().push_next(&mut accel_props);
+    unsafe { instance.get_physical_device_properties2(physical_device, &mut props) };
+    vk::DeviceSize::from(accel_props.min_acceleration_structure_scratch_offset_alignment)
+}
+
 /// One entry in a TLAS: a BLAS placed in the world.
 pub struct TlasInstance<'a> {
     /// The mesh being instanced.
@@ -67,10 +194,16 @@ pub struct TlasInstance<'a> {
 }
 
 impl Context {
-    /// Build a BLAS over `triangle_count` triangles: tightly packed
-    /// `[f32; 3]` positions in `vertices`, `u32` index triples in `indices`.
-    /// Both buffers need `ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR`
-    /// and `SHADER_DEVICE_ADDRESS` usage.
+    /// Build a BLAS over `triangle_count` triangles — tightly packed
+    /// `[f32; 3]` positions in `vertices`, `u32` index triples in
+    /// `indices`, both needing
+    /// `ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR` and
+    /// `SHADER_DEVICE_ADDRESS` usage — on its own blocking submit.
+    ///
+    /// One mesh at a time is the wrong unit for loading a scene — see
+    /// [`Upload`](super::Upload), which batches this — but the right one
+    /// for the handful of callers that build a single structure and want it
+    /// traceable when the call returns.
     pub fn build_blas(
         &self,
         name: &str,
@@ -79,31 +212,11 @@ impl Context {
         indices: &Buffer,
         triangle_count: u32,
     ) -> Result<AccelerationStructure> {
-        assert!(
-            vertex_count > 0 && triangle_count > 0,
-            "cannot build a BLAS over an empty mesh"
-        );
-        let triangles = vk::AccelerationStructureGeometryTrianglesDataKHR::default()
-            .vertex_format(vk::Format::R32G32B32_SFLOAT)
-            .vertex_data(vk::DeviceOrHostAddressConstKHR {
-                device_address: vertices.device_address(),
-            })
-            .vertex_stride(3 * size_of::<f32>() as vk::DeviceSize)
-            .max_vertex(vertex_count - 1)
-            .index_type(vk::IndexType::UINT32)
-            .index_data(vk::DeviceOrHostAddressConstKHR {
-                device_address: indices.device_address(),
-            });
-        let geometry = vk::AccelerationStructureGeometryKHR::default()
-            .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
-            .geometry(vk::AccelerationStructureGeometryDataKHR { triangles })
-            // No any-hit logic anywhere on the roadmap; alpha
-            // testing revisits this flag.
-            .flags(vk::GeometryFlagsKHR::OPAQUE);
+        assert!(triangle_count > 0, "cannot build a BLAS over an empty mesh");
         self.build_structure(
             name,
             vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL,
-            &geometry,
+            triangle_geometry(vertices, vertex_count, indices),
             triangle_count,
         )
     }
@@ -153,25 +266,50 @@ impl Context {
         self.build_structure(
             name,
             vk::AccelerationStructureTypeKHR::TOP_LEVEL,
-            &geometry,
+            geometry,
             instances.len() as u32,
         )
     }
 
-    /// The BLAS/TLAS-common tail: size query, storage + handle creation,
-    /// scratch allocation, blocking build, address query.
+    /// Create a structure and record its build on one blocking submit —
+    /// [`Context::create_structure`] and its [`BuildJob`], immediately.
     fn build_structure(
         &self,
         name: &str,
         ty: vk::AccelerationStructureTypeKHR,
-        geometry: &vk::AccelerationStructureGeometryKHR<'_>,
+        geometry: vk::AccelerationStructureGeometryKHR<'static>,
         primitive_count: u32,
     ) -> Result<AccelerationStructure> {
-        let mut build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
+        let (structure, job) = self.create_structure(name, ty, geometry, primitive_count)?;
+        // On failure `structure` drops, destroying the handle: the funnel
+        // the two-step split replaced is now just ownership.
+        self.submit_once(|_, cmd| {
+            record_builds(&self.accel_loader, cmd, slice::from_ref(&job));
+        })?;
+        Ok(structure)
+    }
+
+    /// Create a structure's storage and handle, and allocate the scratch
+    /// its build will need: everything except the recording.
+    ///
+    /// The returned [`AccelerationStructure`] is already complete in the
+    /// only sense the host cares about — it owns its handle and storage and
+    /// its device address is final — so it can be handed to a caller, put in
+    /// a scene, and referenced by a TLAS build while its own [`BuildJob`]
+    /// waits in a queue. What it is not yet is *traceable*: the job has to
+    /// run first.
+    pub(super) fn create_structure(
+        &self,
+        name: &str,
+        ty: vk::AccelerationStructureTypeKHR,
+        geometry: vk::AccelerationStructureGeometryKHR<'static>,
+        primitive_count: u32,
+    ) -> Result<(AccelerationStructure, BuildJob)> {
+        let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
             .ty(ty)
-            .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+            .flags(BUILD_FLAGS)
             .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
-            .geometries(slice::from_ref(geometry));
+            .geometries(slice::from_ref(&geometry));
         let mut sizes = vk::AccelerationStructureBuildSizesInfoKHR::default();
         unsafe {
             self.accel_loader.get_acceleration_structure_build_sizes(
@@ -198,20 +336,33 @@ impl Context {
                 .create_acceleration_structure(&create_info, None)?
         };
 
-        // From here every failure must destroy the handle: funnel through
-        // one exit point.
-        match self.run_build(
-            &mut build_info,
-            handle,
-            sizes.build_scratch_size,
-            primitive_count,
-        ) {
-            Ok(address) => Ok(AccelerationStructure {
-                handle,
-                address,
-                _buffer: buffer,
-                loader: self.accel_loader.clone(),
-            }),
+        // The one span where a handle is live and unowned: if scratch can't
+        // be allocated, destroy it here.
+        match self.scratch_for(sizes.build_scratch_size) {
+            Ok((scratch, scratch_address)) => {
+                let info = vk::AccelerationStructureDeviceAddressInfoKHR::default()
+                    .acceleration_structure(handle);
+                let address = unsafe {
+                    self.accel_loader
+                        .get_acceleration_structure_device_address(&info)
+                };
+                Ok((
+                    AccelerationStructure {
+                        handle,
+                        address,
+                        _buffer: buffer,
+                        loader: self.accel_loader.clone(),
+                    },
+                    BuildJob {
+                        ty,
+                        geometry,
+                        primitive_count,
+                        dst: handle,
+                        scratch,
+                        scratch_address,
+                    },
+                ))
+            }
             Err(err) => {
                 unsafe {
                     self.accel_loader
@@ -222,56 +373,20 @@ impl Context {
         }
     }
 
-    fn run_build(
-        &self,
-        build_info: &mut vk::AccelerationStructureBuildGeometryInfoKHR<'_>,
-        dst: vk::AccelerationStructureKHR,
-        scratch_size: vk::DeviceSize,
-        primitive_count: u32,
-    ) -> Result<vk::DeviceAddress> {
-        // The scratch *address* must honor the device's alignment minimum,
-        // which plain buffer alignment doesn't guarantee — over-allocate and
-        // round up.
-        let alignment = self.scratch_alignment();
+    /// A scratch buffer of at least `scratch_size` usable bytes, and the
+    /// address inside it a build may start from. The scratch *address* must
+    /// honor the device's alignment minimum, which plain buffer alignment
+    /// doesn't guarantee — over-allocate and round up.
+    fn scratch_for(&self, scratch_size: vk::DeviceSize) -> Result<(Buffer, vk::DeviceAddress)> {
+        let alignment = self.scratch_alignment;
         let scratch = self.create_buffer(
             "accel.scratch",
             scratch_size + alignment,
             vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
             MemoryLocation::GpuOnly,
         )?;
-        *build_info =
-            build_info
-                .dst_acceleration_structure(dst)
-                .scratch_data(vk::DeviceOrHostAddressKHR {
-                    device_address: scratch.device_address().next_multiple_of(alignment),
-                });
-
-        let range =
-            vk::AccelerationStructureBuildRangeInfoKHR::default().primitive_count(primitive_count);
-        self.submit_once(|_, cmd| unsafe {
-            self.accel_loader.cmd_build_acceleration_structures(
-                cmd,
-                slice::from_ref(build_info),
-                &[slice::from_ref(&range)],
-            );
-        })?;
-
-        let info =
-            vk::AccelerationStructureDeviceAddressInfoKHR::default().acceleration_structure(dst);
-        Ok(unsafe {
-            self.accel_loader
-                .get_acceleration_structure_device_address(&info)
-        })
-    }
-
-    fn scratch_alignment(&self) -> vk::DeviceSize {
-        let mut accel_props = vk::PhysicalDeviceAccelerationStructurePropertiesKHR::default();
-        let mut props = vk::PhysicalDeviceProperties2::default().push_next(&mut accel_props);
-        unsafe {
-            self.instance
-                .get_physical_device_properties2(self.physical_device, &mut props);
-        }
-        vk::DeviceSize::from(accel_props.min_acceleration_structure_scratch_offset_alignment)
+        let address = scratch.device_address().next_multiple_of(alignment);
+        Ok((scratch, address))
     }
 }
 
