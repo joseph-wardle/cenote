@@ -350,6 +350,15 @@ pub(super) fn create_device(
     if presentable {
         extensions.push(ash::khr::swapchain::NAME.as_ptr());
     }
+    // CENOTE_PIPELINE_STATS=1 opts into VK_KHR_pipeline_executable_properties
+    // so pipeline creation can log per-kernel register counts — the only
+    // occupancy visibility this Vulkan app has (ncu is CUDA-only).
+    let mut exec_stats = vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR::default()
+        .pipeline_executable_info(true);
+    if std::env::var_os("CENOTE_PIPELINE_STATS").is_some() {
+        extensions.push(ash::khr::pipeline_executable_properties::NAME.as_ptr());
+        features = features.push_next(&mut exec_stats);
+    }
     let create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(std::slice::from_ref(&queue_info))
         .enabled_extension_names(&extensions)

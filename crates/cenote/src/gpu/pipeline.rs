@@ -275,15 +275,26 @@ impl Context {
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(module)
             .name(entry);
-        let info = vk::ComputePipelineCreateInfo::default()
+        // Capture per-kernel compile statistics when CENOTE_PIPELINE_STATS=1
+        // (paired with the feature enable in init.rs).
+        let capture_stats = std::env::var_os("CENOTE_PIPELINE_STATS").is_some();
+        let mut info = vk::ComputePipelineCreateInfo::default()
             .stage(stage)
             .layout(layout);
+        if capture_stats {
+            info = info.flags(vk::PipelineCreateFlags::CAPTURE_STATISTICS_KHR);
+        }
         let pipelines = unsafe {
             device.create_compute_pipelines(vk::PipelineCache::null(), slice::from_ref(&info), None)
         };
 
         match pipelines {
-            Ok(pipelines) => Ok((pipelines[0], layout)),
+            Ok(pipelines) => {
+                if capture_stats {
+                    self.log_pipeline_statistics(pipelines[0], entry);
+                }
+                Ok((pipelines[0], layout))
+            }
             Err((pipelines, err)) => {
                 unsafe {
                     for pipeline in pipelines.into_iter().filter(|p| *p != vk::Pipeline::null()) {
@@ -293,6 +304,58 @@ impl Context {
                 }
                 Err(err.into())
             }
+        }
+    }
+
+    /// Log every executable statistic the driver reports for a pipeline
+    /// created with `CAPTURE_STATISTICS_KHR` — register count above all,
+    /// which is what bounds a kernel's occupancy.
+    fn log_pipeline_statistics(&self, pipeline: vk::Pipeline, entry: &CStr) {
+        let loader = ash::khr::pipeline_executable_properties::Device::new(
+            &self.instance,
+            self.device(),
+        );
+        let pipeline_info = vk::PipelineInfoKHR::default().pipeline(pipeline);
+        let executables =
+            match unsafe { loader.get_pipeline_executable_properties(&pipeline_info) } {
+                Ok(executables) => executables,
+                Err(err) => {
+                    log::warn!("pipeline stats unavailable for {entry:?}: {err}");
+                    return;
+                }
+            };
+        for (index, executable) in executables.iter().enumerate() {
+            let exec_info = vk::PipelineExecutableInfoKHR::default()
+                .pipeline(pipeline)
+                .executable_index(index as u32);
+            let Ok(stats) = (unsafe { loader.get_pipeline_executable_statistics(&exec_info) })
+            else {
+                continue;
+            };
+            let name = executable
+                .name_as_c_str()
+                .map_or_else(|_| "<exec>".into(), CStr::to_string_lossy);
+            use std::fmt::Write as _;
+            let mut line = format!("pipeline stats {entry:?} [{name}]");
+            for stat in &stats {
+                let stat_name = stat
+                    .name_as_c_str()
+                    .map_or_else(|_| "<stat>".into(), CStr::to_string_lossy);
+                let value = match stat.format {
+                    vk::PipelineExecutableStatisticFormatKHR::BOOL32 => {
+                        format!("{}", unsafe { stat.value.b32 } != 0)
+                    }
+                    vk::PipelineExecutableStatisticFormatKHR::INT64 => {
+                        format!("{}", unsafe { stat.value.i64 })
+                    }
+                    vk::PipelineExecutableStatisticFormatKHR::UINT64 => {
+                        format!("{}", unsafe { stat.value.u64 })
+                    }
+                    _ => format!("{}", unsafe { stat.value.f64 }),
+                };
+                let _ = write!(line, "; {stat_name} = {value}");
+            }
+            log::info!("{line}");
         }
     }
 }

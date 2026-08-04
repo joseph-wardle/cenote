@@ -24,3 +24,8 @@
 # is pointed. /restir-baselines/ holds captures from the removed ReSTIR
 # estimator — nothing reads them; delete the directory to reclaim ~800 MB.
 /restir-baselines/
+
+# B7 shading-optimization gates: per-scene timing sidecars and the baked
+# high-spp reference EXRs the relMSE oracle compares against. Machine-local
+# (RTX 4070 Ti SUPER) — regenerate with scripts/b7-gates.sh.
+/b7-baselines/
