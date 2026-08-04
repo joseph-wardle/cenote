@@ -592,6 +592,23 @@ fn build_scene_tlas(gpu: &Context, placements: &[Placement]) -> Result<Accelerat
     gpu.build_tlas("scene.tlas", &instances)
 }
 
+/// Per placement, the index of its first [`TriangleLight`], or
+/// [`LIGHT_NONE`] — what `GeometryRecord.light` carries. A light's
+/// `instance` is its TLAS custom index, which [`build_scene_tlas`] sets to
+/// the placement's own position, so it indexes the result directly. One
+/// pass, not a scan per placement: a dark instance must not cost the length
+/// of the light list to learn that it is dark.
+fn first_light_indices(placements: usize, triangles: &[TriangleLight]) -> Vec<u32> {
+    let mut first = vec![LIGHT_NONE; placements];
+    for (index, light) in triangles.iter().enumerate() {
+        let slot = &mut first[light.instance as usize];
+        if *slot == LIGHT_NONE {
+            *slot = index as u32;
+        }
+    }
+    first
+}
+
 /// Upload the per-instance tables: geometry records (each carrying the
 /// index of its instance's *first* light record, or [`LIGHT_NONE`]), the
 /// material array, and the light records — laid out in the contiguous
@@ -603,16 +620,10 @@ fn upload_instance_tables(
     delta_lights: &[DeltaLight],
 ) -> Result<(Buffer, Buffer, Buffer)> {
     let light_records = crate::lights::build(triangle_lights, delta_lights);
-    let light_index = |instance: u32| {
-        triangle_lights
-            .iter()
-            .position(|light| light.instance == instance)
-            .map_or(LIGHT_NONE, |index| index as u32)
-    };
     let records: Vec<GeometryRecord> = placements
         .iter()
-        .enumerate()
-        .map(|(index, placement)| {
+        .zip(first_light_indices(placements.len(), triangle_lights))
+        .map(|(placement, light)| {
             let inverse = placement.transform.inverse();
             assert!(
                 inverse.is_finite(),
@@ -626,7 +637,7 @@ fn upload_instance_tables(
                 indices: placement.mesh.indices.device_address(),
                 object_to_world: transform_rows(placement.transform),
                 world_to_object: transform_rows(inverse),
-                light: light_index(index as u32),
+                light,
                 _pad0: [0; 3],
             }
         })
@@ -917,6 +928,35 @@ mod tests {
         assert!((a.up + b.up).length() < 1e-6, "{} vs {}", a.up, b.up);
         assert!((a.right + b.right).length() < 1e-6);
         assert!((a.forward - b.forward).length() < 1e-6);
+    }
+
+    /// Every placement points at the first of its own light records, and a
+    /// placement with no emission points nowhere.
+    #[test]
+    fn light_indices_point_at_each_instance_first_record() {
+        let triangle = |instance, primitive| TriangleLight {
+            corners: [Vec3::ZERO, Vec3::X, Vec3::Y],
+            emission: Vec3::ONE,
+            instance,
+            primitive,
+            winding: 1.0,
+        };
+        // Grouped, the shape lowering emits: instance 0 over two triangles,
+        // instance 1 dark, instance 2 over one.
+        let grouped = [triangle(0, 0), triangle(0, 1), triangle(2, 0)];
+        assert_eq!(first_light_indices(3, &grouped), vec![0, LIGHT_NONE, 2]);
+        // Interleaved: still the lowest index per instance. Contiguity is
+        // lowering's contract; this fill does not depend on it, so a
+        // restructured lowering cannot silently change the answer.
+        let mixed = [
+            triangle(2, 0),
+            triangle(0, 0),
+            triangle(2, 1),
+            triangle(0, 1),
+        ];
+        assert_eq!(first_light_indices(3, &mixed), vec![1, LIGHT_NONE, 0]);
+        assert_eq!(first_light_indices(3, &[]), vec![LIGHT_NONE; 3]);
+        assert!(first_light_indices(0, &[]).is_empty());
     }
 
     /// Two BLASes and the TLAS build without errors on real hardware
