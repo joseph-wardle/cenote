@@ -647,6 +647,39 @@ fn interior_absorption_is_spectral() {
     );
 }
 
+/// The transmission slots may not reach an opaque surface. At
+/// `transmission_weight` 0 the closure skips the glass energy tables and
+/// every consumer folds the interface tint away, so neither the interior
+/// color nor its depth may move a single bit of the render. What the
+/// closure leaves in the skipped scale is deliberately not asserted: at
+/// weight 0 any finite stand-in is unobservable, which is exactly why
+/// skipping the fetch is bit-identical. Only the folds are testable.
+#[test]
+fn opaque_shading_ignores_the_transmission_slots() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let renderer = Renderer::new(&gpu).expect("renderer");
+    let render = |color: Vec3, depth: f32| {
+        let mut material = Material::glossy(Vec3::new(0.8, 0.5, 0.3), 0.2, 0.35);
+        material.transmission_color = color;
+        material.transmission_depth = depth;
+        let scene = furnace_scene(&gpu, material, Vec3::ZERO, 1.0, None);
+        accumulate_sum(&gpu, &renderer, &scene, 32, 16)
+    };
+    // The tint takes the interior color only at depth 0, so vary both:
+    // the depth-0 case is the one that moves `glassTint` off white.
+    let tinted = Vec3::new(0.1, 0.7, 0.2);
+    let reference = render(Vec3::ONE, 0.0);
+    for (color, depth) in [(tinted, 0.0), (tinted, 2.0)] {
+        assert_eq!(
+            render(color, depth),
+            reference,
+            "opaque shading moved with transmission_color {color}, depth {depth}"
+        );
+    }
+}
+
 /// Stochastic opacity, per-sample exact: a half-opacity white Lambert
 /// plane in the furnace. A camera ray either passes through (the
 /// intersect stage's Bernoulli trial) and reads the sky directly, or

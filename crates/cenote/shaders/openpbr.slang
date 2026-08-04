@@ -344,12 +344,22 @@ float average(float3 v) {
     return (v.x + v.y + v.z) / 3.0;
 }
 
+// A reflection lobe's Fresnel-free energy, (E, E_avg), from the tables.
+// Lobes differing only in Fresnel share one fetch. E is floored off zero:
+// the scale below divides by it.
+float2 reflectionEnergy(float* tables, float rough, float mu) {
+    return float2(max(1e-4, tableRead2D(tables, TABLE_GGX_E, uint2(32, 32), rough, mu)),
+                  tableRead1D(tables, TABLE_GGX_E_AVG, 32, rough));
+}
+
 // The multiple-scattering scale on a single-scatter reflection lobe:
-// 1 + Fms·(1−E)/E, with E/E_avg from the Fresnel-free tables.
+// 1 + Fms·(1−E)/E.
+float3 reflectionScale(float2 energy, float3 fss) {
+    return 1.0 + fresnelMultiScatter(fss, energy.y) * ((1.0 - energy.x) / energy.x);
+}
+
 float3 reflectionScale(float* tables, float rough, float mu, float3 fss) {
-    let e = max(1e-4, tableRead2D(tables, TABLE_GGX_E, uint2(32, 32), rough, mu));
-    let eAvg = tableRead1D(tables, TABLE_GGX_E_AVG, 32, rough);
-    return 1.0 + fresnelMultiScatter(fss, eAvg) * ((1.0 - e) / e);
+    return reflectionScale(reflectionEnergy(tables, rough, mu), fss);
 }
 
 // Directional albedo of the compensated dielectric reflection lobe at
@@ -465,24 +475,27 @@ public Closure resolveClosure(float* tables, Material m, float3 wo, bool exiting
     c.baseWeight = c.fuzzAtten * coatAtten;
 
     // The base interface: layering albedo and multiple-scattering scales.
-    // Each scale's table reads run only when some consumer keeps it alive;
-    // otherwise every use folds it away through `lerp(a, b, 0)` or a
-    // dropped lobe, so a *finite* stand-in (1, the no-compensation scale)
-    // leaves the mixture bit-identical while skipping the reads.
-    c.specE = c.hasSpecular ? dielectricAlbedo(tables, rough, mu, c.eta) : 0.0;
-    c.conductorScale = m.metalness > 0.0
-                     ? reflectionScale(tables, rough, mu,
-                                       fresnelSchlickAverage(m.baseColor))
-                     : float3(1.0);
-    c.dielectricScale = c.hasSpecular
-                      ? reflectionScale(tables, rough, mu,
-                                        float3(fresnelDielectricAverage(c.eta))).x
-                      : 1.0;
+    // Conductor and dielectric differ only in their average Fresnel, so one
+    // energy fetch at the base roughness serves both. With no specular
+    // interface the layering albedo is genuinely zero, and the scales go
+    // unread — `baseReflection` is their only consumer and runs under this
+    // same flag.
+    c.specE = 0.0;
+    c.conductorScale = float3(1.0);
+    c.dielectricScale = 1.0;
+    if (c.hasSpecular) {
+        c.specE = dielectricAlbedo(tables, rough, mu, c.eta);
+        let baseEnergy = reflectionEnergy(tables, rough, mu);
+        c.conductorScale = reflectionScale(baseEnergy, fresnelSchlickAverage(m.baseColor));
+        c.dielectricScale = reflectionScale(baseEnergy,
+                                            float3(fresnelDielectricAverage(c.eta))).x;
+    }
 
     // The coupled glass lobe's energy, from the 3D tables (η < 1 inverts
     // into its own branch), with the interface tint standing in for the
-    // multi-bounce Fresnel color. Only a transmissive base (or a hit seen
-    // from inside) has a glass lobe to compensate.
+    // multi-bounce Fresnel color. Absent a glass lobe the scale stays 1,
+    // which its consumers fold away exactly: `transmissionWeight` is clamped
+    // to [0, 1] at lowering, so their `lerp` never extrapolates.
     c.glassTint = m.transmissionDepth == 0.0 ? m.transmissionColor : float3(1.0);
     c.glassScale = float3(1.0);
     if (exiting || m.transmissionWeight > 0.0) {
