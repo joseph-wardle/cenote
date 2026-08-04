@@ -1,19 +1,14 @@
 //! Batched residency: many buffer uploads and BLAS builds, few submits.
 //!
-//! [`Context::upload_buffer`] and [`Context::build_blas`] each cost one
-//! blocking submit — create a transient pool, allocate a command buffer,
-//! create a fence, submit, wait, tear it all down. Measured on this
-//! machine that round trip is **0.44 ms** whether it wraps eighteen
-//! kilobytes of copy or nothing at all: an empty `submit_once` and an 18 KB
-//! upload cost the same, and the allocation beside them costs 0.003 ms. The
-//! submit *is* the cost, and the bytes are free.
-//!
-//! Loading a scene one mesh at a time pays five of those per mesh — four
-//! buffers and a build — so a 7,328-mesh scene pays 36,640, which is
-//! sixteen of the seventeen seconds it took to reach its first ray.
-//! [`Upload`] pays them per *chunk* instead: allocate every resource
-//! eagerly (which is free) and queue only the GPU work, flushing when a
-//! chunk's worth of staging and scratch has piled up.
+//! A blocking submit costs ~0.4 ms on this machine whether it wraps
+//! eighteen kilobytes of copy or nothing at all — the submit is the cost,
+//! and the bytes beside it are free. A mesh needs four buffers and a BLAS
+//! build, so a scene uploaded one resource at a time pays five of those per
+//! mesh, which is most of a large scene's time to first ray. [`Upload`]
+//! pays them per *chunk* instead: allocate every resource eagerly (which is
+//! free) and queue only the GPU work, flushing when a chunk's worth of
+//! staging and scratch has piled up. [`Context::upload_buffer`] is this on
+//! a batch of one.
 //!
 //! Two properties are load-bearing and easy to lose:
 //!
@@ -21,7 +16,8 @@
 //!   them. Prep's phase timings are exact host `Instant`s *because* every
 //!   GPU call it makes has finished when it returns — let a submission
 //!   outlive its phase and the numbers quietly redistribute themselves
-//!   between `upload`, `tlas`, and the first sample.
+//!   between `upload`, `tlas`, and the first sample. It is also what lets a
+//!   flush free its staging: nothing is still reading it.
 //! - **`Drop` releases, never submits.** No flush is ever in flight, so
 //!   unwinding out of a half-queued load is unconditionally safe — it
 //!   frees staging and scratch and abandons work that never started. Only
@@ -38,23 +34,19 @@ use crate::error::Result;
 use crate::gpu::accel::{self, BuildJob};
 use crate::gpu::{AccelerationStructure, Buffer, Context, MemoryLocation};
 
-/// Bytes of staging plus scratch that trigger a flush.
+/// Bytes of staging plus scratch that trigger a flush, and so the bound on
+/// an upload's transient memory (plus whichever resource crossed it).
 ///
-/// Large enough that the per-submit constant disappears — a scene of any
-/// size lands in single-digit chunks — and small enough that the transient
-/// cost of loading one is a fraction of the residency it is building. It is
-/// a throughput knob, not a correctness one: any value produces the same
-/// bytes, and the smallest legal value (flush after every resource) is
-/// exactly today's behavior minus the pool and fence churn.
+/// A throughput knob, not a correctness one: any value uploads the same
+/// bytes. Large enough that the per-submit constant disappears — a scene of
+/// any size lands in single-digit chunks — and small enough to stay a
+/// fraction of the residency being built.
 const CHUNK_BYTES: vk::DeviceSize = 64 << 20;
 
 /// One queued `vkCmdCopyBuffer`, as raw handles.
 ///
 /// The destination is *borrowed* by handle: the [`Buffer`] it names was
 /// handed to the caller, who must keep it alive until [`Upload::finish`].
-/// Every caller does so trivially — it is holding the thing it asked for —
-/// and the alternative, sharing ownership, would put a refcount on every
-/// buffer in the renderer to police three call sites.
 struct Copy {
     src: vk::Buffer,
     dst: vk::Buffer,
@@ -68,11 +60,14 @@ struct Copy {
 /// [`Upload::finish`]. Dropping one instead abandons whatever has not been
 /// flushed yet — safe, and silent, because that is what an error unwinding
 /// out of a half-built scene needs.
+///
+/// Everything handed out must outlive [`Upload::finish`], and a BLAS must
+/// be queued *after* the buffers it reads: a flush between the two would
+/// run the build before the copies.
 pub struct Upload<'a> {
     gpu: &'a Context,
-    /// Reset and re-recorded per flush, rather than created per submit:
-    /// pool creation and teardown are part of what made a submit cost
-    /// 0.44 ms.
+    /// Reset and re-recorded per flush, rather than created per submit —
+    /// pool churn is part of what a submit costs.
     pool: vk::CommandPool,
     cmd: vk::CommandBuffer,
     fence: vk::Fence,
@@ -98,6 +93,8 @@ impl Context {
 }
 
 impl<'a> Upload<'a> {
+    /// `threshold` is [`CHUNK_BYTES`] everywhere but the tests, which set it
+    /// small enough to cross a chunk boundary without 64 MiB of data.
     fn new(gpu: &'a Context, threshold: vk::DeviceSize) -> Result<Self> {
         let device = gpu.device();
         let pool_info =
@@ -169,7 +166,7 @@ impl<'a> Upload<'a> {
         });
         self.staging.push(staging);
         self.pending += size;
-        self.gate()?;
+        self.flush_if_full()?;
         Ok(buffer)
     }
 
@@ -178,9 +175,9 @@ impl<'a> Upload<'a> {
     ///
     /// The structure is traceable once [`Upload::finish`] returns, and must
     /// outlive that call. Its geometry buffers may come from
-    /// [`Upload::buffer`] on this same [`Upload`]: within a chunk a barrier
-    /// orders the copies before the builds, across chunks the flush's fence
-    /// does.
+    /// [`Upload::buffer`] on this same [`Upload`], and must have been
+    /// queued before this call: within a chunk a barrier orders the copies
+    /// before the builds, across chunks the flush's fence does.
     ///
     /// # Errors
     ///
@@ -194,16 +191,12 @@ impl<'a> Upload<'a> {
         indices: &Buffer,
         triangle_count: u32,
     ) -> Result<AccelerationStructure> {
-        assert!(triangle_count > 0, "cannot build a BLAS over an empty mesh");
-        let (structure, job) = self.gpu.create_structure(
-            name,
-            vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL,
-            accel::triangle_geometry(vertices, vertex_count, indices),
-            triangle_count,
-        )?;
+        let (structure, job) =
+            self.gpu
+                .create_blas(name, vertices, vertex_count, indices, triangle_count)?;
         self.pending += job.scratch_size();
         self.builds.push(job);
-        self.gate()?;
+        self.flush_if_full()?;
         Ok(structure)
     }
 
@@ -222,7 +215,7 @@ impl<'a> Upload<'a> {
     /// Flush iff the queue has grown past the chunk threshold. Tested after
     /// queueing rather than before, so a single resource larger than the
     /// threshold still makes progress instead of wedging the load.
-    fn gate(&mut self) -> Result<()> {
+    fn flush_if_full(&mut self) -> Result<()> {
         if self.pending >= self.threshold {
             self.flush()
         } else {
@@ -236,18 +229,19 @@ impl<'a> Upload<'a> {
         }
         let copies = std::mem::take(&mut self.copies);
         let builds = std::mem::take(&mut self.builds);
-        let result = self.record_and_submit(&copies, &builds);
-        // Either way this chunk's transients have served their purpose: the
-        // submit blocked, so nothing is still reading them. Releasing on the
-        // error path too keeps a failing load from holding a chunk of
-        // host-visible memory while its caller unwinds.
+        let result = self.submit_chunk(&copies, &builds);
+        // On the error path too: the submit blocked, so nothing is still
+        // reading this chunk's staging or scratch, and a failing load should
+        // not hold a chunk of host-visible memory while its caller unwinds.
         self.staging.clear();
         drop(builds);
         self.pending = 0;
         result
     }
 
-    fn record_and_submit(&self, copies: &[Copy], builds: &[BuildJob]) -> Result<()> {
+    /// Record one chunk — every copy, then every build — into the reused
+    /// command buffer, submit it, and wait.
+    fn submit_chunk(&self, copies: &[Copy], builds: &[BuildJob]) -> Result<()> {
         let device = self.gpu.device();
         unsafe {
             device.reset_command_pool(self.pool, vk::CommandPoolResetFlags::empty())?;
@@ -258,14 +252,12 @@ impl<'a> Upload<'a> {
                 let region = vk::BufferCopy::default().size(copy.size);
                 device.cmd_copy_buffer(self.cmd, copy.src, copy.dst, &[region]);
             }
-            // The one barrier a chunk needs: the builds below read vertex
-            // and index buffers the copies above wrote. Builds need none
-            // between them — each owns its scratch, and they write to
-            // distinct structures.
-            if !builds.is_empty() && !copies.is_empty() {
-                barrier_before_builds(device, self.cmd);
-            }
             if !builds.is_empty() {
+                // The one barrier a chunk needs: these builds read vertex and
+                // index buffers the copies above wrote.
+                if !copies.is_empty() {
+                    barrier_before_builds(device, self.cmd);
+                }
                 accel::record_builds(&self.gpu.accel_loader, self.cmd, builds);
             }
             device.end_command_buffer(self.cmd)?;
@@ -275,7 +267,9 @@ impl<'a> Upload<'a> {
         let buffers = [self.cmd];
         let submit_info = vk::SubmitInfo::default().command_buffers(&buffers);
         // Submit under the queue lock, wait with it released — the rule
-        // every submission in `gpu` follows; see [`super::submit`].
+        // every submission in `gpu` follows; see [`super::submit`]. The wait
+        // is also what lets the next flush reset this pool and command
+        // buffer instead of allocating new ones.
         self.gpu.queue.submit(device, &[submit_info], self.fence)?;
         unsafe { device.wait_for_fences(&[self.fence], true, u64::MAX)? };
         Ok(())
@@ -300,8 +294,8 @@ impl Drop for Upload<'_> {
 /// build's *inputs* — the vertex and index buffers these copies just wrote
 /// — are read as shader data, not as acceleration structures.
 /// `ACCELERATION_STRUCTURE_READ` covers only the structures a build reads,
-/// which for a BLAS is nothing. Synchronization validation names the
-/// difference as a `READ_AFTER_WRITE` hazard on "vertex data".
+/// which for a BLAS is nothing. Omitting it surfaces under synchronization
+/// validation as a `READ_AFTER_WRITE` hazard on "vertex data".
 fn barrier_before_builds(device: &ash::Device, cmd: vk::CommandBuffer) {
     let barrier = vk::MemoryBarrier2::default()
         .src_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
@@ -318,17 +312,19 @@ fn barrier_before_builds(device: &ash::Device, cmd: vk::CommandBuffer) {
 mod tests {
     use super::*;
 
-    /// Bytes survive a batched upload **across a chunk boundary** — the
-    /// case a single-flush test cannot reach, and the only thing about
-    /// batching that can go wrong silently.
+    const PATTERN_BYTES: usize = 3072;
+    const TEST_THRESHOLD: vk::DeviceSize = 4096;
+
+    /// Bytes survive a batched upload **across a chunk boundary**, and the
+    /// queue never holds more than the threshold plus the one resource that
+    /// crossed it.
     ///
     /// The threshold is injected rather than met with 64 MiB of test data:
     /// what is under test is what happens at a boundary, not where the
-    /// boundary happens to be. Six buffers over a 4 KiB threshold force at
-    /// least two flushes, each carrying a distinct pattern, so a copy
-    /// recorded into the wrong chunk — or a staging buffer freed while its
-    /// copy was still queued — shows up as the wrong bytes rather than as
-    /// nothing.
+    /// boundary happens to be. Six buffers over a 4 KiB threshold force
+    /// several flushes, each carrying a distinct pattern, so a copy recorded
+    /// into the wrong chunk — or a staging buffer freed while its copy was
+    /// still queued — shows up as the wrong bytes rather than as nothing.
     #[test]
     fn a_batched_upload_survives_its_chunk_boundaries() {
         let Some(gpu) = crate::gpu::test_context() else {
@@ -339,18 +335,28 @@ mod tests {
                 (0..u8::MAX)
                     .map(|byte| byte ^ index)
                     .cycle()
-                    .take(3072)
+                    .take(PATTERN_BYTES)
                     .collect()
             })
             .collect();
 
-        let mut upload = Upload::new(&gpu, 4096).expect("upload");
+        let mut upload = Upload::new(&gpu, TEST_THRESHOLD).expect("upload");
         let buffers: Vec<Buffer> = patterns
             .iter()
             .map(|data| {
-                upload
+                let buffer = upload
                     .buffer("test.chunked", data, vk::BufferUsageFlags::TRANSFER_SRC)
-                    .expect("queue")
+                    .expect("queue");
+                // The gate fired if it needed to, so what is still queued —
+                // and so the transient memory a chunk can hold, past the
+                // resource that crossed the line — stays under the
+                // threshold.
+                assert!(
+                    upload.pending < TEST_THRESHOLD,
+                    "{} bytes still queued, past the {TEST_THRESHOLD}-byte threshold",
+                    upload.pending
+                );
+                buffer
             })
             .collect();
         upload.finish().expect("finish");
@@ -369,10 +375,8 @@ mod tests {
     /// its builds is what makes the geometry readable, and nothing else
     /// would catch its absence.
     ///
-    /// Two triangles' worth of geometry, uploaded and built in one
-    /// `Upload`, then placed in a TLAS — which is a build that *reads* the
-    /// BLAS, so an unbuilt or garbage one fails here rather than silently
-    /// rendering nothing.
+    /// The TLAS at the end is a build that *reads* the BLAS, so an unbuilt
+    /// one fails here rather than silently rendering nothing.
     #[test]
     fn a_batched_blas_is_traceable_when_finish_returns() {
         let Some(gpu) = crate::gpu::test_context() else {

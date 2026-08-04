@@ -162,28 +162,29 @@ impl Context {
     }
 
     /// Create a device-local buffer holding `data`, moved through a transient
-    /// staging buffer. `TRANSFER_DST` is added to `usage` automatically.
+    /// staging buffer and blocking until it arrives. `TRANSFER_DST` is added
+    /// to `usage` automatically.
+    ///
+    /// One buffer per submit: for many at once, open an [`Upload`](super::Upload)
+    /// directly, which is this on a batch.
     pub fn upload_buffer(
         &self,
         name: &str,
         data: &[u8],
         usage: vk::BufferUsageFlags,
     ) -> Result<Buffer> {
-        let size = data.len() as vk::DeviceSize;
-        let staging = self.staging_buffer(&format!("{name}.staging"), data)?;
-        let buffer = self.create_buffer(
-            name,
-            size,
-            usage | vk::BufferUsageFlags::TRANSFER_DST,
-            MemoryLocation::GpuOnly,
-        )?;
-        self.copy_buffer(&staging, &buffer, size)?;
+        let mut upload = self.upload()?;
+        let buffer = upload.buffer(name, data, usage)?;
+        upload.finish()?;
         Ok(buffer)
     }
 
     /// A transient `CpuToGpu` staging buffer pre-filled with `data` — the
     /// front half of every upload, buffer and image alike.
     pub(super) fn staging_buffer(&self, name: &str, data: &[u8]) -> Result<Buffer> {
+        // Vulkan forbids zero-sized buffers; callers with possibly-empty
+        // data pad to one unread record rather than skipping the upload.
+        assert!(!data.is_empty(), "cannot upload an empty buffer ({name})");
         let mut staging = self.create_buffer(
             name,
             data.len() as vk::DeviceSize,
@@ -207,7 +208,10 @@ impl Context {
             vk::BufferUsageFlags::TRANSFER_DST,
             MemoryLocation::GpuToCpu,
         )?;
-        self.copy_buffer(buffer, &staging, buffer.size())?;
+        self.submit_once(|device, cmd| {
+            let region = vk::BufferCopy::default().size(buffer.size());
+            unsafe { device.cmd_copy_buffer(cmd, buffer.handle(), staging.handle(), &[region]) };
+        })?;
         // The mapped slice spans the whole allocation, which the allocator
         // may pad past the requested size — return exactly the buffer.
         Ok(staging
@@ -215,13 +219,6 @@ impl Context {
             .mapped_slice()
             .expect("GpuToCpu memory is always mapped")[..buffer.size() as usize]
             .to_vec())
-    }
-
-    fn copy_buffer(&self, src: &Buffer, dst: &Buffer, size: vk::DeviceSize) -> Result<()> {
-        self.submit_once(|device, cmd| {
-            let region = vk::BufferCopy::default().size(size);
-            unsafe { device.cmd_copy_buffer(cmd, src.handle(), dst.handle(), &[region]) };
-        })
     }
 }
 

@@ -3,15 +3,15 @@
 //!
 //! Creation and building are two steps, split at the one seam that matters:
 //! a structure's storage, handle, and *device address* are all valid the
-//! moment it is created, and only the traversal data has to wait for a
-//! build. So [`Context::create_structure`] hands back a finished
-//! [`AccelerationStructure`] plus a [`BuildJob`] describing the work still
-//! owed, and the caller decides when to record it —
-//! [`Context::build_blas`] immediately, on its own blocking submit;
-//! [`Upload`](super::Upload) batched with a chunk's worth of others. The
-//! shape is otherwise deliberately minimal — no compaction, no refits —
-//! because every structure is built exactly once; rebuilds only become
-//! interesting with dynamic scenes, which nothing on the roadmap requires.
+//! moment it is created, and only the traversal data waits for a build. So
+//! creation hands back a finished [`AccelerationStructure`] plus a
+//! [`BuildJob`] describing the work still owed, and the caller decides when
+//! to record it — [`Context::build_blas`] immediately, on its own blocking
+//! submit; [`Upload`](super::Upload) batched with a chunk's worth of
+//! others.
+//!
+//! No compaction and no refits: every structure is built exactly once, and
+//! rebuilds only become interesting with dynamic scenes.
 
 use std::slice;
 
@@ -57,14 +57,11 @@ impl Drop for AccelerationStructure {
 }
 
 /// The build a freshly created [`AccelerationStructure`] still owes, and
-/// the scratch memory it will need to pay it.
+/// the scratch it will need to pay it.
 ///
-/// Holds no borrows: the geometry it describes is a pair of device
-/// addresses, so a job can outlive the buffers' Rust bindings and sit in a
-/// queue until someone records it. What it *does* hold is a raw handle to
-/// the structure it fills — whose owner must therefore still be alive when
-/// the recording happens — and the scratch buffer, whose lifetime is
-/// exactly this job's.
+/// Holds no borrows — the geometry is a pair of device addresses — so a job
+/// can sit in a queue until someone records it. It does hold a raw handle
+/// to the structure it fills, whose owner must still be alive then.
 pub(super) struct BuildJob {
     ty: vk::AccelerationStructureTypeKHR,
     geometry: vk::AccelerationStructureGeometryKHR<'static>,
@@ -84,12 +81,11 @@ impl BuildJob {
 }
 
 /// Record `jobs` into `cmd` as one batched build. Per-job scratch means no
-/// barriers between them: nothing two builds touch is shared, so the driver
-/// is free to run them together.
+/// barriers between them: two builds share nothing.
 ///
-/// The caller owes the usual guarantee that the geometry buffers are
-/// readable by the time this executes — within a submission that is a
-/// barrier, across one the fence.
+/// The caller owes the guarantee that the geometry buffers are readable by
+/// the time this executes — within a submission a barrier, across one the
+/// fence.
 pub(super) fn record_builds(
     loader: &ash::khr::acceleration_structure::Device,
     cmd: vk::CommandBuffer,
@@ -122,20 +118,16 @@ pub(super) fn record_builds(
     unsafe { loader.cmd_build_acceleration_structures(cmd, &infos, &per_build) };
 }
 
-/// The triangle geometry a BLAS is built over: tightly packed `[f32; 3]`
-/// positions in `vertices`, `u32` index triples in `indices`. Both buffers
-/// need `ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR` and
-/// `SHADER_DEVICE_ADDRESS` usage.
+/// The triangle geometry a BLAS is built over.
 ///
 /// `'static` is not a widening: the returned struct holds two device
 /// addresses and no pointers, so it borrows the buffers only for the
 /// duration of this call.
-pub(super) fn triangle_geometry(
+fn triangle_geometry(
     vertices: &Buffer,
     vertex_count: u32,
     indices: &Buffer,
 ) -> vk::AccelerationStructureGeometryKHR<'static> {
-    assert!(vertex_count > 0, "cannot build a BLAS over an empty mesh");
     let triangles = vk::AccelerationStructureGeometryTrianglesDataKHR::default()
         .vertex_format(vk::Format::R32G32B32_SFLOAT)
         .vertex_data(vk::DeviceOrHostAddressConstKHR {
@@ -155,12 +147,9 @@ pub(super) fn triangle_geometry(
         .flags(vk::GeometryFlagsKHR::OPAQUE)
 }
 
-/// The device's minimum alignment for build scratch addresses, read once at
-/// bring-up and kept on the [`Context`].
-///
-/// It is a constant of the device, and the query behind it is a full
-/// `vkGetPhysicalDeviceProperties2` round trip — asked per build it cost
-/// one of those for every mesh in the scene.
+/// The device's minimum alignment for build scratch addresses: a constant
+/// of the device behind a full `vkGetPhysicalDeviceProperties2` round trip,
+/// so the [`Context`] reads it once at bring-up rather than per build.
 pub(super) fn scratch_alignment(
     instance: &ash::Instance,
     physical_device: vk::PhysicalDevice,
@@ -212,8 +201,31 @@ impl Context {
         indices: &Buffer,
         triangle_count: u32,
     ) -> Result<AccelerationStructure> {
+        let (structure, job) =
+            self.create_blas(name, vertices, vertex_count, indices, triangle_count)?;
+        self.submit_build(&job)?;
+        Ok(structure)
+    }
+
+    /// Create a BLAS over `triangle_count` triangles and return the build it
+    /// still owes — [`Context::build_blas`] without the submit, for
+    /// [`Upload`](super::Upload) to batch.
+    ///
+    /// `vertices` holds tightly packed `[f32; 3]` positions, `indices` `u32`
+    /// triples; both need
+    /// `ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR` and
+    /// `SHADER_DEVICE_ADDRESS` usage.
+    pub(super) fn create_blas(
+        &self,
+        name: &str,
+        vertices: &Buffer,
+        vertex_count: u32,
+        indices: &Buffer,
+        triangle_count: u32,
+    ) -> Result<(AccelerationStructure, BuildJob)> {
+        assert!(vertex_count > 0, "cannot build a BLAS over an empty mesh");
         assert!(triangle_count > 0, "cannot build a BLAS over an empty mesh");
-        self.build_structure(
+        self.create_structure(
             name,
             vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL,
             triangle_geometry(vertices, vertex_count, indices),
@@ -263,42 +275,31 @@ impl Context {
             .geometry(vk::AccelerationStructureGeometryDataKHR {
                 instances: instance_data,
             });
-        self.build_structure(
+        let (structure, job) = self.create_structure(
             name,
             vk::AccelerationStructureTypeKHR::TOP_LEVEL,
             geometry,
             instances.len() as u32,
-        )
+        )?;
+        self.submit_build(&job)?;
+        Ok(structure)
     }
 
-    /// Create a structure and record its build on one blocking submit —
-    /// [`Context::create_structure`] and its [`BuildJob`], immediately.
-    fn build_structure(
-        &self,
-        name: &str,
-        ty: vk::AccelerationStructureTypeKHR,
-        geometry: vk::AccelerationStructureGeometryKHR<'static>,
-        primitive_count: u32,
-    ) -> Result<AccelerationStructure> {
-        let (structure, job) = self.create_structure(name, ty, geometry, primitive_count)?;
-        // On failure `structure` drops, destroying the handle: the funnel
-        // the two-step split replaced is now just ownership.
+    /// Record one build on its own blocking submit.
+    fn submit_build(&self, job: &BuildJob) -> Result<()> {
         self.submit_once(|_, cmd| {
-            record_builds(&self.accel_loader, cmd, slice::from_ref(&job));
-        })?;
-        Ok(structure)
+            record_builds(&self.accel_loader, cmd, slice::from_ref(job));
+        })
     }
 
     /// Create a structure's storage and handle, and allocate the scratch
     /// its build will need: everything except the recording.
     ///
-    /// The returned [`AccelerationStructure`] is already complete in the
-    /// only sense the host cares about — it owns its handle and storage and
-    /// its device address is final — so it can be handed to a caller, put in
-    /// a scene, and referenced by a TLAS build while its own [`BuildJob`]
-    /// waits in a queue. What it is not yet is *traceable*: the job has to
-    /// run first.
-    pub(super) fn create_structure(
+    /// The returned [`AccelerationStructure`] owns its handle and storage
+    /// and its device address is final, so it can be handed to a caller, put
+    /// in a scene, and referenced by a TLAS build while its [`BuildJob`]
+    /// waits in a queue. What it is not yet is *traceable*.
+    fn create_structure(
         &self,
         name: &str,
         ty: vk::AccelerationStructureTypeKHR,
