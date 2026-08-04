@@ -465,30 +465,43 @@ public Closure resolveClosure(float* tables, Material m, float3 wo, bool exiting
     c.baseWeight = c.fuzzAtten * coatAtten;
 
     // The base interface: layering albedo and multiple-scattering scales.
+    // Each scale's table reads run only when some consumer keeps it alive;
+    // otherwise every use folds it away through `lerp(a, b, 0)` or a
+    // dropped lobe, so a *finite* stand-in (1, the no-compensation scale)
+    // leaves the mixture bit-identical while skipping the reads.
     c.specE = c.hasSpecular ? dielectricAlbedo(tables, rough, mu, c.eta) : 0.0;
-    c.conductorScale = reflectionScale(tables, rough, mu,
-                                       fresnelSchlickAverage(m.baseColor));
-    c.dielectricScale = reflectionScale(tables, rough, mu,
-                                        float3(fresnelDielectricAverage(c.eta))).x;
+    c.conductorScale = m.metalness > 0.0
+                     ? reflectionScale(tables, rough, mu,
+                                       fresnelSchlickAverage(m.baseColor))
+                     : float3(1.0);
+    c.dielectricScale = c.hasSpecular
+                      ? reflectionScale(tables, rough, mu,
+                                        float3(fresnelDielectricAverage(c.eta))).x
+                      : 1.0;
 
     // The coupled glass lobe's energy, from the 3D tables (η < 1 inverts
     // into its own branch), with the interface tint standing in for the
-    // multi-bounce Fresnel color.
+    // multi-bounce Fresnel color. Only a transmissive base (or a hit seen
+    // from inside) has a glass lobe to compensate.
     c.glassTint = m.transmissionDepth == 0.0 ? m.transmissionColor : float3(1.0);
-    var glassEta = c.eta;
-    var glassOffset = TABLE_GLASS_E;
-    var glassAvgOffset = TABLE_GLASS_E_AVG;
-    if (glassEta < 1.0) {
-        glassEta = 1.0 / glassEta;
-        glassOffset = TABLE_GLASS_INV_E;
-        glassAvgOffset = TABLE_GLASS_INV_E_AVG;
+    c.glassScale = float3(1.0);
+    if (exiting || m.transmissionWeight > 0.0) {
+        var glassEta = c.eta;
+        var glassOffset = TABLE_GLASS_E;
+        var glassAvgOffset = TABLE_GLASS_E_AVG;
+        if (glassEta < 1.0) {
+            glassEta = 1.0 / glassEta;
+            glassOffset = TABLE_GLASS_INV_E;
+            glassAvgOffset = TABLE_GLASS_INV_E_AVG;
+        }
+        let glassZ = iorRemap(glassEta);
+        let glassE = max(1e-4, tableRead3D(tables, glassOffset, uint3(16, 16, 16),
+                                           rough, mu, glassZ));
+        let glassEAvg = tableRead2D(tables, glassAvgOffset, uint2(16, 16),
+                                    rough, glassZ);
+        c.glassScale = 1.0 + fresnelMultiScatter(c.glassTint, glassEAvg)
+                           * ((1.0 - glassE) / glassE);
     }
-    let glassZ = iorRemap(glassEta);
-    let glassE = max(1e-4, tableRead3D(tables, glassOffset, uint3(16, 16, 16),
-                                       rough, mu, glassZ));
-    let glassEAvg = tableRead2D(tables, glassAvgOffset, uint2(16, 16), rough, glassZ);
-    c.glassScale = 1.0 + fresnelMultiScatter(c.glassTint, glassEAvg)
-                       * ((1.0 - glassE) / glassE);
 
     // Thin-walled dielectric: sum the internal-bounce series into one
     // reflectance/transmittance pair at the view angle (Cycles' shape),

@@ -311,6 +311,7 @@ impl Context {
     /// Values are logged verbatim as the driver reports them; deriving
     /// occupancy from registers is the analyst's step, not this one.
     fn log_pipeline_statistics(&self, pipeline: vk::Pipeline, entry: &CStr) {
+        use std::fmt::Write as _;
         let loader = ash::khr::pipeline_executable_properties::Device::new(
             &self.instance,
             self.device(),
@@ -335,7 +336,6 @@ impl Context {
             let name = executable
                 .name_as_c_str()
                 .map_or_else(|_| "<exec>".into(), CStr::to_string_lossy);
-            use std::fmt::Write as _;
             let mut line = format!("pipeline stats {entry:?} [{name}]");
             for stat in &stats {
                 let stat_name = stat
