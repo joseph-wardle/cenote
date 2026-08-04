@@ -86,6 +86,12 @@ pub struct Context {
     /// Created via [`Context::presentable`], i.e. the surface and swapchain
     /// extensions are enabled and [`Context::create_presenter`] may be called.
     presentable: bool,
+    /// `CENOTE_PIPELINE_STATS` was set *and* the device supports
+    /// `VK_KHR_pipeline_executable_properties`, so pipelines are created
+    /// with statistics capture and log what the driver reports. The single
+    /// source of truth — pipeline creation must not re-read the environment,
+    /// because capture without the feature enabled is invalid usage.
+    pipeline_stats: bool,
     summary: String,
     debug: Option<DebugMessenger>,
     instance: ash::Instance,
@@ -166,7 +172,7 @@ impl Context {
         let summary = init::describe_device(instance, physical_device, &properties);
         log::info!("selected {summary}");
 
-        let device =
+        let (device, pipeline_stats) =
             init::create_device(instance, physical_device, queue_family_index, presentable)?;
         let accel_loader = ash::khr::acceleration_structure::Device::new(instance, &device);
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
@@ -201,6 +207,7 @@ impl Context {
             timestamp_valid_bits,
             device_local_heap,
             presentable,
+            pipeline_stats,
             summary,
             debug,
             instance: instance.clone(),

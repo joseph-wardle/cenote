@@ -275,13 +275,12 @@ impl Context {
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(module)
             .name(entry);
-        // Capture per-kernel compile statistics when CENOTE_PIPELINE_STATS=1
-        // (paired with the feature enable in init.rs).
-        let capture_stats = std::env::var_os("CENOTE_PIPELINE_STATS").is_some();
+        // Set when init.rs enabled pipelineExecutableInfo; the capture flag
+        // is invalid usage without it, hence the flag and not the env var.
         let mut info = vk::ComputePipelineCreateInfo::default()
             .stage(stage)
             .layout(layout);
-        if capture_stats {
+        if self.pipeline_stats {
             info = info.flags(vk::PipelineCreateFlags::CAPTURE_STATISTICS_KHR);
         }
         let pipelines = unsafe {
@@ -290,7 +289,7 @@ impl Context {
 
         match pipelines {
             Ok(pipelines) => {
-                if capture_stats {
+                if self.pipeline_stats {
                     self.log_pipeline_statistics(pipelines[0], entry);
                 }
                 Ok((pipelines[0], layout))
@@ -308,8 +307,9 @@ impl Context {
     }
 
     /// Log every executable statistic the driver reports for a pipeline
-    /// created with `CAPTURE_STATISTICS_KHR` — register count above all,
-    /// which is what bounds a kernel's occupancy.
+    /// created with `CAPTURE_STATISTICS_KHR`, register counts above all.
+    /// Values are logged verbatim as the driver reports them; deriving
+    /// occupancy from registers is the analyst's step, not this one.
     fn log_pipeline_statistics(&self, pipeline: vk::Pipeline, entry: &CStr) {
         let loader = ash::khr::pipeline_executable_properties::Device::new(
             &self.instance,

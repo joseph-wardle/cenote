@@ -304,13 +304,15 @@ fn device_type_rank(device_type: vk::PhysicalDeviceType) -> u32 {
     }
 }
 
-/// Create the logical device with one compute queue.
+/// Create the logical device with one compute queue. The second return
+/// says whether pipeline-statistics capture (`CENOTE_PIPELINE_STATS`) was
+/// actually enabled — requested-but-unsupported degrades to a warning.
 pub(super) fn create_device(
     instance: &ash::Instance,
     physical_device: vk::PhysicalDevice,
     queue_family_index: u32,
     presentable: bool,
-) -> Result<ash::Device> {
+) -> Result<(ash::Device, bool)> {
     let priorities = [1.0_f32];
     let queue_info = vk::DeviceQueueCreateInfo::default()
         .queue_family_index(queue_family_index)
@@ -351,20 +353,53 @@ pub(super) fn create_device(
         extensions.push(ash::khr::swapchain::NAME.as_ptr());
     }
     // CENOTE_PIPELINE_STATS=1 opts into VK_KHR_pipeline_executable_properties
-    // so pipeline creation can log per-kernel register counts — the only
-    // occupancy visibility this Vulkan app has (ncu is CUDA-only).
+    // so pipeline creation can log the driver's per-kernel statistics
+    // (register counts above all) — in-tree register visibility for a
+    // Vulkan app that external CUDA profilers cannot attach to. Diagnostic
+    // only, so an unsupported driver warns instead of failing bring-up.
     let mut exec_stats = vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR::default()
         .pipeline_executable_info(true);
+    let mut pipeline_stats = false;
     if std::env::var_os("CENOTE_PIPELINE_STATS").is_some() {
-        extensions.push(ash::khr::pipeline_executable_properties::NAME.as_ptr());
-        features = features.push_next(&mut exec_stats);
+        if supports_pipeline_executable_info(instance, physical_device) {
+            extensions.push(ash::khr::pipeline_executable_properties::NAME.as_ptr());
+            features = features.push_next(&mut exec_stats);
+            pipeline_stats = true;
+        } else {
+            log::warn!(
+                "CENOTE_PIPELINE_STATS is set, but this driver lacks \
+                 pipelineExecutableInfo — no per-kernel statistics"
+            );
+        }
     }
     let create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(std::slice::from_ref(&queue_info))
         .enabled_extension_names(&extensions)
         .push_next(&mut features);
 
-    Ok(unsafe { instance.create_device(physical_device, &create_info, None)? })
+    let device = unsafe { instance.create_device(physical_device, &create_info, None)? };
+    Ok((device, pipeline_stats))
+}
+
+/// Whether the device offers `VK_KHR_pipeline_executable_properties` and
+/// its one feature bit. Not part of [`missing_requirements`] — the
+/// diagnostic is optional, never a reason to reject a device.
+fn supports_pipeline_executable_info(
+    instance: &ash::Instance,
+    device: vk::PhysicalDevice,
+) -> bool {
+    let extensions =
+        unsafe { instance.enumerate_device_extension_properties(device) }.unwrap_or_default();
+    let present = extensions.iter().any(|e| {
+        e.extension_name_as_c_str() == Ok(ash::khr::pipeline_executable_properties::NAME)
+    });
+    if !present {
+        return false;
+    }
+    let mut exec_stats = vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR::default();
+    let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut exec_stats);
+    unsafe { instance.get_physical_device_features2(device, &mut features) };
+    exec_stats.pipeline_executable_info == vk::TRUE
 }
 
 /// One-line human-readable description of a device (name, type, driver,
