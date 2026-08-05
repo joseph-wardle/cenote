@@ -712,10 +712,13 @@ impl Wavefront {
         // Every post-raygen stage touches a scene resource — the TLAS, the
         // sampled images, or both — and they share one descriptor layout,
         // so each binds the same set.
+        let (table_planes, table_volumes) = scene.bsdf_table_descriptors();
         let bindings = SceneBindings {
             tlas: scene.tlas(),
             environment: scene.environment(),
             textures: scene.texture_descriptors(),
+            table_planes,
+            table_volumes,
         };
         // An indirect stage: workgroup counts read from its queue's header,
         // which the producing stage maintained.

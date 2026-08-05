@@ -26,17 +26,18 @@ use crate::gpu::{AccelerationStructure, Context, SampledImage};
 /// The descriptor bindings a kernel needs. Buffers travel as device
 /// addresses in push constants, so the only question is whether the kernel
 /// touches the resources that must be descriptors — the TLAS, the
-/// environment texture, and the bindless material-texture array. One shared
-/// layout for all three keeps the binding model a single small set; a kernel
-/// that statically uses only one of them is fine, Vulkan only requires that
-/// what it *uses* is bound.
+/// environment texture, the bindless material-texture array, and the
+/// closure's lookup tables. One shared layout for all of them keeps the
+/// binding model a single small set; a kernel that statically uses only
+/// one is fine, Vulkan only requires that what it *uses* is bound.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Bindings {
     /// Push constants only — no descriptor set.
     None,
     /// Set 0 — binding 0: the scene TLAS; binding 1: the environment
-    /// texture; binding 2: the bindless material-texture array. All
-    /// written at dispatch time.
+    /// texture; binding 2: the bindless material-texture array; bindings
+    /// 3 and 4: the closure's 2D and 3D lookup tables. All written at
+    /// dispatch time.
     Scene,
 }
 
@@ -46,6 +47,15 @@ pub enum Bindings {
 /// staying well inside every ray-tracing GPU's per-stage sampled-image
 /// limit.
 pub const MAX_SCENE_TEXTURES: u32 = 1024;
+
+/// Entries in the closure's 2D lookup-table array (binding 3) — the length
+/// `tables.rs` declares its list at, so the two cannot drift. Every slot is
+/// always written, hence no partial binding.
+pub const TABLE_PLANES: u32 = 7;
+
+/// Entries in the closure's 3D lookup-table array (binding 4), on the
+/// same terms as [`TABLE_PLANES`].
+pub const TABLE_VOLUMES: u32 = 3;
 
 /// The scene resources a [`Bindings::Scene`] dispatch binds.
 #[derive(Clone, Copy)]
@@ -57,6 +67,10 @@ pub struct SceneBindings<'a> {
     /// The material textures (binding 2), in bindless-index order — the
     /// order material records index. At most [`MAX_SCENE_TEXTURES`].
     pub textures: &'a [vk::DescriptorImageInfo],
+    /// The 2D lookup tables (binding 3), [`TABLE_PLANES`] of them.
+    pub table_planes: &'a [vk::DescriptorImageInfo],
+    /// The 3D lookup tables (binding 4), [`TABLE_VOLUMES`] of them.
+    pub table_volumes: &'a [vk::DescriptorImageInfo],
 }
 
 /// A compute pipeline plus its layout and (for scene-resource kernels) its
@@ -178,7 +192,8 @@ impl Context {
 
     /// Create the binding model's single descriptor set: binding 0 = the
     /// scene TLAS, binding 1 = the environment texture, binding 2 = the
-    /// bindless texture array. Contents are written at dispatch time; the
+    /// bindless texture array, bindings 3 and 4 = the closure's 2D and 3D
+    /// lookup tables. Contents are written at dispatch time; the texture
     /// array is partially bound — a scene writes only the slots it holds,
     /// and kernels index nothing past them.
     fn create_scene_descriptors(&self) -> Result<SceneDescriptors> {
@@ -199,11 +214,23 @@ impl Context {
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .descriptor_count(MAX_SCENE_TEXTURES)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(3)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(TABLE_PLANES)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(4)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(TABLE_VOLUMES)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
         ];
         let binding_flags = [
             vk::DescriptorBindingFlags::empty(),
             vk::DescriptorBindingFlags::empty(),
             vk::DescriptorBindingFlags::PARTIALLY_BOUND,
+            vk::DescriptorBindingFlags::empty(),
+            vk::DescriptorBindingFlags::empty(),
         ];
         let mut flags_info =
             vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&binding_flags);
@@ -218,7 +245,7 @@ impl Context {
                 .descriptor_count(1),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .descriptor_count(1 + MAX_SCENE_TEXTURES),
+                .descriptor_count(1 + MAX_SCENE_TEXTURES + TABLE_PLANES + TABLE_VOLUMES),
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(1)

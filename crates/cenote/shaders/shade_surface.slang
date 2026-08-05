@@ -132,8 +132,7 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     }
     let frame = Frame(shading);
     let wo = frame.toLocal(-direction);
-    let closure = resolveClosure(params.scene.bsdfTables, material, wo,
-                                 medium == hit.instance);
+    let closure = resolveClosure(material, wo, medium == hit.instance);
 
     // The denoiser guides' remaining feature throughput: fully open on a
     // camera ray (which never reads the buffer), whatever the specular

@@ -78,46 +78,48 @@ public struct Material {
 };
 
 // -- Lookup tables ---------------------------------------------------------
-// One float buffer, uploaded by the engine from `tables.rs` — offsets and
-// axis conventions must match its `TABLE_*` constants entry for entry.
-// Grid point k of an n-wide axis sits at k/(n−1); reads interpolate with
-// clamped multilinear filtering, the first-named axis fastest.
+// One sampled image per table, uploaded by the engine from `tables.rs`:
+// `PLANE_*` indexes its `PLANES`, `VOLUME_*` its `VOLUMES`, entry for
+// entry. Interpolation is the sampler's — linear, clamped at every edge,
+// the first-named axis fastest. Every index below is a compile-time
+// constant; one that varied across the wave would need
+// `NonUniformResourceIndex`.
 
-static const uint TABLE_GGX_E = 0;               // 32×32 (rough, µ)
-static const uint TABLE_GGX_E_AVG = 1024;        // 32 (rough)
-static const uint TABLE_GLASS_E = 1056;          // 16³ (rough, µ, z)
-static const uint TABLE_GLASS_E_AVG = 5152;      // 16² (rough, z)
-static const uint TABLE_GLASS_INV_E = 5408;      // 16³, η < 1
-static const uint TABLE_GLASS_INV_E_AVG = 9504;  // 16², η < 1
-static const uint TABLE_DIELECTRIC_E = 9760;     // 16³ (rough, µ, z)
-static const uint TABLE_SHEEN_A = 13856;         // 32×32 (µ, rough)
-static const uint TABLE_SHEEN_B = 14880;
-static const uint TABLE_SHEEN_R = 15904;
+[vk::binding(3, 0)]
+Sampler2D<float> bsdfPlanes[7];
+[vk::binding(4, 0)]
+Sampler3D<float> bsdfVolumes[3];
 
-float tableRead1D(float* tables, uint offset, uint size, float x) {
-    let fx = saturate(x) * float(size - 1);
-    let i = min(uint(fx), size - 1);
-    let j = min(i + 1, size - 1);
-    return lerp(tables[offset + i], tables[offset + j], fx - float(i));
+static const uint PLANE_GGX_E = 0;             // 32×32 (rough, µ)
+static const uint PLANE_GGX_E_AVG = 1;         // 32 (rough), one row tall
+static const uint PLANE_GLASS_E_AVG = 2;       // 16² (rough, z)
+static const uint PLANE_GLASS_INV_E_AVG = 3;   // 16², η < 1
+static const uint PLANE_SHEEN_A = 4;           // 32×32 (µ, rough)
+static const uint PLANE_SHEEN_B = 5;
+static const uint PLANE_SHEEN_R = 6;
+
+static const uint VOLUME_GLASS_E = 0;          // 16³ (rough, µ, z)
+static const uint VOLUME_GLASS_INV_E = 1;      // 16³, η < 1
+static const uint VOLUME_DIELECTRIC_E = 2;     // 16³ (rough, µ, z)
+
+// A table coordinate in [0, 1] as a texture one: grid point k of an n-wide
+// axis is the table's k/(n−1) and the image's texel centre (k+0.5)/n. An
+// axis one texel deep lands on 0.5 whatever it is handed. Clamping is the
+// sampler's address mode, so arguments out of range need no saturate. Each
+// table is read at one call site, which names its grid as literals — the
+// whole mapping folds there.
+float tableAxis(float x, float n) {
+    return (x * (n - 1.0) + 0.5) / n;
 }
 
-float tableRead2D(float* tables, uint offset, uint2 size, float x, float y) {
-    let fy = saturate(y) * float(size.y - 1);
-    let i = min(uint(fy), size.y - 1);
-    let j = min(i + 1, size.y - 1);
-    return lerp(tableRead1D(tables, offset + size.x * i, size.x, x),
-                tableRead1D(tables, offset + size.x * j, size.x, x),
-                fy - float(i));
+float tableRead2D(uint table, float2 size, float x, float y) {
+    return bsdfPlanes[table].SampleLevel(
+        float2(tableAxis(x, size.x), tableAxis(y, size.y)), 0.0);
 }
 
-float tableRead3D(float* tables, uint offset, uint3 size, float x, float y, float z) {
-    let fz = saturate(z) * float(size.z - 1);
-    let i = min(uint(fz), size.z - 1);
-    let j = min(i + 1, size.z - 1);
-    let plane = size.x * size.y;
-    return lerp(tableRead2D(tables, offset + plane * i, size.xy, x, y),
-                tableRead2D(tables, offset + plane * j, size.xy, x, y),
-                fz - float(i));
+float tableRead3D(uint table, float3 size, float x, float y, float z) {
+    return bsdfVolumes[table].SampleLevel(
+        float3(tableAxis(x, size.x), tableAxis(y, size.y), tableAxis(z, size.z)), 0.0);
 }
 
 // The glass tables' IOR axis: z = √((η−1)/(η+1)) for η ≥ 1 — callers
@@ -295,7 +297,6 @@ public static const uint LOBE_FUZZ = 4;
 
 public struct Closure {
     Material m;
-    float* tables;
     float alpha;      // base specular alpha, coat-roughened, floor-clamped
     float coatAlpha;
     float eta;        // relative IOR at this hit (< 1 leaving the interior)
@@ -347,9 +348,9 @@ float average(float3 v) {
 // A reflection lobe's Fresnel-free energy, (E, E_avg), from the tables.
 // Lobes differing only in Fresnel share one fetch. E is floored off zero:
 // the scale below divides by it.
-float2 reflectionEnergy(float* tables, float rough, float mu) {
-    return float2(max(1e-4, tableRead2D(tables, TABLE_GGX_E, uint2(32, 32), rough, mu)),
-                  tableRead1D(tables, TABLE_GGX_E_AVG, 32, rough));
+float2 reflectionEnergy(float rough, float mu) {
+    return float2(max(1e-4, tableRead2D(PLANE_GGX_E, float2(32, 32), rough, mu)),
+                  tableRead2D(PLANE_GGX_E_AVG, float2(32, 1), rough, 0.0));
 }
 
 // The multiple-scattering scale on a single-scatter reflection lobe:
@@ -358,19 +359,18 @@ float3 reflectionScale(float2 energy, float3 fss) {
     return 1.0 + fresnelMultiScatter(fss, energy.y) * ((1.0 - energy.x) / energy.x);
 }
 
-float3 reflectionScale(float* tables, float rough, float mu, float3 fss) {
-    return reflectionScale(reflectionEnergy(tables, rough, mu), fss);
+float3 reflectionScale(float rough, float mu, float3 fss) {
+    return reflectionScale(reflectionEnergy(rough, mu), fss);
 }
 
 // Directional albedo of the compensated dielectric reflection lobe at
 // η ≥ 1 from its table; below 1 (rare: authored IOR under 1) the smooth-
 // surface Fresnel stands in, Cycles' own fallback.
-float dielectricAlbedo(float* tables, float rough, float mu, float eta) {
+float dielectricAlbedo(float rough, float mu, float eta) {
     if (eta < 1.0) {
         return fresnelDielectric(eta, mu);
     }
-    return tableRead3D(tables, TABLE_DIELECTRIC_E, uint3(16, 16, 16),
-                       rough, mu, iorRemap(eta));
+    return tableRead3D(VOLUME_DIELECTRIC_E, float3(16, 16, 16), rough, mu, iorRemap(eta));
 }
 
 // OpenPBR's coat darkening: internal reflection off the coat's underside
@@ -399,10 +399,9 @@ float3 coatDarkening(Material m, float rough, float mu, float baseFresnel) {
 // kernel knows from its medium slot): the closure degrades to the bare
 // dielectric interface at the inverted IOR — coat, fuzz, and base live
 // on the outside.
-public Closure resolveClosure(float* tables, Material m, float3 wo, bool exiting) {
+public Closure resolveClosure(Material m, float3 wo, bool exiting) {
     Closure c;
     c.m = m;
-    c.tables = tables;
     c.exiting = exiting;
     c.hasSpecular = exiting || m.metalness > 0.0 || m.transmissionWeight > 0.0
                  || m.specularWeight > 0.0;
@@ -450,11 +449,11 @@ public Closure resolveClosure(float* tables, Material m, float3 wo, bool exiting
     c.fuzzAtten = 1.0;
     if (m.fuzzWeight > 0.0 && !exiting) {
         let fuzzRough = clamp(m.fuzzRoughness, 1e-3, 1.0);
-        let a = tableRead2D(tables, TABLE_SHEEN_A, uint2(32, 32), mu, fuzzRough);
-        let r = tableRead2D(tables, TABLE_SHEEN_R, uint2(32, 32), mu, fuzzRough);
+        let a = tableRead2D(PLANE_SHEEN_A, float2(32, 32), mu, fuzzRough);
+        let r = tableRead2D(PLANE_SHEEN_R, float2(32, 32), mu, fuzzRough);
         if (abs(a) >= 1e-5 && r >= 1e-5) {
             c.fuzzA = a;
-            c.fuzzB = tableRead2D(tables, TABLE_SHEEN_B, uint2(32, 32), mu, fuzzRough);
+            c.fuzzB = tableRead2D(PLANE_SHEEN_B, float2(32, 32), mu, fuzzRough);
             c.fuzzR = r;
             c.fuzzAtten = 1.0 - m.fuzzWeight * r;
         }
@@ -466,9 +465,9 @@ public Closure resolveClosure(float* tables, Material m, float3 wo, bool exiting
     c.coatScale = 1.0;
     var coatAtten = float3(1.0);
     if (m.coatWeight > 0.0 && !exiting) {
-        c.coatE = dielectricAlbedo(tables, coatRough, mu, m.coatIor);
+        c.coatE = dielectricAlbedo(coatRough, mu, m.coatIor);
         let fssCoat = fresnelDielectricAverage(m.coatIor);
-        c.coatScale = reflectionScale(tables, coatRough, mu, float3(fssCoat)).x;
+        c.coatScale = reflectionScale(coatRough, mu, float3(fssCoat)).x;
         coatAtten = lerp(float3(1.0), m.coatColor * (1.0 - c.coatE), m.coatWeight)
                   * coatDarkening(m, rough, mu, f0);
     }
@@ -484,36 +483,37 @@ public Closure resolveClosure(float* tables, Material m, float3 wo, bool exiting
     c.conductorScale = float3(1.0);
     c.dielectricScale = 1.0;
     if (c.hasSpecular) {
-        c.specE = dielectricAlbedo(tables, rough, mu, c.eta);
-        let baseEnergy = reflectionEnergy(tables, rough, mu);
+        c.specE = dielectricAlbedo(rough, mu, c.eta);
+        let baseEnergy = reflectionEnergy(rough, mu);
         c.conductorScale = reflectionScale(baseEnergy, fresnelSchlickAverage(m.baseColor));
         c.dielectricScale = reflectionScale(baseEnergy,
                                             float3(fresnelDielectricAverage(c.eta))).x;
     }
 
     // The coupled glass lobe's energy, from the 3D tables (η < 1 inverts
-    // into its own branch), with the interface tint standing in for the
+    // into its own pair), with the interface tint standing in for the
     // multi-bounce Fresnel color. Absent a glass lobe the scale stays 1,
     // which its consumers fold away exactly: `transmissionWeight` is clamped
     // to [0, 1] at lowering, so their `lerp` never extrapolates.
     c.glassTint = m.transmissionDepth == 0.0 ? m.transmissionColor : float3(1.0);
     c.glassScale = float3(1.0);
     if (exiting || m.transmissionWeight > 0.0) {
-        var glassEta = c.eta;
-        var glassOffset = TABLE_GLASS_E;
-        var glassAvgOffset = TABLE_GLASS_E_AVG;
-        if (glassEta < 1.0) {
-            glassEta = 1.0 / glassEta;
-            glassOffset = TABLE_GLASS_INV_E;
-            glassAvgOffset = TABLE_GLASS_INV_E_AVG;
+        let inverted = c.eta < 1.0;
+        let glassZ = iorRemap(inverted ? 1.0 / c.eta : c.eta);
+        float glassE;
+        float glassEAvg;
+        // Which pair a lane wants varies across the wave, so the branch
+        // names them rather than selecting an index.
+        if (inverted) {
+            glassE = tableRead3D(VOLUME_GLASS_INV_E, float3(16, 16, 16), rough, mu, glassZ);
+            glassEAvg = tableRead2D(PLANE_GLASS_INV_E_AVG, float2(16, 16), rough, glassZ);
+        } else {
+            glassE = tableRead3D(VOLUME_GLASS_E, float3(16, 16, 16), rough, mu, glassZ);
+            glassEAvg = tableRead2D(PLANE_GLASS_E_AVG, float2(16, 16), rough, glassZ);
         }
-        let glassZ = iorRemap(glassEta);
-        let glassE = max(1e-4, tableRead3D(tables, glassOffset, uint3(16, 16, 16),
-                                           rough, mu, glassZ));
-        let glassEAvg = tableRead2D(tables, glassAvgOffset, uint2(16, 16),
-                                    rough, glassZ);
-        c.glassScale = 1.0 + fresnelMultiScatter(c.glassTint, glassEAvg)
-                           * ((1.0 - glassE) / glassE);
+        // Floored off zero: the scale divides by it.
+        let e = max(1e-4, glassE);
+        c.glassScale = 1.0 + fresnelMultiScatter(c.glassTint, glassEAvg) * ((1.0 - e) / e);
     }
 
     // Thin-walled dielectric: sum the internal-bounce series into one
@@ -556,8 +556,8 @@ public Closure resolveClosure(float* tables, Material m, float3 wo, bool exiting
         // a lossless sheet transmits — so a white sheet must sum to
         // exactly 1, which the thin furnace pins.
         c.thinAlpha = thinRough * thinRough;
-        c.thinScaleR = reflectionScale(tables, rough, mu, float3(1.0)).x;
-        c.thinScaleT = reflectionScale(tables, thinRough, mu, float3(1.0)).x;
+        c.thinScaleR = reflectionScale(rough, mu, float3(1.0)).x;
+        c.thinScaleT = reflectionScale(thinRough, mu, float3(1.0)).x;
         let total = average(c.thinR) + average(c.thinT);
         c.thinTShare = total > 0.0 ? average(c.thinT) / total : 0.0;
     }

@@ -1,10 +1,10 @@
 //! The closure's baked lookup tables — GGX energy data and the LTC sheen
-//! fit — embedded in the binary and uploaded once per scene, reached
-//! through the scene table like everything else the kernels share.
+//! fit — embedded in the binary and uploaded once per scene as sampled
+//! images, one per table, 2D or 3D as the grid is.
 //!
-//! Two blobs with two provenances, concatenated into one GPU buffer whose
-//! layout `shaders/openpbr.slang` mirrors constant for constant (the
-//! `TABLE_*` offsets below):
+//! Two blobs with two provenances, sliced by the `TABLE_*` offsets below.
+//! [`PLANES`] and [`VOLUMES`] fix the binding order, which
+//! `shaders/openpbr.slang` mirrors entry for entry:
 //!
 //! - `tables/ggx_energy.bin` is **baked here**, by [`bake`], against this
 //!   kernel's exact integrand (GGX with `alpha = roughness²`, separable
@@ -24,11 +24,15 @@
 //!
 //! Every table reads like Cycles' `lookup_table_read*`: grid point `k` of
 //! an `n`-wide axis sits at coordinate `k/(n−1)` in [0, 1], sampled with
-//! clamped multilinear interpolation. Axis order matches Cycles too —
-//! the first-named axis varies fastest.
+//! clamped multilinear interpolation — here the sampler's, over the texel
+//! centres `openpbr.slang`'s `tableAxis` maps onto. Axis order matches
+//! Cycles too: the first-named axis varies fastest, which is also the
+//! layout a tightly packed image copy wants.
+
+use ash::vk;
 
 use crate::error::Result;
-use crate::gpu::{Buffer, Context};
+use crate::gpu::{Context, SampledImage, TABLE_PLANES, TABLE_VOLUMES};
 
 /// `tables/ggx_energy.bin`, baked by [`bake`].
 static GGX_ENERGY: &[u8] = include_bytes!("tables/ggx_energy.bin");
@@ -43,8 +47,9 @@ const GLASS_SIZE: usize = 16;
 /// Axis resolution of the LTC sheen table.
 const SHEEN_SIZE: usize = 32;
 
-// The buffer layout, in floats. `shaders/openpbr.slang` carries the same
-// constants; the two lists must match entry for entry.
+// Where each table sits in the concatenated blob, in floats. Only
+// [`PLANES`] and [`VOLUMES`] below reach the GPU; those two lists are what
+// `shaders/openpbr.slang` indexes, and they must match it entry for entry.
 //
 // E(rough, µ): directional albedo of the single-scatter GGX reflection
 // lobe with Fresnel ≡ 1 — x = roughness (fastest), y = µ = cos θ.
@@ -70,30 +75,133 @@ const GGX_ENERGY_LEN: usize = TABLE_DIELECTRIC_E + GLASS_SIZE * GLASS_SIZE * GLA
 // The sheen table appends after the baked blob: three 32×32 planes —
 // the inverse-LTC-transform entries A and B, then the directional albedo
 // R — each x = µ = cos θ (fastest), y = fuzz roughness.
-#[cfg(test)]
 const TABLE_SHEEN_A: usize = GGX_ENERGY_LEN;
-#[cfg(test)]
 const TABLE_SHEEN_B: usize = TABLE_SHEEN_A + SHEEN_SIZE * SHEEN_SIZE;
-#[cfg(test)]
 const TABLE_SHEEN_R: usize = TABLE_SHEEN_B + SHEEN_SIZE * SHEEN_SIZE;
 /// Floats in `ltc_sheen.bin`.
 const LTC_SHEEN_LEN: usize = 3 * SHEEN_SIZE * SHEEN_SIZE;
 
-/// Upload the concatenated table buffer — called once per scene build
-/// (the scene's resident buffers own it, and its address rides the scene
-/// table).
-pub(crate) fn upload(gpu: &Context) -> Result<Buffer> {
+/// One table's slice of the blob and the grid it spans: a name for the
+/// memory ledger, a float offset, and the axis extents in the table's own
+/// order (x fastest). Depth 1 is a 2D grid.
+struct Table {
+    name: &'static str,
+    offset: usize,
+    extent: (u32, u32, u32),
+}
+
+// The same axis resolutions as `u32`, which is what image extents take.
+const GGX: u32 = GGX_SIZE as u32;
+const GLASS: u32 = GLASS_SIZE as u32;
+const SHEEN: u32 = SHEEN_SIZE as u32;
+
+/// The 2D tables, in the order the kernel's `bsdfPlanes[]` indexes them.
+/// `E_avg` is one row tall: a 1D grid is a 2D image whose second axis has
+/// nowhere to interpolate.
+const PLANES: [Table; TABLE_PLANES as usize] = [
+    Table {
+        name: "scene.tables.ggx_e",
+        offset: TABLE_GGX_E,
+        extent: (GGX, GGX, 1),
+    },
+    Table {
+        name: "scene.tables.ggx_e_avg",
+        offset: TABLE_GGX_E_AVG,
+        extent: (GGX, 1, 1),
+    },
+    Table {
+        name: "scene.tables.glass_e_avg",
+        offset: TABLE_GLASS_E_AVG,
+        extent: (GLASS, GLASS, 1),
+    },
+    Table {
+        name: "scene.tables.glass_inv_e_avg",
+        offset: TABLE_GLASS_INV_E_AVG,
+        extent: (GLASS, GLASS, 1),
+    },
+    Table {
+        name: "scene.tables.sheen_a",
+        offset: TABLE_SHEEN_A,
+        extent: (SHEEN, SHEEN, 1),
+    },
+    Table {
+        name: "scene.tables.sheen_b",
+        offset: TABLE_SHEEN_B,
+        extent: (SHEEN, SHEEN, 1),
+    },
+    Table {
+        name: "scene.tables.sheen_r",
+        offset: TABLE_SHEEN_R,
+        extent: (SHEEN, SHEEN, 1),
+    },
+];
+
+/// The 3D tables, in the order the kernel's `bsdfVolumes[]` indexes them.
+const VOLUMES: [Table; TABLE_VOLUMES as usize] = [
+    Table {
+        name: "scene.tables.glass_e",
+        offset: TABLE_GLASS_E,
+        extent: (GLASS, GLASS, GLASS),
+    },
+    Table {
+        name: "scene.tables.glass_inv_e",
+        offset: TABLE_GLASS_INV_E,
+        extent: (GLASS, GLASS, GLASS),
+    },
+    Table {
+        name: "scene.tables.dielectric_e",
+        offset: TABLE_DIELECTRIC_E,
+        extent: (GLASS, GLASS, GLASS),
+    },
+];
+
+/// The uploaded tables: one image per entry of [`PLANES`] then [`VOLUMES`]
+/// — one list, split by the slice the two bindings take, since a 2D and a
+/// 3D image cannot share a binding. The images are held for the scene's
+/// lifetime; the descriptors name their views and samplers.
+pub(crate) struct BsdfTables {
+    images: Vec<SampledImage>,
+    descriptors: Vec<vk::DescriptorImageInfo>,
+}
+
+impl BsdfTables {
+    /// The 2D tables' descriptors, in binding-3 index order.
+    pub(crate) fn planes(&self) -> &[vk::DescriptorImageInfo] {
+        &self.descriptors[..PLANES.len()]
+    }
+
+    /// The 3D tables' descriptors, in binding-4 index order.
+    pub(crate) fn volumes(&self) -> &[vk::DescriptorImageInfo] {
+        &self.descriptors[PLANES.len()..]
+    }
+}
+
+/// Upload every table as its own sampled image — called once per scene
+/// build (the scene's residency owns them).
+pub(crate) fn upload(gpu: &Context) -> Result<BsdfTables> {
     assert_eq!(GGX_ENERGY.len(), GGX_ENERGY_LEN * 4, "ggx_energy.bin size");
     assert_eq!(LTC_SHEEN.len(), LTC_SHEEN_LEN * 4, "ltc_sheen.bin size");
-    let mut bytes = Vec::with_capacity(GGX_ENERGY.len() + LTC_SHEEN.len());
-    bytes.extend_from_slice(GGX_ENERGY);
-    bytes.extend_from_slice(LTC_SHEEN);
-    gpu.upload_buffer(
-        "scene.bsdf_tables",
-        &bytes,
-        ash::vk::BufferUsageFlags::STORAGE_BUFFER
-            | ash::vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-    )
+    // `include_bytes!` gives byte alignment, so decode rather than cast.
+    let blob: Vec<f32> = GGX_ENERGY
+        .chunks_exact(4)
+        .chain(LTC_SHEEN.chunks_exact(4))
+        .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("four bytes")))
+        .collect();
+
+    let count = PLANES.len() + VOLUMES.len();
+    let mut tables = BsdfTables {
+        images: Vec::with_capacity(count),
+        descriptors: Vec::with_capacity(count),
+    };
+    for table in PLANES.iter().chain(&VOLUMES) {
+        let (width, height, depth) = table.extent;
+        let texels = (width * height * depth) as usize;
+        let image =
+            gpu.upload_table_image(table.name, table.extent, &blob[table.offset..][..texels])?;
+        tables.descriptors.push(image.descriptor());
+        tables.images.push(image);
+    }
+    Ok(tables)
 }
 
 /// The baker: quasi–Monte Carlo tabulation of the kernel's own GGX

@@ -455,6 +455,8 @@ impl Context {
                     other.tlas.handle() == scene.tlas.handle()
                         && std::ptr::eq(other.environment, scene.environment)
                         && std::ptr::eq(other.textures, scene.textures)
+                        && std::ptr::eq(other.table_planes, scene.table_planes)
+                        && std::ptr::eq(other.table_volumes, scene.table_volumes)
                 }),
             "one pipeline, two scenes — its single descriptor set can hold only one"
         );
@@ -465,7 +467,8 @@ impl Context {
     /// set: the TLAS at binding 0, the environment at binding 1, the
     /// bindless texture table at binding 2 — only as far as the scene
     /// fills it, since the binding is partially bound and kernels never
-    /// index past what the material records name.
+    /// index past what the material records name — and the closure's
+    /// lookup tables at bindings 3 and 4, always whole.
     fn write_scene_descriptors(&self, pipeline: &ComputePipeline, scene: SceneBindings) {
         let descriptors = pipeline.scene.as_ref().expect("checked against bindings");
         let handles = [scene.tlas.handle()];
@@ -486,6 +489,16 @@ impl Context {
                 .dst_binding(1)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .image_info(slice::from_ref(&image_info)),
+            vk::WriteDescriptorSet::default()
+                .dst_set(descriptors.set)
+                .dst_binding(3)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(scene.table_planes),
+            vk::WriteDescriptorSet::default()
+                .dst_set(descriptors.set)
+                .dst_binding(4)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(scene.table_volumes),
         ];
         if !scene.textures.is_empty() {
             writes.push(

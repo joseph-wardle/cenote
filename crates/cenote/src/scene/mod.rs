@@ -45,6 +45,7 @@ use crate::error::{Error, Result};
 use crate::gpu::{AccelerationStructure, Buffer, Context, SampledImage, TlasInstance, Upload};
 use crate::lights::{DeltaLight, LIGHT_NONE, TriangleLight};
 use crate::material::{Material, TEXTURE_NONE};
+use crate::tables::BsdfTables;
 use crate::texture;
 
 /// A rejected edit or malformed scene input, as an [`Error::Scene`] — the
@@ -142,11 +143,6 @@ struct SceneTable {
     geometry: vk::DeviceAddress,
     materials: vk::DeviceAddress,
     lights: vk::DeviceAddress,
-    /// The closure's baked lookup tables ([`crate::tables`]) — static
-    /// data, but reached through the scene table like everything else the
-    /// kernels share, which keeps their push constants inside Vulkan's
-    /// guaranteed 128 bytes.
-    bsdf_tables: vk::DeviceAddress,
     /// Per-texture sample-time parameters ([`TextureParams`]), one record
     /// per bindless slot in the same index order.
     texture_params: vk::DeviceAddress,
@@ -273,17 +269,18 @@ struct ResidentTexture {
     hash: u64,
 }
 
-/// Every buffer the [`SceneTable`] points into: geometry records,
-/// materials, light records, and the environment's three sampling tables.
-/// Held to keep the residency alive; replaced piecewise by prep as edits
-/// dirty them.
+/// Every buffer the [`SceneTable`] points into — geometry records,
+/// materials, light records, and the environment's three sampling tables —
+/// plus the closure's table images, which are built the same once-per-scene
+/// way but reach the kernels as descriptors. Held to keep the residency
+/// alive; replaced piecewise by prep as edits dirty them.
 struct ResidentBuffers {
     geometry: Buffer,
     materials: Buffer,
     lights: Buffer,
     /// The closure's lookup tables — uploaded once at build and never
     /// dirtied (the data is embedded in the binary).
-    bsdf_tables: Buffer,
+    bsdf_tables: BsdfTables,
     /// Per-texture sample-time parameters, in bindless-index order —
     /// rebuilt whenever the texture residency changes.
     texture_params: Buffer,
@@ -465,6 +462,17 @@ impl Scene {
     /// material records use — what every wave binds at binding 2.
     pub fn texture_descriptors(&self) -> &[vk::DescriptorImageInfo] {
         &self.descriptors
+    }
+
+    /// The closure's lookup-table descriptors, 2D then 3D — bindings 3
+    /// and 4. Not [`Self::table`], which is the scene's address table.
+    pub fn bsdf_table_descriptors(
+        &self,
+    ) -> (&[vk::DescriptorImageInfo], &[vk::DescriptorImageInfo]) {
+        (
+            self.resident.bsdf_tables.planes(),
+            self.resident.bsdf_tables.volumes(),
+        )
     }
 
     /// Rebuild the bindless write list from the resident map — called
@@ -707,7 +715,6 @@ fn upload_scene_table(
         geometry: resident.geometry.device_address(),
         materials: resident.materials.device_address(),
         lights: resident.lights.device_address(),
-        bsdf_tables: resident.bsdf_tables.device_address(),
         texture_params: resident.texture_params.device_address(),
         env_to_world: transform_rows(env_placement.0),
         env_from_world: transform_rows(env_placement.1),

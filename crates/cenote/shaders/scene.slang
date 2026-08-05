@@ -37,13 +37,13 @@ public float2 interpolateUv(GeometryRecord mesh, uint primitive, float2 bary) {
 }
 
 // Everything the scene shares with the kernels: buffer addresses (indexed
-// by TLAS instance custom index, except the light list), the closure's
-// baked lookup tables, plus the embedded environment light.
+// by TLAS instance custom index, except the light list), plus the embedded
+// environment light. The closure's baked tables travel as descriptors
+// instead — see `openpbr.slang`.
 public struct SceneTable {
     public GeometryRecord* geometry;
     public Material* materials;
     public LightRecord* lights;
-    public float* bsdfTables; // layout in `tables.rs` ↔ openpbr.slang TABLE_*
     public TextureParams* textureParams; // per bindless slot, same index order
     public Environment env;
     public uint lightCount;

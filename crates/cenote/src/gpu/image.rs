@@ -1,11 +1,13 @@
 //! Sampled images. Buffers travel as device addresses in push constants,
 //! but filtered texture reads need real `VkImage`s behind descriptors, so
 //! images are what the binding model carries: the environment map (set 0,
-//! binding 1, next to the TLAS) and the material textures in the bindless
-//! table (binding 2). Two upload paths, one per producer:
+//! binding 1, next to the TLAS), the material textures in the bindless
+//! table (binding 2), and the closure's lookup tables (bindings 3 and 4).
+//! Three upload paths, one per producer:
 //! [`Context::upload_sampled_image`] for the environment's RGBA `f32`
 //! radiance, [`Context::upload_texture`] for the BC blocks `texture.rs`
-//! prepares.
+//! prepares, [`Context::upload_table_image`] for the scalar grids
+//! `tables.rs` bakes.
 
 use std::mem::ManuallyDrop;
 use std::slice;
@@ -19,11 +21,12 @@ use crate::gpu::buffer::free_allocation;
 use crate::gpu::ledger::{Bucket, Ledger};
 use crate::gpu::{Context, MemoryLocation};
 
-/// A 2D image with a view and its sampler, ready to bind for filtered
+/// An image with a view and its sampler, ready to bind for filtered
 /// shader reads; freed on drop (before the [`Context`], like every `gpu`
-/// resource). Always bilinear; the address modes are the upload path's —
+/// resource). Always linear; the address modes are the upload path's —
 /// equirect-shaped for the environment (wrapping azimuth, clamped poles),
-/// wrapping both ways for material textures.
+/// wrapping both ways for material textures, clamped every axis for the
+/// lookup tables.
 pub struct SampledImage {
     image: vk::Image,
     view: vk::ImageView,
@@ -61,10 +64,15 @@ impl Drop for SampledImage {
     }
 }
 
-/// Texel format: full `f32` — the environment is radiance data (an
+/// The environment's texel format: full `f32` — it is radiance data (an
 /// unclipped sun overflows `f16`), and one small image doesn't earn a
 /// precision compromise.
-const FORMAT: vk::Format = vk::Format::R32G32B32A32_SFLOAT;
+const ENVIRONMENT_FORMAT: vk::Format = vk::Format::R32G32B32A32_SFLOAT;
+
+/// A lookup table's texel format: the scalar `f32` the baker wrote. The
+/// tables are 16 KB in total, small enough that narrowing them buys
+/// nothing measurable.
+const TABLE_FORMAT: vk::Format = vk::Format::R32_SFLOAT;
 
 impl Context {
     /// Create a `width`×`height` [`SampledImage`] holding `texels` (tightly
@@ -92,12 +100,40 @@ impl Context {
         );
         self.upload_image(
             name,
-            (width, height),
-            FORMAT,
+            (width, height, 1),
+            ENVIRONMENT_FORMAT,
             // Equirect addressing: azimuth is periodic, the poles are
             // edges, not seams.
             (
                 vk::SamplerAddressMode::REPEAT,
+                vk::SamplerAddressMode::CLAMP_TO_EDGE,
+            ),
+            bytemuck::cast_slice(texels),
+            (width, height),
+        )
+    }
+
+    /// Create a [`SampledImage`] holding one baked lookup table: scalar
+    /// `f32` texels, tightly packed with x varying fastest, clamped in
+    /// every axis — a read past either end of an axis takes the edge
+    /// value. A depth of 1 makes a 2D image, anything more a 3D one.
+    pub fn upload_table_image(
+        &self,
+        name: &str,
+        (width, height, depth): (u32, u32, u32),
+        texels: &[f32],
+    ) -> Result<SampledImage> {
+        assert_eq!(
+            texels.len() as u64,
+            u64::from(width) * u64::from(height) * u64::from(depth),
+            "texel count doesn't match table dimensions"
+        );
+        self.upload_image(
+            name,
+            (width, height, depth),
+            TABLE_FORMAT,
+            (
+                vk::SamplerAddressMode::CLAMP_TO_EDGE,
                 vk::SamplerAddressMode::CLAMP_TO_EDGE,
             ),
             bytemuck::cast_slice(texels),
@@ -125,7 +161,7 @@ impl Context {
         );
         self.upload_image(
             name,
-            (width, height),
+            (width, height, 1),
             format,
             (
                 vk::SamplerAddressMode::REPEAT,
@@ -143,13 +179,13 @@ impl Context {
     fn upload_image(
         &self,
         name: &str,
-        (width, height): (u32, u32),
+        (width, height, depth): (u32, u32, u32),
         format: vk::Format,
         address_modes: (vk::SamplerAddressMode, vk::SamplerAddressMode),
         data: &[u8],
         row_extent: (u32, u32),
     ) -> Result<SampledImage> {
-        assert!(width > 0 && height > 0, "zero-sized image");
+        assert!(width > 0 && height > 0 && depth > 0, "zero-sized image");
         let device = self.device();
 
         let features = unsafe {
@@ -167,12 +203,16 @@ impl Context {
         }
 
         let info = vk::ImageCreateInfo::default()
-            .image_type(vk::ImageType::TYPE_2D)
+            .image_type(if depth == 1 {
+                vk::ImageType::TYPE_2D
+            } else {
+                vk::ImageType::TYPE_3D
+            })
             .format(format)
             .extent(vk::Extent3D {
                 width,
                 height,
-                depth: 1,
+                depth,
             })
             .mip_levels(1)
             .array_layers(1)
@@ -187,7 +227,7 @@ impl Context {
         match self.finish_sampled_image(
             name,
             image,
-            (width, height),
+            (width, height, depth),
             format,
             address_modes,
             data,
@@ -209,7 +249,7 @@ impl Context {
         &self,
         name: &str,
         image: vk::Image,
-        (width, height): (u32, u32),
+        (width, height, depth): (u32, u32, u32),
         format: vk::Format,
         address_modes: (vk::SamplerAddressMode, vk::SamplerAddressMode),
         data: &[u8],
@@ -250,7 +290,11 @@ impl Context {
 
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D)
+            .view_type(if depth == 1 {
+                vk::ImageViewType::TYPE_2D
+            } else {
+                vk::ImageViewType::TYPE_3D
+            })
             .format(format)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -270,7 +314,7 @@ impl Context {
             .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
         sampled.sampler = unsafe { device.create_sampler(&sampler_info, None)? };
 
-        self.upload_texels(&sampled, (width, height), data, row_extent)?;
+        self.upload_texels(&sampled, (width, height, depth), data, row_extent)?;
         Ok(sampled)
     }
 
@@ -281,7 +325,7 @@ impl Context {
     fn upload_texels(
         &self,
         sampled: &SampledImage,
-        (width, height): (u32, u32),
+        (width, height, depth): (u32, u32, u32),
         data: &[u8],
         row_extent: (u32, u32),
     ) -> Result<()> {
@@ -321,7 +365,7 @@ impl Context {
                 .image_extent(vk::Extent3D {
                     width,
                     height,
-                    depth: 1,
+                    depth,
                 });
             unsafe {
                 device.cmd_copy_buffer_to_image(
