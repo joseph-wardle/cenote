@@ -50,6 +50,9 @@ pub struct Kernels {
     pub shade_miss: Kernel,
     /// Surface shading and path termination/continuation.
     pub shade_surface: Kernel,
+    /// Medium events on path segments — recorded only when the scene has
+    /// media; a skeleton until a medium can be authored.
+    pub shade_volume: Kernel,
     /// Occlusion tests for queued shadow rays.
     pub trace_shadow: Kernel,
     /// Film: add a wave's sample into the running sums (NaN/Inf-guarded).
@@ -80,6 +83,7 @@ impl Kernels {
             intersect: kernel(spirv!("intersect"), c"intersect"),
             shade_miss: kernel(spirv!("shade_miss"), c"shade_miss"),
             shade_surface: kernel(spirv!("shade_surface"), c"shade_surface"),
+            shade_volume: kernel(spirv!("shade_volume"), c"shade_volume"),
             trace_shadow: kernel(spirv!("trace_shadow"), c"trace_shadow"),
             accumulate: kernel(spirv!("accumulate"), c"accumulate"),
             resolve: kernel(spirv!("resolve"), c"resolve"),
@@ -103,6 +107,7 @@ impl Kernels {
             intersect,
             shade_miss,
             shade_surface,
+            shade_volume,
             trace_shadow,
             accumulate,
             resolve,
@@ -130,6 +135,10 @@ impl Kernels {
             shade_surface: Kernel {
                 spirv: shade_surface?,
                 entry: c"shade_surface",
+            },
+            shade_volume: Kernel {
+                spirv: shade_volume?,
+                entry: c"shade_volume",
             },
             trace_shadow: Kernel {
                 spirv: trace_shadow?,
@@ -258,12 +267,13 @@ mod tests {
         u32::from_le_bytes(bytes[..4].try_into().unwrap()) == 0x0723_0203
     }
 
-    fn all(kernels: &Kernels) -> [&Kernel; 8] {
+    fn all(kernels: &Kernels) -> [&Kernel; 9] {
         [
             &kernels.raygen,
             &kernels.intersect,
             &kernels.shade_miss,
             &kernels.shade_surface,
+            &kernels.shade_volume,
             &kernels.trace_shadow,
             &kernels.accumulate,
             &kernels.resolve,

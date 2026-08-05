@@ -9,6 +9,19 @@ import lights;
 import openpbr;
 import textures;
 
+// What a ray crossing an instance's surface crosses, classified at prep:
+// an opaque surface (route to shade_surface as ever), a refractive
+// interface into a closed interior, or a null boundary — pure medium
+// extent, no surface response at all, crossed only by shade_volume's
+// march. One word, read by intersect's three-way route.
+public static const uint BOUNDARY_OPAQUE = 0;
+public static const uint BOUNDARY_REFRACTIVE = 1;
+public static const uint BOUNDARY_NULL = 2;
+
+// An instance bounding no authored medium — what `GeometryRecord.medium`
+// carries until the `Medium` object kind lands.
+public static const uint MEDIUM_INDEX_NONE = 0xffffffff;
+
 // Where an instance's triangles live, plus its transforms — everything
 // needed to re-evaluate shading at a Hit. Mirrors `GeometryRecord` in
 // `scene.rs` field for field.
@@ -20,8 +33,8 @@ public struct GeometryRecord {
     public float4 objectToWorld[3]; // rows of the instance's 3×4 transform
     public float4 worldToObject[3]; // rows of its inverse — normals, error bounds
     public uint light;              // index into the light list, or LIGHT_NONE
-    uint pad0;
-    uint pad1;
+    public uint medium;   // the medium this instance bounds, or MEDIUM_INDEX_NONE
+    public uint boundary; // BOUNDARY_* — what crossing this surface means
     uint pad2;
 };
 

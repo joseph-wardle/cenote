@@ -119,6 +119,9 @@ impl Scene {
         let placements = placements(&meshes, &host.instances);
         let tlas = build_scene_tlas(gpu, &placements)?;
         let tabling = Instant::now();
+        let has_interiors = placements
+            .iter()
+            .any(|placement| super::has_interior(&placement.material));
         let (geometry, materials, lights) =
             upload_instance_tables(gpu, &placements, &host.triangle_lights, &host.delta_lights)?;
         drop(placements);
@@ -153,6 +156,7 @@ impl Scene {
             textures,
             descriptors,
             camera: host.camera.expect("a fresh build always adopts its camera"),
+            has_interiors,
             env_size,
             env_power: power,
             env_source: spec.source.clone(),
@@ -242,6 +246,9 @@ impl Scene {
             self.tlas = build_scene_tlas(gpu, &placements)?;
         }
         let tabling = Instant::now();
+        self.has_interiors = placements
+            .iter()
+            .any(|placement| super::has_interior(&placement.material));
         let (geometry, materials, lights) =
             upload_instance_tables(gpu, &placements, &host.triangle_lights, &host.delta_lights)?;
         drop(placements);

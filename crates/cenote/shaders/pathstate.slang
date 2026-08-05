@@ -34,6 +34,13 @@ public struct Hit {
 // is 24 bits wide, so no instance can ever claim this value.
 public static const uint MEDIUM_NONE = 0xffffff;
 
+// Bit 24 of a medium-stack entry: the entry's medium scatters (σ_s > 0),
+// so segments through it must route to shade_volume rather than run
+// straight to shade_surface. Set by whoever pushes the entry — the
+// instance index rides in the low 24 bits, and intersect's routing test
+// reads only this bit of the top entry, never the medium record itself.
+public static const uint STACK_SCATTERING = 1 << 24;
+
 // Bounces before this always survive — they carry most of the image's energy,
 // and killing them early would just trade traced rays for noise. From here on,
 // paths gamble survival against their throughput and the survivors are
@@ -57,13 +64,17 @@ public struct Paths {
     // scatter that produced this ray, which the next vertex's emission
     // needs for MIS (0 on camera rays: no light-sampling strategy competed).
     public float4* throughput;
-    // The instance whose interior this ray travels ([`MEDIUM_NONE`] in
-    // vacuum), set when a refraction enters a closed surface, cleared when
-    // one leaves, and read at the next vertex for Beer–Lambert absorption
-    // over the segment. One medium slot — nested media are a later, wider
-    // seam. Written only by scatters: bounce 0 knows a camera ray starts in
-    // vacuum, so raygen never touches it.
-    public uint* medium;
+    // The path's medium stack: four entries, nearest interior first, each
+    // a 24-bit instance index (lanes hold [`MEDIUM_NONE`] when empty) with
+    // 8 flag bits above it ([`STACK_SCATTERING`] is the only one defined).
+    // `.x` is the medium the ray currently travels — set when a refraction
+    // enters a closed surface, cleared when one leaves, read at the next
+    // vertex for Beer–Lambert absorption over the segment. Allocated only
+    // when the scene has interiors at all; every access sits behind the
+    // kernel's interiors flag, so a media-free scene carries a null
+    // address and never touches it. Written only by scatters: bounce 0
+    // knows a camera ray starts in vacuum, so raygen never touches it.
+    public uint4* stack;
 };
 
 // The wave's AOV targets, one indirection behind the shading kernels'

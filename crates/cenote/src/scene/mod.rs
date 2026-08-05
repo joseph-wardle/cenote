@@ -129,7 +129,33 @@ struct GeometryRecord {
     /// order, so a BSDF-sampled hit finds the pdf its MIS weight competes
     /// against at `light + primitive`.
     light: u32,
-    _pad0: [u32; 3],
+    /// The medium this instance bounds, or [`MEDIUM_INDEX_NONE`] — always
+    /// the latter until the `Medium` object kind lands.
+    medium: u32,
+    /// What crossing this instance's surface means — a `BOUNDARY_*` value,
+    /// classified at prep from the material: refractive for any closed
+    /// transmissive surface, otherwise opaque (null boundaries arrive with
+    /// authored media).
+    boundary: u32,
+    _pad0: u32,
+}
+
+/// `GeometryRecord::boundary` values — the `BOUNDARY_*` constants in
+/// `shaders/scene.slang`.
+const BOUNDARY_OPAQUE: u32 = 0;
+const BOUNDARY_REFRACTIVE: u32 = 1;
+
+/// `GeometryRecord::medium`'s "bounds no medium" sentinel —
+/// `MEDIUM_INDEX_NONE` in `shaders/scene.slang`.
+const MEDIUM_INDEX_NONE: u32 = 0xffff_ffff;
+
+/// Whether `material` gives its instance a closed transmissive interior —
+/// the boundary classification, and (any true) the trigger for the path
+/// pool's medium-stack allocation. Depth is deliberately not consulted:
+/// even a depth-0 interior (interface tint, no absorption) drives the
+/// closure's `exiting` flag through the stack, so it needs the slot.
+fn has_interior(material: &Material) -> bool {
+    material.transmission_weight > 0.0 && material.thin_walled == 0
 }
 
 /// Every buffer the scene shares with the kernels, one address each, plus
@@ -244,6 +270,10 @@ pub struct Scene {
     /// changes; every wave binds it next to the TLAS.
     descriptors: Vec<vk::DescriptorImageInfo>,
     camera: Camera,
+    /// Whether any instance has a closed transmissive interior — the
+    /// trigger for the wavefront's medium-stack allocation, recomputed on
+    /// every build and update.
+    has_interiors: bool,
     /// The environment's dimensions and emitted power (untinted), retained
     /// so a light edit can rebuild the scene table (its selection
     /// probability weighs the light list against the environment) without
@@ -374,6 +404,9 @@ impl Scene {
             })
             .collect();
         let tlas = build_scene_tlas(gpu, &placements)?;
+        let has_interiors = placements
+            .iter()
+            .any(|placement| has_interior(&placement.material));
         let (geometry, materials, lights) =
             upload_instance_tables(gpu, &placements, &triangle_lights, &[])?;
         let GpuEnvironment {
@@ -421,6 +454,7 @@ impl Scene {
             textures: BTreeMap::new(),
             descriptors: Vec::new(),
             camera,
+            has_interiors,
             env_size,
             env_power: power,
             env_source: None,
@@ -434,6 +468,25 @@ impl Scene {
     #[must_use]
     pub fn tlas(&self) -> &AccelerationStructure {
         &self.tlas
+    }
+
+    /// Whether any instance has a closed transmissive interior. True, the
+    /// wavefront allocates the medium stack and its kernels track which
+    /// interior each path travels; false, the stack is never allocated and
+    /// never touched.
+    #[must_use]
+    pub fn has_interiors(&self) -> bool {
+        self.has_interiors
+    }
+
+    /// Whether the scene has media at all — a scattering medium or a null
+    /// boundary, the things that give a path segment a medium *event* and
+    /// so record the volume stage. Constant false until a medium can be
+    /// authored (pure-absorbing interiors have no event to sample and shade
+    /// through the surface stage as ever).
+    #[must_use]
+    pub fn has_media(&self) -> bool {
+        false
     }
 
     /// The environment's emitted power as the selection heuristic weighs
@@ -651,7 +704,13 @@ fn upload_instance_tables(
                 object_to_world: transform_rows(placement.transform),
                 world_to_object: transform_rows(inverse),
                 light,
-                _pad0: [0; 3],
+                medium: MEDIUM_INDEX_NONE,
+                boundary: if has_interior(&placement.material) {
+                    BOUNDARY_REFRACTIVE
+                } else {
+                    BOUNDARY_OPAQUE
+                },
+                _pad0: 0,
             }
         })
         .collect();

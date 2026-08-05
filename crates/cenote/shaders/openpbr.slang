@@ -396,10 +396,15 @@ float3 coatDarkening(Material m, float rough, float mu, float baseFresnel) {
 
 // Resolve a material against the view direction. `exiting` marks a hit
 // that leaves the interior the path is traveling through (the shading
-// kernel knows from its medium slot): the closure degrades to the bare
+// kernel knows from its medium stack): the closure degrades to the bare
 // dielectric interface at the inverted IOR — coat, fuzz, and base live
-// on the outside.
-public Closure resolveClosure(Material m, float3 wo, bool exiting) {
+// on the outside. `exteriorIor` is the medium on the outside of this
+// boundary — 1.0 (vacuum, the default) everywhere until nested media
+// hand a real dominant exterior down; the relative IOR is the ratio
+// between the media on each side, and `x / 1.0` is exact in IEEE-754,
+// so the default changes no image.
+public Closure resolveClosure(Material m, float3 wo, bool exiting,
+                              float exteriorIor = 1.0) {
     Closure c;
     c.m = m;
     c.exiting = exiting;
@@ -438,7 +443,7 @@ public Closure resolveClosure(Material m, float3 wo, bool exiting) {
     if (abs(eta - 1.0) < 1e-3) {
         eta = eta < 1.0 ? 1.0 - 1e-3 : 1.0 + 1e-3;
     }
-    c.eta = exiting ? 1.0 / eta : eta;
+    c.eta = exiting ? exteriorIor / eta : eta / exteriorIor;
 
     // Fuzz at wo. The published fit skips cells whose reflectance is
     // ~zero (A = 0 there), so a degenerate read means "no fuzz lobe
