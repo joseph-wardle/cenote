@@ -144,11 +144,10 @@ const _: () = assert!(size_of::<GeometryRecord>() == 144);
 const BOUNDARY_OPAQUE: u32 = 0;
 const BOUNDARY_REFRACTIVE: u32 = 1;
 
-/// `GeometryRecord::medium` for an instance whose interior is vacuum — an
-/// index no table can reach. Matches `MEDIUM_NONE` in `shaders/scene.slang`.
-/// Deliberately not the stack's all-ones `STACK_EMPTY`: media and instances
-/// are separate index spaces, and a shared value invites masking one with
-/// the other's bounds.
+/// A medium index that names vacuum — an index no table can reach. Matches
+/// `MEDIUM_NONE` in `shaders/scene.slang`. Deliberately not the stack's
+/// all-ones `STACK_EMPTY`: media and instances are separate index spaces,
+/// and a shared value invites masking one with the other's bounds.
 const MEDIUM_NONE: u32 = u32::MAX;
 
 /// What crossing this material's surface means. The single authority on
@@ -173,25 +172,60 @@ fn has_interiors(placements: &[Placement]) -> bool {
         .any(|placement| boundary(&placement.material) == BOUNDARY_REFRACTIVE)
 }
 
-/// One entry of the medium table: what fills some instance's interior.
-/// Mirrors `struct MediumRecord` in `shaders/scene.slang`.
+/// A homogeneous medium as the renderer holds it: coefficients per `ACEScg`
+/// channel in inverse meters, and the phase function's anisotropy. Both
+/// authoring routes — a description [`Medium`](description::Medium) object
+/// and a transmissive material's interior — lower to this.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Medium {
+    /// Absorption `σ_a`: the part of the extinction that removes light.
+    pub absorption: Vec3,
+    /// Scattering `σ_s`: the part that redirects it. Zero is pure
+    /// absorption, which has no event to sample.
+    pub scattering: Vec3,
+    /// Henyey–Greenstein anisotropy; 0 is isotropic, positive leans
+    /// forward. Clamped inside (−1, 1), where the phase function's closed
+    /// form is finite.
+    pub anisotropy: f32,
+}
+
+/// One entry of the medium table. Mirrors `struct MediumRecord` in
+/// `shaders/scene.slang`.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct MediumRecord {
-    /// Absorption coefficient, per `ACEScg` channel, in inverse meters —
-    /// the σ of Beer–Lambert. Extinction too, until scattering media land.
-    sigma_a: [f32; 3],
+    /// Extinction `σ_a` + `σ_s`, per `ACEScg` channel, in inverse meters —
+    /// the σ of Beer–Lambert, and the density distance sampling draws against.
+    sigma_t: [f32; 3],
+    /// Henyey–Greenstein anisotropy, clamped inside (−1, 1).
+    g: f32,
+    /// Scattering `σ_s`. Zero routes no path to the volume stage.
+    sigma_s: [f32; 3],
     _pad0: f32,
 }
 
-const _: () = assert!(size_of::<MediumRecord>() == 16);
+const _: () = assert!(size_of::<MediumRecord>() == 32);
 
-/// What fills the interior this material closes, as an absorption
-/// coefficient — or `None` for vacuum: an opaque or thin-walled surface
-/// bounds none, and a depth of zero puts the tint on the interface, where
-/// the closure applies it instead. The depth test is written positively so
-/// that a NaN falls to vacuum, as it did on the device, rather than to a σ
-/// of NaN.
+/// How far `g` may reach: at ±1 the Henyey–Greenstein denominator vanishes
+/// and both the phase value and its sampled direction go non-finite.
+const MAX_ANISOTROPY: f32 = 0.99;
+
+impl From<Medium> for MediumRecord {
+    fn from(medium: Medium) -> Self {
+        Self {
+            sigma_t: (medium.absorption + medium.scattering).to_array(),
+            g: medium.anisotropy.clamp(-MAX_ANISOTROPY, MAX_ANISOTROPY),
+            sigma_s: medium.scattering.to_array(),
+            _pad0: 0.0,
+        }
+    }
+}
+
+/// What fills the interior this material closes, as an extinction — or
+/// `None` for vacuum: an opaque or thin-walled surface bounds none, and a
+/// depth of zero puts the tint on the interface, where the closure applies
+/// it instead. The depth test is written positively so that a NaN falls to
+/// vacuum, as it did on the device, rather than to a σ of NaN.
 ///
 /// Not bit-identical to the per-hit form it replaces: Vulkan specifies
 /// `log` only to 2^-21 *absolute* inside [0.5, 2], which is a large
@@ -201,40 +235,51 @@ const _: () = assert!(size_of::<MediumRecord>() == 16);
 fn medium(material: &Material) -> Option<MediumRecord> {
     let depth = material.transmission_depth;
     (boundary(material) == BOUNDARY_REFRACTIVE && depth > 0.0).then(|| MediumRecord {
-        sigma_a: material
+        sigma_t: material
             .transmission_color
             .to_array()
             .map(|channel| -channel.clamp(1e-4, 1.0).ln() / depth),
+        g: 0.0,
+        sigma_s: [0.0; 3],
         _pad0: 0.0,
     })
 }
 
-/// The medium table for `materials` — one record per distinct interior,
-/// however many instances share it — and the index each material's interior
-/// takes in it, or [`MEDIUM_NONE`].
+/// The medium table for `materials` and the scene's `global` medium: one
+/// record per distinct medium, however many places it fills, plus the index
+/// each material's interior takes in it and the index of the global medium
+/// (both [`MEDIUM_NONE`] where there is none).
 ///
-/// Records are keyed by the σ they compute to, not by the material that
-/// produced it: two interiors that absorb identically *are* one medium.
-/// Identity stays on the instance, which is what the stack holds and what
-/// entering and exiting compare — so this sharing can never make a path
-/// inside one instance read as leaving another.
-fn medium_table(materials: &[Material]) -> (Vec<u32>, Vec<MediumRecord>) {
+/// Records are keyed by the coefficients they compute to — by their bits,
+/// so ±0 key apart — not by what produced them: two interiors that
+/// extinguish identically *are* one medium, and so is a global medium that
+/// matches one. The keying is conservative in the safe direction, duplicating
+/// a record where it could have shared. Identity stays on the
+/// instance, which is what the stack holds and what entering and exiting
+/// compare — so this sharing can never make a path inside one instance read
+/// as leaving another.
+fn medium_table(
+    materials: &[Material],
+    global: Option<Medium>,
+) -> (Vec<u32>, u32, Vec<MediumRecord>) {
     let mut records: Vec<MediumRecord> = Vec::new();
-    let mut interned: HashMap<[u32; 3], u32> = HashMap::new();
+    let mut interned: HashMap<[u32; 8], u32> = HashMap::new();
+    let mut intern = |record: Option<MediumRecord>| {
+        record.map_or(MEDIUM_NONE, |record| {
+            *interned
+                .entry(bytemuck::cast(record))
+                .or_insert_with(|| {
+                    records.push(record);
+                    records.len() as u32 - 1
+                })
+        })
+    };
     let indices = materials
         .iter()
-        .map(|material| {
-            medium(material).map_or(MEDIUM_NONE, |record| {
-                *interned
-                    .entry(record.sigma_a.map(f32::to_bits))
-                    .or_insert_with(|| {
-                        records.push(record);
-                        records.len() as u32 - 1
-                    })
-            })
-        })
+        .map(|material| intern(medium(material)))
         .collect();
-    (indices, records)
+    let global = intern(global.map(MediumRecord::from));
+    (indices, global, records)
 }
 
 /// Every buffer the scene shares with the kernels, one address each, plus
@@ -269,7 +314,8 @@ struct SceneTable {
     /// The [`MediumRecord`] table.
     media: vk::DeviceAddress,
     light_count: u32,
-    _pad0: u32,
+    /// What fills the open space between instances, or [`MEDIUM_NONE`].
+    global_medium: u32,
 }
 
 // The Slang side lays these out from its own rules, so the sizes are
@@ -440,6 +486,23 @@ impl Scene {
         camera: Camera,
         environment: &Environment,
     ) -> Result<Self> {
+        Self::new_in_medium(gpu, objects, camera, environment, None)
+    }
+
+    /// [`Scene::new`] with the open space around the objects filled by
+    /// `global` — the procedural spelling of a description's global medium,
+    /// which is how the volumetric estimator tests reach it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Scene::new`].
+    pub fn new_in_medium(
+        gpu: &Context,
+        objects: &[Object],
+        camera: Camera,
+        environment: &Environment,
+        global: Option<Medium>,
+    ) -> Result<Self> {
         assert!(!objects.is_empty(), "a scene needs at least one object");
         let mut upload = gpu.upload()?;
         let meshes = objects
@@ -480,7 +543,7 @@ impl Scene {
             .collect();
         let tlas = build_scene_tlas(gpu, &placements)?;
         let has_interiors = has_interiors(&placements);
-        let instances = upload_instance_tables(gpu, &placements, &triangle_lights, &[])?;
+        let instances = upload_instance_tables(gpu, &placements, &triangle_lights, &[], global)?;
         let GpuEnvironment {
             image,
             marginal,
@@ -549,14 +612,20 @@ impl Scene {
         self.has_interiors
     }
 
-    /// Whether the scene has media — a scattering medium or a null
-    /// boundary, the things that give a path segment a medium *event* and
-    /// so record the volume stage. Constant false until a medium can be
-    /// authored: a pure-absorbing interior has no event to sample and
-    /// shades through the surface stage as ever.
+    /// Whether the scene has media — the things that give a path segment a
+    /// medium *event* and so record the volume stage. A pure-absorbing
+    /// interior is not one: it has no event to sample, and shades through
+    /// the surface stage exactly as it did before media existed.
     #[must_use]
     pub fn has_media(&self) -> bool {
-        false
+        self.has_global_medium()
+    }
+
+    /// Whether the open space between instances is filled — the flag
+    /// intersect routes every segment outside an interior on.
+    #[must_use]
+    pub fn has_global_medium(&self) -> bool {
+        self.resident.instances.global_medium != MEDIUM_NONE
     }
 
     /// The environment's emitted power as the selection heuristic weighs
@@ -749,10 +818,14 @@ fn first_light_indices(placements: usize, triangles: &[TriangleLight]) -> Vec<u3
 struct InstanceTables {
     geometry: Buffer,
     materials: Buffer,
-    /// The deduplicated interiors — a handful of records, indexed by
-    /// `GeometryRecord::medium`, not by instance.
+    /// The deduplicated media — a handful of records, indexed by
+    /// `GeometryRecord::medium` or by `global_medium`, not by instance.
     media: Buffer,
     lights: Buffer,
+    /// What fills the open space between instances, indexing `media`, or
+    /// [`MEDIUM_NONE`]. Interned alongside the interiors, so it is derived
+    /// here rather than carried separately.
+    global_medium: u32,
 }
 
 /// Upload one scene table as a shader-addressable buffer. Vulkan forbids
@@ -782,13 +855,14 @@ fn upload_instance_tables(
     placements: &[Placement],
     triangle_lights: &[TriangleLight],
     delta_lights: &[DeltaLight],
+    global: Option<Medium>,
 ) -> Result<InstanceTables> {
     let light_records = crate::lights::build(triangle_lights, delta_lights);
     let materials: Vec<Material> = placements
         .iter()
         .map(|placement| placement.material)
         .collect();
-    let (medium_indices, media) = medium_table(&materials);
+    let (medium_indices, global_medium, media) = medium_table(&materials, global);
     let records: Vec<GeometryRecord> = placements
         .iter()
         .zip(first_light_indices(placements.len(), triangle_lights))
@@ -819,6 +893,7 @@ fn upload_instance_tables(
         materials: upload_table(gpu, "scene.materials", &materials)?,
         media: upload_table(gpu, "scene.media", &media)?,
         lights: upload_table(gpu, "scene.lights", &light_records)?,
+        global_medium,
     })
 }
 
@@ -851,7 +926,7 @@ fn upload_scene_table(
         env_height: env_size.1,
         media: resident.instances.media.device_address(),
         light_count,
-        _pad0: 0,
+        global_medium: resident.instances.global_medium,
     };
     let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
     gpu.upload_buffer("scene.table", bytemuck::bytes_of(&table), usage)
@@ -1061,26 +1136,60 @@ mod tests {
             transmission_depth: 2.0,
             ..clear
         };
-        let (indices, records) = medium_table(&[
-            tinted,
-            clear,
-            tinted,
-            Material::matte(Vec3::ONE, 0.5),
-            tinted.thin_walled(),
-        ]);
+        let fog = Medium {
+            absorption: Vec3::splat(0.2),
+            scattering: Vec3::splat(0.3),
+            anisotropy: 0.0,
+        };
+        let (indices, global, records) = medium_table(
+            &[
+                tinted,
+                clear,
+                tinted,
+                Material::matte(Vec3::ONE, 0.5),
+                tinted.thin_walled(),
+            ],
+            Some(fog),
+        );
         assert_eq!(
             indices,
             [0, MEDIUM_NONE, 0, MEDIUM_NONE, MEDIUM_NONE],
             "instances sharing an interior share its record"
         );
-        assert_eq!(records.len(), 1);
         assert_eq!(
-            records[0].sigma_a.map(f32::to_bits),
+            (global, records.len()),
+            (1, 2),
+            "the global medium interns beside the interiors, in its own record"
+        );
+        assert_eq!(
+            records[0].sigma_t.map(f32::to_bits),
             [0.25f32, 0.5, 1.0].map(|channel| (-channel.ln() / 2.0).to_bits()),
-            "σ = -ln(transmission color) / transmission depth, to the bit"
+            "σ_t = -ln(transmission color) / transmission depth, to the bit"
+        );
+        assert_eq!(
+            (records[1].sigma_t, records[1].sigma_s),
+            ([0.5; 3], [0.3; 3]),
+            "an authored medium's extinction is σ_a + σ_s"
+        );
+        // Value keying, not identity: a global medium that matches an
+        // interior *is* that interior's medium, one record for both.
+        let deep = Material {
+            transmission_color: Vec3::new(0.25, 0.5, 0.75),
+            ..tinted
+        };
+        let matching = Medium {
+            absorption: Vec3::from(medium(&deep).expect("an interior").sigma_t),
+            scattering: Vec3::ZERO,
+            anisotropy: 0.0,
+        };
+        let shared = medium_table(&[deep], Some(matching));
+        assert_eq!(
+            (shared.0, shared.1, shared.2.len()),
+            (vec![0], 0, 1),
+            "a global medium that matches an interior is that interior's medium"
         );
         assert!(
-            medium_table(&[]).1.is_empty() && medium_table(&[clear]).1.is_empty(),
+            medium_table(&[], None).2.is_empty() && medium_table(&[clear], None).2.is_empty(),
             "a scene with nothing to fill uploads no records"
         );
     }
@@ -1113,7 +1222,7 @@ mod tests {
         })
         .expect("a positive depth fills the interior");
         assert_eq!(
-            extremes.sigma_a.map(f32::to_bits),
+            extremes.sigma_t.map(f32::to_bits),
             [1e-4f32, 1e-4, 1.0].map(|channel| (-channel.ln()).to_bits())
         );
     }

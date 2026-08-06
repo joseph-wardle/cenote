@@ -1800,6 +1800,7 @@ mod tests {
                         cenote::scene::changeset::Kind::Mesh => "mesh",
                         cenote::scene::changeset::Kind::Instance => "instance",
                         cenote::scene::changeset::Kind::Material => "material",
+                        cenote::scene::changeset::Kind::Medium => "medium",
                         cenote::scene::changeset::Kind::Light => "light",
                         cenote::scene::changeset::Kind::Camera => "camera",
                         cenote::scene::changeset::Kind::Environment => "environment",

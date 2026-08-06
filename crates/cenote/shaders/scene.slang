@@ -17,19 +17,25 @@ public static const uint BOUNDARY_OPAQUE = 0;
 public static const uint BOUNDARY_REFRACTIVE = 1;
 public static const uint BOUNDARY_NULL = 2;
 
-// `GeometryRecord.medium` for an instance whose interior is vacuum — an
-// index no table can reach. Deliberately not pathstate's all-ones
-// `STACK_EMPTY`: media and instances are separate index spaces.
+// A medium index that names vacuum — an index no table can reach.
+// Deliberately not pathstate's all-ones `STACK_EMPTY`: media and instances
+// are separate index spaces.
 public static const uint MEDIUM_NONE = 0xffffffff;
 
-// What fills some instance's interior — one record per distinct absorption,
-// however many instances share it. Mirrors `struct MediumRecord` in
-// `scene.rs`.
+// What fills an instance's interior, or the open space around everything —
+// one record per distinct medium, however many places it fills. Mirrors
+// `struct MediumRecord` in `scene.rs`.
 public struct MediumRecord {
-    // Absorption coefficient, per ACEScg channel, in inverse meters — the
-    // σ of Beer–Lambert, derived at prep. Extinction too, until scattering
-    // media land.
-    public float3 sigmaA;
+    // Extinction σ_t = σ_a + σ_s, per ACEScg channel, in inverse meters:
+    // the σ of Beer–Lambert, and the density distance sampling draws
+    // against. Derived at prep.
+    public float3 sigmaT;
+    // Henyey–Greenstein anisotropy, in (−1, 1); 0 is isotropic.
+    public float g;
+    // Scattering σ_s, the part of the extinction that redirects rather
+    // than removes. Zero is a purely absorbing medium, which has no event
+    // to sample and so never routes a path to the volume stage.
+    public float3 sigmaS;
     float pad0;
 };
 
@@ -74,7 +80,11 @@ public struct SceneTable {
     public Environment env;
     public MediumRecord* media;
     public uint lightCount;
-    uint pad0;
+    // What fills the open space between instances, or MEDIUM_NONE for
+    // vacuum. Unbounded, so a segment that reaches no surface has infinite
+    // optical depth through it: with a global medium the environment and
+    // the distant lights are unreachable by construction.
+    public uint globalMedium;
 };
 
 // The coverage of one traversal crossing: the instance's opacity constant
@@ -101,7 +111,7 @@ public float3 interiorTransmittance(SceneTable* scene, uint instance,
     if (medium == MEDIUM_NONE) {
         return float3(1.0);
     }
-    return exp(-scene.media[medium].sigmaA * distance(from, to));
+    return exp(-scene.media[medium].sigmaT * distance(from, to));
 }
 
 // Trace one next-event connection and return its visibility in [0, 1]: 0 when a

@@ -192,6 +192,10 @@ fn op(op: wire::Op) -> core::Op {
                 spp,
                 max_bounces,
                 seed,
+                // The wire schema has no medium kind to reference yet, so
+                // a client cannot name one: leave whatever the scene file
+                // set alone rather than clearing it.
+                global_medium: None,
             })
         }
         wire::Op::Remove(kind, name) => core::Op::Remove(self::kind(kind), name),

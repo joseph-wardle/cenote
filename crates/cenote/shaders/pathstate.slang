@@ -25,10 +25,17 @@ public static const uint WORKGROUP_SIZE = 64;
 // Where a path's ray stopped, in the re-evaluable form (instance +
 // primitive + barycentrics) that shading recomputes from.
 public struct Hit {
-    public uint instance; // TLAS instance custom index
+    public uint instance; // TLAS instance custom index, or INSTANCE_NONE
     public uint primitive; // triangle index within the instance's mesh
     public float2 barycentrics;
 };
+
+// `Hit.instance` for a ray that reached nothing. Only paths owed a medium
+// event carry it — a segment that runs to infinity still has a medium to
+// sample, so the volume stage needs to tell "ends at a surface" from
+// "never ends", and reads the rest of the record only in the first case.
+// Above the 24-bit custom-index range every real instance lives in.
+public static const uint INSTANCE_NONE = 0xffffffff;
 
 // A medium-stack entry: an instance's TLAS custom index in the low 24
 // bits, flags above. The entry names the *instance* whose interior the

@@ -40,7 +40,12 @@ public static const uint BSDF_DIR = 1;  // scattered direction
 public static const uint NEE_LIGHT = 2; // environment vs the list, and which light
 public static const uint NEE_POINT = 3; // point on the light, or env texel
 public static const uint RR = 4;        // Russian-roulette survival
-static const uint BOUNCE_SLOTS = 8;     // 5 named + 3 reserved
+// Channel pick and distance for a medium event. A path takes at most one
+// vertex per bounce — a segment either scatters in a medium or reaches a
+// surface — so the volume stage shares the four slots above with the
+// surface stage rather than claiming its own.
+public static const uint VOLUME_DISTANCE = 5;
+static const uint BOUNCE_SLOTS = 8;     // 6 named + 2 reserved
 
 public uint bounceDimension(uint bounce, uint slot) {
     return PATH_BASE + bounce * BOUNCE_SLOTS + slot;

@@ -32,6 +32,21 @@ void trace_shadow(uint3 tid: SV_DispatchThreadID) {
     }
     ShadowRay shadow = params.shadows.entries[tid.x];
 
+    // Every connection crosses the open space a global medium fills, and a
+    // homogeneous extinction over a known length is closed-form — so media
+    // attenuate connections here, once for both the surface and the volume
+    // stage, and this kernel stays RNG-free. A connection aimed at the
+    // environment or a distant light runs to `tmax` 1e30: infinite optical
+    // depth, and nothing arrives.
+    var contribution = shadow.contribution;
+    let global = params.scene.globalMedium;
+    if (global != MEDIUM_NONE) {
+        contribution *= exp(-params.scene.media[global].sigmaT * shadow.tmax);
+        if (!any(contribution > 0.0)) {
+            return;
+        }
+    }
+
     RayDesc ray;
     ray.Origin = shadow.origin;
     ray.Direction = shadow.direction;
@@ -50,6 +65,6 @@ void trace_shadow(uint3 tid: SV_DispatchThreadID) {
     let attenuation = shadowVisibility(sceneTlas, params.scene, ray,
                                        shadow.light, shadow.primitive);
     if (attenuation > 0.0) {
-        params.radiance[shadow.pixel] += float4(shadow.contribution * attenuation, 0.0);
+        params.radiance[shadow.pixel] += float4(contribution * attenuation, 0.0);
     }
 }

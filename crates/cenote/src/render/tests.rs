@@ -84,11 +84,25 @@ fn furnace_scene(
 /// but no longer a tight per-pixel assertion. Strategy agreement is
 /// the MIS-agreement tests' job, over in `wavefront.rs`.
 fn bsdf_only_sum(gpu: &Context, scene: &Scene, size: u32, samples: u32) -> Vec<f32> {
+    bsdf_only_sum_deep(gpu, scene, size, samples, Wavefront::DEFAULT_MAX_BOUNCES)
+}
+
+/// [`bsdf_only_sum`] at an explicit bounce cap — for the estimators whose
+/// exactness the cap itself would otherwise bound. A path inside a
+/// scattering medium turns several times before it leaves, and the truncated
+/// tail is energy, not noise.
+fn bsdf_only_sum_deep(
+    gpu: &Context,
+    scene: &Scene,
+    size: u32,
+    samples: u32,
+    bounces: u32,
+) -> Vec<f32> {
     let wavefront = Wavefront::new(
         gpu,
         &Kernels::embedded(),
         Wavefront::DEFAULT_CAPACITY,
-        Wavefront::DEFAULT_MAX_BOUNCES,
+        bounces,
         LightSampling::BsdfOnly,
     )
     .expect("wavefront");
@@ -593,6 +607,150 @@ fn the_glass_furnace_closes() {
         (mean - sky).abs() / sky < 0.015,
         "glass furnace leaked: mean {mean} vs {sky}"
     );
+}
+
+/// Turn a closed mesh inside out: reversed winding, flipped normals. An
+/// enclosure the camera stands inside, whose emission faces in — the
+/// volumetric furnace's oven.
+fn inside_out(mut mesh: crate::scene::Mesh) -> crate::scene::Mesh {
+    for triangle in &mut mesh.triangles {
+        triangle.swap(1, 2);
+    }
+    for normal in &mut mesh.normals {
+        *normal = -*normal;
+    }
+    mesh
+}
+
+/// Beer–Lambert through a *global* medium, against the closed form: a
+/// bright plane three meters ahead, seen through a purely absorbing
+/// atmosphere with a different extinction in every channel, must read
+/// exactly `L·exp(-σ_t·d)`.
+///
+/// This is the transmittance half of the volume estimator on its own —
+/// the branch where the sampled distance runs past the surface — and the
+/// analytic answer catches what a furnace cannot: the sampling density
+/// divided out here is the *mixture* over the three channels, so dividing
+/// by any single channel's density (the tempting simplification) lands a
+/// visibly wrong color rather than a wrong energy.
+///
+/// The field of view is degrees wide so every ray's path length is the
+/// center ray's to within 1e-4 — the assertion is against one distance.
+#[test]
+fn a_global_medium_attenuates_by_beer_lambert() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let emission = 4.0;
+    let distance = 3.0;
+    let sigma_t = Vec3::new(0.1, 0.3, 0.6);
+    let scene = Scene::new_in_medium(
+        &gpu,
+        &[Object {
+            // Face-on to the camera, wide enough to fill the frame.
+            mesh: ground_plane(5.0),
+            transform: Mat4::from_translation(Vec3::NEG_Z * distance)
+                * Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2),
+            material: Material::emitter(Vec3::splat(emission)),
+        }],
+        Camera {
+            position: Vec3::ZERO,
+            look_at: Vec3::NEG_Z,
+            up: Vec3::Y,
+            vfov_degrees: 2.0,
+            lens: None,
+        },
+        &Environment::constant(Vec3::ZERO),
+        Some(crate::scene::Medium {
+            absorption: sigma_t,
+            scattering: Vec3::ZERO,
+            anisotropy: 0.0,
+        }),
+    )
+    .expect("scene");
+
+    // Distance sampling makes each sample all-or-nothing (it reaches the
+    // plane or it does not), so this is a mean, not a per-sample identity.
+    let (size, samples) = (16, 2048);
+    let sum = bsdf_only_sum(&gpu, &scene, size, samples);
+    let count = f64::from(samples * size * size);
+    for channel in 0..3 {
+        let mean = sum
+            .chunks_exact(4)
+            .map(|pixel| f64::from(pixel[channel]))
+            .sum::<f64>()
+            / count;
+        let expected = f64::from(emission) * f64::from(-sigma_t[channel] * distance).exp();
+        assert!(
+            (mean - expected).abs() / expected < 0.02,
+            "channel {channel}: {mean} vs Beer–Lambert's {expected}"
+        );
+    }
+}
+
+/// The volumetric furnace: a purely scattering medium inside a uniformly
+/// emissive shell must read exactly the shell's radiance, however many
+/// times a path turns on the way out. Radiative equilibrium — the volume
+/// counterpart of the surface furnaces above, and the one test that holds
+/// distance sampling, its density, and the phase function to a single
+/// number together.
+///
+/// The extinction is neutral on purpose: with one σ in every channel the
+/// mixture density collapses to the single-channel density, so `σ_s/σ_t`
+/// is exactly 1 and *every sample of every pixel* equals the emission —
+/// the tight-bound trick the Lambert furnace uses. BSDF-only, so no
+/// next-event estimation blurs the per-sample identity.
+#[test]
+fn the_volumetric_furnace_closes() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let emission = 0.5;
+    let scene = Scene::new_in_medium(
+        &gpu,
+        &[Object {
+            mesh: inside_out(crate::scene::icosphere(3)),
+            transform: Mat4::from_scale(Vec3::splat(2.0)),
+            material: Material::emitter(Vec3::splat(emission)),
+        }],
+        Camera {
+            position: Vec3::ZERO,
+            look_at: Vec3::NEG_Z,
+            up: Vec3::Y,
+            vfov_degrees: 60.0,
+            lens: None,
+        },
+        &Environment::constant(Vec3::ZERO),
+        // Half a mean free path across the shell's radius: a path turns a
+        // few times before it leaves, and the bounce cap truncates nothing
+        // measurable.
+        Some(crate::scene::Medium {
+            absorption: Vec3::ZERO,
+            scattering: Vec3::splat(0.25),
+            anisotropy: 0.3,
+        }),
+    )
+    .expect("scene");
+
+    // 64 bounces, not the default 8: the shell is half a mean free path
+    // deep, so a few percent of paths still turn after eight vertices, and
+    // the cap would take that energy off the top as a flat 6% deficit.
+    let (size, samples) = (32, 16);
+    let sum = bsdf_only_sum_deep(&gpu, &scene, size, samples, 64);
+    for chunk in sum.chunks_exact(4) {
+        for channel in &chunk[..3] {
+            let value = channel / samples as f32;
+            assert!(
+                (value - emission).abs() / emission < 0.005,
+                "volumetric furnace leaked: {value} vs {emission}"
+            );
+        }
+        assert!(
+            (chunk[3] - samples as f32).abs() < 1e-3,
+            "every path must finish exactly once, got alpha {}",
+            chunk[3]
+        );
+    }
 }
 
 /// Beer–Lambert absorption, pinned per channel: a glass sphere whose

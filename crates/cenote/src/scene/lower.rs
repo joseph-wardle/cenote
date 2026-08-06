@@ -57,6 +57,10 @@ pub(super) struct HostScene {
     /// The camera, when it changed — a material edit must not snap the
     /// view back to the authored pose.
     pub(super) camera: Option<Camera>,
+    /// What fills the open space between instances, or `None` for vacuum.
+    /// Lowered on every pass: it is three numbers, and it lives in the
+    /// medium table, which rebuilds wholesale on any edit anyway.
+    pub(super) global_medium: Option<super::Medium>,
     /// The TLAS must rebuild. Set by a mesh, instance, *or* material edit —
     /// material because fractional opacity bakes into each instance's
     /// non-opaque flag (see where it's assigned).
@@ -125,7 +129,7 @@ pub(super) fn host_phase(
     resident_environment: Option<&Path>,
 ) -> Result<HostScene> {
     let (_, camera_source) = singleton(description.cameras(), "camera")?;
-    singleton(description.settings(), "settings")?;
+    let (_, settings) = singleton(description.settings(), "settings")?;
     if description.environments().len() > 1 {
         return Err(scene_error(format!(
             "a scene renders at most one environment, this one has {}",
@@ -212,23 +216,12 @@ pub(super) fn host_phase(
     };
     let camera = touched(Kind::Camera).then(|| lower_camera(camera_source));
     let environment = if fresh || touched(Kind::Environment) {
-        Some(match description.environments().iter().next() {
-            Some((name, environment)) => {
-                lower_environment(name, environment, resident_environment)?
-            }
-            // No environment is a black sky: zero power, so next-event
-            // estimation puts all its draws on the light list.
-            None => EnvironmentSpec {
-                image: Some(Arc::new(Environment::constant(Vec3::ZERO))),
-                source: None,
-                tint: Vec3::ONE,
-                to_world: Mat4::IDENTITY,
-                from_world: Mat4::IDENTITY,
-            },
-        })
+        Some(environment_spec(description, resident_environment)?)
     } else {
         None
     };
+
+    let global_medium = global_medium(description, settings.global_medium.as_deref())?;
 
     Ok(HostScene {
         meshes,
@@ -239,6 +232,7 @@ pub(super) fn host_phase(
         textures,
         environment,
         camera,
+        global_medium,
         // Material dirt rebuilds the TLAS too: fractional opacity is baked
         // into each instance's non-opaque flag, and the TLAS over a scene's
         // handful of instances is the cheap structure (every BLAS stays).
@@ -645,6 +639,86 @@ fn emissive_geometry(
     }
 }
 
+/// The description's one environment, lowered — or the black sky a
+/// description without one renders under: zero power, so next-event
+/// estimation puts all its draws on the light list.
+fn environment_spec(
+    description: &SceneDescription,
+    resident_environment: Option<&Path>,
+) -> Result<EnvironmentSpec> {
+    match description.environments().iter().next() {
+        Some((name, environment)) => lower_environment(name, environment, resident_environment),
+        None => Ok(EnvironmentSpec {
+            image: Some(Arc::new(Environment::constant(Vec3::ZERO))),
+            source: None,
+            tint: Vec3::ONE,
+            to_world: Mat4::IDENTITY,
+            from_world: Mat4::IDENTITY,
+        }),
+    }
+}
+
+/// Resolve and lower the medium a description's settings name as the
+/// atmosphere. The reference is validated at apply, but `replace` swaps a
+/// whole description in without one — so it is checked here, where every
+/// other failure on user data is caught.
+fn global_medium(
+    description: &SceneDescription,
+    name: Option<&str>,
+) -> Result<Option<super::Medium>> {
+    match name {
+        Some(name) => description
+            .media()
+            .get(name)
+            .ok_or_else(|| scene_error(format!("the global medium \"{name}\" does not exist")))
+            .map(|medium| Some(lower_medium(name, medium))),
+        None => Ok(None),
+    }
+}
+
+/// Lower one description medium into the renderer's coefficients.
+///
+/// The coefficients convert to the working space like every other authored
+/// color, and clamp at zero on the far side: the `Rec.709` → `ACEScg`
+/// matrix has negative entries, so a saturated authored coefficient can
+/// land below zero — which would be a medium that *amplifies*, and one
+/// path's runaway throughput reaches the whole image through next-event
+/// estimation. Anisotropy clamps inside (−1, 1), where the phase function's
+/// closed form stays finite.
+fn lower_medium(name: &str, medium: &description::Medium) -> super::Medium {
+    let convert = |what: &str, authored: [f32; 3]| {
+        let converted = crate::color::acescg_from_rec709(Vec3::from(authored));
+        if converted.min_element() < 0.0 {
+            log::warn!(
+                "medium \"{name}\": {what} {authored:?} is outside the working space's gamut; \
+                 clamping the negative channels to zero"
+            );
+        }
+        converted.max(Vec3::ZERO)
+    };
+    let anisotropy = medium
+        .anisotropy
+        .clamp(-super::MAX_ANISOTROPY, super::MAX_ANISOTROPY);
+    if !(-super::MAX_ANISOTROPY..=super::MAX_ANISOTROPY).contains(&medium.anisotropy) {
+        log::warn!(
+            "medium \"{name}\": anisotropy {} clamped to {anisotropy}",
+            medium.anisotropy
+        );
+    }
+    let lowered = super::Medium {
+        absorption: convert("absorption", medium.absorption),
+        scattering: convert("scattering", medium.scattering),
+        anisotropy,
+    };
+    if lowered.scattering == Vec3::ZERO && lowered.absorption != Vec3::ZERO {
+        log::warn!(
+            "medium \"{name}\" only absorbs: as a global medium it leaves the environment and \
+             the distant lights unreachable, since nothing scatters light back into a path"
+        );
+    }
+    lowered
+}
+
 /// Lower one description environment: the tint converts to `ACEScg` and
 /// sanitizes the way material colors do, the placement drops to its linear
 /// part (apply validated invertibility, so the inverse exists), and the
@@ -760,6 +834,7 @@ pub(super) fn all_dirty(description: &SceneDescription) -> Dirty {
     mark(&mut dirty, Kind::Mesh, description.meshes());
     mark(&mut dirty, Kind::Instance, description.instances());
     mark(&mut dirty, Kind::Material, description.materials());
+    mark(&mut dirty, Kind::Medium, description.media());
     mark(&mut dirty, Kind::Light, description.lights());
     mark(&mut dirty, Kind::Camera, description.cameras());
     mark(&mut dirty, Kind::Environment, description.environments());

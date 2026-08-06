@@ -30,13 +30,13 @@ use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
 use super::description::{
-    Camera, Instance, Light, Mesh, MeshSource, Objects, SceneDescription, Settings, Texturable,
-    TextureRef, Transform,
+    Camera, Instance, Light, Medium, Mesh, MeshSource, Objects, SceneDescription, Settings,
+    Texturable, TextureRef, Transform,
 };
 use super::scene_error;
 use crate::error::Result;
 
-/// The seven object kinds a description holds — the closed schema.
+/// The eight object kinds a description holds — the closed schema.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Kind {
     /// Triangle geometry ([`Mesh`]).
@@ -45,6 +45,8 @@ pub enum Kind {
     Instance,
     /// An `OpenPBR` surface ([`Material`](super::description::Material)).
     Material,
+    /// A participating medium ([`Medium`]).
+    Medium,
     /// A delta light ([`Light`]).
     Light,
     /// A viewpoint ([`Camera`]).
@@ -62,6 +64,7 @@ impl fmt::Display for Kind {
             Self::Mesh => "mesh",
             Self::Instance => "instance",
             Self::Material => "material",
+            Self::Medium => "medium",
             Self::Light => "light",
             Self::Camera => "camera",
             Self::Environment => "environment",
@@ -81,6 +84,8 @@ pub enum Op {
     /// Upsert a material. Boxed: the patch is an order of magnitude wider
     /// than any other, and importers build long op lists.
     Material(Box<MaterialPatch>),
+    /// Upsert a medium.
+    Medium(MediumPatch),
     /// Upsert a delta light.
     Light(LightPatch),
     /// Upsert a camera.
@@ -104,6 +109,7 @@ impl Op {
             Self::Mesh(patch) => (Kind::Mesh, &patch.name),
             Self::Instance(patch) => (Kind::Instance, &patch.name),
             Self::Material(patch) => (Kind::Material, &patch.name),
+            Self::Medium(patch) => (Kind::Medium, &patch.name),
             Self::Light(patch) => (Kind::Light, &patch.name),
             Self::Camera(patch) => (Kind::Camera, &patch.name),
             Self::Environment(patch) => (Kind::Environment, &patch.name),
@@ -199,6 +205,21 @@ impl MaterialPatch {
     }
 }
 
+/// Patch for a [`Medium`]. Fields mirror the target one for one; see there
+/// for meanings and defaults.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MediumPatch {
+    /// Target name.
+    pub name: String,
+    /// Absorption coefficient per meter, linear `Rec.709`.
+    pub absorption: Option<[f32; 3]>,
+    /// Scattering coefficient per meter, linear `Rec.709`.
+    pub scattering: Option<[f32; 3]>,
+    /// Henyey–Greenstein anisotropy.
+    pub anisotropy: Option<f32>,
+}
+
 /// Patch for a [`Light`]: the definition replaces wholesale — a delta
 /// light is a handful of numbers and its variant is its identity.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -261,6 +282,9 @@ pub struct SettingsPatch {
     pub max_bounces: Option<u32>,
     /// Sampler seed.
     pub seed: Option<u32>,
+    /// The medium filling open space, by name. Doubly optional: `None`
+    /// leaves it alone, `Some(None)` empties the scene back to vacuum.
+    pub global_medium: Option<Option<String>>,
 }
 
 /// Generate the shared constructor: a patch that names its target and
@@ -283,6 +307,7 @@ named_patches!(
     MeshPatch,
     InstancePatch,
     MaterialPatch,
+    MediumPatch,
     LightPatch,
     CameraPatch,
     EnvironmentPatch,
@@ -454,6 +479,9 @@ fn apply_op(objects: &mut Objects, dirty: &mut Dirty, op: &Op) -> Result<()> {
                 geometry_opacity, geometry_thin_walled, geometry_normal,
             );
         }),
+        Op::Medium(patch) => upsert(&mut objects.media, &name, |medium| {
+            merge!(medium, patch; absorption, scattering, anisotropy);
+        }),
         Op::Light(patch) => upsert(&mut objects.lights, &name, |light| {
             if let Some(value) = patch.light {
                 *light = value;
@@ -468,7 +496,7 @@ fn apply_op(objects: &mut Objects, dirty: &mut Dirty, op: &Op) -> Result<()> {
             merge!(environment, patch; path, tint, transform);
         }),
         Op::Settings(patch) => upsert(&mut objects.settings, &name, |settings| {
-            merge!(settings, patch; resolution, spp, max_bounces, seed);
+            merge!(settings, patch; resolution, spp, max_bounces, seed, global_medium);
         }),
         Op::Remove(..) => unreachable!("handled above"),
     };
@@ -506,6 +534,7 @@ impl Objects {
             Kind::Mesh => self.meshes.remove(name).is_some(),
             Kind::Instance => self.instances.remove(name).is_some(),
             Kind::Material => self.materials.remove(name).is_some(),
+            Kind::Medium => self.media.remove(name).is_some(),
             Kind::Light => self.lights.remove(name).is_some(),
             Kind::Camera => self.cameras.remove(name).is_some(),
             Kind::Environment => self.environments.remove(name).is_some(),
@@ -553,8 +582,11 @@ fn validate(objects: &Objects) -> Result<()> {
             )));
         }
     }
+    for (name, medium) in &objects.media {
+        validate_medium(name, medium)?;
+    }
     for (name, settings) in &objects.settings {
-        validate_settings(name, settings)?;
+        validate_settings(objects, name, settings)?;
     }
     Ok(())
 }
@@ -672,7 +704,37 @@ fn validate_camera(name: &str, camera: &Camera) -> Result<()> {
     Ok(())
 }
 
-fn validate_settings(name: &str, settings: &Settings) -> Result<()> {
+/// A medium's coefficients must be finite and non-negative: a negative
+/// extinction amplifies instead of attenuating, and one path's runaway
+/// throughput reaches the whole image through next-event estimation.
+fn validate_medium(name: &str, medium: &Medium) -> Result<()> {
+    for (what, coefficients) in [
+        ("absorption", medium.absorption),
+        ("scattering", medium.scattering),
+    ] {
+        if coefficients.iter().any(|c| !c.is_finite() || *c < 0.0) {
+            return Err(scene_error(format!(
+                "medium \"{name}\": {what} must be finite and non-negative, got {coefficients:?}"
+            )));
+        }
+    }
+    if !medium.anisotropy.is_finite() {
+        return Err(scene_error(format!(
+            "medium \"{name}\": anisotropy must be finite, got {}",
+            medium.anisotropy
+        )));
+    }
+    Ok(())
+}
+
+fn validate_settings(objects: &Objects, name: &str, settings: &Settings) -> Result<()> {
+    if let Some(medium) = &settings.global_medium
+        && !objects.media.contains_key(medium)
+    {
+        return Err(scene_error(format!(
+            "settings \"{name}\" name a global medium \"{medium}\" that does not exist"
+        )));
+    }
     if settings.resolution.contains(&0) {
         return Err(scene_error(format!(
             "settings \"{name}\": resolution has a zero dimension"
@@ -1036,6 +1098,79 @@ mod tests {
         };
         let error = description.apply(&vertical).unwrap_err();
         assert!(error.to_string().contains("parallel"), "{error}");
+    }
+
+    /// A global medium is a reference like any other: it must resolve
+    /// after the whole set, and removing the object it names strands it.
+    /// Coefficients are checked here rather than clamped at prep because a
+    /// negative extinction amplifies, and one runaway path reaches the whole
+    /// image through next-event estimation.
+    #[test]
+    fn a_global_medium_must_resolve_and_be_physical() {
+        let settings = |medium: &str| {
+            Op::Settings(SettingsPatch {
+                global_medium: Some(Some(medium.to_owned())),
+                ..SettingsPatch::new("main")
+            })
+        };
+        let mut description = SceneDescription::new();
+        let error = description
+            .apply(&ChangeSet {
+                ops: vec![settings("fog")],
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("does not exist"), "{error}");
+
+        // Forward references within one set are legal, as everywhere else.
+        description
+            .apply(&ChangeSet {
+                ops: vec![
+                    settings("fog"),
+                    Op::Medium(MediumPatch {
+                        scattering: Some([0.1; 3]),
+                        ..MediumPatch::new("fog")
+                    }),
+                ],
+            })
+            .expect("valid");
+        assert_eq!(
+            description.media()["fog"],
+            Medium {
+                scattering: [0.1; 3],
+                ..Medium::default()
+            }
+        );
+
+        let error = description
+            .apply(&ChangeSet {
+                ops: vec![Op::Remove(Kind::Medium, "fog".into())],
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("does not exist"), "{error}");
+
+        let error = description
+            .apply(&ChangeSet {
+                ops: vec![Op::Medium(MediumPatch {
+                    absorption: Some([0.1, -0.2, 0.1]),
+                    ..MediumPatch::new("fog")
+                })],
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("non-negative"), "{error}");
+
+        // Emptying the reference releases the object again.
+        description
+            .apply(&ChangeSet {
+                ops: vec![
+                    Op::Settings(SettingsPatch {
+                        global_medium: Some(None),
+                        ..SettingsPatch::new("main")
+                    }),
+                    Op::Remove(Kind::Medium, "fog".into()),
+                ],
+            })
+            .expect("valid");
+        assert!(description.media().is_empty());
     }
 
     #[test]

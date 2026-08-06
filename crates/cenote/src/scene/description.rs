@@ -4,9 +4,9 @@
 //! [`super::changeset`]) is its *only* mutation path, so every consumer of
 //! an edit sees the same dirty accounting.
 //!
-//! The model is a closed set of seven object kinds — mesh, instance,
-//! material, light, camera, environment, settings — each a map of objects
-//! addressed by name. Names are stable identities: patches target objects
+//! The model is a closed set of eight object kinds — mesh, instance,
+//! material, medium, light, camera, environment, settings — each a map of
+//! objects addressed by name. Names are stable identities: patches target objects
 //! by name (creating them on first mention), references between objects
 //! (instance → mesh, instance → material) are names, and a rename is a
 //! remove plus a create. A description may hold any number of objects of
@@ -428,6 +428,48 @@ impl Material {
     }
 }
 
+/// A homogeneous participating medium: what fills a volume, rather than
+/// what covers a surface. Named and referenced like every other object —
+/// today by `Settings::global_medium`, the atmosphere everything stands in.
+///
+/// Its own object kind rather than more `OpenPBR` material slugs: a medium
+/// is not a surface property, and the grid file a heterogeneous one will
+/// name is not a slug any surface schema will grow.
+///
+/// Coefficients are per meter, in linear `Rec.709` like every other color
+/// constant, and convert to the working space at prep — where a saturated
+/// authored value can land slightly negative, and clamps to zero.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Medium {
+    /// Absorption coefficient `σ_a`: how much light the medium removes per
+    /// meter. Default zero.
+    #[serde(default = "zero3")]
+    pub absorption: [f32; 3],
+    /// Scattering coefficient `σ_s`: how much it redirects per meter. Zero
+    /// (the default) is a purely absorbing medium — Beer–Lambert and
+    /// nothing more.
+    #[serde(default = "zero3")]
+    pub scattering: [f32; 3],
+    /// Henyey–Greenstein anisotropy: 0 scatters isotropically, positive
+    /// leans forward (haze, clouds), negative back. Clamped inside (−1, 1)
+    /// at prep, where the phase function stays finite.
+    #[serde(default)]
+    pub anisotropy: f32,
+}
+
+impl Default for Medium {
+    /// Vacuum — the get-or-create placeholder, and harmless if it survives:
+    /// a medium with no coefficients extinguishes nothing.
+    fn default() -> Self {
+        Self {
+            absorption: zero3(),
+            scattering: zero3(),
+            anisotropy: 0.0,
+        }
+    }
+}
+
 /// A delta light — zero area, so next-event estimation is its only
 /// sampling strategy (MIS weight 1). Area lighting is not a light object:
 /// any instance whose material emits is an emitter.
@@ -542,6 +584,12 @@ pub struct Settings {
     /// but not yet wired into the sampler — honest decorrelation needs a
     /// seed input in the RNG, not a sample-index offset.
     pub seed: u32,
+    /// The [`Medium`] filling the open space between instances, by name;
+    /// `None` is vacuum. Unbounded: with one, a ray that reaches no surface
+    /// crosses infinite optical depth, so the environment and the distant
+    /// lights are unreachable — an atmosphere with a sky in it wants a
+    /// bounded volume, not this.
+    pub global_medium: Option<String>,
 }
 
 impl Default for Settings {
@@ -553,17 +601,19 @@ impl Default for Settings {
             spp: 64,
             max_bounces: crate::wavefront::Wavefront::DEFAULT_MAX_BOUNCES,
             seed: 0,
+            global_medium: None,
         }
     }
 }
 
-/// The seven object maps — the description's entire contents, split out
+/// The eight object maps — the description's entire contents, split out
 /// so apply can clone, mutate, validate, and swap them atomically.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Objects {
     pub(crate) meshes: BTreeMap<String, Mesh>,
     pub(crate) instances: BTreeMap<String, Instance>,
     pub(crate) materials: BTreeMap<String, Material>,
+    pub(crate) media: BTreeMap<String, Medium>,
     pub(crate) lights: BTreeMap<String, Light>,
     pub(crate) cameras: BTreeMap<String, Camera>,
     pub(crate) environments: BTreeMap<String, Environment>,
@@ -606,6 +656,12 @@ impl SceneDescription {
     #[must_use]
     pub fn materials(&self) -> &BTreeMap<String, Material> {
         &self.objects.materials
+    }
+
+    /// The media, by name.
+    #[must_use]
+    pub fn media(&self) -> &BTreeMap<String, Medium> {
+        &self.objects.media
     }
 
     /// The delta lights, by name.
@@ -664,6 +720,12 @@ impl SceneDescription {
             Kind::Material,
             &self.objects.materials,
             &new.objects.materials,
+            &mut dirty,
+        );
+        diff(
+            Kind::Medium,
+            &self.objects.media,
+            &new.objects.media,
             &mut dirty,
         );
         diff(
