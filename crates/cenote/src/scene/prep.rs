@@ -119,9 +119,7 @@ impl Scene {
         let placements = placements(&meshes, &host.instances);
         let tlas = build_scene_tlas(gpu, &placements)?;
         let tabling = Instant::now();
-        let has_interiors = placements
-            .iter()
-            .any(|placement| super::has_interior(&placement.material));
+        let has_interiors = super::has_interiors(&placements);
         let (geometry, materials, lights) =
             upload_instance_tables(gpu, &placements, &host.triangle_lights, &host.delta_lights)?;
         drop(placements);
@@ -246,9 +244,7 @@ impl Scene {
             self.tlas = build_scene_tlas(gpu, &placements)?;
         }
         let tabling = Instant::now();
-        self.has_interiors = placements
-            .iter()
-            .any(|placement| super::has_interior(&placement.material));
+        self.has_interiors = super::has_interiors(&placements);
         let (geometry, materials, lights) =
             upload_instance_tables(gpu, &placements, &host.triangle_lights, &host.delta_lights)?;
         drop(placements);

@@ -30,15 +30,14 @@ public struct Hit {
     public float2 barycentrics;
 };
 
-// No instance's TLAS custom index: a path traveling vacuum. A custom index
-// is 24 bits wide, so no instance can ever claim this value.
-public static const uint MEDIUM_NONE = 0xffffff;
-
-// Bit 24 of a medium-stack entry: the entry's medium scatters (σ_s > 0),
-// so segments through it must route to shade_volume rather than run
-// straight to shade_surface. Set by whoever pushes the entry — the
-// instance index rides in the low 24 bits, and intersect's routing test
-// reads only this bit of the top entry, never the medium record itself.
+// A medium-stack entry: an instance's TLAS custom index in the low 24
+// bits, flags above. `MEDIUM_NONE` is the all-ones index — a path
+// traveling vacuum, and an entry no instance can claim (custom indices
+// are 24 bits, and `raw_instance` in `accel.rs` asserts they stay below
+// this value). `STACK_SCATTERING` marks an entry whose medium scatters
+// (σ_s > 0), which is what routes a segment to shade_volume.
+public static const uint STACK_INDEX_MASK = 0xffffff;
+public static const uint MEDIUM_NONE = STACK_INDEX_MASK;
 public static const uint STACK_SCATTERING = 1 << 24;
 
 // Bounces before this always survive — they carry most of the image's energy,
@@ -64,17 +63,27 @@ public struct Paths {
     // scatter that produced this ray, which the next vertex's emission
     // needs for MIS (0 on camera rays: no light-sampling strategy competed).
     public float4* throughput;
-    // The path's medium stack: four entries, nearest interior first, each
-    // a 24-bit instance index (lanes hold [`MEDIUM_NONE`] when empty) with
-    // 8 flag bits above it ([`STACK_SCATTERING`] is the only one defined).
-    // `.x` is the medium the ray currently travels — set when a refraction
-    // enters a closed surface, cleared when one leaves, read at the next
-    // vertex for Beer–Lambert absorption over the segment. Allocated only
-    // when the scene has interiors at all; every access sits behind the
-    // kernel's interiors flag, so a media-free scene carries a null
-    // address and never touches it. Written only by scatters: bounce 0
-    // knows a camera ray starts in vacuum, so raygen never touches it.
+    // The path's medium stack: four entries, innermost first. Allocated
+    // only when the scene has interiors, so this address is null in
+    // media-free scenes and every access sits behind the kernel's
+    // interiors flag. Reach it through `top`/`setTop` rather than
+    // indexing it directly — depth is 1 for now, and only the innermost
+    // entry is ever written. The other three hold whatever the allocation
+    // left: push/pop has to fill them with MEDIUM_NONE before any read.
     public uint4* stack;
+
+    // The innermost entry: the medium the ray is currently travelling,
+    // set when a refraction enters a closed surface and cleared when one
+    // leaves. Read at the next vertex for Beer–Lambert absorption, and by
+    // intersect for STACK_SCATTERING.
+    //
+    // Both touch one lane, not the vector: `stack[path].x` would load a
+    // whole uint4, and a full-width store measured +2.9% frame on
+    // glass-of-water. The pool is residency-bound — bytes moved are the
+    // cost. Written only by scatters, so bounce 0 must not read it: a
+    // camera ray starts in vacuum and raygen leaves the entry unwritten.
+    public uint top(uint path) { return ((uint*)stack)[path * 4]; }
+    public void setTop(uint path, uint entry) { stack[path].x = entry; }
 };
 
 // The wave's AOV targets, one indirection behind the shading kernels'

@@ -20,10 +20,10 @@ RaytracingAccelerationStructure sceneTlas;
 // depth cap.
 static const uint TRANSPARENT_CAP = 8;
 
-// Bits 16+ of `Params.packed`: whether the scene has media at all. Set,
-// the route below reads real path and boundary state; clear (every scene
-// today without a scattering medium or null boundary), the route is one
-// uniform never-taken branch and this kernel touches nothing new.
+// Bit 16 of `Params.packed`: whether the scene has media. Clear, the
+// route below is one uniform never-taken branch and this kernel reads
+// neither the medium stack (which was never allocated) nor the boundary
+// word.
 static const uint FLAG_MEDIA = 1 << 16;
 
 struct Params {
@@ -34,10 +34,9 @@ struct Params {
     Queue<uint> volumes; // hits owed a medium event first — shade_volume's input
     SceneTable* scene; // materials — the opacity each crossing tests
     uint sampleIndex; // which sample of every pixel's sequence this wave is
-    // rayMask | bounce << 8 | media flags at bit 16 — see the unpack below.
-    // Packed because this block sits exactly at Vulkan's guaranteed 128
-    // push-constant bytes: the volume queue's 16 bytes come out of these
-    // small scalars.
+    // rayMask | bounce << 8 | FLAG_MEDIA. Packed because this block sits
+    // exactly at Vulkan's guaranteed 128 push-constant bytes: the volume
+    // queue's 16 bytes come out of these small scalars.
     uint packed;
 };
 
@@ -90,19 +89,17 @@ void intersect(uint3 tid: SV_DispatchThreadID) {
         hit.primitive = query.CommittedPrimitiveIndex();
         hit.barycentrics = query.CommittedTriangleBarycentrics();
         params.paths.hit[path] = hit;
-        // The three-way route: a segment through a scattering medium, or
-        // one stopped by a null boundary, has a medium event to sample
-        // before (or instead of) any surface — shade_volume's job. Every
-        // other hit shades as ever. Media-free scenes take the uniform
-        // early-out and read neither the stack nor the boundary word.
-        var volume = false;
+        // A hit that stopped at a null boundary (pure medium extent, no
+        // surface response), or one whose path is inside a scattering
+        // medium, owes a medium event before — or instead of — shading:
+        // shade_volume's job. Every other hit shades as ever. Bounce 0
+        // starts in vacuum, so its stack entry is unwritten.
+        var event = false;
         if ((params.packed & FLAG_MEDIA) != 0) {
-            volume = params.scene.geometry[hit.instance].boundary == BOUNDARY_NULL;
-            if (!volume && bounce != 0) {
-                volume = (params.paths.stack[path].x & STACK_SCATTERING) != 0;
-            }
+            event = params.scene.geometry[hit.instance].boundary == BOUNDARY_NULL
+                    || (bounce != 0 && (params.paths.top(path) & STACK_SCATTERING) != 0);
         }
-        if (volume) {
+        if (event) {
             params.volumes.push(path);
         } else {
             params.hits.push(path);

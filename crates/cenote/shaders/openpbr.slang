@@ -398,11 +398,10 @@ float3 coatDarkening(Material m, float rough, float mu, float baseFresnel) {
 // that leaves the interior the path is traveling through (the shading
 // kernel knows from its medium stack): the closure degrades to the bare
 // dielectric interface at the inverted IOR — coat, fuzz, and base live
-// on the outside. `exteriorIor` is the medium on the outside of this
-// boundary — 1.0 (vacuum, the default) everywhere until nested media
-// hand a real dominant exterior down; the relative IOR is the ratio
-// between the media on each side, and `x / 1.0` is exact in IEEE-754,
-// so the default changes no image.
+// on the outside. `exteriorIor` is the IOR of the medium on the other
+// side of this boundary; the relative IOR is the ratio across it. Vacuum
+// until nested media hand a real exterior down, and `x / 1.0` is exact in
+// IEEE-754, so the default changes no image.
 public Closure resolveClosure(Material m, float3 wo, bool exiting,
                               float exteriorIor = 1.0) {
     Closure c;

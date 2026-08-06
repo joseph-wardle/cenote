@@ -30,6 +30,11 @@ import scene;
 import surface;
 import textures;
 
+// Bit 24 of `Params.packed`: the scene has closed transmissive surfaces,
+// so the medium stack exists. Clear, every stack access below is skipped
+// — the buffer was never allocated.
+static const uint FLAG_INTERIORS = 1 << 24;
+
 struct Params {
     Paths paths;
     Queue<uint> hits;
@@ -39,12 +44,10 @@ struct Params {
     float4* radiance;         // the film's per-pixel accumulator for this wave
     AovTable* aov;            // the wave's AOV targets; enabled = 0 skips them
     uint sampleIndex; // which sample of every pixel's sequence this wave is
-    // bounce | maxBounces << 8 | lightSampling << 16 | interiors << 24.
+    // bounce | maxBounces << 8 | lightSampling << 16 | FLAG_INTERIORS.
     // Packed because this block sits exactly at Vulkan's guaranteed 128
     // push-constant bytes: the AOV pointer's 8 bytes come out of these
-    // small scalars. The interiors bit says the scene has closed
-    // transmissive surfaces at all — it gates every medium-stack access,
-    // because a scene without interiors never allocated the stack.
+    // small scalars.
     uint packed;
 };
 
@@ -70,7 +73,7 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     let bounce = params.packed & 0xff;
     let maxBounces = (params.packed >> 8) & 0xff;
     let lightSampling = (params.packed >> 16) & 0xff;
-    let interiors = (params.packed & (1 << 24)) != 0;
+    let interiors = (params.packed & FLAG_INTERIORS) != 0;
     uint path = params.hits.entries[tid.x];
     uint pixel = params.paths.pixel[path];
     Hit hit = params.paths.hit[path];
@@ -86,15 +89,12 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     // xyz = the path's weight; w = the previous scatter's pdf (0: camera ray).
     var throughput = params.paths.throughput[path];
 
-    // The interior the segment crossed — the top of the medium stack:
-    // Beer–Lambert absorption toward this medium's target color, folded
-    // into the throughput before anything at this vertex spends it. A zero
-    // transmission depth means no interior — the tint sat on the interface
-    // instead. Camera rays start in vacuum, so bounce 0 never reads the
-    // (unwritten) entry, and a scene with no interiors never reads the
-    // (unallocated) stack.
+    // The interior the segment crossed: Beer–Lambert absorption toward
+    // this medium's target color, folded into the throughput before
+    // anything at this vertex spends it. A zero transmission depth means
+    // no interior — the tint sat on the interface instead.
     var medium = (interiors && bounce != 0)
-                     ? params.paths.stack[path].x & 0xffffff
+                     ? params.paths.top(path) & STACK_INDEX_MASK
                      : MEDIUM_NONE;
     if (medium != MEDIUM_NONE) {
         throughput.xyz *= interiorTransmittance(params.scene, medium,
@@ -259,9 +259,8 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
 
     // A transmission through a closed surface crosses into (or out of) its
     // interior; thin walls have none. Reflections keep whatever medium the
-    // path was already in. The stack write is depth-1 today (entry .x, the
-    // rest held empty); Schmidt–Budge push/pop over the full four entries
-    // is the nesting rung's change, in this one place.
+    // path was already in. Depth 1: the innermost entry alone, the rest of
+    // the stack held empty until push/pop lands.
     if (scatter.lobe == LOBE_TRANSMISSION && material.thinWalled == 0) {
         medium = medium == hit.instance ? MEDIUM_NONE : hit.instance;
     }
@@ -270,7 +269,7 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     params.paths.direction[path] = float4(wiWorld, 0.0);
     params.paths.throughput[path] = float4(scattered, scatter.pdf);
     if (interiors) {
-        params.paths.stack[path].x = medium;
+        params.paths.setTop(path, medium);
     }
     params.rays.push(path);
 

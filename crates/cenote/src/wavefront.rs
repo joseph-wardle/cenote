@@ -27,6 +27,8 @@
 //! `shaders/pathstate.slang` ([`PathPool`] ↔ `struct Paths`): adding a
 //! field touches those two files and no kernel signature.
 
+use std::sync::OnceLock;
+
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
@@ -64,6 +66,21 @@ const INDIRECT_OFFSET: u64 = 4;
 /// Byte size of one `ShadowRay` record (`shaders/pathstate.slang`).
 const SHADOW_RAY_SIZE: u64 = 64;
 
+/// Push-constant bytes every Vulkan implementation guarantees. Several of
+/// the blocks below sit exactly here — which is why their small scalars
+/// ride packed in one word — so the fit is asserted at compile time
+/// rather than discovered as a pipeline-creation failure.
+const PUSH_CONSTANT_LIMIT: usize = 128;
+
+const _: () = {
+    assert!(size_of::<RaygenParams>() <= PUSH_CONSTANT_LIMIT);
+    assert!(size_of::<IntersectParams>() <= PUSH_CONSTANT_LIMIT);
+    assert!(size_of::<ShadeMissParams>() <= PUSH_CONSTANT_LIMIT);
+    assert!(size_of::<ShadeSurfaceParams>() <= PUSH_CONSTANT_LIMIT);
+    assert!(size_of::<ShadeVolumeParams>() <= PUSH_CONSTANT_LIMIT);
+    assert!(size_of::<TraceShadowParams>() <= PUSH_CONSTANT_LIMIT);
+};
+
 /// The path pool's field-buffer addresses — `struct Paths` in
 /// `shaders/pathstate.slang`, embedded in every stage's push constants.
 #[repr(C)]
@@ -74,7 +91,7 @@ struct PathsAddrs {
     pixel: vk::DeviceAddress,
     hit: vk::DeviceAddress,
     throughput: vk::DeviceAddress,
-    /// Null in scenes with no interiors — the buffer was never allocated,
+    /// Null in scenes with no interiors: the buffer was never allocated,
     /// and every kernel access sits behind the interiors flag.
     stack: vk::DeviceAddress,
 }
@@ -137,7 +154,7 @@ struct IntersectParams {
     hits: QueueAddrs,
     misses: QueueAddrs,
     /// Paths owed a medium event before any surface — `shade_volume`'s
-    /// input. Entries address is null in media-free scenes, where the
+    /// input. Its entries address is null in media-free scenes, where the
     /// routing branch never runs.
     volumes: QueueAddrs,
     /// Device address of the scene table — opacity lives in the materials.
@@ -145,9 +162,8 @@ struct IntersectParams {
     /// Which sample of every pixel's sequence this wave traces.
     sample_index: u32,
     /// `ray_mask | bounce << 8 | media << 16` — see [`pack_intersect`].
-    /// Packed because this block sits exactly at Vulkan's guaranteed 128
-    /// push-constant bytes: the volume queue's 16 bytes come out of these
-    /// small scalars.
+    /// Packed because this block sits exactly at [`PUSH_CONSTANT_LIMIT`]:
+    /// the volume queue's 16 bytes came out of these small scalars.
     packed: u32,
 }
 
@@ -202,16 +218,15 @@ struct ShadeSurfaceParams {
     sample_index: u32,
     /// `bounce | max_bounces << 8 | light_sampling << 16 | interiors << 24`
     /// — see [`pack_shade_surface`]. Packed because this block sits exactly
-    /// at Vulkan's guaranteed 128 push-constant bytes: the AOV pointer's
-    /// 8 bytes come out of these small scalars.
+    /// at [`PUSH_CONSTANT_LIMIT`]: the AOV pointer's 8 bytes came out of
+    /// these small scalars.
     packed: u32,
 }
 
 /// Pack `ShadeSurfaceParams::packed`, mirrored by the unpack at the top of
 /// `shade_surface.slang`. Both byte-wide fields are asserted in range by
-/// [`Wavefront::new`]; `interiors` says the scene has closed transmissive
-/// surfaces at all — it gates every medium-stack access in the kernel,
-/// because a scene without interiors never allocated the stack.
+/// [`Wavefront::new`]; `interiors` gates every medium-stack access in the
+/// kernel, because a scene without interiors never allocated the stack.
 fn pack_shade_surface(
     bounce: u32,
     max_bounces: u32,
@@ -227,7 +242,6 @@ fn pack_shade_surface(
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct ShadeVolumeParams {
-    paths: PathsAddrs,
     volumes: QueueAddrs,
     hits: QueueAddrs,
 }
@@ -240,6 +254,24 @@ struct TraceShadowParams {
     radiance: vk::DeviceAddress,
     /// Device address of the scene table — opacity attenuates connections.
     scene: vk::DeviceAddress,
+}
+
+/// Allocate a device-local buffer into `cell` unless it already holds one.
+/// The medium stack and the volume queue exist only once some scene needs
+/// them, and are then reused for every later scene — a scene that stops
+/// needing one simply stops addressing it.
+fn ensure(cell: &OnceLock<Buffer>, gpu: &Context, label: &str, bytes: u64) -> Result<()> {
+    if cell.get().is_none() {
+        let buffer = gpu.create_buffer(
+            label,
+            bytes,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            MemoryLocation::GpuOnly,
+        )?;
+        // A concurrent winner just means this allocation drops.
+        let _ = cell.set(buffer);
+    }
+    Ok(())
 }
 
 /// The `SoA` path state: one GPU buffer per logical field, `capacity` slots
@@ -260,13 +292,12 @@ struct PathPool {
     /// scatter that produced this ray (0 on camera rays), kept for the next
     /// vertex's MIS weight; 16 B/path.
     throughput: Buffer,
-    /// The medium stack — four instance-index entries, nearest interior
-    /// first; 16 B/path. Allocated on the first wave over a scene with
-    /// interiors (any closed transmissive surface) and never before: a
-    /// scene without them carries a null address, every kernel access sits
-    /// behind the interiors flag, and the pool stays *smaller* than when
-    /// this was a single 4 B medium slot.
-    stack: std::sync::OnceLock<Buffer>,
+    /// The medium stack — four instance-index entries, innermost first;
+    /// 16 B/path, allocated by [`ensure`] on the first wave over a scene
+    /// with interiors and never before. Without one the pool is 68 B/path
+    /// and its address here is null, which is safe because every kernel
+    /// access sits behind the interiors flag.
+    stack: OnceLock<Buffer>,
 }
 
 impl PathPool {
@@ -305,25 +336,8 @@ impl PathPool {
                 storage,
                 MemoryLocation::GpuOnly,
             )?,
-            stack: std::sync::OnceLock::new(),
+            stack: OnceLock::new(),
         })
-    }
-
-    /// Allocate the medium stack if this pool doesn't hold one yet — called
-    /// before any wave over a scene with interiors. Reused for every later
-    /// scene; a subsequent interior-free scene simply stops addressing it.
-    fn ensure_stack(&self, gpu: &Context, capacity: u32) -> Result<()> {
-        if self.stack.get().is_none() {
-            let buffer = gpu.create_buffer(
-                "wavefront.stack",
-                u64::from(capacity) * 16,
-                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-                MemoryLocation::GpuOnly,
-            )?;
-            // A concurrent winner just means this allocation drops.
-            let _ = self.stack.set(buffer);
-        }
-        Ok(())
     }
 
     fn addresses(&self) -> PathsAddrs {
@@ -357,10 +371,9 @@ struct Queues {
     /// `trace_shadow`.
     shadow: Buffer,
     /// Path indices owed a medium event — awaiting `shade_volume`.
-    /// Allocated on the first wave over a scene with media (a scattering
-    /// medium or null boundary — none can be authored yet) and never
-    /// before; its header slot always exists, and stays empty otherwise.
-    volume: std::sync::OnceLock<Buffer>,
+    /// Allocated by [`ensure`] on the first wave over a scene with media
+    /// and never before; the header slot always exists and stays zeroed.
+    volume: OnceLock<Buffer>,
 }
 
 impl Queues {
@@ -401,23 +414,8 @@ impl Queues {
                 storage,
                 MemoryLocation::GpuOnly,
             )?,
-            volume: std::sync::OnceLock::new(),
+            volume: OnceLock::new(),
         })
-    }
-
-    /// Allocate the volume queue's entries if they don't exist yet — called
-    /// before any wave over a scene with media.
-    fn ensure_volume(&self, gpu: &Context, capacity: u32) -> Result<()> {
-        if self.volume.get().is_none() {
-            let buffer = gpu.create_buffer(
-                "wavefront.queue.volume",
-                u64::from(capacity) * 4,
-                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-                MemoryLocation::GpuOnly,
-            )?;
-            let _ = self.volume.set(buffer);
-        }
-        Ok(())
     }
 
     fn addresses(&self, index: u64, entries: &Buffer) -> QueueAddrs {
@@ -688,16 +686,20 @@ impl Wavefront {
             "radiance buffer smaller than the target"
         );
         let aov_table = aovs.map_or(&self.aov_disabled, |aov| aov.table);
-        // The interior-conditional residency: a scene with closed
-        // transmissive surfaces gets the medium stack, one with media gets
-        // the volume queue — allocated on first need, then reused for every
-        // later scene. Everything else carries null addresses the kernels
-        // never dereference.
+        // Residency the scene has to earn: without interiors there is no
+        // medium stack, without media no volume queue, and the kernels
+        // carry null addresses they never dereference.
+        let capacity = u64::from(self.capacity);
         if scene.has_interiors() {
-            self.paths.ensure_stack(gpu, self.capacity)?;
+            ensure(&self.paths.stack, gpu, "wavefront.stack", capacity * 16)?;
         }
         if scene.has_media() {
-            self.queues.ensure_volume(gpu, self.capacity)?;
+            ensure(
+                &self.queues.volume,
+                gpu,
+                "wavefront.queue.volume",
+                capacity * 4,
+            )?;
         }
         let params = self.wave_params(scene, radiance, aov_table, width, height, sample);
         let mut passes = self.record_wave(scene, radiance, aovs, pixels, &params);
@@ -802,7 +804,6 @@ impl Wavefront {
                 })
                 .collect(),
             shade_volume: ShadeVolumeParams {
-                paths: self.paths.addresses(),
                 volumes: self.queues.volume_addresses(),
                 hits: self.queues.addresses(queue::HIT, &self.queues.hit),
             },
@@ -884,10 +885,9 @@ impl Wavefront {
             // The bounce loop, recorded ahead of time: each round consumes
             // the ray queue, refills it with the paths that scattered, and
             // ends by tracing the round's next-event shadow rays. Rounds
-            // after every path has died dispatch nothing. The volume stage
-            // exists only when the scene has media: media-free scenes
-            // record neither its fill nor its dispatch, keeping their pass
-            // list byte-identical to the pre-media engine's.
+            // after every path has died dispatch nothing. A media-free
+            // scene records neither the volume stage's fill nor its
+            // dispatch, so its pass list is the pre-media engine's.
             let media = scene.has_media();
             let bounces = params.shade_surface.len() as u32;
             for bounce in 0..bounces {
@@ -908,8 +908,9 @@ impl Wavefront {
                 if bounce + 1 < bounces {
                     passes.push(fill(queue::RAY));
                 }
-                // Volume events resolve before the surface stage consumes
-                // the hit queue — a passed-through hit shades as ever.
+                // Medium events resolve before the surface stage consumes
+                // the hit queue: a path that survives one is pushed there
+                // and shades as ever.
                 if media {
                     passes.push(indirect(
                         &self.shade_volume,
@@ -950,8 +951,8 @@ struct WaveParams {
     shade_miss: ShadeMissParams,
     /// One instance per recorded bounce; its length is the wave's bounce count.
     shade_surface: Vec<ShadeSurfaceParams>,
-    /// One instance for every bounce — recorded only when the scene has
-    /// media, built regardless (it is a handful of addresses).
+    /// Bounce-invariant, and built even when no pass will use it — it is
+    /// two queue addresses.
     shade_volume: ShadeVolumeParams,
     trace_shadow: TraceShadowParams,
 }
@@ -976,6 +977,55 @@ mod tests {
             MemoryLocation::GpuOnly,
         )
         .expect("radiance buffer")
+    }
+
+    /// The medium stack is residency a scene has to earn: a wave over
+    /// opaque geometry must never allocate it, and one over glass must.
+    /// The null address the first case leaves in every kernel's push
+    /// constants is only safe because no kernel dereferences it, so this
+    /// also stands in for "media-free scenes touch no medium state".
+    #[test]
+    fn only_a_scene_with_interiors_allocates_the_medium_stack() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let object = |material| Object {
+            mesh: icosphere(2),
+            transform: Mat4::from_translation(Vec3::Y),
+            material,
+        };
+        let camera = Camera {
+            position: Vec3::new(0.0, 2.0, 8.5),
+            look_at: Vec3::new(0.0, 0.5, 0.0),
+            up: Vec3::Y,
+            vfov_degrees: 40.0,
+            lens: None,
+        };
+        let environment = Environment::constant(Vec3::splat(0.4));
+        let kernels = Kernels::embedded();
+        let (width, height) = (16, 16);
+        for (material, wanted) in [
+            (Material::matte(Vec3::splat(0.5), 0.3), false),
+            (Material::glass(0.1, 1.5), true),
+        ] {
+            let scene = Scene::new(&gpu, &[object(material)], camera, &environment).expect("scene");
+            assert_eq!(scene.has_interiors(), wanted);
+            let wavefront =
+                Wavefront::new(&gpu, &kernels, 4096, 2, LightSampling::Mis).expect("wavefront");
+            let radiance = radiance_buffer(&gpu, width, height);
+            wavefront
+                .trace(&gpu, &scene, &radiance, width, height, 0)
+                .expect("trace");
+            assert_eq!(
+                wavefront.paths.stack.get().is_some(),
+                wanted,
+                "the stack must exist exactly when the scene has interiors"
+            );
+            assert!(
+                wavefront.queues.volume.get().is_none(),
+                "no scene can author media yet, so the volume queue stays unallocated"
+            );
+        }
     }
 
     /// Audit the queue machinery after one wave over a ragged 33×17 target,

@@ -1,22 +1,20 @@
 // The volume stage: paths whose segment has a medium event to sample —
 // a scattering medium on their stack, or a null boundary where their ray
-// stopped — arrive here instead of shade_surface. This is deliberately a
-// separate kernel: media code in intersect or shade_surface would cost
-// every scene register pressure, while a stage of its own is recorded
-// only when the scene has media at all, so media-free scenes keep a
-// byte-identical pass list.
+// stopped — arrive here from intersect instead of shade_surface, and the
+// ones that survive continue to shade_surface through the hit queue.
 //
-// Today the body is the skeleton alone: nothing routes here until a
-// scattering medium or null boundary can be authored, and a path that
-// somehow arrives shades its held hit as ever. The real body — distance
-// sampling against the stack's σ_t, phase scatter + NEE, and the
-// null-crossing march (re-trace, capped) — lands with the global-medium
-// and null-prim rungs.
+// A stage of its own rather than a branch in shade_surface: it is
+// recorded only when the scene has media, so media-free scenes keep a
+// byte-identical pass list and no scene pays register pressure for
+// medium code it never runs.
+//
+// Skeleton only. Nothing routes here until a scattering medium or null
+// boundary can be authored; distance sampling, phase scatter with NEE,
+// and the capped null-crossing march land with those rungs.
 
 import pathstate;
 
 struct Params {
-    Paths paths;
     Queue<uint> volumes; // this stage's input, pushed by intersect
     Queue<uint> hits;    // where surviving hits continue to shade_surface
 };
@@ -30,6 +28,5 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
     if (tid.x >= params.volumes.count()) {
         return;
     }
-    uint path = params.volumes.entries[tid.x];
-    params.hits.push(path);
+    params.hits.push(params.volumes.entries[tid.x]);
 }

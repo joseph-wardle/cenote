@@ -129,33 +129,36 @@ struct GeometryRecord {
     /// order, so a BSDF-sampled hit finds the pdf its MIS weight competes
     /// against at `light + primitive`.
     light: u32,
-    /// The medium this instance bounds, or [`MEDIUM_INDEX_NONE`] — always
-    /// the latter until the `Medium` object kind lands.
-    medium: u32,
-    /// What crossing this instance's surface means — a `BOUNDARY_*` value,
-    /// classified at prep from the material: refractive for any closed
-    /// transmissive surface, otherwise opaque (null boundaries arrive with
-    /// authored media).
+    /// What crossing this instance's surface means — see [`boundary`].
     boundary: u32,
-    _pad0: u32,
+    _pad0: [u32; 2],
 }
 
 /// `GeometryRecord::boundary` values — the `BOUNDARY_*` constants in
-/// `shaders/scene.slang`.
+/// `shaders/scene.slang` (`BOUNDARY_NULL` arrives with authored media).
 const BOUNDARY_OPAQUE: u32 = 0;
 const BOUNDARY_REFRACTIVE: u32 = 1;
 
-/// `GeometryRecord::medium`'s "bounds no medium" sentinel —
-/// `MEDIUM_INDEX_NONE` in `shaders/scene.slang`.
-const MEDIUM_INDEX_NONE: u32 = 0xffff_ffff;
+/// What crossing this material's surface means. The single authority on
+/// interiors: it classifies every instance's boundary word *and*, through
+/// [`has_interiors`], decides whether the wavefront allocates the medium
+/// stack — so the two can't disagree. Transmission depth is deliberately
+/// not consulted: a depth-0 interior absorbs nothing but still drives the
+/// closure's `exiting` flag, which reads the stack.
+fn boundary(material: &Material) -> u32 {
+    if material.transmission_weight > 0.0 && material.thin_walled == 0 {
+        BOUNDARY_REFRACTIVE
+    } else {
+        BOUNDARY_OPAQUE
+    }
+}
 
-/// Whether `material` gives its instance a closed transmissive interior —
-/// the boundary classification, and (any true) the trigger for the path
-/// pool's medium-stack allocation. Depth is deliberately not consulted:
-/// even a depth-0 interior (interface tint, no absorption) drives the
-/// closure's `exiting` flag through the stack, so it needs the slot.
-fn has_interior(material: &Material) -> bool {
-    material.transmission_weight > 0.0 && material.thin_walled == 0
+/// Whether any placement has a closed transmissive interior — see
+/// [`Scene::has_interiors`].
+fn has_interiors(placements: &[Placement]) -> bool {
+    placements
+        .iter()
+        .any(|placement| boundary(&placement.material) == BOUNDARY_REFRACTIVE)
 }
 
 /// Every buffer the scene shares with the kernels, one address each, plus
@@ -270,9 +273,8 @@ pub struct Scene {
     /// changes; every wave binds it next to the TLAS.
     descriptors: Vec<vk::DescriptorImageInfo>,
     camera: Camera,
-    /// Whether any instance has a closed transmissive interior — the
-    /// trigger for the wavefront's medium-stack allocation, recomputed on
-    /// every build and update.
+    /// Whether any instance has a closed transmissive interior —
+    /// recomputed on every build and update. See [`Scene::has_interiors`].
     has_interiors: bool,
     /// The environment's dimensions and emitted power (untinted), retained
     /// so a light edit can rebuild the scene table (its selection
@@ -404,9 +406,7 @@ impl Scene {
             })
             .collect();
         let tlas = build_scene_tlas(gpu, &placements)?;
-        let has_interiors = placements
-            .iter()
-            .any(|placement| has_interior(&placement.material));
+        let has_interiors = has_interiors(&placements);
         let (geometry, materials, lights) =
             upload_instance_tables(gpu, &placements, &triangle_lights, &[])?;
         let GpuEnvironment {
@@ -470,20 +470,20 @@ impl Scene {
         &self.tlas
     }
 
-    /// Whether any instance has a closed transmissive interior. True, the
-    /// wavefront allocates the medium stack and its kernels track which
-    /// interior each path travels; false, the stack is never allocated and
-    /// never touched.
+    /// Whether any instance has a closed transmissive interior (see
+    /// [`boundary`]). True, the wavefront allocates the medium stack and
+    /// its kernels track which interior each path travels; false, the
+    /// stack is never allocated and no kernel addresses it.
     #[must_use]
     pub fn has_interiors(&self) -> bool {
         self.has_interiors
     }
 
-    /// Whether the scene has media at all — a scattering medium or a null
+    /// Whether the scene has media — a scattering medium or a null
     /// boundary, the things that give a path segment a medium *event* and
     /// so record the volume stage. Constant false until a medium can be
-    /// authored (pure-absorbing interiors have no event to sample and shade
-    /// through the surface stage as ever).
+    /// authored: a pure-absorbing interior has no event to sample and
+    /// shades through the surface stage as ever.
     #[must_use]
     pub fn has_media(&self) -> bool {
         false
@@ -704,13 +704,8 @@ fn upload_instance_tables(
                 object_to_world: transform_rows(placement.transform),
                 world_to_object: transform_rows(inverse),
                 light,
-                medium: MEDIUM_INDEX_NONE,
-                boundary: if has_interior(&placement.material) {
-                    BOUNDARY_REFRACTIVE
-                } else {
-                    BOUNDARY_OPAQUE
-                },
-                _pad0: 0,
+                boundary: boundary(&placement.material),
+                _pad0: [0; 2],
             }
         })
         .collect();
@@ -957,6 +952,27 @@ fn upload_mesh(upload: &mut Upload, name: &str, mesh: &Mesh) -> Result<GpuMesh> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One predicate decides two things — an instance's boundary word and
+    /// whether the wavefront allocates the medium stack at all — so what
+    /// counts as an interior is worth pinning. Closed glass qualifies at
+    /// transmission depth 0: it absorbs nothing, but the closure's
+    /// `exiting` flag still reads the stack to know it is leaving. A
+    /// thin-walled sheet has no interior to be inside of.
+    #[test]
+    fn closed_transmissive_surfaces_bound_interiors() {
+        let glass = Material {
+            transmission_depth: 0.0,
+            ..Material::glass(0.1, 1.5)
+        };
+        assert_eq!(boundary(&glass), BOUNDARY_REFRACTIVE);
+        assert_eq!(boundary(&glass.thin_walled()), BOUNDARY_OPAQUE);
+        assert_eq!(
+            boundary(&Material::matte(Vec3::ONE, 0.5)),
+            BOUNDARY_OPAQUE,
+            "an opaque surface has no interior"
+        );
+    }
 
     /// The ray basis must be orthogonal, oriented (up skyward, right = +X
     /// when looking down −Z), and scaled by fov and aspect — the kernel
