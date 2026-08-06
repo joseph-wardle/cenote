@@ -51,10 +51,14 @@ pub struct Kernels {
     /// Surface shading and path termination/continuation.
     pub shade_surface: Kernel,
     /// Medium events on path segments — recorded only when the scene has
-    /// media; a skeleton until a medium can be authored.
+    /// media.
     pub shade_volume: Kernel,
     /// Occlusion tests for queued shadow rays.
     pub trace_shadow: Kernel,
+    /// The same, for a scene with volume-bounding meshes: a second entry
+    /// point of the same module, so that measuring a connection's way
+    /// through them costs registers only where there are any.
+    pub trace_shadow_volumes: Kernel,
     /// Film: add a wave's sample into the running sums (NaN/Inf-guarded).
     pub accumulate: Kernel,
     /// Film: running sums → the resolved linear `ACEScg` average.
@@ -85,6 +89,7 @@ impl Kernels {
             shade_surface: kernel(spirv!("shade_surface"), c"shade_surface"),
             shade_volume: kernel(spirv!("shade_volume"), c"shade_volume"),
             trace_shadow: kernel(spirv!("trace_shadow"), c"trace_shadow"),
+            trace_shadow_volumes: kernel(spirv!("trace_shadow"), c"trace_shadow_volumes"),
             accumulate: kernel(spirv!("accumulate"), c"accumulate"),
             resolve: kernel(spirv!("resolve"), c"resolve"),
             tonemap: kernel(spirv!("tonemap"), c"tonemap"),
@@ -119,6 +124,7 @@ impl Kernels {
                 })
                 .map(|handle| handle.join().expect("compile thread panicked"))
         });
+        let shadow = trace_shadow?;
         Ok(Self {
             raygen: Kernel {
                 spirv: raygen?,
@@ -140,8 +146,13 @@ impl Kernels {
                 spirv: shade_volume?,
                 entry: c"shade_volume",
             },
+            trace_shadow_volumes: Kernel {
+                // The same module, a second entry point in it.
+                spirv: shadow.clone(),
+                entry: c"trace_shadow_volumes",
+            },
             trace_shadow: Kernel {
-                spirv: trace_shadow?,
+                spirv: shadow,
                 entry: c"trace_shadow",
             },
             accumulate: Kernel {
@@ -267,7 +278,7 @@ mod tests {
         u32::from_le_bytes(bytes[..4].try_into().unwrap()) == 0x0723_0203
     }
 
-    fn all(kernels: &Kernels) -> [&Kernel; 9] {
+    fn all(kernels: &Kernels) -> [&Kernel; 10] {
         [
             &kernels.raygen,
             &kernels.intersect,
@@ -275,6 +286,7 @@ mod tests {
             &kernels.shade_surface,
             &kernels.shade_volume,
             &kernels.trace_shadow,
+            &kernels.trace_shadow_volumes,
             &kernels.accumulate,
             &kernels.resolve,
             &kernels.tonemap,

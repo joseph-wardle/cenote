@@ -38,16 +38,24 @@ public struct Hit {
 public static const uint INSTANCE_NONE = 0xffffffff;
 
 // A medium-stack entry: an instance's TLAS custom index in the low 24
-// bits, flags above. The entry names the *instance* whose interior the
+// bits, flags above. The entry names the *instance* whose medium the
 // path travels, not what fills it — identity is what entering and exiting
 // compare, and two instances can share one medium. `STACK_EMPTY` is the
-// all-ones index — a path in open space, and an entry no instance can
+// all-ones index — a path outside everything, and an entry no instance can
 // claim (custom indices are 24 bits, and `raw_instance` in `accel.rs`
 // asserts they stay below this value). `STACK_SCATTERING` marks an entry
 // whose medium scatters (σ_s > 0), which routes a segment to shade_volume.
 public static const uint STACK_INDEX_MASK = 0xffffff;
 public static const uint STACK_EMPTY = STACK_INDEX_MASK;
 public static const uint STACK_SCATTERING = 1 << 24;
+
+// How many null-bounded volumes a path can be inside at once — the y, z,
+// and w lanes of its stack entry. Overlap deeper than this is not modelled:
+// the fourth volume's boundary is ignored, which leaves its extent unfogged
+// (and, since the set is what exits compare against, leaves its far side
+// fogged instead). Three is what the layout affords; the volumes production
+// scenes overlap are one or two.
+public static const uint VOLUME_SLOTS = 3;
 
 // Bounces before this always survive — they carry most of the image's energy,
 // and killing them early would just trade traced rays for noise. From here on,
@@ -81,13 +89,18 @@ public struct Paths {
     // scatter that produced this ray, which the next vertex's emission
     // needs for MIS (0 on camera rays: no light-sampling strategy competed).
     public float4* throughput;
-    // The path's medium stack: four entries, innermost first. Allocated
-    // only when the scene has interiors, so this address is null in
-    // media-free scenes and every access sits behind the kernel's
-    // interiors flag. Reach it through `top`/`setTop` rather than
-    // indexing it directly — depth is 1 for now, and only the innermost
-    // entry is ever written. The other three hold whatever the allocation
-    // left: push/pop has to fill them with STACK_EMPTY before any read.
+    // The path's medium stack, allocated only for a scene that has
+    // interiors or volumes — so this address is null in a media-free
+    // scene, and every access sits behind the kernel flag for the half it
+    // reads. Two independent halves, because the two kinds nest
+    // differently and the surface stage only ever wants the first:
+    //
+    //   x       the innermost refractive interior — `top`/`setTop`
+    //   y, z, w the null-bounded volumes the path is inside — `inside`/
+    //           `setInside`, an unordered set
+    //
+    // Reach either through its accessors rather than indexing this
+    // directly: the sentinels and the store widths are theirs to keep.
     public uint4* stack;
 
     // The innermost entry: the interior the ray is currently travelling,
@@ -119,7 +132,60 @@ public struct Paths {
     public void setSegment(uint path, float length) {
         ((float*)origin)[path * 4 + 3] = length;
     }
+
+    // The null-bounded volumes the path is inside: an unordered set, since
+    // overlapping volumes add and addition has no order. `volumes` is the
+    // kernel's flag — a scene with no volume-bounding mesh never seeds
+    // these lanes, so nothing may read them there. Intersect seeds them at
+    // bounce 0, which is why every later stage can read without asking
+    // what bounce it is.
+    public uint3 inside(uint path, bool volumes) {
+        return volumes ? stack[path].yzw : uint3(STACK_EMPTY);
+    }
+
+    // Three one-lane stores, for `setTop`'s reason: the pool is
+    // residency-bound and the x lane belongs to the surface stage.
+    public void setInside(uint path, uint3 set) {
+        stack[path].y = set.x;
+        stack[path].z = set.y;
+        stack[path].w = set.z;
+    }
 };
+
+// The volumes lanes of one stack entry — what `Paths::inside` reads, for a
+// stage that carries the stack alone rather than the whole pool.
+public uint3 insideOf(uint4* stack, uint path) {
+    return stack[path].yzw;
+}
+
+// Crossing a null boundary flips the instance's membership in `set`: it is
+// there, so this crossing leaves it; it is absent, so this one enters.
+//
+// Membership, not which way the triangle faces. A volume mesh authored
+// inside-out — the winding mistake every USD pipeline makes at least once —
+// still bounds exactly its own interior this way, where a front-face rule
+// would fog the entire world outside it instead. The two agree on any
+// closed, outward-wound mesh, which is what the shadow pass's signed
+// distances need anyway.
+//
+// A fourth simultaneous volume has nowhere to go and is dropped; see
+// `VOLUME_SLOTS`.
+public uint3 crossVolume(uint3 set, uint instance) {
+    var free = VOLUME_SLOTS;
+    for (uint slot = 0; slot < VOLUME_SLOTS; slot++) {
+        if (set[slot] == instance) {
+            set[slot] = STACK_EMPTY;
+            return set;
+        }
+        if (set[slot] == STACK_EMPTY && free == VOLUME_SLOTS) {
+            free = slot;
+        }
+    }
+    if (free < VOLUME_SLOTS) {
+        set[free] = instance;
+    }
+    return set;
+}
 
 // The wave's AOV targets, one indirection behind the shading kernels'
 // push constants (shade_surface sits exactly at Vulkan's guaranteed 128
@@ -201,7 +267,12 @@ public struct ShadowRay {
     public float3 contribution; // unshadowed radiance, fully weighted
     public float tmax;
     public uint pixel;
+    // The path that launched it — not to make this record depend on the
+    // pool, but so the shadow stage can find the volumes the connection
+    // starts inside. Nothing writes that set between the launching stage
+    // and this one (a surface scatter moves the interior lane, never these),
+    // so the entry it reads is the one at the connection's own vertex.
+    public uint path;
     public uint pad0;
     public uint pad1;
-    public uint pad2;
 };

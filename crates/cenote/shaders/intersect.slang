@@ -16,18 +16,14 @@ import scene;
 [vk::binding(0, 0)]
 RaytracingAccelerationStructure sceneTlas;
 
-// Crossings after this many commit as opaque: a bound on pathological
-// transparent stacks (and on the traversal loop), separate from the path
-// depth cap.
-static const uint TRANSPARENT_CAP = 8;
-
 // Flags in `Params.packed`. MEDIA clear, the routing below is one uniform
 // never-taken branch reading neither the medium stack nor the boundary
-// word. INTERIORS says the stack was allocated at all; GLOBAL says the open
-// space between instances is filled.
+// word. INTERIORS says the stack's x lane is live; VOLUMES, that its other
+// three are; GLOBAL, that the open space between instances is filled.
 static const uint FLAG_MEDIA = 1 << 16;
 static const uint FLAG_INTERIORS = 1 << 17;
 static const uint FLAG_GLOBAL = 1 << 18;
+static const uint FLAG_VOLUMES = 1 << 19;
 
 struct Params {
     Paths paths;
@@ -46,16 +42,20 @@ struct Params {
 [vk::push_constant]
 Params params;
 
-// Did the arriving segment travel through a medium with an event to sample?
-// Open space has one when a global medium fills it; an interior has one when
-// its medium scatters. A purely absorbing interior does not: its Beer–Lambert
-// factor is closed-form, and shade_surface folds it as it always has.
-// Callers guard on FLAG_MEDIA — without it neither the stack nor the flags
-// mean anything.
-bool travelledMedium(Paths paths, uint path, uint bounce, uint packed) {
+// Does the volume stage owe the arriving segment anything? A refractive
+// interior displaces whatever surrounds it and none of them scatters yet,
+// so a path inside one owes nothing: its Beer–Lambert factor is
+// closed-form, and shade_surface folds it as it always has. Otherwise any
+// volume the path is inside owes one — even a purely absorbing volume,
+// since nothing else can apply its extinction — and so does a filled open
+// space. Callers guard on FLAG_MEDIA, without which neither the stack nor
+// the flags mean anything.
+bool travelledMedium(Paths paths, uint path, uint bounce, uint packed, uint3 inside) {
     let entry = paths.arriving(path, bounce, (packed & FLAG_INTERIORS) != 0);
-    return entry == STACK_EMPTY ? (packed & FLAG_GLOBAL) != 0
-                                : (entry & STACK_SCATTERING) != 0;
+    if (entry != STACK_EMPTY) {
+        return (entry & STACK_SCATTERING) != 0;
+    }
+    return any(inside != STACK_EMPTY) || (packed & FLAG_GLOBAL) != 0;
 }
 
 [shader("compute")]
@@ -99,6 +99,20 @@ void intersect(uint3 tid: SV_DispatchThreadID) {
     }
 
     let media = (params.packed & FLAG_MEDIA) != 0;
+    // The volumes this path is inside. Bounce 0 seeds them rather than
+    // reading them: raygen's push constants are full to Vulkan's guarantee
+    // and cannot reach the stack, so this is the first stage that can give
+    // the lanes a value — and every later one then reads without asking
+    // what bounce it is. The seed is the empty set; a camera that starts
+    // inside a volume is not yet resolved (see `Instance::medium`).
+    var inside = uint3(STACK_EMPTY);
+    if ((params.packed & FLAG_VOLUMES) != 0) {
+        if (bounce == 0) {
+            params.paths.setInside(path, inside);
+        } else {
+            inside = params.paths.inside(path, true);
+        }
+    }
     if (query.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
         Hit hit;
         hit.instance = query.CommittedInstanceID();
@@ -112,7 +126,7 @@ void intersect(uint3 tid: SV_DispatchThreadID) {
         var event = false;
         if (media) {
             event = params.scene.geometry[hit.instance].boundary == BOUNDARY_NULL
-                    || travelledMedium(params.paths, path, bounce, params.packed);
+                    || travelledMedium(params.paths, path, bounce, params.packed, inside);
         }
         if (event) {
             params.paths.setSegment(path, query.CommittedRayT());
@@ -120,7 +134,7 @@ void intersect(uint3 tid: SV_DispatchThreadID) {
         } else {
             params.hits.push(path);
         }
-    } else if (media && travelledMedium(params.paths, path, bounce, params.packed)) {
+    } else if (media && travelledMedium(params.paths, path, bounce, params.packed, inside)) {
         // Nothing stopped the segment, but a medium still fills it. The
         // sentinel is what tells the volume stage the rest of this record
         // holds nothing to read — and that the segment has no far end.

@@ -5,6 +5,14 @@
 // own next-event connection, and one that does not carries the segment's
 // transmittance on to whatever intersect found.
 //
+// A segment that ends at a *null* boundary — a volume's surface, pure
+// extent with no surface response — is not over: the path crosses, the
+// medium behind the boundary is a different one, and the stage re-traces
+// and draws again. That march is why this stage binds the acceleration
+// structure, and it is the reason the volume queue exists at all rather
+// than the routing living in intersect's candidate loop: the crossings must
+// be resolved in order, and `Proceed()` delivers candidates in none.
+//
 // A stage of its own rather than a branch in shade_surface: it is recorded
 // only when the scene has media, so media-free scenes keep a byte-identical
 // pass list and no scene pays register pressure for medium code it never
@@ -21,9 +29,27 @@ import pathstate;
 import rng;
 import scene;
 
-// Bit 24 of `Params.packed`, as in shade_surface: the scene has closed
-// transmissive surfaces, so the medium stack exists.
+// The scene TLAS — the march re-traces against it.
+[vk::binding(0, 0)]
+RaytracingAccelerationStructure sceneTlas;
+
+// Bits 24 and 25 of `Params.packed`, as in shade_surface: the scene has
+// closed transmissive surfaces, and it has volume-bounding meshes.
 static const uint FLAG_INTERIORS = 1 << 24;
+static const uint FLAG_VOLUMES = 1 << 25;
+
+// Null boundaries one segment may cross before the march stops tracking
+// media and runs straight through the rest — the bound on a pathological
+// stack of volume shells, mirroring `TRANSPARENT_CAP` for the other
+// unbounded traversal chain. Too-thin media beat both a black pixel and a
+// wall that is not there.
+static const uint NULL_CROSSING_CAP = 8;
+
+// The march's own budget of stochastic-opacity crossings, across every
+// re-trace it makes: what one traversal is allowed, once per leg. It starts
+// where intersect's chain left off, so no two of a path's crossings this
+// bounce ever draw the same key.
+static const uint MARCH_CROSSING_CAP = TRANSPARENT_CAP * (NULL_CROSSING_CAP + 1);
 
 // The five queues this stage touches, behind one pointer: consuming one and
 // feeding four is more push-constant bytes than Vulkan guarantees. Their
@@ -44,9 +70,14 @@ struct Params {
     float4* radiance; // the film's per-pixel accumulator for this wave
     AovTable* aov;    // the wave's AOV targets; enabled = 0 skips them
     uint sampleIndex; // which sample of every pixel's sequence this wave is
-    // bounce | maxBounces << 8 | lightSampling << 16 | FLAG_INTERIORS —
+    // bounce | maxBounces << 8 | lightSampling << 16 | the FLAG_* bits —
     // shade_surface's packing exactly.
     uint packed;
+    // Which instances the march's re-traces see — the same mask intersect
+    // traced this bounce with, since crossing a boundary does not make a
+    // camera ray something else.
+    uint rayMask;
+    uint pad0;
 };
 
 [vk::push_constant]
@@ -62,55 +93,133 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
     let maxBounces = (params.packed >> 8) & 0xff;
     let lightSampling = (params.packed >> 16) & 0xff;
     let interiors = (params.packed & FLAG_INTERIORS) != 0;
+    let volumes = (params.packed & FLAG_VOLUMES) != 0;
     uint path = params.queues.volumes.entries[tid.x];
     uint pixel = params.paths.pixel[path];
-    let instance = params.paths.hit[path].instance;
+    var hit = params.paths.hit[path];
     let direction4 = params.paths.direction[path];
     let direction = direction4.xyz;
     let origin4 = params.paths.origin[path];
     let origin = origin4.xyz;
     var throughput = params.paths.throughput[path];
 
-    // How far the segment runs: intersect parked it in origin's w lane, and
-    // the sentinel says there is no far end.
-    let tmax = instance == INSTANCE_NONE ? 1e30 : origin4.w;
-
-    // What fills the segment: the interior on the path's stack, or — in
-    // open space — the global medium. Intersect routes a path here only
-    // when one of the two does.
-    let entry = params.paths.arriving(path, bounce, interiors) & STACK_INDEX_MASK;
-    let record = params.scene.media[entry == STACK_EMPTY
-                                        ? params.scene.globalMedium
-                                        : params.scene.geometry[entry].medium];
-
-    let uDistance = sample_2d(pixel, params.sampleIndex,
-                              bounceDimension(bounce, VOLUME_DISTANCE));
-    let event = sampleMedium(record, tmax, uDistance);
-    throughput.xyz *= event.weight;
-
-    if (!event.scattered) {
-        // The segment reached its far end: whatever intersect found shades
-        // as ever, carrying the medium's transmittance. Origin and the
-        // previous scatter's pdf are left alone — they describe the vertex
-        // before this segment, which is still where the next stage's MIS
-        // weight is measured from.
-        params.paths.throughput[path] = throughput;
-        if (instance == INSTANCE_NONE) {
-            params.queues.misses.push(path);
-        } else {
-            params.queues.hits.push(path);
+    // Everything below measures along the ray intersect traced, from the
+    // vertex it left. The march moves the ray's near end and never its
+    // origin, so distances need no reconstruction and a refractive
+    // interior's absorption is still the surface stage's one exp() over the
+    // whole segment.
+    var start = 0.0;
+    // How far the current sub-segment runs: intersect parked the first
+    // one's length in origin's w lane, and the sentinel says there is no
+    // far end.
+    var end = hit.instance == INSTANCE_NONE ? 1e30 : origin4.w;
+    // The interior stays fixed across the march — a null boundary is not a
+    // refractive one, so crossing it enters no interior.
+    let interior = params.paths.arriving(path, bounce, interiors) & STACK_INDEX_MASK;
+    var inside = params.paths.inside(path, volumes);
+    // Continues intersect's transparency chain past its own cap, so the
+    // march's stochastic-opacity draws can never repeat one it already made.
+    var crossing = TRANSPARENT_CAP;
+    var crossed = 0u;
+    MediumEvent event;
+    MediumRecord record;
+    for (;;) {
+        record = combineMedia(params.scene, interior, inside);
+        // The first sub-segment keeps the Sobol dimension the bounce block
+        // reserved; the rest draw from the hash stream, having no reserved
+        // dimensions of their own. A segment no boundary interrupts
+        // therefore samples exactly as it did before the march existed.
+        let uDistance = crossed == 0
+                            ? sample_2d(pixel, params.sampleIndex,
+                                        bounceDimension(bounce, VOLUME_DISTANCE))
+                            : hashUniform2(pixel, params.sampleIndex, bounce, crossed);
+        event = sampleMedium(record, end - start, uDistance);
+        throughput.xyz *= event.weight;
+        if (event.scattered) {
+            break;
         }
-        return;
+        // The segment reached its far end. Whatever intersect (or the last
+        // re-trace) found shades as ever, carrying every sub-segment's
+        // transmittance. Origin and the previous scatter's pdf are left
+        // alone — they describe the vertex before all this, which is still
+        // where the next stage's MIS weight is measured from.
+        let boundary = hit.instance == INSTANCE_NONE
+                           ? BOUNDARY_OPAQUE
+                           : params.scene.geometry[hit.instance].boundary;
+        if (boundary != BOUNDARY_NULL || !any(throughput.xyz > 0.0)) {
+            params.paths.throughput[path] = throughput;
+            if (volumes && crossed != 0) {
+                params.paths.setInside(path, inside);
+            }
+            if (hit.instance == INSTANCE_NONE) {
+                params.queues.misses.push(path);
+            } else {
+                params.queues.hits.push(path);
+            }
+            return;
+        }
+
+        // Cross it, and trace on from just past it. Nudging the near end
+        // rather than respawning from the surface keeps every distance in
+        // the original ray's parameter and needs no error bounds: the same
+        // triangle re-tested gives back the same t, which this now excludes.
+        crossed++;
+        inside = crossVolume(inside, hit.instance);
+        start = end;
+
+        // Past the cap the march stops *tracking* media but keeps the
+        // geometry honest: the re-trace runs through null boundaries instead
+        // of stopping at them, so a pathological stack of shells reads as
+        // too little fog rather than as a wall that is not there. It also
+        // ends the loop — the hit it commits cannot be a null boundary.
+        let exhausted = crossed >= NULL_CROSSING_CAP;
+        RayDesc ray;
+        ray.Origin = origin;
+        ray.Direction = direction;
+        ray.TMin = start * (1.0 + 1e-6) + 1e-6;
+        ray.TMax = 1e30;
+        RayQuery<RAY_FLAG_NONE> query;
+        query.TraceRayInline(sceneTlas, RAY_FLAG_NONE, params.rayMask, ray);
+        while (query.Proceed()) {
+            let candidate = query.CandidateInstanceID();
+            if (exhausted && params.scene.geometry[candidate].boundary == BOUNDARY_NULL) {
+                continue;
+            }
+            let opacity = opacityAt(params.scene, candidate,
+                                    query.CandidatePrimitiveIndex(),
+                                    query.CandidateTriangleBarycentrics());
+            if (crossing >= MARCH_CROSSING_CAP
+                || hashUniform(pixel, params.sampleIndex, bounce, crossing) < opacity) {
+                query.CommitNonOpaqueTriangleHit();
+            }
+            crossing++;
+        }
+        if (query.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
+            hit.instance = query.CommittedInstanceID();
+            hit.primitive = query.CommittedPrimitiveIndex();
+            hit.barycentrics = query.CommittedTriangleBarycentrics();
+            end = query.CommittedRayT();
+        } else {
+            hit.instance = INSTANCE_NONE;
+            hit.primitive = 0;
+            hit.barycentrics = float2(0.0);
+            end = 1e30;
+        }
+        params.paths.hit[path] = hit;
     }
 
-    let position = origin + event.distance * direction;
+    let distance = start + event.distance;
+    let position = origin + distance * direction;
+    if (volumes && crossed != 0) {
+        params.paths.setInside(path, inside);
+    }
     let aovOn = params.aov.enabled != 0;
     if (aovOn) {
         if (bounce == 0) {
             // First vertex: camera-plane z, via the cosine raygen stashed
             // in direction.w. A pixel that sees only fog has its depth here
             // or nowhere.
-            params.aov.depth[pixel] += event.distance * direction4.w;
+            params.aov.depth[pixel] += distance * direction4.w;
         }
         // The guides close on the medium: its single-scattering albedo is
         // what a denoiser should divide out here, and a scattering point
@@ -153,9 +262,9 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
             shadow.contribution = nee.unshadowed;
             shadow.tmax = nee.tmax;
             shadow.pixel = pixel;
+            shadow.path = path;
             shadow.pad0 = 0;
             shadow.pad1 = 0;
-            shadow.pad2 = 0;
             params.queues.shadows.push(shadow);
         }
     }
@@ -183,9 +292,9 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
         scattered /= survival;
     }
 
-    // The path continues from inside the same medium — a scatter crosses no
-    // boundary, so the stack is untouched. Direction.w is zeroed: only
-    // camera rays have a camera to measure depth against.
+    // The path continues from inside the same media — a scatter crosses no
+    // boundary, so neither half of the stack moves. Direction.w is zeroed:
+    // only camera rays have a camera to measure depth against.
     params.paths.origin[path] = float4(position, 0.0);
     params.paths.direction[path] = float4(scatter.wi, 0.0);
     params.paths.throughput[path] = float4(scattered, scatter.pdf);

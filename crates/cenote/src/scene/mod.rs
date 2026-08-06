@@ -30,7 +30,7 @@ mod many_lights;
 mod prep;
 mod shapes;
 
-pub use shapes::{ground_plane, icosphere};
+pub use shapes::{cube, ground_plane, icosphere};
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -93,6 +93,10 @@ pub struct Object {
     pub transform: Mat4,
     /// The surface, constant across the mesh (per-face materials are not modelled).
     pub material: Material,
+    /// The medium this mesh bounds — the procedural spelling of a
+    /// description's [`description::Instance::medium`]. `Some`, and the
+    /// mesh is a null boundary: `material` is never shaded.
+    pub medium: Option<Medium>,
 }
 
 /// One mesh resident on the GPU. The vertex, normal, and index buffers stay
@@ -132,7 +136,7 @@ struct GeometryRecord {
     /// What crossing this instance's surface means — see [`boundary`].
     boundary: u32,
     /// Index into the medium table of what this instance's interior is
-    /// filled with, or [`MEDIUM_NONE`] — see [`medium`].
+    /// filled with, or [`MEDIUM_NONE`] — see [`placement_medium`].
     medium: u32,
     _pad0: u32,
 }
@@ -140,9 +144,10 @@ struct GeometryRecord {
 const _: () = assert!(size_of::<GeometryRecord>() == 144);
 
 /// `GeometryRecord::boundary` values — the `BOUNDARY_*` constants in
-/// `shaders/scene.slang` (`BOUNDARY_NULL` arrives with authored media).
+/// `shaders/scene.slang`.
 const BOUNDARY_OPAQUE: u32 = 0;
 const BOUNDARY_REFRACTIVE: u32 = 1;
+const BOUNDARY_NULL: u32 = 2;
 
 /// A medium index that names vacuum — an index no table can reach. Matches
 /// `MEDIUM_NONE` in `shaders/scene.slang`. Deliberately not the stack's
@@ -150,18 +155,30 @@ const BOUNDARY_REFRACTIVE: u32 = 1;
 /// and a shared value invites masking one with the other's bounds.
 const MEDIUM_NONE: u32 = u32::MAX;
 
-/// What crossing this material's surface means. The single authority on
+/// What crossing this placement's surface means. The single authority on
 /// interiors: it classifies every instance's boundary word *and*, through
 /// [`has_interiors`], decides whether the wavefront allocates the medium
-/// stack — so the two can't disagree. Transmission depth is deliberately
-/// not consulted: a depth-0 interior absorbs nothing but still drives the
-/// closure's `exiting` flag, which reads the stack.
-fn boundary(material: &Material) -> u32 {
-    if material.transmission_weight > 0.0 && material.thin_walled == 0 {
+/// stack — so the two can't disagree.
+///
+/// Bounding a medium wins over any surface the material describes: a
+/// volume's boundary is crossed, never shaded. Otherwise transmission
+/// decides, and transmission *depth* is deliberately not consulted — a
+/// depth-0 interior absorbs nothing but still drives the closure's
+/// `exiting` flag, which reads the stack.
+fn boundary(material: &Material, bounds_medium: bool) -> u32 {
+    if bounds_medium {
+        BOUNDARY_NULL
+    } else if material.transmission_weight > 0.0 && material.thin_walled == 0 {
         BOUNDARY_REFRACTIVE
     } else {
         BOUNDARY_OPAQUE
     }
+}
+
+/// [`boundary`] for a lowered placement — the one caller that has both
+/// halves of the question.
+fn placement_boundary(placement: &Placement) -> u32 {
+    boundary(&placement.material, placement.medium.is_some())
 }
 
 /// Whether any placement has a closed transmissive interior — see
@@ -169,7 +186,14 @@ fn boundary(material: &Material) -> u32 {
 fn has_interiors(placements: &[Placement]) -> bool {
     placements
         .iter()
-        .any(|placement| boundary(&placement.material) == BOUNDARY_REFRACTIVE)
+        .any(|placement| placement_boundary(placement) == BOUNDARY_REFRACTIVE)
+}
+
+/// Whether any placement bounds a medium — see [`Scene::has_volumes`].
+fn has_volumes(placements: &[Placement]) -> bool {
+    placements
+        .iter()
+        .any(|placement| placement.medium.is_some())
 }
 
 /// A homogeneous medium as the renderer holds it: coefficients per `ACEScg`
@@ -232,9 +256,9 @@ impl From<Medium> for MediumRecord {
 /// *relative* error where the color is near 1 and the logarithm near 0 —
 /// up to 9e-6 on the corpus's σ. The host's correctly rounded `ln` is the
 /// accurate side of that.
-fn medium(material: &Material) -> Option<MediumRecord> {
+fn interior(material: &Material) -> Option<MediumRecord> {
     let depth = material.transmission_depth;
-    (boundary(material) == BOUNDARY_REFRACTIVE && depth > 0.0).then(|| MediumRecord {
+    (boundary(material, false) == BOUNDARY_REFRACTIVE && depth > 0.0).then(|| MediumRecord {
         sigma_t: material
             .transmission_color
             .to_array()
@@ -245,10 +269,21 @@ fn medium(material: &Material) -> Option<MediumRecord> {
     })
 }
 
-/// The medium table for `materials` and the scene's `global` medium: one
-/// record per distinct medium, however many places it fills, plus the index
-/// each material's interior takes in it and the index of the global medium
-/// (both [`MEDIUM_NONE`] where there is none).
+/// What fills a placement: the medium its mesh bounds, or — for an ordinary
+/// surface — whatever its material's interior holds. A mesh that bounds a
+/// medium is a null boundary, so the material's own interior can never also
+/// apply.
+fn placement_medium(placement: &Placement) -> Option<MediumRecord> {
+    placement.medium.map_or_else(
+        || interior(&placement.material),
+        |medium| Some(medium.into()),
+    )
+}
+
+/// The medium table for the placements' `filled` interiors and the scene's
+/// `global` medium: one record per distinct medium, however many places it
+/// fills, plus the index each placement takes in it and the index of the
+/// global medium (both [`MEDIUM_NONE`] where there is none).
 ///
 /// Records are keyed by the coefficients they compute to — by their bits, so
 /// ±0 key apart, conservative in the safe direction — not by what produced
@@ -258,7 +293,7 @@ fn medium(material: &Material) -> Option<MediumRecord> {
 /// this sharing can never make a path inside one instance read as leaving
 /// another.
 fn medium_table(
-    materials: &[Material],
+    filled: impl Iterator<Item = Option<MediumRecord>>,
     global: Option<Medium>,
 ) -> (Vec<u32>, u32, Vec<MediumRecord>) {
     let mut records: Vec<MediumRecord> = Vec::new();
@@ -273,10 +308,7 @@ fn medium_table(
                 })
         })
     };
-    let indices = materials
-        .iter()
-        .map(|material| intern(medium(material)))
-        .collect();
+    let indices = filled.map(&mut intern).collect();
     let global = intern(global.map(MediumRecord::from));
     (indices, global, records)
 }
@@ -403,6 +435,8 @@ pub struct Scene {
     /// Whether any instance has a closed transmissive interior —
     /// recomputed on every build and update. See [`Scene::has_interiors`].
     has_interiors: bool,
+    /// Likewise for the volume-bounding meshes. See [`Scene::has_volumes`].
+    has_volumes: bool,
     /// The environment's dimensions and emitted power (untinted), retained
     /// so a light edit can rebuild the scene table (its selection
     /// probability weighs the light list against the environment) without
@@ -519,7 +553,9 @@ impl Scene {
         let triangle_lights: Vec<TriangleLight> = objects
             .iter()
             .enumerate()
-            .filter(|(_, object)| object.material.emission != Vec3::ZERO)
+            // A volume's boundary is never shaded, so it must not enter the
+            // light list either — lowering says why.
+            .filter(|(_, object)| object.material.emission != Vec3::ZERO && object.medium.is_none())
             .flat_map(|(index, object)| {
                 emissive_triangles(
                     &object.mesh.positions,
@@ -538,10 +574,12 @@ impl Scene {
                 transform: object.transform,
                 material: object.material,
                 camera_visible: true,
+                medium: object.medium,
             })
             .collect();
         let tlas = build_scene_tlas(gpu, &placements)?;
         let has_interiors = has_interiors(&placements);
+        let has_volumes = has_volumes(&placements);
         let instances = upload_instance_tables(gpu, &placements, &triangle_lights, &[], global)?;
         let GpuEnvironment {
             image,
@@ -587,6 +625,7 @@ impl Scene {
             descriptors: Vec::new(),
             camera,
             has_interiors,
+            has_volumes,
             env_size,
             env_power: power,
             env_source: None,
@@ -611,22 +650,28 @@ impl Scene {
         self.has_interiors
     }
 
-    /// Whether the scene has media — the things that give a path segment a
-    /// medium *event* and so record the volume stage. A pure-absorbing
-    /// interior is not one: it has no event to sample, and shades through
+    /// Whether the scene has media — the things that route a path segment
+    /// through the volume stage, and so record it at all. A pure-absorbing
+    /// *interior* is not one: it has no event to sample, and shades through
     /// the surface stage exactly as it did before media existed.
     #[must_use]
     pub fn has_media(&self) -> bool {
-        self.has_global_medium()
+        self.has_global_medium() || self.has_volumes()
     }
 
     /// Whether the open space between instances is filled — the flag
-    /// intersect routes every segment outside an interior on. Coincides with
-    /// [`Scene::has_media`] while a global medium is the only kind that can
-    /// be authored; the two answer different questions.
+    /// intersect routes every segment outside an interior on.
     #[must_use]
     pub fn has_global_medium(&self) -> bool {
         self.resident.instances.global_medium != MEDIUM_NONE
+    }
+
+    /// Whether any mesh bounds a medium. True, the wavefront allocates the
+    /// medium stack for the set of volumes each path is inside, and the
+    /// volume stage marches across their boundaries.
+    #[must_use]
+    pub fn has_volumes(&self) -> bool {
+        self.has_volumes
     }
 
     /// The environment's emitted power as the selection heuristic weighs
@@ -769,6 +814,9 @@ struct Placement<'a> {
     /// Whether camera rays see it — lowered into the instance's TLAS
     /// visibility mask.
     camera_visible: bool,
+    /// The medium this mesh bounds, or `None` for an ordinary surface —
+    /// see [`boundary`].
+    medium: Option<Medium>,
 }
 
 /// Build the TLAS: one instance per placement, with `custom_index` =
@@ -790,8 +838,13 @@ fn build_scene_tlas(gpu: &Context, placements: &[Placement]) -> Result<Accelerat
                 ray_mask::ALL & !ray_mask::CAMERA
             } as u8,
             // An opacity *map* forces the non-opaque path no matter the
-            // constant: the traversal loop must get its per-texel look.
-            opaque: placement.material.opacity >= 1.0
+            // constant: the traversal loop must get its per-texel look. A
+            // volume boundary forces it too, for the opposite reason — the
+            // shadow traversal has to *see* each crossing to measure the
+            // extent it bounds, and an opaque one would commit and read as
+            // a solid occluder.
+            opaque: placement.medium.is_none()
+                && placement.material.opacity >= 1.0
                 && placement.material.opacity_texture == TEXTURE_NONE,
         })
         .collect();
@@ -861,9 +914,22 @@ fn upload_instance_tables(
     let light_records = crate::lights::build(triangle_lights, delta_lights);
     let materials: Vec<Material> = placements
         .iter()
-        .map(|placement| placement.material)
+        .map(|placement| {
+            // A volume boundary traverses as non-opaque so the shadow pass
+            // can measure it, which puts it in front of the stochastic
+            // opacity test — and full coverage is what makes that test
+            // always commit, so the nearest crossing is the one the march
+            // resolves. Lowering warns where an author's opacity is lost.
+            let mut material = placement.material;
+            if placement.medium.is_some() {
+                material.opacity = 1.0;
+                material.opacity_texture = TEXTURE_NONE;
+            }
+            material
+        })
         .collect();
-    let (medium_indices, global_medium, media) = medium_table(&materials, global);
+    let (medium_indices, global_medium, media) =
+        medium_table(placements.iter().map(placement_medium), global);
     let records: Vec<GeometryRecord> = placements
         .iter()
         .zip(first_light_indices(placements.len(), triangle_lights))
@@ -883,7 +949,7 @@ fn upload_instance_tables(
                 object_to_world: transform_rows(placement.transform),
                 world_to_object: transform_rows(inverse),
                 light,
-                boundary: boundary(&placement.material),
+                boundary: placement_boundary(placement),
                 medium,
                 _pad0: 0,
             }
@@ -1112,12 +1178,17 @@ mod tests {
             transmission_depth: 0.0,
             ..Material::glass(0.1, 1.5)
         };
-        assert_eq!(boundary(&glass), BOUNDARY_REFRACTIVE);
-        assert_eq!(boundary(&glass.thin_walled()), BOUNDARY_OPAQUE);
+        assert_eq!(boundary(&glass, false), BOUNDARY_REFRACTIVE);
+        assert_eq!(boundary(&glass.thin_walled(), false), BOUNDARY_OPAQUE);
         assert_eq!(
-            boundary(&Material::matte(Vec3::ONE, 0.5)),
+            boundary(&Material::matte(Vec3::ONE, 0.5), false),
             BOUNDARY_OPAQUE,
             "an opaque surface has no interior"
+        );
+        assert_eq!(
+            boundary(&glass, true),
+            BOUNDARY_NULL,
+            "bounding a medium wins over any surface the material describes"
         );
     }
 
@@ -1143,13 +1214,15 @@ mod tests {
             anisotropy: 0.0,
         };
         let (indices, global, records) = medium_table(
-            &[
+            [
                 tinted,
                 clear,
                 tinted,
                 Material::matte(Vec3::ONE, 0.5),
                 tinted.thin_walled(),
-            ],
+            ]
+            .iter()
+            .map(interior),
             Some(fog),
         );
         assert_eq!(
@@ -1179,18 +1252,21 @@ mod tests {
             ..tinted
         };
         let matching = Medium {
-            absorption: Vec3::from(medium(&deep).expect("an interior").sigma_t),
+            absorption: Vec3::from(interior(&deep).expect("an interior").sigma_t),
             scattering: Vec3::ZERO,
             anisotropy: 0.0,
         };
-        let shared = medium_table(&[deep], Some(matching));
+        let shared = medium_table(std::iter::once(interior(&deep)), Some(matching));
         assert_eq!(
             (shared.0, shared.1, shared.2.len()),
             (vec![0], 0, 1),
             "a global medium that matches an interior is that interior's medium"
         );
         assert!(
-            medium_table(&[], None).2.is_empty() && medium_table(&[clear], None).2.is_empty(),
+            medium_table(std::iter::empty(), None).2.is_empty()
+                && medium_table(std::iter::once(interior(&clear)), None)
+                    .2
+                    .is_empty(),
             "a scene with nothing to fill uploads no records"
         );
     }
@@ -1209,14 +1285,14 @@ mod tests {
                 ..glass
             };
             assert!(
-                medium(&material).is_none(),
+                interior(&material).is_none(),
                 "depth {depth} is not an interior"
             );
         }
         // Out-of-range channels clamp exactly as the kernel's did: a hard
         // zero would take σ to infinity, and anything above 1 would make
         // Beer–Lambert amplify.
-        let extremes = medium(&Material {
+        let extremes = interior(&Material {
             transmission_color: Vec3::new(0.0, -3.0, 8.0),
             transmission_depth: 1.0,
             ..glass

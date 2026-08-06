@@ -83,6 +83,10 @@ fn op(op: wire::Op) -> core::Op {
                 transforms: transforms
                     .map(|list| list.into_iter().map(self::transform).collect()),
                 camera_visible,
+                // The wire protocol has no volume prims yet — Hydra's
+                // `UsdVolVolume` reader is Track A's, and until it lands
+                // nothing on this side can bound a medium.
+                medium: None,
             })
         }
         wire::Op::Material(patch) => {

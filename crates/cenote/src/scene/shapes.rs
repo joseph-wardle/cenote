@@ -134,6 +134,40 @@ pub fn ground_plane(half_extent: f32) -> Mesh {
     }
 }
 
+/// An axis-aligned cube of half-extent `half_extent` meters centered on the
+/// origin: closed, outward-wound, one flat normal per face (so the corners
+/// carry four vertices each, not one). The shape a bounded volume wants —
+/// a ray crosses it exactly twice, at a thickness the test can predict.
+#[must_use]
+pub fn cube(half_extent: f32) -> Mesh {
+    let e = half_extent;
+    let mut mesh = Mesh {
+        positions: Vec::with_capacity(24),
+        normals: Vec::with_capacity(24),
+        uvs: Vec::with_capacity(24),
+        triangles: Vec::with_capacity(12),
+    };
+    // Each face is the unit square in its own two axes, lifted to +e along
+    // the third and wound counter-clockwise seen from outside.
+    for axis in 0..3 {
+        for side in [1.0f32, -1.0] {
+            let normal = Vec3::from(std::array::from_fn(|i| if i == axis { side } else { 0.0 }));
+            let u = Vec3::from(std::array::from_fn(|i| f32::from(i == (axis + 1) % 3)));
+            let v = normal.cross(u);
+            let base = mesh.positions.len() as u32;
+            for (du, dv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                mesh.positions.push((normal + du * u + dv * v) * e);
+                mesh.normals.push(normal);
+                mesh.uvs
+                    .push(Vec2::new(du.mul_add(0.5, 0.5), dv.mul_add(0.5, 0.5)));
+            }
+            mesh.triangles.push([base, base + 1, base + 2]);
+            mesh.triangles.push([base, base + 2, base + 3]);
+        }
+    }
+    mesh
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,6 +206,15 @@ mod tests {
     /// its geometric normal pointing away from the origin.
     #[test]
     fn winding_is_counter_clockwise_outward() {
+        let box_ = cube(1.5);
+        for [a, b, c] in &box_.triangles {
+            let (a, b, c) = (
+                box_.positions[*a as usize],
+                box_.positions[*b as usize],
+                box_.positions[*c as usize],
+            );
+            assert!((b - a).cross(c - a).dot(a + b + c) > 0.0);
+        }
         let mesh = icosphere(1);
         for [a, b, c] in mesh.triangles {
             let (a, b, c) = (

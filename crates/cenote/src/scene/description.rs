@@ -291,6 +291,18 @@ pub struct Instance {
     /// appears in frame. Bounce rays always see everything — the full
     /// per-ray-type visibility set is a deferral.
     pub camera_visible: bool,
+    /// The [`Medium`] this mesh *bounds*, by name — fog, smoke, a light
+    /// shaft. Naming one makes the surface a null boundary: a pure medium
+    /// extent with no surface response at all, so the material is unused
+    /// (it still has to name one, like every instance) and the mesh should
+    /// be closed and outward-wound. Overlapping volumes add, which is what
+    /// makes their order irrelevant.
+    ///
+    /// A camera that starts *inside* one is not yet resolved: the initial
+    /// medium set is empty, so the first segment renders as if the camera
+    /// stood outside. Fill a whole room through
+    /// [`Settings::global_medium`] instead.
+    pub medium: Option<String>,
 }
 
 impl Default for Instance {
@@ -302,6 +314,7 @@ impl Default for Instance {
             material: String::new(),
             transforms: vec![Transform::default()],
             camera_visible: true,
+            medium: None,
         }
     }
 }
@@ -429,8 +442,9 @@ impl Material {
 }
 
 /// A homogeneous participating medium: what fills a volume, rather than what
-/// covers a surface. Named and referenced like every other object — today by
-/// `Settings::global_medium`, the atmosphere everything stands in.
+/// covers a surface. Named and referenced like every other object: by
+/// [`Settings::global_medium`], the atmosphere everything stands in, and by
+/// [`Instance::medium`], a mesh that bounds it.
 ///
 /// Coefficients are per meter, in linear `Rec.709` like every other color
 /// constant, and convert to the working space at prep — where a saturated

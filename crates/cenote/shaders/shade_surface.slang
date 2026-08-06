@@ -196,9 +196,9 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
             shadow.contribution = nee.unshadowed;
             shadow.tmax = nee.tmax;
             shadow.pixel = pixel;
+            shadow.path = path;
             shadow.pad0 = 0;
             shadow.pad1 = 0;
-            shadow.pad2 = 0;
             params.shadows.push(shadow);
         }
     }

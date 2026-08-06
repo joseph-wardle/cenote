@@ -136,6 +136,19 @@ public float hashUniform(uint pixel, uint sampleIndex, uint bounce, uint crossin
     return toUnitFloat(h);
 }
 
+// The 2D counterpart, for the volume march's distance draws past the first.
+// Same reasoning as above: a segment crossed by null boundaries is an
+// unbounded, traversal-ordered sequence of sub-segments, so its draws are
+// keyed by crossing rather than given Sobol dimensions the bounce block has
+// no room to reserve. The first sub-segment keeps the Sobol dimension,
+// which is what leaves a scene without null boundaries sampling exactly as
+// it did before they existed.
+public float2 hashUniform2(uint pixel, uint sampleIndex, uint bounce, uint crossing) {
+    var h = lowbias32(pixel ^ lowbias32(sampleIndex ^ 0x1b56c4e9u));
+    h = lowbias32(h ^ (bounce << 8 | crossing));
+    return float2(toUnitFloat(h), toUnitFloat(lowbias32(h ^ 0x27d4eb2fu)));
+}
+
 // A dimension's Owen-scrambled point at an *explicit* sample index — the
 // scramble half of the sampler, split from the per-dimension shuffle of
 // *which* index sample_2d/1d ask for. The scramble is keyed per (pixel,

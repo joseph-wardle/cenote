@@ -59,6 +59,7 @@ fn furnace_scene(
         mesh: ground_plane(5.0),
         transform: Mat4::from_translation(center) * Mat4::from_scale(Vec3::splat(scale)),
         material,
+        medium: None,
     };
     let camera = Camera {
         position: center + Vec3::new(0.0, scale, 0.0),
@@ -449,6 +450,7 @@ fn a_mirrored_emitter_lights_the_same_side() {
                 mesh: ground_plane(4.0),
                 transform: Mat4::IDENTITY,
                 material: Material::matte(Vec3::splat(0.5), 0.0),
+                medium: None,
             },
             Object {
                 mesh: ground_plane(1.0),
@@ -457,6 +459,7 @@ fn a_mirrored_emitter_lights_the_same_side() {
                     emission: Vec3::splat(5.0),
                     ..Material::matte(Vec3::ZERO, 0.0)
                 },
+                medium: None,
             },
         ];
         let camera = Camera {
@@ -583,6 +586,7 @@ fn the_glass_furnace_closes() {
         mesh: crate::scene::icosphere(3),
         transform: Mat4::from_translation(Vec3::Y * 2.0),
         material: Material::glass(0.2, 1.5),
+        medium: None,
     }];
     let camera = Camera {
         position: Vec3::new(0.0, 2.0, 4.0),
@@ -652,6 +656,7 @@ fn a_global_medium_attenuates_by_beer_lambert() {
             transform: Mat4::from_translation(Vec3::NEG_Z * distance)
                 * Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2),
             material: Material::emitter(Vec3::splat(emission)),
+            medium: None,
         }],
         Camera {
             position: Vec3::ZERO,
@@ -712,6 +717,7 @@ fn the_volumetric_furnace_closes() {
             mesh: inside_out(crate::scene::icosphere(3)),
             transform: Mat4::from_scale(Vec3::splat(2.0)),
             material: Material::emitter(Vec3::splat(emission)),
+            medium: None,
         }],
         Camera {
             position: Vec3::ZERO,
@@ -753,6 +759,200 @@ fn the_volumetric_furnace_closes() {
     }
 }
 
+/// Looking through boxes of fog along a nearly axial ray: what arrives is
+/// the sky times Beer–Lambert over exactly the extent the boxes bound.
+///
+/// The one-box case pins the whole march — the boundary routes to this
+/// stage, the crossing enters the medium, the far crossing leaves it, and
+/// the sky beyond arrives through vacuum. The two-box case pins the rule
+/// that makes overlap order-free: where they intersect the path is inside
+/// both, and their extinctions *add*, so the answer is the same product
+/// whether the boxes overlap, touch, or stand apart.
+///
+/// A one-degree field keeps every ray within half a degree of the axis, so
+/// the slant a wide frame would add to each crossing stays under 4e-5 of the
+/// thickness — far below the tolerance, and the reason this can assert on a
+/// closed form rather than on a mean.
+#[test]
+fn bounded_volumes_absorb_over_exactly_the_extent_they_bound() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let sky = Vec3::splat(0.75);
+    let sigma = Vec3::new(0.15, 0.35, 0.6);
+    // Half-extent 1 at z = −5 and z = −6: two meters of fog each, one of
+    // which they share.
+    let fog = |z: f32, medium: crate::scene::Medium| Object {
+        mesh: crate::scene::cube(1.0),
+        transform: Mat4::from_translation(Vec3::Z * z),
+        material: Material::matte(Vec3::ONE, 0.0),
+        medium: Some(medium),
+    };
+    let absorbing = |scale: f32| crate::scene::Medium {
+        absorption: sigma * scale,
+        scattering: Vec3::ZERO,
+        anisotropy: 0.0,
+    };
+    let camera = Camera {
+        position: Vec3::ZERO,
+        look_at: Vec3::NEG_Z,
+        up: Vec3::Y,
+        vfov_degrees: 1.0,
+        lens: None,
+    };
+    let sky_image = Environment::constant(sky);
+    let (size, samples) = (8, 64);
+    for (name, objects, depth) in [
+        ("one box", vec![fog(-5.0, absorbing(1.0))], 2.0),
+        (
+            "two overlapping boxes",
+            vec![fog(-5.0, absorbing(1.0)), fog(-6.0, absorbing(2.0))],
+            2.0f32.mul_add(2.0, 2.0),
+        ),
+    ] {
+        let scene = Scene::new(&gpu, &objects, camera, &sky_image).expect("scene");
+        let sum = bsdf_only_sum(&gpu, &scene, size, samples);
+        let count = f64::from(samples * size * size);
+        for channel in 0..3 {
+            let mean = sum
+                .chunks_exact(4)
+                .map(|pixel| f64::from(pixel[channel]))
+                .sum::<f64>()
+                / count;
+            // The two-box depth already counts the shared meter twice; a
+            // renderer that took one medium instead of their sum would land
+            // a third of the way toward `expected`'s square root.
+            let expected = f64::from(sky[channel]) * (-f64::from(sigma[channel] * depth)).exp();
+            assert!(
+                (mean - expected).abs() / expected < 0.005,
+                "{name}, channel {channel}: {mean} vs Beer–Lambert's {expected}"
+            );
+        }
+    }
+}
+
+/// Nesting, to the depth the stack holds and then past it. Three concentric
+/// boxes are three simultaneous memberships, and their extinctions still sum
+/// to the closed form; nine are more crossings than the march will make and
+/// more volumes than the set has room for, and what that must produce is not
+/// an exact answer but a *sound* one — finite, non-negative, and one alpha
+/// per path. Degrading toward too little fog is the deliberate choice; a NaN,
+/// a hang, or a path that never finishes would not be.
+#[test]
+fn nested_volumes_sum_until_the_march_runs_out_of_room() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let sky = 0.75;
+    let sigma = 0.2;
+    let shell = |half: f32| Object {
+        mesh: crate::scene::cube(half),
+        transform: Mat4::from_translation(Vec3::Z * -6.0),
+        material: Material::matte(Vec3::ONE, 0.0),
+        medium: Some(crate::scene::Medium {
+            absorption: Vec3::splat(sigma),
+            scattering: Vec3::ZERO,
+            anisotropy: 0.0,
+        }),
+    };
+    let camera = Camera {
+        position: Vec3::ZERO,
+        look_at: Vec3::NEG_Z,
+        up: Vec3::Y,
+        vfov_degrees: 1.0,
+        lens: None,
+    };
+    let sky_image = Environment::constant(Vec3::splat(sky));
+    let (size, samples) = (8, 64);
+
+    // Three shells of half-extent 1, 2, 3: the axial ray runs 2 + 4 + 6
+    // meters of fog, and every meter of it is inside one shell or more.
+    let nested: Vec<Object> = (1..=3).map(|n| shell(n as f32)).collect();
+    let scene = Scene::new(&gpu, &nested, camera, &sky_image).expect("scene");
+    let sum = bsdf_only_sum(&gpu, &scene, size, samples);
+    let count = f64::from(samples * size * size);
+    let mean = sum.chunks_exact(4).map(|p| f64::from(p[0])).sum::<f64>() / count;
+    let expected = f64::from(sky) * f64::from(-sigma * (2.0 + 4.0 + 6.0)).exp();
+    assert!(
+        (mean - expected).abs() / expected < 0.005,
+        "three nested shells: {mean} vs Beer–Lambert's {expected}"
+    );
+
+    let deep: Vec<Object> = (1..=9).map(|n| shell(n as f32)).collect();
+    let scene = Scene::new(&gpu, &deep, camera, &sky_image).expect("scene");
+    let sum = bsdf_only_sum(&gpu, &scene, size, samples);
+    for chunk in sum.chunks_exact(4) {
+        for value in chunk {
+            assert!(
+                value.is_finite() && *value >= 0.0,
+                "nine nested shells must stay sound, got {value}"
+            );
+        }
+        assert!(
+            (chunk[3] - samples as f32).abs() < 1e-3,
+            "every path must finish exactly once, got alpha {}",
+            chunk[3]
+        );
+    }
+}
+
+/// A box of pure scattering standing in a uniform sky is invisible: every
+/// path that enters leaves with the radiance it would have had anyway.
+/// The volumetric furnace, bounded — it holds the march, the phase
+/// function, and the chromatic distance sampling to energy conservation all
+/// at once, and it is the test that would catch a boundary crossing that
+/// entered a volume without leaving it.
+///
+/// Deep bounces, not the default eight: at unit optical thickness a path
+/// turns several times before it finds its way out, and the truncated tail
+/// is energy rather than noise.
+#[test]
+fn a_scattering_box_in_a_uniform_sky_disappears() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let sky = 0.6;
+    let scene = Scene::new(
+        &gpu,
+        &[Object {
+            mesh: crate::scene::cube(1.0),
+            transform: Mat4::from_translation(Vec3::Z * -5.0),
+            material: Material::matte(Vec3::ONE, 0.0),
+            medium: Some(crate::scene::Medium {
+                absorption: Vec3::ZERO,
+                scattering: Vec3::splat(0.5),
+                anisotropy: 0.4,
+            }),
+        }],
+        Camera {
+            position: Vec3::ZERO,
+            look_at: Vec3::NEG_Z,
+            up: Vec3::Y,
+            vfov_degrees: 30.0,
+            lens: None,
+        },
+        &Environment::constant(Vec3::splat(sky)),
+    )
+    .expect("scene");
+
+    let (size, samples) = (16, 512);
+    let sum = bsdf_only_sum_deep(&gpu, &scene, size, samples, 64);
+    for (index, chunk) in sum.chunks_exact(4).enumerate() {
+        for (channel, total) in chunk.iter().enumerate().take(3) {
+            let mean = f64::from(*total) / f64::from(samples);
+            assert!(
+                (mean - f64::from(sky)).abs() / f64::from(sky) < 0.03,
+                "pixel {index}, channel {channel}: {mean} vs the sky's {sky}"
+            );
+        }
+        assert!(
+            (chunk[3] - samples as f32).abs() < 1e-3,
+            "every path must finish exactly once, got alpha {}",
+            chunk[3]
+        );
+    }
+}
+
 /// A channel that does not extinguish reaches the sky through an unbounded
 /// medium, at full strength, while the channels that do reach nothing.
 ///
@@ -777,6 +977,7 @@ fn a_transparent_channel_reaches_the_environment() {
             mesh: crate::scene::icosphere(1),
             transform: Mat4::from_translation(Vec3::Z * 20.0),
             material: Material::matte(Vec3::splat(0.5), 0.0),
+            medium: None,
         }],
         Camera {
             position: Vec3::ZERO,
@@ -787,10 +988,12 @@ fn a_transparent_channel_reaches_the_environment() {
         },
         &Environment::constant(Vec3::splat(sky)),
         Some(crate::scene::Medium {
-            // Red passes, green and blue extinguish. Absorption only: a
-            // scattering channel would turn paths back rather than end them.
-            absorption: Vec3::new(0.0, 0.5, 0.5),
-            scattering: Vec3::ZERO,
+            // Red passes; green and blue turn back and never escape. It has
+            // to be *scattering* that stops them: a medium that only
+            // absorbs takes the closed-form branch, where no distance is
+            // drawn and there is no mixture density to check.
+            absorption: Vec3::ZERO,
+            scattering: Vec3::new(0.0, 0.5, 0.5),
             anisotropy: 0.0,
         }),
     )
@@ -811,7 +1014,8 @@ fn a_transparent_channel_reaches_the_environment() {
         "the transparent channel should read the sky exactly: {red} vs {sky}"
     );
     for channel in 1..3 {
-        // Radiance sums non-negative terms, so this is exactly zero.
+        // Radiance sums non-negative terms, so this is exactly zero: an
+        // extinguishing channel's every path turns back forever.
         assert!(
             mean(channel) <= 0.0,
             "an infinitely deep channel must arrive at exactly zero, got {}",
@@ -846,6 +1050,7 @@ fn interior_absorption_is_spectral() {
         mesh: crate::scene::icosphere(3),
         transform: Mat4::from_translation(Vec3::Y * 2.0),
         material,
+        medium: None,
     }];
     let camera = Camera {
         position: Vec3::new(0.0, 2.0, 4.0),
@@ -1622,11 +1827,13 @@ fn indirect_light_bleeds_color() {
                 crate::color::acescg_from_rec709(Vec3::new(0.7, 0.22, 0.08)),
                 0.6,
             ),
+            medium: None,
         },
         Object {
             mesh: ground_plane(5.0),
             transform: Mat4::IDENTITY,
             material: Material::matte(crate::color::acescg_from_rec709(Vec3::splat(0.65)), 0.1),
+            medium: None,
         },
     ];
     let camera = Camera {

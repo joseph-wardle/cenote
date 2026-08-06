@@ -1,10 +1,59 @@
-// Homogeneous-medium transport: how far a path travels before it scatters,
-// and which way it leaves. Both halves are closed-form — one extinction
-// holds everywhere in the medium, so there is nothing to track along the
-// segment and no majorant to bound.
+// Homogeneous-medium transport: what fills a path's current segment, how far
+// it travels before it scatters, and which way it leaves. The last two are
+// closed-form — one extinction holds everywhere in the medium, so there is
+// nothing to track along the segment and no majorant to bound.
 
 import openpbr; // Frame, PI
+import pathstate; // STACK_EMPTY, VOLUME_SLOTS
 import scene;
+
+// The medium filling the segment a path is travelling: the volumes it is
+// inside, added coefficient by coefficient to whatever fills the open space
+// around them. Addition is what makes overlap order-free, and order-free is
+// what lets the shadow pass measure the same extinction from unordered
+// traversal candidates.
+//
+// A refractive interior displaces all of it — a path inside glass is not
+// also in the room's haze — and no interior has an event to sample yet, so
+// naming one returns vacuum here: its Beer–Lambert absorption stays the
+// surface stage's, applied once over the whole segment, exactly as it was
+// before volumes existed.
+public MediumRecord combineMedia(SceneTable* scene, uint interior, uint3 inside) {
+    MediumRecord total;
+    total.sigmaT = float3(0.0);
+    total.sigmaS = float3(0.0);
+    total.g = 0.0;
+    if (interior != STACK_EMPTY) {
+        return total;
+    }
+    // A mixture's true phase function is the σ_s-weighted average of its
+    // components', which one Henyey–Greenstein lobe cannot be; its
+    // anisotropy is that average instead. Exact wherever a single component
+    // scatters, which is every case but two scattering volumes overlapping.
+    var anisotropy = 0.0;
+    var weight = 0.0;
+    // The last pass is the open space the volumes stand in, which adds the
+    // same way they do.
+    for (uint slot = 0; slot <= VOLUME_SLOTS; slot++) {
+        var index = scene.globalMedium;
+        if (slot < VOLUME_SLOTS) {
+            index = inside[slot] == STACK_EMPTY
+                        ? MEDIUM_NONE
+                        : scene.geometry[inside[slot]].medium;
+        }
+        if (index == MEDIUM_NONE) {
+            continue;
+        }
+        let record = scene.media[index];
+        total.sigmaT += record.sigmaT;
+        total.sigmaS += record.sigmaS;
+        let scattering = record.sigmaS.x + record.sigmaS.y + record.sigmaS.z;
+        anisotropy += scattering * record.g;
+        weight += scattering;
+    }
+    total.g = weight > 0.0 ? anisotropy / weight : 0.0;
+    return total;
+}
 
 // Where a path's segment ended in a medium, and what carrying it there
 // costs. `weight` already divides by the density the distance was drawn
@@ -23,6 +72,17 @@ public struct MediumEvent {
 // and visibly noisier in exactly the saturated media a per-channel σ exists
 // to describe.
 public MediumEvent sampleMedium(MediumRecord medium, float tmax, float2 u) {
+    if (!any(medium.sigmaS > 0.0)) {
+        // Nothing to scatter, so there is no event to draw and the segment
+        // is Beer–Lambert alone: taking it in closed form is exact and
+        // noiseless where drawing a distance would kill the path outright
+        // whenever it landed short. Vacuum takes this path too, at σ_t = 0.
+        MediumEvent event;
+        event.scattered = false;
+        event.distance = tmax;
+        event.weight = exp(-medium.sigmaT * tmax);
+        return event;
+    }
     let channel = min(uint(u.x * 3.0), 2u);
     let sigma = medium.sigmaT[channel];
     // A channel that does not extinguish never scatters: its draws run past

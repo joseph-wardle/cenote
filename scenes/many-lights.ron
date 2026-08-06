@@ -2658,6 +2658,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "occluder_r0c0",
@@ -2696,6 +2697,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "occluder_r0c1",
@@ -2734,6 +2736,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "occluder_r0c2",
@@ -2772,6 +2775,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "occluder_r1c0",
@@ -2810,6 +2814,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "occluder_r1c1",
@@ -2848,6 +2853,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "occluder_r1c2",
@@ -2886,6 +2892,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "occluder_r2c0",
@@ -2924,6 +2931,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "occluder_r2c1",
@@ -2962,6 +2970,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "occluder_r2c2",
@@ -3000,6 +3009,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r0c0",
@@ -3038,6 +3048,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r0c1",
@@ -3076,6 +3087,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r0c2",
@@ -3114,6 +3126,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r0c3",
@@ -3152,6 +3165,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r0c4",
@@ -3190,6 +3204,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r0c5",
@@ -3228,6 +3243,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r0c6",
@@ -3266,6 +3282,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r0c7",
@@ -3304,6 +3321,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r0c8",
@@ -3342,6 +3360,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r0c9",
@@ -3380,6 +3399,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r0c10",
@@ -3418,6 +3438,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r0c11",
@@ -3456,6 +3477,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r0c12",
@@ -3494,6 +3516,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r0c13",
@@ -3532,6 +3555,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r0c14",
@@ -3570,6 +3594,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r0c15",
@@ -3608,6 +3633,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r1c0",
@@ -3646,6 +3672,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r1c1",
@@ -3684,6 +3711,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r1c2",
@@ -3722,6 +3750,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r1c3",
@@ -3760,6 +3789,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r1c4",
@@ -3798,6 +3828,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r1c5",
@@ -3836,6 +3867,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r1c6",
@@ -3874,6 +3906,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r1c7",
@@ -3912,6 +3945,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r1c8",
@@ -3950,6 +3984,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r1c9",
@@ -3988,6 +4023,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r1c10",
@@ -4026,6 +4062,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r1c11",
@@ -4064,6 +4101,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r1c12",
@@ -4102,6 +4140,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r1c13",
@@ -4140,6 +4179,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r1c14",
@@ -4178,6 +4218,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r1c15",
@@ -4216,6 +4257,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r2c0",
@@ -4254,6 +4296,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r2c1",
@@ -4292,6 +4335,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r2c2",
@@ -4330,6 +4374,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r2c3",
@@ -4368,6 +4413,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r2c4",
@@ -4406,6 +4452,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r2c5",
@@ -4444,6 +4491,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r2c6",
@@ -4482,6 +4530,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r2c7",
@@ -4520,6 +4569,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r2c8",
@@ -4558,6 +4608,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r2c9",
@@ -4596,6 +4647,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r2c10",
@@ -4634,6 +4686,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r2c11",
@@ -4672,6 +4725,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r2c12",
@@ -4710,6 +4764,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r2c13",
@@ -4748,6 +4803,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r2c14",
@@ -4786,6 +4842,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r2c15",
@@ -4824,6 +4881,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r3c0",
@@ -4862,6 +4920,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r3c1",
@@ -4900,6 +4959,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r3c2",
@@ -4938,6 +4998,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r3c3",
@@ -4976,6 +5037,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r3c4",
@@ -5014,6 +5076,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r3c5",
@@ -5052,6 +5115,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r3c6",
@@ -5090,6 +5154,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r3c7",
@@ -5128,6 +5193,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r3c8",
@@ -5166,6 +5232,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r3c9",
@@ -5204,6 +5271,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r3c10",
@@ -5242,6 +5310,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r3c11",
@@ -5280,6 +5349,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r3c12",
@@ -5318,6 +5388,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r3c13",
@@ -5356,6 +5427,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r3c14",
@@ -5394,6 +5466,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r3c15",
@@ -5432,6 +5505,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r4c0",
@@ -5470,6 +5544,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r4c1",
@@ -5508,6 +5583,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r4c2",
@@ -5546,6 +5622,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r4c3",
@@ -5584,6 +5661,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r4c4",
@@ -5622,6 +5700,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r4c5",
@@ -5660,6 +5739,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r4c6",
@@ -5698,6 +5778,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r4c7",
@@ -5736,6 +5817,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r4c8",
@@ -5774,6 +5856,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r4c9",
@@ -5812,6 +5895,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r4c10",
@@ -5850,6 +5934,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r4c11",
@@ -5888,6 +5973,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r4c12",
@@ -5926,6 +6012,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r4c13",
@@ -5964,6 +6051,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r4c14",
@@ -6002,6 +6090,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r4c15",
@@ -6040,6 +6129,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r5c0",
@@ -6078,6 +6168,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r5c1",
@@ -6116,6 +6207,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r5c2",
@@ -6154,6 +6246,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r5c3",
@@ -6192,6 +6285,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r5c4",
@@ -6230,6 +6324,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r5c5",
@@ -6268,6 +6363,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r5c6",
@@ -6306,6 +6402,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r5c7",
@@ -6344,6 +6441,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r5c8",
@@ -6382,6 +6480,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r5c9",
@@ -6420,6 +6519,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r5c10",
@@ -6458,6 +6558,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r5c11",
@@ -6496,6 +6597,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r5c12",
@@ -6534,6 +6636,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r5c13",
@@ -6572,6 +6675,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r5c14",
@@ -6610,6 +6714,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r5c15",
@@ -6648,6 +6753,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r6c0",
@@ -6686,6 +6792,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r6c1",
@@ -6724,6 +6831,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r6c2",
@@ -6762,6 +6870,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r6c3",
@@ -6800,6 +6909,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r6c4",
@@ -6838,6 +6948,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r6c5",
@@ -6876,6 +6987,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r6c6",
@@ -6914,6 +7026,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r6c7",
@@ -6952,6 +7065,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r6c8",
@@ -6990,6 +7104,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r6c9",
@@ -7028,6 +7143,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r6c10",
@@ -7066,6 +7182,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r6c11",
@@ -7104,6 +7221,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r6c12",
@@ -7142,6 +7260,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r6c13",
@@ -7180,6 +7299,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r6c14",
@@ -7218,6 +7338,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r6c15",
@@ -7256,6 +7377,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r7c0",
@@ -7294,6 +7416,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r7c1",
@@ -7332,6 +7455,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r7c2",
@@ -7370,6 +7494,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r7c3",
@@ -7408,6 +7533,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r7c4",
@@ -7446,6 +7572,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r7c5",
@@ -7484,6 +7611,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r7c6",
@@ -7522,6 +7650,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r7c7",
@@ -7560,6 +7689,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r7c8",
@@ -7598,6 +7728,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r7c9",
@@ -7636,6 +7767,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r7c10",
@@ -7674,6 +7806,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r7c11",
@@ -7712,6 +7845,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r7c12",
@@ -7750,6 +7884,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r7c13",
@@ -7788,6 +7923,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r7c14",
@@ -7826,6 +7962,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r7c15",
@@ -7864,6 +8001,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r8c0",
@@ -7902,6 +8040,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r8c1",
@@ -7940,6 +8079,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r8c2",
@@ -7978,6 +8118,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r8c3",
@@ -8016,6 +8157,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r8c4",
@@ -8054,6 +8196,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r8c5",
@@ -8092,6 +8235,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r8c6",
@@ -8130,6 +8274,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r8c7",
@@ -8168,6 +8313,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r8c8",
@@ -8206,6 +8352,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r8c9",
@@ -8244,6 +8391,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r8c10",
@@ -8282,6 +8430,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r8c11",
@@ -8320,6 +8469,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r8c12",
@@ -8358,6 +8508,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r8c13",
@@ -8396,6 +8547,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r8c14",
@@ -8434,6 +8586,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r8c15",
@@ -8472,6 +8625,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r9c0",
@@ -8510,6 +8664,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r9c1",
@@ -8548,6 +8703,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r9c2",
@@ -8586,6 +8742,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r9c3",
@@ -8624,6 +8781,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r9c4",
@@ -8662,6 +8820,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r9c5",
@@ -8700,6 +8859,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r9c6",
@@ -8738,6 +8898,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r9c7",
@@ -8776,6 +8937,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r9c8",
@@ -8814,6 +8976,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r9c9",
@@ -8852,6 +9015,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r9c10",
@@ -8890,6 +9054,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r9c11",
@@ -8928,6 +9093,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r9c12",
@@ -8966,6 +9132,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r9c13",
@@ -9004,6 +9171,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r9c14",
@@ -9042,6 +9210,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r9c15",
@@ -9080,6 +9249,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r10c0",
@@ -9118,6 +9288,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r10c1",
@@ -9156,6 +9327,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r10c2",
@@ -9194,6 +9366,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r10c3",
@@ -9232,6 +9405,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r10c4",
@@ -9270,6 +9444,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r10c5",
@@ -9308,6 +9483,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r10c6",
@@ -9346,6 +9522,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r10c7",
@@ -9384,6 +9561,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r10c8",
@@ -9422,6 +9600,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r10c9",
@@ -9460,6 +9639,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r10c10",
@@ -9498,6 +9678,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r10c11",
@@ -9536,6 +9717,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r10c12",
@@ -9574,6 +9756,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r10c13",
@@ -9612,6 +9795,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r10c14",
@@ -9650,6 +9834,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r10c15",
@@ -9688,6 +9873,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r11c0",
@@ -9726,6 +9912,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r11c1",
@@ -9764,6 +9951,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r11c2",
@@ -9802,6 +9990,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r11c3",
@@ -9840,6 +10029,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r11c4",
@@ -9878,6 +10068,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r11c5",
@@ -9916,6 +10107,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r11c6",
@@ -9954,6 +10146,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r11c7",
@@ -9992,6 +10185,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r11c8",
@@ -10030,6 +10224,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r11c9",
@@ -10068,6 +10263,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r11c10",
@@ -10106,6 +10302,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r11c11",
@@ -10144,6 +10341,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r11c12",
@@ -10182,6 +10380,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r11c13",
@@ -10220,6 +10419,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r11c14",
@@ -10258,6 +10458,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r11c15",
@@ -10296,6 +10497,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r12c0",
@@ -10334,6 +10536,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r12c1",
@@ -10372,6 +10575,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r12c2",
@@ -10410,6 +10614,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r12c3",
@@ -10448,6 +10653,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r12c4",
@@ -10486,6 +10692,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r12c5",
@@ -10524,6 +10731,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r12c6",
@@ -10562,6 +10770,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r12c7",
@@ -10600,6 +10809,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r12c8",
@@ -10638,6 +10848,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r12c9",
@@ -10676,6 +10887,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r12c10",
@@ -10714,6 +10926,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r12c11",
@@ -10752,6 +10965,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r12c12",
@@ -10790,6 +11004,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r12c13",
@@ -10828,6 +11043,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r12c14",
@@ -10866,6 +11082,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r12c15",
@@ -10904,6 +11121,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r13c0",
@@ -10942,6 +11160,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r13c1",
@@ -10980,6 +11199,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r13c2",
@@ -11018,6 +11238,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r13c3",
@@ -11056,6 +11277,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r13c4",
@@ -11094,6 +11316,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r13c5",
@@ -11132,6 +11355,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r13c6",
@@ -11170,6 +11394,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r13c7",
@@ -11208,6 +11433,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r13c8",
@@ -11246,6 +11472,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r13c9",
@@ -11284,6 +11511,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r13c10",
@@ -11322,6 +11550,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r13c11",
@@ -11360,6 +11589,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r13c12",
@@ -11398,6 +11628,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r13c13",
@@ -11436,6 +11667,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r13c14",
@@ -11474,6 +11706,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r13c15",
@@ -11512,6 +11745,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r14c0",
@@ -11550,6 +11784,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r14c1",
@@ -11588,6 +11823,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r14c2",
@@ -11626,6 +11862,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r14c3",
@@ -11664,6 +11901,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r14c4",
@@ -11702,6 +11940,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r14c5",
@@ -11740,6 +11979,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r14c6",
@@ -11778,6 +12018,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r14c7",
@@ -11816,6 +12057,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r14c8",
@@ -11854,6 +12096,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r14c9",
@@ -11892,6 +12135,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r14c10",
@@ -11930,6 +12174,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r14c11",
@@ -11968,6 +12213,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r14c12",
@@ -12006,6 +12252,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r14c13",
@@ -12044,6 +12291,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r14c14",
@@ -12082,6 +12330,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r14c15",
@@ -12120,6 +12369,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r15c0",
@@ -12158,6 +12408,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r15c1",
@@ -12196,6 +12447,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r15c2",
@@ -12234,6 +12486,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r15c3",
@@ -12272,6 +12525,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r15c4",
@@ -12310,6 +12564,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r15c5",
@@ -12348,6 +12603,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r15c6",
@@ -12386,6 +12642,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r15c7",
@@ -12424,6 +12681,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r15c8",
@@ -12462,6 +12720,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r15c9",
@@ -12500,6 +12759,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r15c10",
@@ -12538,6 +12798,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r15c11",
@@ -12576,6 +12837,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r15c12",
@@ -12614,6 +12876,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r15c13",
@@ -12652,6 +12915,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r15c14",
@@ -12690,6 +12954,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
         Material((
             name: "light_r15c15",
@@ -12728,6 +12993,7 @@
                 ),
             ]),
             camera_visible: None,
+            medium: None,
         )),
     ],
 )

@@ -88,6 +88,10 @@ pub(super) struct InstanceSpec {
     pub(super) transform: Mat4,
     pub(super) material: Material,
     pub(super) camera_visible: bool,
+    /// The medium this mesh bounds, already lowered — `None` for an
+    /// ordinary surface. Some, and the surface is a null boundary: the
+    /// medium fills it, and the material above is inert.
+    pub(super) medium: Option<super::Medium>,
 }
 
 /// The environment lowered from the description: the image when it must be
@@ -306,10 +310,29 @@ fn lower_instances(
 ) -> Result<(Vec<InstanceSpec>, Vec<TriangleLight>)> {
     let mut instances = Vec::with_capacity(description.instances().len());
     let mut triangle_lights = Vec::new();
-    for instance in description.instances().values() {
+    for (name, instance) in description.instances() {
         // Apply validated the references and every transform, so lookups
         // can't miss and the inverses the records need exist.
-        let material = materials[instance.material.as_str()];
+        let mut material = materials[instance.material.as_str()];
+        let medium = instance
+            .medium
+            .as_ref()
+            .map(|named| lower_medium(named, &description.media()[named]));
+        if medium.is_some() {
+            // A volume's boundary is crossed, never shaded, so nothing its
+            // material says can be honoured. Emission has to be *removed*
+            // rather than merely ignored: it would enter the light list, and
+            // next-event estimation would then reach a surface that path
+            // sampling can never hit — the two strategies disagreeing is
+            // bias, not a lost highlight.
+            if luminance(material.emission) > 0.0 || material.opacity < 1.0 {
+                log::warn!(
+                    "instance \"{name}\" bounds a medium, so its material is inert — dropping \
+                     its emission and opacity"
+                );
+            }
+            material.emission = Vec3::ZERO;
+        }
         // The geometry fetch is per instance, not per element: N emissive
         // placements share one resolve and pay only the N×T light records.
         let geometry = if luminance(material.emission) > 0.0 && !instance.transforms.is_empty() {
@@ -337,6 +360,7 @@ fn lower_instances(
                 transform,
                 material,
                 camera_visible: instance.camera_visible,
+                medium,
             });
         }
     }
@@ -671,7 +695,20 @@ fn global_medium(
             .media()
             .get(name)
             .ok_or_else(|| scene_error(format!("the global medium \"{name}\" does not exist")))
-            .map(|medium| Some(lower_medium(name, medium))),
+            .map(|medium| {
+                let lowered = lower_medium(name, medium);
+                // Only an unbounded medium is affected: it extinguishes over
+                // an infinite path, so with nothing scattering light back
+                // there is no route to the sky at all. A bounded volume that
+                // only absorbs is an ordinary dark solid.
+                if lowered.scattering == Vec3::ZERO && lowered.absorption != Vec3::ZERO {
+                    log::warn!(
+                        "the global medium \"{name}\" only absorbs, which leaves the environment \
+                         and the distant lights unreachable"
+                    );
+                }
+                Some(lowered)
+            }),
         None => Ok(None),
     }
 }
@@ -701,18 +738,11 @@ fn lower_medium(name: &str, medium: &description::Medium) -> super::Medium {
             super::MAX_ANISOTROPY
         );
     }
-    let lowered = super::Medium {
+    super::Medium {
         absorption: convert("absorption", medium.absorption),
         scattering: convert("scattering", medium.scattering),
         anisotropy: medium.anisotropy,
-    };
-    if lowered.scattering == Vec3::ZERO && lowered.absorption != Vec3::ZERO {
-        log::warn!(
-            "medium \"{name}\" only absorbs: as a global medium it leaves the environment and \
-             the distant lights unreachable, since nothing scatters light back into a path"
-        );
     }
-    lowered
 }
 
 /// Lower one description environment: the tint converts to `ACEScg` and

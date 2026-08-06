@@ -7,6 +7,7 @@
 import environment;
 import lights;
 import openpbr;
+import pathstate; // STACK_EMPTY, VOLUME_SLOTS, crossVolume
 import textures;
 
 // What crossing an instance's surface means, classified at prep: an
@@ -88,6 +89,11 @@ public struct SceneTable {
     public uint globalMedium;
 };
 
+// Crossings after this many commit as opaque, in whichever traversal is
+// resolving them: a bound on pathological transparent stacks, and on the
+// loop that walks them. Separate from the path depth cap.
+public static const uint TRANSPARENT_CAP = 8;
+
 // The coverage of one traversal crossing: the instance's opacity constant
 // times its opacity map at the crossing point — the one value both halves
 // of the transparency policy test, stochastically in intersect and
@@ -115,37 +121,84 @@ public float3 interiorTransmittance(SceneTable* scene, uint instance,
     return exp(-scene.media[medium].sigmaT * distance(from, to));
 }
 
-// Trace one next-event connection and return its visibility in [0, 1]: 0 when a
+// The extinction of whatever fills `instance`, or zero where nothing does.
+public float3 extinctionOf(SceneTable* scene, uint instance) {
+    let medium = scene.geometry[instance].medium;
+    return medium == MEDIUM_NONE ? float3(0.0) : scene.media[medium].sigmaT;
+}
+
+// Trace one next-event connection and return what reaches the light: 0 when a
 // solid occluder blocks it, otherwise the product of (1 − opacity) over every
 // fractional-opacity crossing — Cycles' deterministic transparency split, so
-// this stays RNG-free. `light`/`primitive` name the connection's aimed target
-// (or `LIGHT_NONE`, which no instance carries, for the environment and delta
-// lights): the connection is visible iff the nearest solid thing along the ray
-// is that target or nothing. The identity test needs no distance epsilon — the
-// ray's `tmax` is bounded to the target (see `ShadowRay` in pathstate.slang).
-// Used by `trace_shadow`, for the queued next-event rays.
-public float shadowVisibility(RaytracingAccelerationStructure tlas, SceneTable* scene,
-                              RayDesc ray, uint light, uint primitive) {
+// this stays RNG-free — times the transmittance of every volume the
+// connection passes through. `light`/`primitive` name the connection's aimed
+// target (or `LIGHT_NONE`, which no instance carries, for the environment and
+// delta lights): the connection is visible iff the nearest solid thing along
+// the ray is that target or nothing. The identity test needs no distance
+// epsilon — the ray's `tmax` is bounded to the target (see `ShadowRay` in
+// pathstate.slang). Used by `trace_shadow`, for the queued next-event rays.
+//
+// `VOLUMES` is a specialization, not a flag: a scene with no volume-bounding
+// mesh compiles a copy with none of the machinery below, because leaving it
+// in behind a uniformly-false branch measured **+22% of this stage** on
+// zero-day — the loop-carried extent and membership are registers whether or
+// not they are ever written, and this kernel traverses.
+//
+// `inside` names the volumes the connection *starts* in. Volume extents are
+// measured, not marched: for one volume the optical depth over [0, tmax] is
+// σ_t times the extent inside it, and that extent is
+//
+//     Σ over crossings of (∓ t)  +  tmax if the far end is still inside,
+//
+// signed − where the ray enters and + where it leaves. Every term is a plain
+// sum, so the candidates may arrive in any order — which is the whole reason
+// overlapping volumes were defined to *add*, since an ordered walk is the one
+// thing `Proceed()` cannot give. Membership at the far end is the same
+// order-free question, answered by parity.
+public float3 shadowVisibility<let VOLUMES : int>(
+    RaytracingAccelerationStructure tlas, SceneTable* scene, RayDesc ray,
+    uint light, uint primitive, uint3 inside) {
     RayQuery<RAY_FLAG_NONE> query;
     query.TraceRayInline(tlas, RAY_FLAG_NONE, 0xFF, ray);
     var attenuation = 1.0;
+    var extent = float3(0.0);
+    var atEnd = inside;
     while (query.Proceed()) {
-        if (query.CandidateInstanceID() == light
-            && query.CandidatePrimitiveIndex() == primitive) {
+        let instance = query.CandidateInstanceID();
+        if (instance == light && query.CandidatePrimitiveIndex() == primitive) {
             query.CommitNonOpaqueTriangleHit();
+        } else if (VOLUMES != 0 && scene.geometry[instance].boundary == BOUNDARY_NULL) {
+            // A volume's boundary is not a surface: it never occludes, and
+            // committing it — which its full coverage would otherwise do —
+            // would read a fog bank as a solid wall.
+            let t = query.CandidateTriangleRayT();
+            extent += extinctionOf(scene, instance)
+                      * (query.CandidateTriangleFrontFace() ? -t : t);
+            atEnd = crossVolume(atEnd, instance);
         } else {
-            attenuation *= 1.0 - opacityAt(scene, query.CandidateInstanceID(),
+            attenuation *= 1.0 - opacityAt(scene, instance,
                                            query.CandidatePrimitiveIndex(),
                                            query.CandidateTriangleBarycentrics());
             if (attenuation < 1e-4) {
-                return 0.0; // solidly occluded, to any precision that matters
+                return float3(0.0); // solidly occluded, to any precision that matters
             }
         }
     }
-    if (query.CommittedStatus() == COMMITTED_NOTHING
-        || (query.CommittedInstanceID() == light
-            && query.CommittedPrimitiveIndex() == primitive)) {
-        return attenuation;
+    if (query.CommittedStatus() != COMMITTED_NOTHING
+        && (query.CommittedInstanceID() != light
+            || query.CommittedPrimitiveIndex() != primitive)) {
+        return float3(0.0);
     }
-    return 0.0;
+    if (VOLUMES == 0) {
+        return float3(attenuation);
+    }
+    for (uint slot = 0; slot < VOLUME_SLOTS; slot++) {
+        if (atEnd[slot] != STACK_EMPTY) {
+            extent += extinctionOf(scene, atEnd[slot]) * ray.TMax;
+        }
+    }
+    // A negative extent means a volume was entered and never left, or wound
+    // inside-out; clamping is what keeps that a missing shadow rather than a
+    // medium that amplifies.
+    return attenuation * exp(-max(extent, float3(0.0)));
 }

@@ -144,6 +144,9 @@ pub struct InstancePatch {
     pub transforms: Option<Vec<Transform>>,
     /// Whether camera rays see it.
     pub camera_visible: Option<bool>,
+    /// The medium this mesh bounds, by name. Doubly optional: `None` leaves
+    /// the reference alone, `Some(None)` clears it.
+    pub medium: Option<Option<String>>,
 }
 
 /// Patch for a [`Material`](super::description::Material). Fields mirror
@@ -466,7 +469,7 @@ fn apply_op(objects: &mut Objects, dirty: &mut Dirty, op: &Op) -> Result<()> {
             merge!(mesh, patch; source);
         }),
         Op::Instance(patch) => upsert(&mut objects.instances, &name, |instance| {
-            merge!(instance, patch; mesh, material, transforms, camera_visible);
+            merge!(instance, patch; mesh, material, transforms, camera_visible, medium);
         }),
         Op::Material(patch) => upsert(&mut objects.materials, &name, |material| {
             merge!(material, patch;
@@ -635,6 +638,13 @@ fn validate_mesh(name: &str, mesh: &Mesh) -> Result<()> {
 fn validate_instance(objects: &Objects, name: &str, instance: &Instance) -> Result<()> {
     validate_reference(&objects.meshes, "mesh", name, &instance.mesh)?;
     validate_reference(&objects.materials, "material", name, &instance.material)?;
+    if let Some(medium) = &instance.medium
+        && !objects.media.contains_key(medium)
+    {
+        return Err(scene_error(format!(
+            "instance \"{name}\" bounds a medium \"{medium}\" that does not exist"
+        )));
+    }
     // Element by element — an empty array is a valid instance that places
     // nothing, so there is nothing to check.
     for (element, transform) in instance.transforms.iter().enumerate() {
@@ -1171,6 +1181,79 @@ mod tests {
             })
             .expect("valid");
         assert!(description.media().is_empty());
+    }
+
+    /// An instance bounds a medium by name, which makes it a reference like
+    /// the mesh and material beside it: dangling on the way in, and holding
+    /// the object against removal on the way out.
+    #[test]
+    fn a_bounded_volume_holds_its_medium() {
+        let mut description = SceneDescription::new();
+        let instance = |medium: Option<&str>| {
+            Op::Instance(InstancePatch {
+                mesh: Some("tri".into()),
+                material: Some("gray".into()),
+                medium: Some(medium.map(str::to_owned)),
+                ..InstancePatch::new("fog-box")
+            })
+        };
+        let geometry = || {
+            [
+                Op::Material(Box::new(MaterialPatch::new("gray"))),
+                Op::Mesh(MeshPatch {
+                    source: Some(MeshSource::Inline {
+                        positions: vec![[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                        normals: None,
+                        uvs: None,
+                        triangles: vec![[0, 1, 2]],
+                    }),
+                    ..MeshPatch::new("tri")
+                }),
+            ]
+        };
+        let error = description
+            .apply(&ChangeSet {
+                ops: [instance(Some("haze"))]
+                    .into_iter()
+                    .chain(geometry())
+                    .collect(),
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("bounds a medium"), "{error}");
+
+        description
+            .apply(&ChangeSet {
+                ops: [
+                    instance(Some("haze")),
+                    Op::Medium(MediumPatch {
+                        scattering: Some([0.2; 3]),
+                        ..MediumPatch::new("haze")
+                    }),
+                ]
+                .into_iter()
+                .chain(geometry())
+                .collect(),
+            })
+            .expect("valid");
+        assert_eq!(
+            description.instances()["fog-box"].medium.as_deref(),
+            Some("haze")
+        );
+
+        let error = description
+            .apply(&ChangeSet {
+                ops: vec![Op::Remove(Kind::Medium, "haze".into())],
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("does not exist"), "{error}");
+
+        // Clearing the reference releases it, and leaves an ordinary surface.
+        description
+            .apply(&ChangeSet {
+                ops: vec![instance(None), Op::Remove(Kind::Medium, "haze".into())],
+            })
+            .expect("valid");
+        assert!(description.instances()["fog-box"].medium.is_none());
     }
 
     #[test]

@@ -91,8 +91,9 @@ struct PathsAddrs {
     pixel: vk::DeviceAddress,
     hit: vk::DeviceAddress,
     throughput: vk::DeviceAddress,
-    /// Null in scenes with no interiors: the buffer was never allocated,
-    /// and every kernel access sits behind the interiors flag.
+    /// Null in scenes with neither interiors nor volumes: the buffer was
+    /// never allocated, and every kernel access sits behind the flag for
+    /// the half of it being read.
     stack: vk::DeviceAddress,
 }
 
@@ -161,23 +162,55 @@ struct IntersectParams {
     scene: vk::DeviceAddress,
     /// Which sample of every pixel's sequence this wave traces.
     sample_index: u32,
-    /// `ray_mask | bounce << 8 | media << 16` — see [`pack_intersect`].
+    /// `ray_mask | bounce << 8 | the flag bits` — see [`pack_intersect`].
     /// Packed because this block sits exactly at [`PUSH_CONSTANT_LIMIT`]:
     /// the volume queue's 16 bytes came out of these small scalars.
     packed: u32,
 }
 
+/// What a scene's media ask of the kernels, answered once per wave. Every
+/// stage's flag bits come from here, so the routing, the two halves of the
+/// medium stack, and the pass list cannot disagree about what the scene has.
+#[derive(Clone, Copy)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "four independent questions about one scene, each a flag bit downstream — \
+              a two-variant enum apiece would name the same booleans twice"
+)]
+struct Media {
+    /// Some segment can owe a medium event, so the volume stage runs.
+    any: bool,
+    /// The stack's x lane is live: some mesh closes a refractive interior.
+    interiors: bool,
+    /// Its other three lanes are: some mesh bounds a volume.
+    volumes: bool,
+    /// The open space between instances is filled.
+    global: bool,
+}
+
+impl Media {
+    fn of(scene: &Scene) -> Self {
+        Self {
+            any: scene.has_media(),
+            interiors: scene.has_interiors(),
+            volumes: scene.has_volumes(),
+            global: scene.has_global_medium(),
+        }
+    }
+}
+
 /// Pack `IntersectParams::packed`, mirrored by the unpack at the top of
 /// `intersect.slang`. `ray_mask` values fit a byte ([`ray_mask::ALL`] is
 /// 0xFF) and the bounce cap is asserted ≤ 255 by [`Wavefront::new`]. The
-/// three flags gate the routing block, the medium-stack read inside it, and
-/// whether open space counts as a medium.
-fn pack_intersect(ray_mask: u32, bounce: u32, media: bool, interiors: bool, global: bool) -> u32 {
+/// flags gate the routing block, each half of the medium stack it reads,
+/// and whether open space counts as a medium.
+fn pack_intersect(ray_mask: u32, bounce: u32, media: Media) -> u32 {
     ray_mask
         | bounce << 8
-        | u32::from(media) << 16
-        | u32::from(interiors) << 17
-        | u32::from(global) << 18
+        | u32::from(media.any) << 16
+        | u32::from(media.interiors) << 17
+        | u32::from(media.global) << 18
+        | u32::from(media.volumes) << 19
 }
 
 /// Push constants for the miss-shading kernel (`shaders/shade_miss.slang`).
@@ -229,16 +262,17 @@ struct ShadeSurfaceParams {
 
 /// Pack the shading stages' `packed`, mirrored by the unpack at the top of
 /// `shade_surface.slang` and `shade_volume.slang` — one layout, because the
-/// two stages read the same four things. Both byte-wide fields are asserted
-/// in range by [`Wavefront::new`]; `interiors` gates every medium-stack
-/// access, because a scene without interiors never allocated the stack.
-fn pack_shade(
-    bounce: u32,
-    max_bounces: u32,
-    light_sampling: LightSampling,
-    interiors: bool,
-) -> u32 {
-    bounce | max_bounces << 8 | (light_sampling as u32) << 16 | u32::from(interiors) << 24
+/// two stages read the same things. Both byte-wide fields are asserted in
+/// range by [`Wavefront::new`]; the two flags gate the halves of the medium
+/// stack, which a scene without interiors and without volumes never
+/// allocated. Only the volume stage reads `volumes`; the surface stage is
+/// handed it so the two packings stay one.
+fn pack_shade(bounce: u32, max_bounces: u32, light_sampling: LightSampling, media: Media) -> u32 {
+    bounce
+        | max_bounces << 8
+        | (light_sampling as u32) << 16
+        | u32::from(media.interiors) << 24
+        | u32::from(media.volumes) << 25
 }
 
 /// The five queues the volume kernel touches — `struct VolumeQueues` in
@@ -271,9 +305,15 @@ struct ShadeVolumeParams {
     aov: vk::DeviceAddress,
     /// Which sample of every pixel's sequence this wave traces.
     sample_index: u32,
-    /// `bounce | max_bounces << 8 | light_sampling << 16 | interiors << 24`
-    /// — see [`pack_shade`].
+    /// `bounce | max_bounces << 8 | light_sampling << 16 | the flag bits` —
+    /// see [`pack_shade`].
     packed: u32,
+    /// Which instances the march's re-traces see — the mask this bounce's
+    /// intersect traced with, since crossing a boundary does not make a
+    /// camera ray something else.
+    ray_mask: u32,
+    /// Explicit tail padding to the struct's 8-byte alignment.
+    _pad0: u32,
 }
 
 /// Push constants for the shadow-ray kernel (`shaders/trace_shadow.slang`).
@@ -284,6 +324,12 @@ struct TraceShadowParams {
     radiance: vk::DeviceAddress,
     /// Device address of the scene table — opacity attenuates connections.
     scene: vk::DeviceAddress,
+    /// The medium stack, for the volumes each connection starts inside —
+    /// null unless the scene has volume-bounding meshes, which is how this
+    /// stage knows there are none. A scene with interiors alone allocates a
+    /// stack whose volume lanes were never seeded, so the address is the
+    /// flag rather than the buffer.
+    stack: vk::DeviceAddress,
 }
 
 /// Allocate a device-local buffer into `cell` unless it already holds one.
@@ -322,11 +368,12 @@ struct PathPool {
     /// scatter that produced this ray (0 on camera rays), kept for the next
     /// vertex's MIS weight; 16 B/path.
     throughput: Buffer,
-    /// The medium stack — four instance-index entries, innermost first;
-    /// 16 B/path, allocated by [`ensure`] on the first wave over a scene
-    /// with interiors and never before. Without one the pool is 68 B/path
-    /// and its address here is null, which is safe because every kernel
-    /// access sits behind the interiors flag.
+    /// The medium stack — the innermost refractive interior plus the set
+    /// of volumes the path is inside; 16 B/path, allocated by [`ensure`] on
+    /// the first wave over a scene with either and never before. Without
+    /// one the pool is 68 B/path and its address here is null, which is
+    /// safe because every kernel access sits behind the flag for the half
+    /// it reads.
     stack: OnceLock<Buffer>,
 }
 
@@ -587,6 +634,9 @@ pub struct Wavefront {
     shade_surface: ComputePipeline,
     shade_volume: ComputePipeline,
     trace_shadow: ComputePipeline,
+    /// The shadow stage specialized for bounded volumes — see
+    /// `trace_shadow.slang`. One or the other is recorded, never both.
+    trace_shadow_volumes: ComputePipeline,
     paths: PathPool,
     queues: Queues,
     /// The all-zero [`AovTableData`] a wave binds when the caller brings
@@ -659,6 +709,11 @@ impl Wavefront {
             )?,
             trace_shadow: pipeline(
                 &kernels.trace_shadow,
+                size_of::<TraceShadowParams>(),
+                Bindings::Scene,
+            )?,
+            trace_shadow_volumes: pipeline(
+                &kernels.trace_shadow_volumes,
                 size_of::<TraceShadowParams>(),
                 Bindings::Scene,
             )?,
@@ -752,7 +807,7 @@ impl Wavefront {
         // medium stack, without media no volume queue, and the kernels
         // carry null addresses they never dereference.
         let capacity = u64::from(self.capacity);
-        if scene.has_interiors() {
+        if scene.has_interiors() || scene.has_volumes() {
             ensure(&self.paths.stack, gpu, "wavefront.stack", capacity * 16)?;
         }
         if scene.has_media() {
@@ -809,11 +864,7 @@ impl Wavefront {
                 _pad1: 0,
             })
             .collect();
-        let interiors = scene.has_interiors();
-        let media = scene.has_media();
-        // Coincident while a global medium is the only kind that can be
-        // authored: every medium event is then an open-space one.
-        let global = scene.has_global_medium();
+        let media = Media::of(scene);
         let intersect = |bounce: u32| IntersectParams {
             paths: self.paths.addresses(),
             rays: self.queues.addresses(queue::RAY, &self.queues.ray),
@@ -830,8 +881,6 @@ impl Wavefront {
                 },
                 bounce,
                 media,
-                interiors,
-                global,
             ),
         };
         let bounces = self.max_bounces;
@@ -857,14 +906,19 @@ impl Wavefront {
                     radiance: radiance.device_address(),
                     aov: aov_table.device_address(),
                     sample_index: sample,
-                    packed: pack_shade(bounce, self.max_bounces, self.light_sampling, interiors),
+                    packed: pack_shade(bounce, self.max_bounces, self.light_sampling, media),
                 })
                 .collect(),
-            shade_volume: self.volume_params(scene, radiance, aov_table, sample, interiors),
+            shade_volume: self.volume_params(scene, radiance, aov_table, sample, media),
             trace_shadow: TraceShadowParams {
                 shadows: self.queues.addresses(queue::SHADOW, &self.queues.shadow),
                 radiance: radiance.device_address(),
                 scene: scene.table().device_address(),
+                stack: if media.volumes {
+                    self.paths.addresses().stack
+                } else {
+                    0
+                },
             },
         }
     }
@@ -878,7 +932,7 @@ impl Wavefront {
         radiance: &Buffer,
         aov_table: &Buffer,
         sample: u32,
-        interiors: bool,
+        media: Media,
     ) -> Vec<ShadeVolumeParams> {
         let Some(block) = self.queues.volume_block.get() else {
             return Vec::new();
@@ -891,7 +945,13 @@ impl Wavefront {
                 radiance: radiance.device_address(),
                 aov: aov_table.device_address(),
                 sample_index: sample,
-                packed: pack_shade(bounce, self.max_bounces, self.light_sampling, interiors),
+                packed: pack_shade(bounce, self.max_bounces, self.light_sampling, media),
+                ray_mask: if bounce == 0 {
+                    ray_mask::CAMERA
+                } else {
+                    ray_mask::ALL
+                },
+                _pad0: 0,
             })
             .collect()
     }
@@ -1010,7 +1070,11 @@ impl Wavefront {
                     queue::HIT,
                 ));
                 passes.push(indirect(
-                    &self.trace_shadow,
+                    if scene.has_volumes() {
+                        &self.trace_shadow_volumes
+                    } else {
+                        &self.trace_shadow
+                    },
                     bytemuck::bytes_of(&params.trace_shadow),
                     queue::SHADOW,
                 ));
@@ -1061,19 +1125,28 @@ mod tests {
     }
 
     /// The medium stack is residency a scene has to earn: a wave over
-    /// opaque geometry must never allocate it, and one over glass must.
-    /// The null address the first case leaves in every kernel's push
-    /// constants is only safe because no kernel dereferences it, so this
-    /// also stands in for "media-free scenes touch no medium state".
+    /// opaque geometry must never allocate it, and one over glass or one
+    /// over a fog box must — the two halves of the stack are earned
+    /// separately, by different scene features, and either one alone pays
+    /// for the whole 16 bytes. The null address the first case leaves in
+    /// every kernel's push constants is only safe because no kernel
+    /// dereferences it, so this also stands in for "media-free scenes touch
+    /// no medium state".
     #[test]
-    fn only_a_scene_with_interiors_allocates_the_medium_stack() {
+    fn either_half_of_the_medium_stack_earns_the_allocation() {
         let Some(gpu) = crate::gpu::test_context() else {
             return;
         };
-        let object = |material| Object {
+        let object = |material, medium| Object {
             mesh: icosphere(2),
             transform: Mat4::from_translation(Vec3::Y),
             material,
+            medium,
+        };
+        let fog = crate::scene::Medium {
+            absorption: Vec3::splat(0.05),
+            scattering: Vec3::splat(0.1),
+            anisotropy: 0.0,
         };
         let camera = Camera {
             position: Vec3::new(0.0, 2.0, 8.5),
@@ -1085,12 +1158,18 @@ mod tests {
         let environment = Environment::constant(Vec3::splat(0.4));
         let kernels = Kernels::embedded();
         let (width, height) = (16, 16);
-        for (material, wanted) in [
-            (Material::matte(Vec3::splat(0.5), 0.3), false),
-            (Material::glass(0.1, 1.5), true),
+        let matte = Material::matte(Vec3::splat(0.5), 0.3);
+        for (material, medium, interiors, volumes) in [
+            (matte, None, false, false),
+            (Material::glass(0.1, 1.5), None, true, false),
+            (matte, Some(fog), false, true),
         ] {
-            let scene = Scene::new(&gpu, &[object(material)], camera, &environment).expect("scene");
-            assert_eq!(scene.has_interiors(), wanted);
+            let scene =
+                Scene::new(&gpu, &[object(material, medium)], camera, &environment).expect("scene");
+            assert_eq!(
+                (scene.has_interiors(), scene.has_volumes()),
+                (interiors, volumes)
+            );
             let wavefront =
                 Wavefront::new(&gpu, &kernels, 4096, 2, LightSampling::Mis).expect("wavefront");
             let radiance = radiance_buffer(&gpu, width, height);
@@ -1099,20 +1178,22 @@ mod tests {
                 .expect("trace");
             assert_eq!(
                 wavefront.paths.stack.get().is_some(),
-                wanted,
-                "the stack must exist exactly when the scene has interiors"
+                interiors || volumes,
+                "the stack must exist exactly when the scene has one half of it or the other"
             );
-            assert!(
-                wavefront.queues.volume.get().is_none(),
-                "neither scene has media, so the volume queue stays unallocated"
+            assert_eq!(
+                wavefront.queues.volume.get().is_some(),
+                volumes,
+                "only the volume scene has a medium event to route"
             );
         }
     }
 
-    /// The volume stage's residency is earned the same way, on the other
-    /// flag: a global medium allocates the queue *and* the block of
+    /// The volume stage's residency, on the flag a bounded volume does not
+    /// set: a global medium allocates the queue *and* the block of
     /// addresses the kernel reads it through — which must not exist before
-    /// the queue it points at does.
+    /// the queue it points at does — while leaving the stack unallocated,
+    /// since an unbounded medium is nothing to be inside of.
     #[test]
     fn only_a_scene_with_media_allocates_the_volume_queue() {
         let Some(gpu) = crate::gpu::test_context() else {
@@ -1138,6 +1219,7 @@ mod tests {
                     mesh: icosphere(2),
                     transform: Mat4::from_translation(Vec3::Y),
                     material: Material::matte(Vec3::splat(0.5), 0.3),
+                    medium: None,
                 }],
                 camera,
                 &Environment::constant(Vec3::splat(0.4)),
@@ -1265,12 +1347,14 @@ mod tests {
                 mesh: icosphere(2),
                 transform: Mat4::from_translation(Vec3::Y),
                 material: Material::matte(Vec3::splat(0.5), 0.3),
+                medium: None,
             },
             Object {
                 // Large enough that the frame's bottom edge lands on it.
                 mesh: ground_plane(12.0),
                 transform: Mat4::IDENTITY,
                 material: Material::matte(Vec3::splat(0.5), 0.1),
+                medium: None,
             },
         ];
         let camera = Camera {
@@ -1456,11 +1540,13 @@ mod tests {
                 mesh: icosphere(2),
                 transform: Mat4::from_translation(Vec3::Y),
                 material: Material::matte(Vec3::splat(0.5), 0.3),
+                medium: None,
             },
             Object {
                 mesh: ground_plane(12.0),
                 transform: Mat4::IDENTITY,
                 material: Material::matte(Vec3::splat(0.5), 0.1),
+                medium: None,
             },
         ];
         let camera = |lens| Camera {
@@ -1556,17 +1642,20 @@ mod tests {
                 mesh: icosphere(2),
                 transform: Mat4::from_translation(Vec3::Y),
                 material: Material::glossy(Vec3::splat(0.6), 0.4, 0.3).with_metalness(0.5),
+                medium: None,
             },
             Object {
                 mesh: ground_plane(4.0),
                 transform: Mat4::IDENTITY,
                 material: Material::glossy(Vec3::splat(0.7), 0.0, 0.2),
+                medium: None,
             },
             Object {
                 mesh: icosphere(2),
                 transform: Mat4::from_translation(Vec3::new(1.6, 0.6, 1.2))
                     * Mat4::from_scale(Vec3::splat(0.6)),
                 material: Material::glass(0.4, 1.5),
+                medium: None,
             },
             Object {
                 // An emissive ball right above the sphere: big enough that
@@ -1576,6 +1665,7 @@ mod tests {
                 transform: Mat4::from_translation(Vec3::Y * 3.0)
                     * Mat4::from_scale(Vec3::splat(0.7)),
                 material: Material::emitter(Vec3::splat(4.0)),
+                medium: None,
             },
         ];
         let camera = Camera {
@@ -1617,18 +1707,21 @@ mod tests {
                 mesh: ground_plane(4.0),
                 transform: Mat4::IDENTITY,
                 material: Material::matte(Vec3::splat(0.6), 0.0),
+                medium: None,
             },
             Object {
                 mesh: icosphere(2),
                 transform: Mat4::from_translation(Vec3::Y * 2.0)
                     * Mat4::from_scale(Vec3::splat(0.6)),
                 material: Material::emitter(Vec3::splat(8.0)),
+                medium: None,
             },
             Object {
                 mesh: icosphere(2),
                 transform: Mat4::from_translation(Vec3::new(-1.6, 1.0, 0.8))
                     * Mat4::from_scale(Vec3::splat(0.3)),
                 material: Material::emitter(Vec3::splat(1.5)),
+                medium: None,
             },
         ];
         let camera = Camera {
@@ -1656,6 +1749,65 @@ mod tests {
         assert_strategies_agree(&gpu, &scene);
     }
 
+    /// The same agreement across a *bounded* volume, which is where the two
+    /// strategies stop sharing an implementation. Phase and BSDF sampling
+    /// walk the fog box's boundaries in order, one re-trace per crossing,
+    /// and multiply a transmittance per sub-segment; next-event estimation
+    /// never marches at all — it reads the crossings out of an *unordered*
+    /// candidate stream and sums signed distances. Those are two different
+    /// derivations of one number, and nothing but this test holds them
+    /// together.
+    ///
+    /// The box wraps the emitters and one corner of the floor, so shadow
+    /// rays that start inside it, ones that only pass through, and ones that
+    /// never meet it are all in the same image — the three cases the signed
+    /// sum's parity seed distinguishes.
+    #[test]
+    fn light_sampling_strategies_agree_across_a_bounded_volume() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let objects = [
+            Object {
+                mesh: ground_plane(4.0),
+                transform: Mat4::IDENTITY,
+                material: Material::matte(Vec3::splat(0.6), 0.0),
+                medium: None,
+            },
+            Object {
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::Y * 1.6)
+                    * Mat4::from_scale(Vec3::splat(0.5)),
+                material: Material::emitter(Vec3::splat(9.0)),
+                medium: None,
+            },
+            Object {
+                mesh: crate::scene::cube(1.0),
+                transform: Mat4::from_translation(Vec3::new(0.4, 1.2, 0.0))
+                    * Mat4::from_scale(Vec3::new(1.6, 1.2, 1.6)),
+                material: Material::matte(Vec3::ONE, 0.0),
+                // Chromatic, so a strategy that dropped a channel of the
+                // extent would show as a tint rather than a level.
+                medium: Some(crate::scene::Medium {
+                    absorption: Vec3::new(0.05, 0.02, 0.01),
+                    scattering: Vec3::new(0.10, 0.16, 0.22),
+                    anisotropy: 0.3,
+                }),
+            },
+        ];
+        let camera = Camera {
+            position: Vec3::new(0.0, 2.0, 5.0),
+            look_at: Vec3::new(0.0, 1.0, 0.0),
+            up: Vec3::Y,
+            vfov_degrees: 45.0,
+            lens: None,
+        };
+        let scene =
+            Scene::new(&gpu, &objects, camera, &Environment::constant(Vec3::ZERO)).expect("scene");
+
+        assert_strategies_agree(&gpu, &scene);
+    }
+
     /// The same agreement, with the *environment* as the only light. The
     /// synthetic sky is the CDF tables' worst
     /// case: one bright texel flanked by hard zeros over a dim base, so
@@ -1674,11 +1826,13 @@ mod tests {
                 mesh: icosphere(2),
                 transform: Mat4::from_translation(Vec3::Y),
                 material: Material::glossy(Vec3::splat(0.6), 0.4, 0.3).with_metalness(0.5),
+                medium: None,
             },
             Object {
                 mesh: ground_plane(4.0),
                 transform: Mat4::IDENTITY,
                 material: Material::glossy(Vec3::splat(0.7), 0.0, 0.2),
+                medium: None,
             },
         ];
         let camera = Camera {

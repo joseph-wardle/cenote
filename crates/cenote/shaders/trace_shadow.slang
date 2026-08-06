@@ -7,6 +7,14 @@
 // bounce round, so a pixel sees at most one shadow ray per dispatch — the
 // plain += below stays race-free, and the barriers between rounds order
 // the adds deterministically.
+//
+// Two entry points from one body, `VOLUMES` apart, because register
+// allocation is per kernel: measuring a connection's way through bounded
+// volumes costs a loop-carried extent and membership, and carrying them
+// through a scene that has no volumes — behind a uniformly-false branch,
+// never written — measured **+25% of this stage** on zero-day. Which one a
+// wave records is `has_volumes`, host-side. It is the same trade that gave
+// medium events their own stage rather than a branch in shade_surface.
 
 import pathstate;
 import scene;
@@ -19,14 +27,17 @@ struct Params {
     Queue<ShadowRay> shadows;
     float4* radiance; // the film's per-pixel accumulator for this wave
     SceneTable* scene; // materials — the opacity each crossing attenuates by
+    // The medium stack, for the volumes each connection *starts* inside.
+    // Read only by the `trace_shadow_volumes` entry point, and null for the
+    // other — a scene with interiors alone allocates a stack whose volume
+    // lanes were never seeded, so having one is not the same as having them.
+    uint4* stack;
 };
 
 [vk::push_constant]
 Params params;
 
-[shader("compute")]
-[numthreads(WORKGROUP_SIZE, 1, 1)]
-void trace_shadow(uint3 tid: SV_DispatchThreadID) {
+void traceShadow<let VOLUMES : int>(uint3 tid) {
     if (tid.x >= params.shadows.count()) {
         return;
     }
@@ -37,15 +48,16 @@ void trace_shadow(uint3 tid: SV_DispatchThreadID) {
     // attenuate connections here, once for both the surface and the volume
     // stage, and this kernel stays RNG-free. A connection aimed at the
     // environment or a distant light runs to `tmax` 1e30: infinite optical
-    // depth, and nothing arrives.
+    // depth, and nothing arrives. Bounded volumes are the traversal's to
+    // measure, below.
     //
     // TODO: a connection launched from *inside* a refractive interior takes
     // the global extinction over its whole length, including the part still
     // inside the glass. The renderer applied no extinction at all there
     // before a global medium existed, so this is not a regression — but it
-    // is wrong, and only a per-crossing extent (which bounded media carry
-    // and the depth-1 stack cannot express) fixes it. Until then, a scene
-    // with both a global medium and refractive interiors is approximate.
+    // is wrong, and only a per-crossing extent (which the interior lane, one
+    // instance wide, cannot express) fixes it. Until then, a scene with both
+    // a global medium and refractive interiors is approximate.
     var contribution = shadow.contribution;
     let global = params.scene.globalMedium;
     if (global != MEDIUM_NONE) {
@@ -70,9 +82,30 @@ void trace_shadow(uint3 tid: SV_DispatchThreadID) {
     // multiplying its transparency into the connection; the target itself
     // commits, opaque or not. The identity, opacity, and epsilon-free reasoning
     // all live in `shadowVisibility` (scene.slang).
-    let attenuation = shadowVisibility(sceneTlas, params.scene, ray,
-                                       shadow.light, shadow.primitive);
-    if (attenuation > 0.0) {
+    // An `if`, not a select: `params.stack` is null in the other
+    // specialization, and a select would have to evaluate the load.
+    var inside = uint3(STACK_EMPTY);
+    if (VOLUMES != 0) {
+        inside = insideOf(params.stack, shadow.path);
+    }
+    let attenuation = shadowVisibility<VOLUMES>(sceneTlas, params.scene, ray,
+                                                shadow.light, shadow.primitive, inside);
+    if (any(attenuation > 0.0)) {
         params.radiance[shadow.pixel] += float4(contribution * attenuation, 0.0);
     }
+}
+
+[shader("compute")]
+[numthreads(WORKGROUP_SIZE, 1, 1)]
+void trace_shadow(uint3 tid: SV_DispatchThreadID) {
+    traceShadow<0>(tid);
+}
+
+// The same stage for a scene with volume-bounding meshes: `params.stack`
+// then addresses the pool's medium stack, and every connection's way through
+// the volumes it crosses is measured and folded in.
+[shader("compute")]
+[numthreads(WORKGROUP_SIZE, 1, 1)]
+void trace_shadow_volumes(uint3 tid: SV_DispatchThreadID) {
+    traceShadow<1>(tid);
 }
