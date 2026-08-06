@@ -17,6 +17,23 @@ public static const uint BOUNDARY_OPAQUE = 0;
 public static const uint BOUNDARY_REFRACTIVE = 1;
 public static const uint BOUNDARY_NULL = 2;
 
+// `GeometryRecord.medium` for an instance whose interior is vacuum: the
+// all-ones 24-bit index, which no real record can take. Distinct from
+// pathstate's `STACK_EMPTY` despite the shared value — that one indexes
+// instances, this one indexes media.
+public static const uint MEDIUM_NONE = 0xffffff;
+
+// What fills some instance's interior. Deduplicated by value at prep, so
+// this table is a handful of records however many instances share them.
+// Mirrors `struct MediumRecord` in `scene.rs`.
+public struct MediumRecord {
+    // Absorption coefficient, per ACEScg channel, in inverse meters — the
+    // σ of Beer–Lambert, derived at prep from the material's transmission
+    // color and depth. Extinction too, until scattering media land.
+    public float3 sigmaA;
+    float pad0;
+};
+
 // Where an instance's triangles live, plus its transforms — everything
 // needed to re-evaluate shading at a Hit. Mirrors `GeometryRecord` in
 // `scene.rs` field for field.
@@ -29,8 +46,8 @@ public struct GeometryRecord {
     public float4 worldToObject[3]; // rows of its inverse — normals, error bounds
     public uint light;              // index into the light list, or LIGHT_NONE
     public uint boundary;           // BOUNDARY_* — what crossing this means
+    public uint medium;             // this interior's record, or MEDIUM_NONE
     uint pad0;
-    uint pad1;
 };
 
 // The UV at barycentrics (b1, b2) of a triangle — weights on the second
@@ -54,10 +71,11 @@ public struct SceneTable {
     public LightRecord* lights;
     public TextureParams* textureParams; // per bindless slot, same index order
     public Environment env;
+    // Last of the addresses, in what used to be trailing pad — see the
+    // Rust side for why it does not sit with its peers.
+    public MediumRecord* media;
     public uint lightCount;
     uint pad0;
-    uint pad1;
-    uint pad2;
 };
 
 // The coverage of one traversal crossing: the instance's opacity constant
@@ -74,21 +92,17 @@ public float opacityAt(SceneTable* scene, uint instance, uint primitive, float2 
     return opacity;
 }
 
-// Beer–Lambert transmittance over one path segment through an instance's
-// interior: absorption toward the medium's target color, scaled by its
-// transmission depth. A zero depth means no interior — the tint sat on the
-// interface instead — and transmits fully. Callers pass a real interior
-// (`medium != MEDIUM_NONE`); shared by `shade_surface`'s per-bounce loop and
-// the queued shadow rays.
-public float3 interiorTransmittance(SceneTable* scene, uint medium,
+// Beer–Lambert transmittance over one path segment through the interior of
+// `instance` — the instance the path is inside, which is what the medium
+// stack holds. An interior filled with vacuum (MEDIUM_NONE: the material
+// tinted its interface rather than its volume) transmits fully.
+public float3 interiorTransmittance(SceneTable* scene, uint instance,
                                     float3 from, float3 to) {
-    Material interior = scene.materials[medium];
-    if (interior.transmissionDepth > 0.0) {
-        let sigma = -log(clamp(interior.transmissionColor, 1e-4, 1.0))
-                  / interior.transmissionDepth;
-        return exp(-sigma * distance(from, to));
+    let medium = scene.geometry[instance].medium;
+    if (medium == MEDIUM_NONE) {
+        return float3(1.0);
     }
-    return float3(1.0);
+    return exp(-scene.media[medium].sigmaA * distance(from, to));
 }
 
 // Trace one next-event connection and return its visibility in [0, 1]: 0 when a

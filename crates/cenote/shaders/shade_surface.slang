@@ -89,15 +89,14 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     // xyz = the path's weight; w = the previous scatter's pdf (0: camera ray).
     var throughput = params.paths.throughput[path];
 
-    // The interior the segment crossed: Beer–Lambert absorption toward
-    // this medium's target color, folded into the throughput before
-    // anything at this vertex spends it. A zero transmission depth means
-    // no interior — the tint sat on the interface instead.
-    var medium = (interiors && bounce != 0)
-                     ? params.paths.top(path) & STACK_INDEX_MASK
-                     : MEDIUM_NONE;
-    if (medium != MEDIUM_NONE) {
-        throughput.xyz *= interiorTransmittance(params.scene, medium,
+    // The interior the segment crossed: its medium's Beer–Lambert
+    // absorption, folded into the throughput before anything at this
+    // vertex spends it.
+    var interior = (interiors && bounce != 0)
+                       ? params.paths.top(path) & STACK_INDEX_MASK
+                       : STACK_EMPTY;
+    if (interior != STACK_EMPTY) {
+        throughput.xyz *= interiorTransmittance(params.scene, interior,
                                                 origin, spawn.position);
     }
 
@@ -140,7 +139,7 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     }
     let frame = Frame(shading);
     let wo = frame.toLocal(-direction);
-    let closure = resolveClosure(material, wo, medium == hit.instance);
+    let closure = resolveClosure(material, wo, interior == hit.instance);
 
     // The denoiser guides' remaining feature throughput: fully open on a
     // camera ray (which never reads the buffer), whatever the specular
@@ -258,18 +257,18 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     }
 
     // A transmission through a closed surface crosses into (or out of) its
-    // interior; thin walls have none. Reflections keep whatever medium the
-    // path was already in. Depth 1: the innermost entry alone, the rest of
-    // the stack held empty until push/pop lands.
+    // interior; thin walls have none. Reflections keep whatever interior
+    // the path was already in. Depth 1: the innermost entry alone, the
+    // rest of the stack held empty until push/pop lands.
     if (scatter.lobe == LOBE_TRANSMISSION && material.thinWalled == 0) {
-        medium = medium == hit.instance ? MEDIUM_NONE : hit.instance;
+        interior = interior == hit.instance ? STACK_EMPTY : hit.instance;
     }
     let transmitted = scatter.wi.z < 0.0;
     params.paths.origin[path] = float4(transmitted ? spawn.below : spawn.position, 0.0);
     params.paths.direction[path] = float4(wiWorld, 0.0);
     params.paths.throughput[path] = float4(scattered, scatter.pdf);
     if (interiors) {
-        params.paths.setTop(path, medium);
+        params.paths.setTop(path, interior);
     }
     params.rays.push(path);
 

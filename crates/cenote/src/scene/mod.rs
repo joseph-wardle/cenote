@@ -32,7 +32,7 @@ mod shapes;
 
 pub use shapes::{ground_plane, icosphere};
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use ash::vk;
@@ -131,13 +131,24 @@ struct GeometryRecord {
     light: u32,
     /// What crossing this instance's surface means — see [`boundary`].
     boundary: u32,
-    _pad0: [u32; 2],
+    /// Index into the medium table of what this instance's interior is
+    /// filled with, or [`MEDIUM_NONE`] — see [`medium`].
+    medium: u32,
+    _pad0: u32,
 }
+
+const _: () = assert!(size_of::<GeometryRecord>() == 144);
 
 /// `GeometryRecord::boundary` values — the `BOUNDARY_*` constants in
 /// `shaders/scene.slang` (`BOUNDARY_NULL` arrives with authored media).
 const BOUNDARY_OPAQUE: u32 = 0;
 const BOUNDARY_REFRACTIVE: u32 = 1;
+
+/// `GeometryRecord::medium` for an instance whose interior is vacuum: the
+/// all-ones 24-bit index, which no real record can take. Matches
+/// `MEDIUM_NONE` in `shaders/scene.slang`, and is *not* the stack's
+/// `STACK_EMPTY` — that one indexes instances, this one indexes media.
+const MEDIUM_NONE: u32 = 0xff_ffff;
 
 /// What crossing this material's surface means. The single authority on
 /// interiors: it classifies every instance's boundary word *and*, through
@@ -159,6 +170,66 @@ fn has_interiors(placements: &[Placement]) -> bool {
     placements
         .iter()
         .any(|placement| boundary(&placement.material) == BOUNDARY_REFRACTIVE)
+}
+
+/// One entry of the medium table: what fills some instance's interior.
+/// Deduplicated by value, so the table is a handful of records however many
+/// instances share them, and reached through `GeometryRecord::medium`.
+/// Mirrors `struct MediumRecord` in `shaders/scene.slang`.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct MediumRecord {
+    /// Absorption coefficient, per `ACEScg` channel, in inverse meters —
+    /// the σ of Beer–Lambert. Extinction too, until scattering media land.
+    sigma_a: [f32; 3],
+    _pad0: f32,
+}
+
+const _: () = assert!(size_of::<MediumRecord>() == 16);
+
+/// What fills the interior this material closes, as an absorption
+/// coefficient — or `None` for vacuum, which is what an opaque or
+/// thin-walled surface bounds and what a zero transmission depth means (the
+/// tint sits on the interface instead, and the closure applies it).
+///
+/// Derived once here rather than at every hit, by the arithmetic and in the
+/// precision the kernel used to do it in — which held every corpus scene's
+/// image to the bit, though agreement between the host's `ln` and the
+/// device's is a measurement, not a guarantee.
+fn medium(material: &Material) -> Option<MediumRecord> {
+    if boundary(material) != BOUNDARY_REFRACTIVE || material.transmission_depth <= 0.0 {
+        return None;
+    }
+    Some(MediumRecord {
+        sigma_a: material
+            .transmission_color
+            .to_array()
+            .map(|channel| -channel.clamp(1e-4, 1.0).ln() / material.transmission_depth),
+        _pad0: 0.0,
+    })
+}
+
+/// The medium table for `materials` — one record per distinct interior,
+/// however many instances share it — and the index each material's interior
+/// takes in it, or [`MEDIUM_NONE`]. One pass: an instance must not cost the
+/// length of the table to learn what fills it.
+fn medium_table(materials: &[Material]) -> (Vec<u32>, Vec<MediumRecord>) {
+    let mut records: Vec<MediumRecord> = Vec::new();
+    let mut interned: HashMap<[u32; 3], u32> = HashMap::new();
+    let indices = materials
+        .iter()
+        .map(|material| {
+            medium(material).map_or(MEDIUM_NONE, |record| {
+                *interned
+                    .entry(record.sigma_a.map(f32::to_bits))
+                    .or_insert_with(|| {
+                        records.push(record);
+                        records.len() as u32 - 1
+                    })
+            })
+        })
+        .collect();
+    (indices, records)
 }
 
 /// Every buffer the scene shares with the kernels, one address each, plus
@@ -190,9 +261,17 @@ struct SceneTable {
     env_pdfs: vk::DeviceAddress,
     env_width: u32,
     env_height: u32,
+    /// The [`MediumRecord`] table. Last of the addresses because it lands
+    /// in what was trailing pad, where a pointer needs no realignment —
+    /// putting it with its peers would shift the float4 rows below.
+    media: vk::DeviceAddress,
     light_count: u32,
-    _pad0: [u32; 3],
+    _pad0: u32,
 }
+
+// The Slang side lays these out from its own rules, so the sizes are
+// pinned here: a mirror that drifts reads garbage rather than failing.
+const _: () = assert!(size_of::<SceneTable>() == 192);
 
 /// Sample-time parameters of one bindless texture slot: the affine UV
 /// remap and the value multiplier a [`description::TextureRef`] carries
@@ -309,6 +388,7 @@ struct ResidentTexture {
 struct ResidentBuffers {
     geometry: Buffer,
     materials: Buffer,
+    media: Buffer,
     lights: Buffer,
     /// The closure's lookup tables — uploaded once at build and never
     /// dirtied (the data is embedded in the binary).
@@ -327,25 +407,19 @@ impl ResidentBuffers {
     /// alongside. The one place both the procedural [`Scene::new`] and the
     /// description-driven [`Scene::prep`] build this set, so a new resident
     /// buffer is added here once rather than in two build paths that drift.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one argument per resident buffer, in field order — grouping them \
-                  would just restate the struct"
-    )]
     fn assemble(
         gpu: &Context,
-        geometry: Buffer,
-        materials: Buffer,
-        lights: Buffer,
+        instances: InstanceTables,
         texture_params: Buffer,
         env_marginal: Buffer,
         env_conditional: Buffer,
         env_pdfs: Buffer,
     ) -> Result<Self> {
         Ok(Self {
-            geometry,
-            materials,
-            lights,
+            geometry: instances.geometry,
+            materials: instances.materials,
+            media: instances.media,
+            lights: instances.lights,
             bsdf_tables: crate::tables::upload(gpu)?,
             texture_params,
             env_marginal,
@@ -407,8 +481,7 @@ impl Scene {
             .collect();
         let tlas = build_scene_tlas(gpu, &placements)?;
         let has_interiors = has_interiors(&placements);
-        let (geometry, materials, lights) =
-            upload_instance_tables(gpu, &placements, &triangle_lights, &[])?;
+        let instances = upload_instance_tables(gpu, &placements, &triangle_lights, &[])?;
         let GpuEnvironment {
             image,
             marginal,
@@ -418,9 +491,7 @@ impl Scene {
         } = upload_environment(gpu, environment)?;
         let resident = ResidentBuffers::assemble(
             gpu,
-            geometry,
-            materials,
-            lights,
+            instances,
             // The procedural path has no textures — the identity record
             // keeps the table address valid.
             upload_texture_params(gpu, std::iter::empty())?,
@@ -675,21 +746,38 @@ fn first_light_indices(placements: usize, triangles: &[TriangleLight]) -> Vec<u3
     first
 }
 
+/// The tables one pass over the placements produces, each its own buffer.
+struct InstanceTables {
+    geometry: Buffer,
+    materials: Buffer,
+    /// The deduplicated interiors — a handful of records, indexed by
+    /// `GeometryRecord::medium`, not by instance.
+    media: Buffer,
+    lights: Buffer,
+}
+
 /// Upload the per-instance tables: geometry records (each carrying the
-/// index of its instance's *first* light record, or [`LIGHT_NONE`]), the
-/// material array, and the light records — laid out in the contiguous
-/// primitive order `GeometryRecord.light` depends on.
+/// index of its instance's *first* light record, or [`LIGHT_NONE`], and of
+/// its interior's medium), the material array, the deduplicated medium
+/// table, and the light records — laid out in the contiguous primitive
+/// order `GeometryRecord.light` depends on.
 fn upload_instance_tables(
     gpu: &Context,
     placements: &[Placement],
     triangle_lights: &[TriangleLight],
     delta_lights: &[DeltaLight],
-) -> Result<(Buffer, Buffer, Buffer)> {
+) -> Result<InstanceTables> {
     let light_records = crate::lights::build(triangle_lights, delta_lights);
+    let materials: Vec<Material> = placements
+        .iter()
+        .map(|placement| placement.material)
+        .collect();
+    let (medium_indices, media) = medium_table(&materials);
     let records: Vec<GeometryRecord> = placements
         .iter()
         .zip(first_light_indices(placements.len(), triangle_lights))
-        .map(|(placement, light)| {
+        .zip(medium_indices)
+        .map(|((placement, light), medium)| {
             let inverse = placement.transform.inverse();
             assert!(
                 inverse.is_finite(),
@@ -705,7 +793,8 @@ fn upload_instance_tables(
                 world_to_object: transform_rows(inverse),
                 light,
                 boundary: boundary(&placement.material),
-                _pad0: [0; 2],
+                medium,
+                _pad0: 0,
             }
         })
         .collect();
@@ -723,10 +812,6 @@ fn upload_instance_tables(
         }),
         usage,
     )?;
-    let materials: Vec<Material> = placements
-        .iter()
-        .map(|placement| placement.material)
-        .collect();
     let padded_material = [Material::zeroed()];
     let materials = gpu.upload_buffer(
         "scene.materials",
@@ -734,6 +819,19 @@ fn upload_instance_tables(
             &padded_material
         } else {
             &materials
+        }),
+        usage,
+    )?;
+    // A scene with no interiors still uploads one record: the buffer must
+    // exist for the table's address, and every instance carries MEDIUM_NONE
+    // so nothing reads it.
+    let padded_medium = [MediumRecord::zeroed()];
+    let media = gpu.upload_buffer(
+        "scene.media",
+        bytemuck::cast_slice(if media.is_empty() {
+            &padded_medium
+        } else {
+            &media
         }),
         usage,
     )?;
@@ -749,7 +847,12 @@ fn upload_instance_tables(
         }),
         usage,
     )?;
-    Ok((geometry, materials, lights))
+    Ok(InstanceTables {
+        geometry,
+        materials,
+        media,
+        lights,
+    })
 }
 
 /// Upload the [`SceneTable`] — the one buffer of addresses every kernel
@@ -779,8 +882,9 @@ fn upload_scene_table(
         env_pdfs: resident.env_pdfs.device_address(),
         env_width: env_size.0,
         env_height: env_size.1,
+        media: resident.media.device_address(),
         light_count,
-        _pad0: [0; 3],
+        _pad0: 0,
     };
     let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
     gpu.upload_buffer("scene.table", bytemuck::bytes_of(&table), usage)
@@ -971,6 +1075,42 @@ mod tests {
             boundary(&Material::matte(Vec3::ONE, 0.5)),
             BOUNDARY_OPAQUE,
             "an opaque surface has no interior"
+        );
+    }
+
+    /// Bounding an interior and filling one are separate questions: the
+    /// depth-0 glass above is still a refractive boundary, but its tint
+    /// sits on the interface, so it encloses vacuum and takes no record.
+    /// Where there is a medium, the record is the σ the kernel used to
+    /// recompute at every hit.
+    #[test]
+    fn only_absorbing_interiors_take_a_medium_record() {
+        let clear = Material {
+            transmission_depth: 0.0,
+            ..Material::glass(0.1, 1.5)
+        };
+        let tinted = Material {
+            transmission_color: Vec3::new(0.25, 0.5, 1.0),
+            transmission_depth: 2.0,
+            ..clear
+        };
+        let (indices, records) = medium_table(&[
+            tinted,
+            clear,
+            tinted,
+            Material::matte(Vec3::ONE, 0.5),
+            tinted.thin_walled(),
+        ]);
+        assert_eq!(
+            indices,
+            [0, MEDIUM_NONE, 0, MEDIUM_NONE, MEDIUM_NONE],
+            "instances sharing an interior share its record"
+        );
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].sigma_a.map(f32::to_bits),
+            [0.25f32, 0.5, 1.0].map(|channel| (-channel.ln() / 2.0).to_bits()),
+            "σ = -ln(transmission color) / transmission depth, to the bit"
         );
     }
 

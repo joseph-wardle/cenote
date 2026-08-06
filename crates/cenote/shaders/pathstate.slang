@@ -31,13 +31,15 @@ public struct Hit {
 };
 
 // A medium-stack entry: an instance's TLAS custom index in the low 24
-// bits, flags above. `MEDIUM_NONE` is the all-ones index — a path
-// traveling vacuum, and an entry no instance can claim (custom indices
-// are 24 bits, and `raw_instance` in `accel.rs` asserts they stay below
-// this value). `STACK_SCATTERING` marks an entry whose medium scatters
-// (σ_s > 0), which is what routes a segment to shade_volume.
+// bits, flags above. The entry names the *instance* whose interior the
+// path travels, not what fills it — identity is what entering and exiting
+// compare, and two instances can share one medium. `STACK_EMPTY` is the
+// all-ones index — a path in open space, and an entry no instance can
+// claim (custom indices are 24 bits, and `raw_instance` in `accel.rs`
+// asserts they stay below this value). `STACK_SCATTERING` marks an entry
+// whose medium scatters (σ_s > 0), which routes a segment to shade_volume.
 public static const uint STACK_INDEX_MASK = 0xffffff;
-public static const uint MEDIUM_NONE = STACK_INDEX_MASK;
+public static const uint STACK_EMPTY = STACK_INDEX_MASK;
 public static const uint STACK_SCATTERING = 1 << 24;
 
 // Bounces before this always survive — they carry most of the image's energy,
@@ -69,10 +71,10 @@ public struct Paths {
     // interiors flag. Reach it through `top`/`setTop` rather than
     // indexing it directly — depth is 1 for now, and only the innermost
     // entry is ever written. The other three hold whatever the allocation
-    // left: push/pop has to fill them with MEDIUM_NONE before any read.
+    // left: push/pop has to fill them with STACK_EMPTY before any read.
     public uint4* stack;
 
-    // The innermost entry: the medium the ray is currently travelling,
+    // The innermost entry: the interior the ray is currently travelling,
     // set when a refraction enters a closed surface and cleared when one
     // leaves. Read at the next vertex for Beer–Lambert absorption, and by
     // intersect for STACK_SCATTERING.

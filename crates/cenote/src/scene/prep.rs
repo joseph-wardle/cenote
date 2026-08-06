@@ -120,19 +120,11 @@ impl Scene {
         let tlas = build_scene_tlas(gpu, &placements)?;
         let tabling = Instant::now();
         let has_interiors = super::has_interiors(&placements);
-        let (geometry, materials, lights) =
+        let instances =
             upload_instance_tables(gpu, &placements, &host.triangle_lights, &host.delta_lights)?;
         drop(placements);
-        let resident = ResidentBuffers::assemble(
-            gpu,
-            geometry,
-            materials,
-            lights,
-            texture_params,
-            marginal,
-            conditional,
-            pdfs,
-        )?;
+        let resident =
+            ResidentBuffers::assemble(gpu, instances, texture_params, marginal, conditional, pdfs)?;
         let env_size = (environment.width(), environment.height());
         let tinted_power = power * f64::from(crate::color::luminance(spec.tint));
         let table = upload_scene_table(
@@ -245,12 +237,13 @@ impl Scene {
         }
         let tabling = Instant::now();
         self.has_interiors = super::has_interiors(&placements);
-        let (geometry, materials, lights) =
+        let instances =
             upload_instance_tables(gpu, &placements, &host.triangle_lights, &host.delta_lights)?;
         drop(placements);
-        self.resident.geometry = geometry;
-        self.resident.materials = materials;
-        self.resident.lights = lights;
+        self.resident.geometry = instances.geometry;
+        self.resident.materials = instances.materials;
+        self.resident.media = instances.media;
+        self.resident.lights = instances.lights;
         let env_power = self.tinted_env_power();
         self.table = upload_scene_table(
             gpu,
