@@ -17,19 +17,18 @@ public static const uint BOUNDARY_OPAQUE = 0;
 public static const uint BOUNDARY_REFRACTIVE = 1;
 public static const uint BOUNDARY_NULL = 2;
 
-// `GeometryRecord.medium` for an instance whose interior is vacuum: the
-// all-ones 24-bit index, which no real record can take. Distinct from
-// pathstate's `STACK_EMPTY` despite the shared value — that one indexes
-// instances, this one indexes media.
-public static const uint MEDIUM_NONE = 0xffffff;
+// `GeometryRecord.medium` for an instance whose interior is vacuum — an
+// index no table can reach. Deliberately not pathstate's all-ones
+// `STACK_EMPTY`: media and instances are separate index spaces.
+public static const uint MEDIUM_NONE = 0xffffffff;
 
-// What fills some instance's interior. Deduplicated by value at prep, so
-// this table is a handful of records however many instances share them.
-// Mirrors `struct MediumRecord` in `scene.rs`.
+// What fills some instance's interior — one record per distinct absorption,
+// however many instances share it. Mirrors `struct MediumRecord` in
+// `scene.rs`.
 public struct MediumRecord {
     // Absorption coefficient, per ACEScg channel, in inverse meters — the
-    // σ of Beer–Lambert, derived at prep from the material's transmission
-    // color and depth. Extinction too, until scattering media land.
+    // σ of Beer–Lambert, derived at prep. Extinction too, until scattering
+    // media land.
     public float3 sigmaA;
     float pad0;
 };
@@ -64,15 +63,15 @@ public float2 interpolateUv(GeometryRecord mesh, uint primitive, float2 bary) {
 // Everything the scene shares with the kernels: buffer addresses (indexed
 // by TLAS instance custom index, except the light list), plus the embedded
 // environment light. The closure's baked tables travel as descriptors
-// instead — see `openpbr.slang`.
+// instead — see `openpbr.slang`. Field order is the contract with
+// `struct SceneTable` in `scene.rs`, which only asserts the total size:
+// reordering here moves offsets the Rust mirror will not notice.
 public struct SceneTable {
     public GeometryRecord* geometry;
     public Material* materials;
     public LightRecord* lights;
     public TextureParams* textureParams; // per bindless slot, same index order
     public Environment env;
-    // Last of the addresses, in what used to be trailing pad — see the
-    // Rust side for why it does not sit with its peers.
     public MediumRecord* media;
     public uint lightCount;
     uint pad0;
@@ -92,10 +91,10 @@ public float opacityAt(SceneTable* scene, uint instance, uint primitive, float2 
     return opacity;
 }
 
-// Beer–Lambert transmittance over one path segment through the interior of
-// `instance` — the instance the path is inside, which is what the medium
-// stack holds. An interior filled with vacuum (MEDIUM_NONE: the material
-// tinted its interface rather than its volume) transmits fully.
+// exp(-σ·d) over one path segment through the interior of `instance` — the
+// instance the path is inside, which is what the medium stack names. A
+// vacuum interior (MEDIUM_NONE: the material tinted its interface rather
+// than its volume) transmits fully.
 public float3 interiorTransmittance(SceneTable* scene, uint instance,
                                     float3 from, float3 to) {
     let medium = scene.geometry[instance].medium;

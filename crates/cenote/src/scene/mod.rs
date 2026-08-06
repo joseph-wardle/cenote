@@ -144,11 +144,12 @@ const _: () = assert!(size_of::<GeometryRecord>() == 144);
 const BOUNDARY_OPAQUE: u32 = 0;
 const BOUNDARY_REFRACTIVE: u32 = 1;
 
-/// `GeometryRecord::medium` for an instance whose interior is vacuum: the
-/// all-ones 24-bit index, which no real record can take. Matches
-/// `MEDIUM_NONE` in `shaders/scene.slang`, and is *not* the stack's
-/// `STACK_EMPTY` — that one indexes instances, this one indexes media.
-const MEDIUM_NONE: u32 = 0xff_ffff;
+/// `GeometryRecord::medium` for an instance whose interior is vacuum — an
+/// index no table can reach. Matches `MEDIUM_NONE` in `shaders/scene.slang`.
+/// Deliberately not the stack's all-ones `STACK_EMPTY`: media and instances
+/// are separate index spaces, and a shared value invites masking one with
+/// the other's bounds.
+const MEDIUM_NONE: u32 = u32::MAX;
 
 /// What crossing this material's surface means. The single authority on
 /// interiors: it classifies every instance's boundary word *and*, through
@@ -173,8 +174,6 @@ fn has_interiors(placements: &[Placement]) -> bool {
 }
 
 /// One entry of the medium table: what fills some instance's interior.
-/// Deduplicated by value, so the table is a handful of records however many
-/// instances share them, and reached through `GeometryRecord::medium`.
 /// Mirrors `struct MediumRecord` in `shaders/scene.slang`.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -188,31 +187,37 @@ struct MediumRecord {
 const _: () = assert!(size_of::<MediumRecord>() == 16);
 
 /// What fills the interior this material closes, as an absorption
-/// coefficient — or `None` for vacuum, which is what an opaque or
-/// thin-walled surface bounds and what a zero transmission depth means (the
-/// tint sits on the interface instead, and the closure applies it).
+/// coefficient — or `None` for vacuum: an opaque or thin-walled surface
+/// bounds none, and a depth of zero puts the tint on the interface, where
+/// the closure applies it instead. The depth test is written positively so
+/// that a NaN falls to vacuum, as it did on the device, rather than to a σ
+/// of NaN.
 ///
-/// Derived once here rather than at every hit, by the arithmetic and in the
-/// precision the kernel used to do it in — which held every corpus scene's
-/// image to the bit, though agreement between the host's `ln` and the
-/// device's is a measurement, not a guarantee.
+/// Not bit-identical to the per-hit form it replaces: Vulkan specifies
+/// `log` only to 2^-21 *absolute* inside [0.5, 2], which is a large
+/// *relative* error where the color is near 1 and the logarithm near 0 —
+/// up to 9e-6 on the corpus's σ. The host's correctly rounded `ln` is the
+/// accurate side of that.
 fn medium(material: &Material) -> Option<MediumRecord> {
-    if boundary(material) != BOUNDARY_REFRACTIVE || material.transmission_depth <= 0.0 {
-        return None;
-    }
-    Some(MediumRecord {
+    let depth = material.transmission_depth;
+    (boundary(material) == BOUNDARY_REFRACTIVE && depth > 0.0).then(|| MediumRecord {
         sigma_a: material
             .transmission_color
             .to_array()
-            .map(|channel| -channel.clamp(1e-4, 1.0).ln() / material.transmission_depth),
+            .map(|channel| -channel.clamp(1e-4, 1.0).ln() / depth),
         _pad0: 0.0,
     })
 }
 
 /// The medium table for `materials` — one record per distinct interior,
 /// however many instances share it — and the index each material's interior
-/// takes in it, or [`MEDIUM_NONE`]. One pass: an instance must not cost the
-/// length of the table to learn what fills it.
+/// takes in it, or [`MEDIUM_NONE`].
+///
+/// Records are keyed by the σ they compute to, not by the material that
+/// produced it: two interiors that absorb identically *are* one medium.
+/// Identity stays on the instance, which is what the stack holds and what
+/// entering and exiting compare — so this sharing can never make a path
+/// inside one instance read as leaving another.
 fn medium_table(materials: &[Material]) -> (Vec<u32>, Vec<MediumRecord>) {
     let mut records: Vec<MediumRecord> = Vec::new();
     let mut interned: HashMap<[u32; 3], u32> = HashMap::new();
@@ -261,9 +266,7 @@ struct SceneTable {
     env_pdfs: vk::DeviceAddress,
     env_width: u32,
     env_height: u32,
-    /// The [`MediumRecord`] table. Last of the addresses because it lands
-    /// in what was trailing pad, where a pointer needs no realignment —
-    /// putting it with its peers would shift the float4 rows below.
+    /// The [`MediumRecord`] table.
     media: vk::DeviceAddress,
     light_count: u32,
     _pad0: u32,
@@ -386,10 +389,9 @@ struct ResidentTexture {
 /// way but reach the kernels as descriptors. Held to keep the residency
 /// alive; replaced piecewise by prep as edits dirty them.
 struct ResidentBuffers {
-    geometry: Buffer,
-    materials: Buffer,
-    media: Buffer,
-    lights: Buffer,
+    /// Everything one pass over the placements produces, replaced as a set
+    /// — a table that outlived its instances would read stale addresses.
+    instances: InstanceTables,
     /// The closure's lookup tables — uploaded once at build and never
     /// dirtied (the data is embedded in the binary).
     bsdf_tables: BsdfTables,
@@ -416,10 +418,7 @@ impl ResidentBuffers {
         env_pdfs: Buffer,
     ) -> Result<Self> {
         Ok(Self {
-            geometry: instances.geometry,
-            materials: instances.materials,
-            media: instances.media,
-            lights: instances.lights,
+            instances,
             bsdf_tables: crate::tables::upload(gpu)?,
             texture_params,
             env_marginal,
@@ -756,6 +755,23 @@ struct InstanceTables {
     lights: Buffer,
 }
 
+/// Upload one scene table as a shader-addressable buffer. Vulkan forbids
+/// empty buffers, so an empty table uploads one zeroed record instead: it
+/// keeps the address valid, and nothing indexes it — whatever would have
+/// pointed here carries a sentinel or a count of zero.
+fn upload_table<T: Pod>(gpu: &Context, name: &str, records: &[T]) -> Result<Buffer> {
+    let padding = [T::zeroed()];
+    gpu.upload_buffer(
+        name,
+        bytemuck::cast_slice(if records.is_empty() {
+            &padding
+        } else {
+            records
+        }),
+        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+    )
+}
+
 /// Upload the per-instance tables: geometry records (each carrying the
 /// index of its instance's *first* light record, or [`LIGHT_NONE`], and of
 /// its interior's medium), the material array, the deduplicated medium
@@ -798,60 +814,11 @@ fn upload_instance_tables(
             }
         })
         .collect();
-    let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
-    // Vulkan forbids empty buffers, so an instanceless scene (nothing to
-    // hit — every ray misses the empty TLAS) uploads one zeroed record per
-    // table that the kernels can never reach.
-    let padded_record = [GeometryRecord::zeroed()];
-    let geometry = gpu.upload_buffer(
-        "scene.geometry",
-        bytemuck::cast_slice(if records.is_empty() {
-            &padded_record
-        } else {
-            &records
-        }),
-        usage,
-    )?;
-    let padded_material = [Material::zeroed()];
-    let materials = gpu.upload_buffer(
-        "scene.materials",
-        bytemuck::cast_slice(if materials.is_empty() {
-            &padded_material
-        } else {
-            &materials
-        }),
-        usage,
-    )?;
-    // A scene with no interiors still uploads one record: the buffer must
-    // exist for the table's address, and every instance carries MEDIUM_NONE
-    // so nothing reads it.
-    let padded_medium = [MediumRecord::zeroed()];
-    let media = gpu.upload_buffer(
-        "scene.media",
-        bytemuck::cast_slice(if media.is_empty() {
-            &padded_medium
-        } else {
-            &media
-        }),
-        usage,
-    )?;
-    // Vulkan forbids empty buffers, so a lightless scene uploads one
-    // zeroed record the kernels never read (the table says count 0).
-    let padded = [Zeroable::zeroed()];
-    let lights = gpu.upload_buffer(
-        "scene.lights",
-        bytemuck::cast_slice(if light_records.is_empty() {
-            &padded
-        } else {
-            &light_records
-        }),
-        usage,
-    )?;
     Ok(InstanceTables {
-        geometry,
-        materials,
-        media,
-        lights,
+        geometry: upload_table(gpu, "scene.geometry", &records)?,
+        materials: upload_table(gpu, "scene.materials", &materials)?,
+        media: upload_table(gpu, "scene.media", &media)?,
+        lights: upload_table(gpu, "scene.lights", &light_records)?,
     })
 }
 
@@ -869,9 +836,9 @@ fn upload_scene_table(
     light_count: u32,
 ) -> Result<Buffer> {
     let table = SceneTable {
-        geometry: resident.geometry.device_address(),
-        materials: resident.materials.device_address(),
-        lights: resident.lights.device_address(),
+        geometry: resident.instances.geometry.device_address(),
+        materials: resident.instances.materials.device_address(),
+        lights: resident.instances.lights.device_address(),
         texture_params: resident.texture_params.device_address(),
         env_to_world: transform_rows(env_placement.0),
         env_from_world: transform_rows(env_placement.1),
@@ -882,7 +849,7 @@ fn upload_scene_table(
         env_pdfs: resident.env_pdfs.device_address(),
         env_width: env_size.0,
         env_height: env_size.1,
-        media: resident.media.device_address(),
+        media: resident.instances.media.device_address(),
         light_count,
         _pad0: 0,
     };
@@ -1111,6 +1078,43 @@ mod tests {
             records[0].sigma_a.map(f32::to_bits),
             [0.25f32, 0.5, 1.0].map(|channel| (-channel.ln() / 2.0).to_bits()),
             "σ = -ln(transmission color) / transmission depth, to the bit"
+        );
+        assert!(
+            medium_table(&[]).1.is_empty() && medium_table(&[clear]).1.is_empty(),
+            "a scene with nothing to fill uploads no records"
+        );
+    }
+
+    /// σ is per-instance data that outlives the prep pass, so a malformed
+    /// material must resolve to vacuum here rather than to a coefficient
+    /// that poisons every hit on the instance. These are the inputs the
+    /// kernel's old `transmissionDepth > 0.0` test used to turn away.
+    #[test]
+    fn a_malformed_interior_is_vacuum() {
+        let glass = Material::glass(0.1, 1.5);
+        for depth in [f32::NAN, -1.0, -0.0] {
+            let material = Material {
+                transmission_color: Vec3::splat(0.5),
+                transmission_depth: depth,
+                ..glass
+            };
+            assert!(
+                medium(&material).is_none(),
+                "depth {depth} is not an interior"
+            );
+        }
+        // Out-of-range channels clamp exactly as the kernel's did: a hard
+        // zero would take σ to infinity, and anything above 1 would make
+        // Beer–Lambert amplify.
+        let extremes = medium(&Material {
+            transmission_color: Vec3::new(0.0, -3.0, 8.0),
+            transmission_depth: 1.0,
+            ..glass
+        })
+        .expect("a positive depth fills the interior");
+        assert_eq!(
+            extremes.sigma_a.map(f32::to_bits),
+            [1e-4f32, 1e-4, 1.0].map(|channel| (-channel.ln()).to_bits())
         );
     }
 

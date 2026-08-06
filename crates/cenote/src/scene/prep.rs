@@ -237,13 +237,9 @@ impl Scene {
         }
         let tabling = Instant::now();
         self.has_interiors = super::has_interiors(&placements);
-        let instances =
+        self.resident.instances =
             upload_instance_tables(gpu, &placements, &host.triangle_lights, &host.delta_lights)?;
         drop(placements);
-        self.resident.geometry = instances.geometry;
-        self.resident.materials = instances.materials;
-        self.resident.media = instances.media;
-        self.resident.lights = instances.lights;
         let env_power = self.tinted_env_power();
         self.table = upload_scene_table(
             gpu,
