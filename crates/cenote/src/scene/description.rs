@@ -428,18 +428,16 @@ impl Material {
     }
 }
 
-/// A homogeneous participating medium: what fills a volume, rather than
-/// what covers a surface. Named and referenced like every other object —
-/// today by `Settings::global_medium`, the atmosphere everything stands in.
-///
-/// Its own object kind rather than more `OpenPBR` material slugs: a medium
-/// is not a surface property, and the grid file a heterogeneous one will
-/// name is not a slug any surface schema will grow.
+/// A homogeneous participating medium: what fills a volume, rather than what
+/// covers a surface. Named and referenced like every other object — today by
+/// `Settings::global_medium`, the atmosphere everything stands in.
 ///
 /// Coefficients are per meter, in linear `Rec.709` like every other color
 /// constant, and convert to the working space at prep — where a saturated
-/// authored value can land slightly negative, and clamps to zero.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+/// authored value can land slightly negative, and clamps to zero. The
+/// default is vacuum, which is also what a get-or-create placeholder wants:
+/// a medium with no coefficients extinguishes nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Medium {
     /// Absorption coefficient `σ_a`: how much light the medium removes per
@@ -456,18 +454,6 @@ pub struct Medium {
     /// at prep, where the phase function stays finite.
     #[serde(default)]
     pub anisotropy: f32,
-}
-
-impl Default for Medium {
-    /// Vacuum — the get-or-create placeholder, and harmless if it survives:
-    /// a medium with no coefficients extinguishes nothing.
-    fn default() -> Self {
-        Self {
-            absorption: zero3(),
-            scattering: zero3(),
-            anisotropy: 0.0,
-        }
-    }
 }
 
 /// A delta light — zero area, so next-event estimation is its only

@@ -243,9 +243,8 @@ fn pack_shade(
 
 /// The five queues the volume kernel touches — `struct VolumeQueues` in
 /// `shaders/shade_volume.slang`. Behind a pointer rather than in the push
-/// constants: consuming one queue and feeding four is more bytes than
-/// Vulkan guarantees, and these addresses never change once the wavefront
-/// has its buffers.
+/// constants: consuming one queue and feeding four is more bytes than Vulkan
+/// guarantees.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct VolumeQueues {
@@ -406,7 +405,7 @@ struct Queues {
     /// and never before; the header slot always exists and stays zeroed.
     volume: OnceLock<Buffer>,
     /// The five queue addresses `shade_volume` works through, as one
-    /// uploaded [`VolumeQueues`] block. Built with `volume` — it holds that
+    /// uploaded [`VolumeQueues`] block. Built after `volume` — it holds that
     /// buffer's address, and every other queue is created with the
     /// wavefront, so nothing in it can later go stale.
     volume_block: OnceLock<Buffer>,
@@ -456,8 +455,9 @@ impl Queues {
     }
 
     /// Make the volume stage's residency exist: its entry buffer and the
-    /// block of addresses it reads them through, in that order. Called on
-    /// the first wave over a scene with media and never before.
+    /// block of addresses it reads them through, in that order — the block
+    /// can only be built once the buffer it points at exists. Called on the
+    /// first wave over a scene with media and never before.
     fn ensure_volume(&self, gpu: &Context, capacity: u64) -> Result<()> {
         ensure(&self.volume, gpu, "wavefront.queue.volume", capacity * 4)?;
         if self.volume_block.get().is_none() {
@@ -479,20 +479,21 @@ impl Queues {
         Ok(())
     }
 
-    fn addresses(&self, index: u64, entries: &Buffer) -> QueueAddrs {
-        QueueAddrs {
-            state: self.headers.device_address() + index * QUEUE_HEADER_SIZE,
-            entries: entries.device_address(),
-        }
-    }
-
-    /// The volume queue as kernels see it — entries address null until the
-    /// first media scene allocates them (media-free scenes never run the
-    /// code that would dereference it).
+    /// The volume queue as kernels see it. Entries address null until the
+    /// first media scene allocates them: `intersect` carries this block in
+    /// every scene's push constants, and a media-free one never runs the
+    /// branch that would dereference it.
     fn volume_addresses(&self) -> QueueAddrs {
         QueueAddrs {
             state: self.headers.device_address() + queue::VOLUME * QUEUE_HEADER_SIZE,
             entries: self.volume.get().map_or(0, Buffer::device_address),
+        }
+    }
+
+    fn addresses(&self, index: u64, entries: &Buffer) -> QueueAddrs {
+        QueueAddrs {
+            state: self.headers.device_address() + index * QUEUE_HEADER_SIZE,
+            entries: entries.device_address(),
         }
     }
 }
@@ -810,6 +811,8 @@ impl Wavefront {
             .collect();
         let interiors = scene.has_interiors();
         let media = scene.has_media();
+        // Coincident while a global medium is the only kind that can be
+        // authored: every medium event is then an open-space one.
         let global = scene.has_global_medium();
         let intersect = |bounce: u32| IntersectParams {
             paths: self.paths.addresses(),
@@ -857,27 +860,40 @@ impl Wavefront {
                     packed: pack_shade(bounce, self.max_bounces, self.light_sampling, interiors),
                 })
                 .collect(),
-            shade_volume: (0..bounces)
-                .map(|bounce| ShadeVolumeParams {
-                    paths: self.paths.addresses(),
-                    queues: self
-                        .queues
-                        .volume_block
-                        .get()
-                        .map_or(0, Buffer::device_address),
-                    scene: scene.table().device_address(),
-                    radiance: radiance.device_address(),
-                    aov: aov_table.device_address(),
-                    sample_index: sample,
-                    packed: pack_shade(bounce, self.max_bounces, self.light_sampling, interiors),
-                })
-                .collect(),
+            shade_volume: self.volume_params(scene, radiance, aov_table, sample, interiors),
             trace_shadow: TraceShadowParams {
                 shadows: self.queues.addresses(queue::SHADOW, &self.queues.shadow),
                 radiance: radiance.device_address(),
                 scene: scene.table().device_address(),
             },
         }
+    }
+
+    /// The volume stage's push constants, one per bounce — or none at all,
+    /// which is what a media-free scene gets: `ensure` never built the block
+    /// of queue addresses they would point at, and no pass will read them.
+    fn volume_params(
+        &self,
+        scene: &Scene,
+        radiance: &Buffer,
+        aov_table: &Buffer,
+        sample: u32,
+        interiors: bool,
+    ) -> Vec<ShadeVolumeParams> {
+        let Some(block) = self.queues.volume_block.get() else {
+            return Vec::new();
+        };
+        (0..self.max_bounces)
+            .map(|bounce| ShadeVolumeParams {
+                paths: self.paths.addresses(),
+                queues: block.device_address(),
+                scene: scene.table().device_address(),
+                radiance: radiance.device_address(),
+                aov: aov_table.device_address(),
+                sample_index: sample,
+                packed: pack_shade(bounce, self.max_bounces, self.light_sampling, interiors),
+            })
+            .collect()
     }
 
     fn record_wave<'a>(
@@ -1016,8 +1032,8 @@ struct WaveParams {
     shade_miss: ShadeMissParams,
     /// One instance per recorded bounce; its length is the wave's bounce count.
     shade_surface: Vec<ShadeSurfaceParams>,
-    /// One instance per recorded bounce, like `shade_surface`; empty of
-    /// meaning in a media-free scene, where no pass reads it.
+    /// One instance per recorded bounce, like `shade_surface` — and empty in
+    /// a media-free scene, which records no volume pass to read them.
     shade_volume: Vec<ShadeVolumeParams>,
     trace_shadow: TraceShadowParams,
 }
@@ -1576,12 +1592,21 @@ mod tests {
     }
 
     /// The same agreement at a *medium* vertex. A scattering atmosphere
-    /// around a lone emitter: next-event estimation from inside the fog
-    /// draws through the phase function and takes the connection's
-    /// transmittance analytically, while phase sampling reaches the same
-    /// emitter through the distance estimator. The two densities are
-    /// computed in different places by different code, and the pair biases
-    /// silently if they disagree — this is what makes them one claim.
+    /// around the emitters: next-event estimation from inside the fog draws
+    /// through the phase function and takes the connection's transmittance
+    /// analytically, while phase sampling reaches the same emitter through
+    /// the distance estimator. The two densities are computed in different
+    /// places by different code, and the pair biases silently if they
+    /// disagree — this is what makes them one claim.
+    ///
+    /// The scene is built to hold `drawLight` (nee.slang) level with the
+    /// surface path's inline copy of the same composition, which is
+    /// deliberately duplicated for speed. *Two* emitters of different power,
+    /// so a drift in how the category leftover remaps onto the alias walk
+    /// misweights one against the other; and a dim environment, so the
+    /// category split and the `1 − envProb` scale on the list's pdf are both
+    /// live. The environment contributes nothing through an unbounded medium
+    /// — it is here for the density it changes, not the light it adds.
     #[test]
     fn light_sampling_strategies_agree_inside_a_medium() {
         let Some(gpu) = crate::gpu::test_context() else {
@@ -1599,6 +1624,12 @@ mod tests {
                     * Mat4::from_scale(Vec3::splat(0.6)),
                 material: Material::emitter(Vec3::splat(8.0)),
             },
+            Object {
+                mesh: icosphere(2),
+                transform: Mat4::from_translation(Vec3::new(-1.6, 1.0, 0.8))
+                    * Mat4::from_scale(Vec3::splat(0.3)),
+                material: Material::emitter(Vec3::splat(1.5)),
+            },
         ];
         let camera = Camera {
             position: Vec3::new(0.0, 2.0, 5.0),
@@ -1613,7 +1644,7 @@ mod tests {
             &gpu,
             &objects,
             camera,
-            &Environment::constant(Vec3::ZERO),
+            &Environment::constant(Vec3::splat(0.02)),
             Some(crate::scene::Medium {
                 absorption: Vec3::splat(0.01),
                 scattering: Vec3::splat(0.06),
@@ -1682,7 +1713,10 @@ mod tests {
     /// its per-texel coverage stochastically in traversal while shadow
     /// rays attenuate deterministically — same map, two policies, and any
     /// disagreement between them biases the NEE modes away from
-    /// BSDF-only. Black sky, so the textured emitter is the only light.
+    /// BSDF-only. Black sky, so the textured emitter is the only light — and
+    /// a thin haze fills the room, so some of the vertices drawing that map
+    /// are medium vertices, reaching it through `drawLight`'s separate copy
+    /// of the light-category composition rather than `sampleNee`'s.
     #[test]
     #[expect(
         clippy::too_many_lines,
@@ -1691,7 +1725,8 @@ mod tests {
     )]
     fn light_sampling_strategies_agree_on_textured_lights_and_opacity() {
         use crate::scene::changeset::{
-            CameraPatch, ChangeSet, InstancePatch, MaterialPatch, MeshPatch, Op, SettingsPatch,
+            CameraPatch, ChangeSet, InstancePatch, MaterialPatch, MediumPatch, MeshPatch, Op,
+            SettingsPatch,
         };
         use crate::scene::description::{
             MeshSource, SceneDescription, Texturable, TextureRef, Transform,
@@ -1735,7 +1770,19 @@ mod tests {
         description
             .apply(&ChangeSet {
                 ops: vec![
-                    Op::Settings(SettingsPatch::new("main")),
+                    Op::Settings(SettingsPatch {
+                        global_medium: Some(Some("haze".into())),
+                        ..SettingsPatch::new("main")
+                    }),
+                    // A thin haze, so some vertices are medium vertices: the
+                    // emitter's map has to read the same from a phase-function
+                    // draw as from a BSDF one, and `drawLight` evaluates it in
+                    // its own copy of the composition.
+                    Op::Medium(MediumPatch {
+                        scattering: Some([0.02; 3]),
+                        anisotropy: Some(0.2),
+                        ..MediumPatch::new("haze")
+                    }),
                     Op::Camera(CameraPatch {
                         position: Some([0.0, 2.5, 6.0]),
                         look_at: Some([0.0, 1.0, 0.0]),

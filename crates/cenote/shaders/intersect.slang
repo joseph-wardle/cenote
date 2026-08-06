@@ -21,11 +21,10 @@ RaytracingAccelerationStructure sceneTlas;
 // depth cap.
 static const uint TRANSPARENT_CAP = 8;
 
-// Flags in `Params.packed`. MEDIA clear, the route below is one uniform
-// never-taken branch and this kernel reads neither the medium stack nor the
-// boundary word. INTERIORS says the stack was allocated at all; GLOBAL says
-// the open space between instances is filled, which makes every segment
-// outside an interior a medium event.
+// Flags in `Params.packed`. MEDIA clear, the routing below is one uniform
+// never-taken branch reading neither the medium stack nor the boundary
+// word. INTERIORS says the stack was allocated at all; GLOBAL says the open
+// space between instances is filled.
 static const uint FLAG_MEDIA = 1 << 16;
 static const uint FLAG_INTERIORS = 1 << 17;
 static const uint FLAG_GLOBAL = 1 << 18;
@@ -48,13 +47,13 @@ struct Params {
 Params params;
 
 // Did the arriving segment travel through a medium with an event to sample?
-// The stack's innermost entry names the interior the path is inside;
-// STACK_EMPTY is open space, which a global medium fills. Bounce 0 starts in
-// open space, so its stack entry is unwritten. Callers guard on FLAG_MEDIA —
-// without it neither the stack nor the flags below mean anything.
+// Open space has one when a global medium fills it; an interior has one when
+// its medium scatters. A purely absorbing interior does not: its Beer–Lambert
+// factor is closed-form, and shade_surface folds it as it always has.
+// Callers guard on FLAG_MEDIA — without it neither the stack nor the flags
+// mean anything.
 bool travelledMedium(Paths paths, uint path, uint bounce, uint packed) {
-    let interiors = (packed & FLAG_INTERIORS) != 0;
-    let entry = interiors && bounce != 0 ? paths.top(path) : STACK_EMPTY;
+    let entry = paths.arriving(path, bounce, (packed & FLAG_INTERIORS) != 0);
     return entry == STACK_EMPTY ? (packed & FLAG_GLOBAL) != 0
                                 : (entry & STACK_SCATTERING) != 0;
 }
@@ -116,6 +115,7 @@ void intersect(uint3 tid: SV_DispatchThreadID) {
                     || travelledMedium(params.paths, path, bounce, params.packed);
         }
         if (event) {
+            params.paths.setSegment(path, query.CommittedRayT());
             params.volumes.push(path);
         } else {
             params.hits.push(path);
@@ -123,7 +123,7 @@ void intersect(uint3 tid: SV_DispatchThreadID) {
     } else if (media && travelledMedium(params.paths, path, bounce, params.packed)) {
         // Nothing stopped the segment, but a medium still fills it. The
         // sentinel is what tells the volume stage the rest of this record
-        // holds nothing to read.
+        // holds nothing to read — and that the segment has no far end.
         Hit hit;
         hit.instance = INSTANCE_NONE;
         hit.primitive = 0;

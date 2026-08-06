@@ -58,7 +58,16 @@ public static const uint ROULETTE_START = 3;
 
 // The SoA path pool: one pointer per logical field, indexed by path slot.
 public struct Paths {
-    public float4* origin; // xyz = ray origin
+    // xyz = ray origin; w = how far the arriving segment ran, written by
+    // intersect for the paths it routes to shade_volume and read there —
+    // the tracer already has the distance, and recomputing the surface
+    // point to recover it costs a geometry record and three vertex fetches
+    // per volume path. Worth 16.8% of shade_volume and 2.4% of the frame on
+    // a hazy sanmiguel; on a fog-filled cornell box, whose geometry never
+    // leaves L2, the same trade measured slightly negative. It also drops
+    // the spawn-point epsilon out of the transport, since this is the true
+    // ray t. Dead in every other stage: raygen and both scatters write 0.
+    public float4* origin;
     // xyz = unit ray direction; w = the ray's cosine against the camera
     // forward axis, written by raygen and read once at the first hit —
     // hit distance × w is the camera-plane z the depth AOV records, with
@@ -67,7 +76,7 @@ public struct Paths {
     // against.
     public float4* direction;
     public uint* pixel; // the film pixel this path contributes to
-    public Hit* hit; // written by intersect, read by shade_surface
+    public Hit* hit; // written by intersect, read by both shading stages
     // xyz = the path's accumulated weight; w = the solid-angle pdf of the
     // scatter that produced this ray, which the next vertex's emission
     // needs for MIS (0 on camera rays: no light-sampling strategy competed).
@@ -93,6 +102,23 @@ public struct Paths {
     // camera ray starts in vacuum and raygen leaves the entry unwritten.
     public uint top(uint path) { return ((uint*)stack)[path * 4]; }
     public void setTop(uint path, uint entry) { stack[path].x = entry; }
+
+    // The interior the arriving segment travelled, or `STACK_EMPTY` for
+    // open space — the question intersect and shade_volume both ask (and
+    // shade_surface spells out again, for a reason recorded there).
+    // `interiors` is the kernel's flag: a scene without them never
+    // allocated the buffer. Bounce 0 must not read it either — a camera ray
+    // starts in vacuum and raygen leaves the entry unwritten.
+    public uint arriving(uint path, uint bounce, bool interiors) {
+        return interiors && bounce != 0 ? top(path) : STACK_EMPTY;
+    }
+
+    // The segment length lane of `origin` — see the field above. A one-lane
+    // store, like `setTop`: the pool is residency-bound, and a full float4
+    // store measured +2.9% frame on glass-of-water.
+    public void setSegment(uint path, float length) {
+        ((float*)origin)[path * 4 + 3] = length;
+    }
 };
 
 // The wave's AOV targets, one indirection behind the shading kernels'

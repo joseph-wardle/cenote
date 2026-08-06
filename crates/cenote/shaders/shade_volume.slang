@@ -20,16 +20,15 @@ import nee;
 import pathstate;
 import rng;
 import scene;
-import surface;
 
 // Bit 24 of `Params.packed`, as in shade_surface: the scene has closed
 // transmissive surfaces, so the medium stack exists.
 static const uint FLAG_INTERIORS = 1 << 24;
 
-// The five queues this stage touches, behind one pointer: it consumes one
-// and feeds four, which together are more push-constant bytes than Vulkan
-// guarantees. Their addresses are fixed for the wavefront's lifetime, so the
-// block is written once — unlike the per-bounce scalars below.
+// The five queues this stage touches, behind one pointer: consuming one and
+// feeding four is more push-constant bytes than Vulkan guarantees. Their
+// addresses are fixed for the wavefront's lifetime, so the block is written
+// once — unlike the per-bounce scalars below.
 struct VolumeQueues {
     Queue<uint> volumes;      // this stage's input, pushed by intersect
     Queue<uint> hits;         // segments that reached a surface
@@ -65,26 +64,21 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
     let interiors = (params.packed & FLAG_INTERIORS) != 0;
     uint path = params.queues.volumes.entries[tid.x];
     uint pixel = params.paths.pixel[path];
-    Hit hit = params.paths.hit[path];
+    let instance = params.paths.hit[path].instance;
     let direction4 = params.paths.direction[path];
     let direction = direction4.xyz;
-    let origin = params.paths.origin[path].xyz;
+    let origin4 = params.paths.origin[path];
+    let origin = origin4.xyz;
     var throughput = params.paths.throughput[path];
 
-    // How far the segment runs. The surface point is recomputed rather than
-    // carried from intersect: a distance in the hit record would cost every
-    // scene 8 bytes of path state, and the pool is residency-bound.
-    var tmax = 1e30;
-    if (hit.instance != INSTANCE_NONE) {
-        let mesh = params.scene.geometry[hit.instance];
-        tmax = distance(origin, spawnPoint(mesh, hit, direction).position);
-    }
+    // How far the segment runs: intersect parked it in origin's w lane, and
+    // the sentinel says there is no far end.
+    let tmax = instance == INSTANCE_NONE ? 1e30 : origin4.w;
 
     // What fills the segment: the interior on the path's stack, or — in
     // open space — the global medium. Intersect routes a path here only
     // when one of the two does.
-    let entry = interiors && bounce != 0 ? params.paths.top(path) & STACK_INDEX_MASK
-                                         : STACK_EMPTY;
+    let entry = params.paths.arriving(path, bounce, interiors) & STACK_INDEX_MASK;
     let record = params.scene.media[entry == STACK_EMPTY
                                         ? params.scene.globalMedium
                                         : params.scene.geometry[entry].medium];
@@ -97,11 +91,11 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
     if (!event.scattered) {
         // The segment reached its far end: whatever intersect found shades
         // as ever, carrying the medium's transmittance. Origin and the
-        // previous scatter's pdf are left alone — the vertex those describe
-        // is the one before this segment, which is still where the next
-        // stage's MIS weight is measured from.
+        // previous scatter's pdf are left alone — they describe the vertex
+        // before this segment, which is still where the next stage's MIS
+        // weight is measured from.
         params.paths.throughput[path] = throughput;
-        if (hit.instance == INSTANCE_NONE) {
+        if (instance == INSTANCE_NONE) {
             params.queues.misses.push(path);
         } else {
             params.queues.hits.push(path);
@@ -139,8 +133,8 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
     }
 
     // Next-event estimation from inside the medium, drawn and weighted by
-    // the shared `sampleNeeVolume` (nee.slang). The connection's own
-    // transmittance is trace_shadow's to apply.
+    // `sampleNeeVolume` (nee.slang); the connection's own transmittance is
+    // trace_shadow's to apply.
     let wo = -direction;
     if (lightSampling != LIGHT_SAMPLING_BSDF
         && (params.scene.lightCount > 0 || params.scene.env.selectProb > 0.0)) {
@@ -167,8 +161,8 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
     }
 
     // Turn through the phase function. HG samples its own density exactly,
-    // so the estimator's f/pdf is 1 and the throughput carries only what
-    // the distance sample cost it.
+    // so f/pdf is 1 and the throughput carries only what the distance
+    // sample cost it.
     let uPhase = sample_2d(pixel, params.sampleIndex,
                            bounceDimension(bounce, BSDF_DIR));
     let scatter = samplePhase(record.g, wo, uPhase);

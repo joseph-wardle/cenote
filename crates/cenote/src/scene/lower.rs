@@ -58,7 +58,7 @@ pub(super) struct HostScene {
     /// view back to the authored pose.
     pub(super) camera: Option<Camera>,
     /// What fills the open space between instances, or `None` for vacuum.
-    /// Lowered on every pass: it is three numbers, and it lives in the
+    /// Lowered on every pass: it is seven numbers, and it lives in the
     /// medium table, which rebuilds wholesale on any edit anyway.
     pub(super) global_medium: Option<super::Medium>,
     /// The TLAS must rebuild. Set by a mesh, instance, *or* material edit —
@@ -660,7 +660,7 @@ fn environment_spec(
 
 /// Resolve and lower the medium a description's settings name as the
 /// atmosphere. The reference is validated at apply, but `replace` swaps a
-/// whole description in without one — so it is checked here, where every
+/// whole description in without one — so it is checked here too, where every
 /// other failure on user data is caught.
 fn global_medium(
     description: &SceneDescription,
@@ -679,12 +679,10 @@ fn global_medium(
 /// Lower one description medium into the renderer's coefficients.
 ///
 /// The coefficients convert to the working space like every other authored
-/// color, and clamp at zero on the far side: the `Rec.709` → `ACEScg`
-/// matrix has negative entries, so a saturated authored coefficient can
-/// land below zero — which would be a medium that *amplifies*, and one
-/// path's runaway throughput reaches the whole image through next-event
-/// estimation. Anisotropy clamps inside (−1, 1), where the phase function's
-/// closed form stays finite.
+/// color, and clamp at zero on the far side: the `Rec.709` → `ACEScg` matrix
+/// has negative entries, so a saturated authored coefficient can land below
+/// zero — which would be a medium that *amplifies*, and one path's runaway
+/// throughput reaches the whole image through next-event estimation.
 fn lower_medium(name: &str, medium: &description::Medium) -> super::Medium {
     let convert = |what: &str, authored: [f32; 3]| {
         let converted = crate::color::acescg_from_rec709(Vec3::from(authored));
@@ -696,19 +694,17 @@ fn lower_medium(name: &str, medium: &description::Medium) -> super::Medium {
         }
         converted.max(Vec3::ZERO)
     };
-    let anisotropy = medium
-        .anisotropy
-        .clamp(-super::MAX_ANISOTROPY, super::MAX_ANISOTROPY);
     if !(-super::MAX_ANISOTROPY..=super::MAX_ANISOTROPY).contains(&medium.anisotropy) {
         log::warn!(
-            "medium \"{name}\": anisotropy {} clamped to {anisotropy}",
-            medium.anisotropy
+            "medium \"{name}\": anisotropy {} will clamp to ±{}",
+            medium.anisotropy,
+            super::MAX_ANISOTROPY
         );
     }
     let lowered = super::Medium {
         absorption: convert("absorption", medium.absorption),
         scattering: convert("scattering", medium.scattering),
-        anisotropy,
+        anisotropy: medium.anisotropy,
     };
     if lowered.scattering == Vec3::ZERO && lowered.absorption != Vec3::ZERO {
         log::warn!(

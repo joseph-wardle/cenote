@@ -28,13 +28,14 @@ public static const uint MEDIUM_NONE = 0xffffffff;
 public struct MediumRecord {
     // Extinction σ_t = σ_a + σ_s, per ACEScg channel, in inverse meters:
     // the σ of Beer–Lambert, and the density distance sampling draws
-    // against. Derived at prep.
+    // against. Derived at prep — storing σ_t rather than σ_a is what keeps
+    // a purely absorbing interior's value bit-for-bit what it always was.
     public float3 sigmaT;
     // Henyey–Greenstein anisotropy, in (−1, 1); 0 is isotropic.
     public float g;
-    // Scattering σ_s, the part of the extinction that redirects rather
-    // than removes. Zero is a purely absorbing medium, which has no event
-    // to sample and so never routes a path to the volume stage.
+    // Scattering σ_s, the part of the extinction that redirects rather than
+    // removes. Zero is a purely absorbing medium: no event to sample, so
+    // intersect never routes a path to the volume stage.
     public float3 sigmaS;
     float pad0;
 };
@@ -81,9 +82,9 @@ public struct SceneTable {
     public MediumRecord* media;
     public uint lightCount;
     // What fills the open space between instances, or MEDIUM_NONE for
-    // vacuum. Unbounded, so a segment that reaches no surface has infinite
-    // optical depth through it: with a global medium the environment and
-    // the distant lights are unreachable by construction.
+    // vacuum. Unbounded, so a segment that reaches no surface crosses
+    // infinite optical depth in every channel that extinguishes at all: the
+    // environment and the distant lights are unreachable through one.
     public uint globalMedium;
 };
 

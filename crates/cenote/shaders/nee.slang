@@ -4,17 +4,15 @@
 // density a connection is drawn with and the weight it is combined with can
 // never drift apart into a silent bias.
 //
-// Two kinds of vertex draw connections — a surface, through its BSDF, and a
-// scattering point inside a medium, through its phase function. Four things
-// must read the same in both, or the pair biases silently: where `uLight`
-// splits the environment from the list, how the leftover remaps onto the
-// alias walk, the factor the chosen category's pdf is scaled by, and the
-// textured emitter's radiance. `drawLight` below is that composition, and
-// `sampleNee` spells it out again rather than calling it — routing the
-// surface path through the shared draw joins two specialized branches into
-// one, and the shading kernel measured 4–7% slower for it on every driver
-// scene. The two spellings sit adjacent so a change to either shows the
-// other in the same diff.
+// A surface vertex draws through its BSDF and a medium vertex through its
+// phase function, and the two spell the category choice out separately:
+// routing the surface through `drawLight` joins two specialized branches
+// into one and measured 4–7% slower on the shading kernel. The duplication
+// is held level by test, not by care — the MIS-agreement tests in
+// wavefront.rs render a medium vertex against an environment, two emitters
+// of different power, and a textured emitter, so a drift in either
+// spelling's category split, alias remap, pdf scale, or emitter radiance
+// shows up as a disagreement rather than a silent bias.
 
 import lights;
 import medium;

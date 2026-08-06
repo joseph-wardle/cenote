@@ -753,6 +753,80 @@ fn the_volumetric_furnace_closes() {
     }
 }
 
+/// A channel that does not extinguish reaches the sky through an unbounded
+/// medium, at full strength, while the channels that do reach nothing.
+///
+/// This is the one way a path can survive a global medium without hitting
+/// anything, and so the only route that exercises the volume stage's *miss*
+/// branch: a channel with `σ_t` = 0 draws an infinite distance, runs past
+/// `tmax`, and comes back as pure transmittance. It is also the sharpest
+/// test of the mixture density — the surviving channel's sample carries
+/// weight 3 (one draw in three picks it), and a density taken from the
+/// picked channel alone rather than the mixture would land it at 1.
+#[test]
+fn a_transparent_channel_reaches_the_environment() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let sky = 0.75;
+    let scene = Scene::new_in_medium(
+        &gpu,
+        // A scene needs an object; this one sits behind the camera, so
+        // every ray traced below sees only sky.
+        &[Object {
+            mesh: crate::scene::icosphere(1),
+            transform: Mat4::from_translation(Vec3::Z * 20.0),
+            material: Material::matte(Vec3::splat(0.5), 0.0),
+        }],
+        Camera {
+            position: Vec3::ZERO,
+            look_at: Vec3::NEG_Z,
+            up: Vec3::Y,
+            vfov_degrees: 40.0,
+            lens: None,
+        },
+        &Environment::constant(Vec3::splat(sky)),
+        Some(crate::scene::Medium {
+            // Red passes, green and blue extinguish. Absorption only: a
+            // scattering channel would turn paths back rather than end them.
+            absorption: Vec3::new(0.0, 0.5, 0.5),
+            scattering: Vec3::ZERO,
+            anisotropy: 0.0,
+        }),
+    )
+    .expect("scene");
+
+    let (size, samples) = (16, 512);
+    let sum = bsdf_only_sum(&gpu, &scene, size, samples);
+    let count = f64::from(samples * size * size);
+    let mean = |channel: usize| {
+        sum.chunks_exact(4)
+            .map(|pixel| f64::from(pixel[channel]))
+            .sum::<f64>()
+            / count
+    };
+    let red = mean(0);
+    assert!(
+        (red - f64::from(sky)).abs() / f64::from(sky) < 0.02,
+        "the transparent channel should read the sky exactly: {red} vs {sky}"
+    );
+    for channel in 1..3 {
+        // Radiance sums non-negative terms, so this is exactly zero.
+        assert!(
+            mean(channel) <= 0.0,
+            "an infinitely deep channel must arrive at exactly zero, got {}",
+            mean(channel)
+        );
+    }
+    for chunk in sum.chunks_exact(4) {
+        assert!(
+            (chunk[3] - samples as f32).abs() < 1e-3,
+            "every path must finish exactly once, got alpha {}",
+            chunk[3]
+        );
+    }
+}
+
 /// Beer–Lambert absorption, pinned per channel: a glass sphere whose
 /// interior reaches (0.4, 1, 1) after one radius of travel absorbs
 /// red only — the green channel must still close its furnace exactly

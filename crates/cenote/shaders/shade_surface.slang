@@ -90,8 +90,10 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     var throughput = params.paths.throughput[path];
 
     // The interior the segment crossed: its medium's Beer–Lambert
-    // absorption, folded into the throughput before anything at this
-    // vertex spends it.
+    // absorption, folded into the throughput before anything at this vertex
+    // spends it. `Paths::arriving` spelled out — this one is a `var` the
+    // scatter below reassigns, and routing it through the shared getter
+    // moved this kernel's codegen for no gain.
     var interior = (interiors && bounce != 0)
                        ? params.paths.top(path) & STACK_INDEX_MASK
                        : STACK_EMPTY;

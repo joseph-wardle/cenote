@@ -173,9 +173,7 @@ fn has_interiors(placements: &[Placement]) -> bool {
 }
 
 /// A homogeneous medium as the renderer holds it: coefficients per `ACEScg`
-/// channel in inverse meters, and the phase function's anisotropy. Both
-/// authoring routes — a description [`Medium`](description::Medium) object
-/// and a transmissive material's interior — lower to this.
+/// channel in inverse meters, and the phase function's anisotropy.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Medium {
     /// Absorption `σ_a`: the part of the extinction that removes light.
@@ -184,8 +182,8 @@ pub struct Medium {
     /// absorption, which has no event to sample.
     pub scattering: Vec3,
     /// Henyey–Greenstein anisotropy; 0 is isotropic, positive leans
-    /// forward. Clamped inside (−1, 1), where the phase function's closed
-    /// form is finite.
+    /// forward. Clamped to [`MAX_ANISOTROPY`] on its way into the table —
+    /// the one place it can reach a shader.
     pub anisotropy: f32,
 }
 
@@ -208,7 +206,9 @@ const _: () = assert!(size_of::<MediumRecord>() == 32);
 
 /// How far `g` may reach: at ±1 the Henyey–Greenstein denominator vanishes
 /// and both the phase value and its sampled direction go non-finite.
-const MAX_ANISOTROPY: f32 = 0.99;
+/// Enforced here, at the table, so no other construction path can bypass it;
+/// lowering only warns that it happened.
+pub(super) const MAX_ANISOTROPY: f32 = 0.99;
 
 impl From<Medium> for MediumRecord {
     fn from(medium: Medium) -> Self {
@@ -250,14 +250,13 @@ fn medium(material: &Material) -> Option<MediumRecord> {
 /// each material's interior takes in it and the index of the global medium
 /// (both [`MEDIUM_NONE`] where there is none).
 ///
-/// Records are keyed by the coefficients they compute to — by their bits,
-/// so ±0 key apart — not by what produced them: two interiors that
-/// extinguish identically *are* one medium, and so is a global medium that
-/// matches one. The keying is conservative in the safe direction, duplicating
-/// a record where it could have shared. Identity stays on the
-/// instance, which is what the stack holds and what entering and exiting
-/// compare — so this sharing can never make a path inside one instance read
-/// as leaving another.
+/// Records are keyed by the coefficients they compute to — by their bits, so
+/// ±0 key apart, conservative in the safe direction — not by what produced
+/// them: two interiors that extinguish identically *are* one medium, and so
+/// is a global medium that matches one. Identity stays on the instance,
+/// which is what the stack holds and what entering and exiting compare, so
+/// this sharing can never make a path inside one instance read as leaving
+/// another.
 fn medium_table(
     materials: &[Material],
     global: Option<Medium>,
@@ -622,7 +621,9 @@ impl Scene {
     }
 
     /// Whether the open space between instances is filled — the flag
-    /// intersect routes every segment outside an interior on.
+    /// intersect routes every segment outside an interior on. Coincides with
+    /// [`Scene::has_media`] while a global medium is the only kind that can
+    /// be authored; the two answer different questions.
     #[must_use]
     pub fn has_global_medium(&self) -> bool {
         self.resident.instances.global_medium != MEDIUM_NONE

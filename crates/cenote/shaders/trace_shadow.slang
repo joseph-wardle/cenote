@@ -38,6 +38,14 @@ void trace_shadow(uint3 tid: SV_DispatchThreadID) {
     // stage, and this kernel stays RNG-free. A connection aimed at the
     // environment or a distant light runs to `tmax` 1e30: infinite optical
     // depth, and nothing arrives.
+    //
+    // TODO: a connection launched from *inside* a refractive interior takes
+    // the global extinction over its whole length, including the part still
+    // inside the glass. The renderer applied no extinction at all there
+    // before a global medium existed, so this is not a regression — but it
+    // is wrong, and only a per-crossing extent (which bounded media carry
+    // and the depth-1 stack cannot express) fixes it. Until then, a scene
+    // with both a global medium and refractive interiors is approximate.
     var contribution = shadow.contribution;
     let global = params.scene.globalMedium;
     if (global != MEDIUM_NONE) {
