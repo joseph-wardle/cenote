@@ -154,18 +154,14 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
         // terminal alpha.
         //
         // What the march may cross is `crossable`: a volume's boundary, or
-        // a refractive interface a higher-priority interior cuts away —
-        // a false interface being nothing more than a null boundary decided
-        // per path instead of per instance. One exception, and it applies to
-        // the false kind only: a crossing with no slot to go to is *not*
-        // crossed, it is shaded. Dropping it would leave the set claiming
-        // the path is outside a solid it is physically inside, and the far
-        // face would then read as an entry — a phantom that outlives the
-        // real dominant and takes over `interiorOf`. Shading instead
-        // degrades an overflowing scene smoothly back to no-priority, which
-        // is what `shade_surface` already does at `crossing.slot`. A
-        // dropped *null* boundary keeps marching, as it always has: too
-        // little fog beats a wall that is not there.
+        // an interface the dominant interior cuts away. One exception, for
+        // the false kind only: a crossing with no free slot is shaded, not
+        // crossed — dropping it would leave the set denying a solid the
+        // path is physically inside, and the far face would read as an
+        // entry that outlives the real dominant. Shading walks an
+        // overflowing scene back toward no-priority instead. A dropped
+        // *null* crossing keeps marching, as it always has: too little fog
+        // beats a wall that is not there.
         var toggled = Crossing(set, MEDIUM_SLOTS);
         var cross = false;
         if (hit.instance != INSTANCE_NONE) {
@@ -203,11 +199,14 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
         // have crossed instead of stopping at them, so a pathological stack
         // of shells reads as too little fog rather than as a wall that is
         // not there. It also ends the loop — the hit it commits cannot be
-        // one of them. The dominant interior is invariant across every
-        // crossing the march makes (a false one is strictly below it, a
-        // null one is not an interior at all), so reading it after the
-        // crossing is reading it before.
+        // one of them.
         let exhausted = crossed >= NULL_CROSSING_CAP;
+        // The dominant interior is invariant across every crossing the
+        // march makes — a false one is strictly below it, a null one is no
+        // interior at all — so reading it here is reading it at entry.
+        // Recomputed per use rather than hoisted above the loop: the hoist
+        // measured shade_volume +2.4% on an L2-resident fog scene, the
+        // march being register-bound while three maxes are free.
         let interior = interiorOf(set);
         RayDesc ray;
         ray.Origin = origin;

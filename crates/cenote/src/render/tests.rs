@@ -1041,8 +1041,9 @@ fn an_interior_inside_a_higher_priority_one_is_not_there() {
         assert_ne!(
             render(&[block(0), sphere(0)]),
             alone,
-            "at equal priority the sphere is two real interfaces, so this \
-             comparison proves nothing ({bounces} bounces)"
+            "equal priorities must leave the sphere's interfaces real — \
+             matching the block alone means the equality above has no power \
+             ({bounces} bounces)"
         );
     }
 }

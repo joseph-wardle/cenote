@@ -43,21 +43,18 @@ public static const uint INSTANCE_NONE = 0xffffffff;
 // compare, and two instances can share one medium. `STACK_EMPTY` is the
 // all-ones index — a slot no instance can claim (custom indices are 24
 // bits, and `raw_instance` in `accel.rs` asserts they stay below this
-// value). `STACK_SCATTERING` marks an entry whose medium scatters
-// (σ_s > 0), which routes a segment to shade_volume. `STACK_INTERIOR`
-// marks a refractive interior, which *displaces* what surrounds it, as
-// against a null-bounded volume, which *adds* to it (see `combineMedia`).
-// `STACK_PRIORITY` is the nesting priority of an interior, in bits 25–30
-// — directly under `STACK_INTERIOR` so that the same `max` that finds an
-// interior at all ranks interiors against each other by priority, at no
-// cost.
+// value). `STACK_INTERIOR` marks a refractive interior, which *displaces*
+// what surrounds it, as against a null-bounded volume, which *adds* to it
+// (see `combineMedia`). `STACK_PRIORITY` is an interior's nesting
+// priority, directly under `STACK_INTERIOR` so the one `max` in
+// `interiorOf` finds the dominant interior and ranks interiors against
+// each other at once. Bit 24 is free.
 //
 // Built by `stackEntry` in scene.slang, which is where an instance's
 // boundary word lives — the flags are insertion's to set, and this module
 // only ever matches on the index.
 public static const uint STACK_INDEX_MASK = 0xffffff;
 public static const uint STACK_EMPTY = STACK_INDEX_MASK;
-public static const uint STACK_SCATTERING = 1 << 24;
 public static const uint STACK_PRIORITY_SHIFT = 25;
 public static const uint STACK_PRIORITY = 63 << STACK_PRIORITY_SHIFT;
 public static const uint STACK_INTERIOR = 1 << 31;

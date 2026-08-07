@@ -232,22 +232,22 @@ fn has_volumes(placements: &[Placement]) -> bool {
 }
 
 /// Medium-set entry bits, mirroring `STACK_*` in `shaders/pathstate.slang`
-/// — where this side puts a priority inside [`GeometryRecord::boundary`],
-/// so the shader lifts it into an entry without shifting anything.
+/// — [`boundary_word`] bakes them into [`GeometryRecord::boundary`], so
+/// the shader's `stackEntry` lifts them into an entry without shifting
+/// anything.
 const STACK_PRIORITY_SHIFT: u32 = 25;
 const STACK_INTERIOR: u32 = 1 << 31;
 
 /// How far a nesting priority may reach: the six bits the medium-set entry
-/// has room for, between the scattering flag at 24 and `STACK_INTERIOR` at
-/// 31 — which is what lets one `max` rank the whole set by priority. Held
-/// here, at the table, so no construction path can bypass it; the same
-/// place [`MAX_ANISOTROPY`] is held.
+/// has room for, directly under `STACK_INTERIOR` — which is what lets one
+/// `max` rank the whole set by priority. Held here, at the table, so no
+/// construction path can bypass it; the same place [`MAX_ANISOTROPY`] is
+/// held.
 const MAX_PRIORITY: u32 = 63;
 
 /// A placement's interior priority as the tables carry it. Zero on
-/// anything but a refractive boundary: a volume's boundary is displaced by
-/// any interior whatever its number, and an opaque one has no interface to
-/// cut away — so carrying a number there could only make [`has_priority`]
+/// anything but a refractive boundary — only a refractive interface can be
+/// cut away, so a number anywhere else could only make [`has_priority`]
 /// disagree with what a shader can act on.
 fn interior_priority(placement: &Placement) -> u32 {
     if placement_boundary(placement) != BOUNDARY_REFRACTIVE {
@@ -263,19 +263,25 @@ fn interior_priority(placement: &Placement) -> u32 {
     placement.priority.min(MAX_PRIORITY)
 }
 
-/// [`GeometryRecord::boundary`]: the class in the low byte, the nesting
-/// priority already sitting in the bits the medium-set entry reserves for
-/// it. Packed because `stackEntry` on the shader side wants both and would
-/// otherwise pay a second scalar load for six bits.
+/// [`GeometryRecord::boundary`]: the `BOUNDARY_*` class in the low byte
+/// and, on a refractive boundary, the medium-set entry's flag bits above
+/// it — `STACK_INTERIOR` and the nesting priority — pre-baked so the
+/// shader's `stackEntry` is one load and one OR. Packed into one word
+/// because a second field would be a second scalar load per crossing.
 fn boundary_word(placement: &Placement) -> u32 {
-    placement_boundary(placement) | (interior_priority(placement) << STACK_PRIORITY_SHIFT)
+    let class = placement_boundary(placement);
+    let flags = if class == BOUNDARY_REFRACTIVE {
+        STACK_INTERIOR | interior_priority(placement) << STACK_PRIORITY_SHIFT
+    } else {
+        0
+    };
+    class | flags
 }
 
 /// Whether any placement authors a priority the kernels can act on — see
-/// [`Scene::has_priority`]. Defined through [`interior_priority`] so that
-/// `has_priority` implies [`has_interiors`] by construction: 8d-0's lesson
-/// was that a flag which can disagree with the buffer it gates is a null
-/// dereference waiting to be found.
+/// [`Scene::has_priority`]. Defined through [`interior_priority`], so
+/// `has_priority` implies [`has_interiors`] by construction and can never
+/// gate a read of a buffer that was not allocated.
 ///
 /// All-zero priorities are never *strictly* less than one another, so a
 /// scene that authors none can never suppress an interface — which is why

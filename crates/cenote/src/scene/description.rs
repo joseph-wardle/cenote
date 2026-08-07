@@ -323,9 +323,9 @@ pub struct Instance {
     /// It lives on the instance, not the material, because two things
     /// wearing one glass routinely need different priorities (the ice
     /// cubes and the tumbler), and because `OpenPBR` has no priority
-    /// parameter for it to be a slug of. Authored the way Karma asks:
-    /// model at render scale and overlap *generously* — surfaces that
-    /// merely touch fall foul of the same coincidence limit volumes do.
+    /// parameter for it to be a slug of. Overlap *generously* — surfaces
+    /// that merely touch fall foul of the same coincidence limit volumes
+    /// do.
     ///
     /// Only refractive surfaces have it; a volume's boundary or an opaque
     /// one carries it harmlessly and nothing reads it.

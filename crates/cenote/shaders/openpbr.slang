@@ -345,17 +345,13 @@ float average(float3 v) {
     return (v.x + v.y + v.z) / 3.0;
 }
 
-// The IOR a dielectric interface actually refracts at, from the base IOR
-// reaching it and the `specular_weight` that remaps it: the weight scales
-// F0, and refraction has to follow the modulated ratio, so a surface at
-// weight 0 has no interface at all and reading its authored IOR would
-// invent one. η = 1 is degenerate — no reflection, an undefined refraction
-// half-vector — and is held just off unity instead.
-//
-// Shared, because the same question gets asked from the outside: when a
-// path is inside one solid and hits another, `shade_surface` reads the
-// surrounding material's η through here to hand `resolveClosure` a real
-// `exteriorIor`. The coat is deliberately not part of it — see the caller.
+// The IOR a dielectric interface actually refracts at: `specular_weight`
+// scales F0, and refraction has to follow the modulated ratio — a surface
+// at weight 0 has no interface at all, and reading its authored IOR would
+// invent one. η = 1 is degenerate (no reflection, an undefined refraction
+// half-vector) and is held just off unity. `shade_surface` also asks this
+// of the material *around* a hit, to hand `resolveClosure` its
+// `exteriorIor`; the coat is deliberately not part of it — see the caller.
 public float remapEta(float ior, float specularWeight) {
     let etaS = max(ior, 1e-4);
     let f0 = (etaS - 1.0) * (etaS - 1.0) / ((etaS + 1.0) * (etaS + 1.0));
@@ -460,13 +456,12 @@ public Closure resolveClosure(Material m, float3 wo, bool exiting,
     let f0 = (etaS - 1.0) * (etaS - 1.0) / ((etaS + 1.0) * (etaS + 1.0));
     let eta = remapEta(etaS, m.specularWeight);
     var relative = exiting ? exteriorIor / eta : eta / exteriorIor;
-    // Two nested solids of the same glass are one solid: the interface
-    // between them has a relative IOR of exactly 1, where reflection
-    // vanishes and the refraction half-vector is undefined. Only a real
-    // exterior can put the *ratio* back on unity — `remapEta` already held
-    // each side off it alone — and asking again where there is none would
-    // move materials whose own η sits just inside 1 ± 1e-3, which is where
-    // an unweighted specular interface lands.
+    // Two nested solids of the same glass are one solid: their interface's
+    // relative IOR is exactly 1, where reflection vanishes and the
+    // refraction half-vector is undefined. Only a real exterior can put
+    // the *ratio* back on unity — `remapEta` already held each side off it
+    // alone, and re-clamping against a vacuum exterior would move
+    // materials whose own η sits just inside 1 ± 1e-3.
     if (exteriorIor != 1.0 && abs(relative - 1.0) < 1e-3) {
         relative = relative < 1.0 ? 1.0 - 1e-3 : 1.0 + 1e-3;
     }

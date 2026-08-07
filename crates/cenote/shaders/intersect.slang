@@ -46,19 +46,15 @@ struct Params {
 Params params;
 
 // Does the volume stage owe the arriving segment anything? A refractive
-// interior displaces whatever surrounds it and none of them scatters yet,
-// so a path inside one owes nothing: its Beer–Lambert factor is
-// closed-form, and shade_surface folds it as it always has. Otherwise any
-// volume the path is inside owes one — even a purely absorbing volume,
-// since nothing else can apply its extinction — and so does a filled open
-// space. Callers guard on FLAG_MEDIA, without which neither the stack nor
-// the flags mean anything, and hand in the dominant interior they already
-// need for the routing test below.
+// interior displaces whatever surrounds it and does not scatter — its
+// Beer–Lambert factor is shade_surface's closed form — so a path inside
+// one owes nothing. Otherwise any volume the path is inside owes an event,
+// even a purely absorbing one (nothing else can apply its extinction), and
+// so does a filled open space. Callers guard on FLAG_MEDIA and hand in the
+// dominant interior they already need for the routing test below.
 bool travelledMedium(uint4 set, uint interior, uint packed) {
-    if (interior != STACK_EMPTY) {
-        return (interior & STACK_SCATTERING) != 0;
-    }
-    return any(set != STACK_EMPTY) || (packed & FLAG_GLOBAL) != 0;
+    return interior == STACK_EMPTY
+        && (any(set != STACK_EMPTY) || (packed & FLAG_GLOBAL) != 0);
 }
 
 [shader("compute")]
@@ -112,17 +108,12 @@ void intersect(uint3 tid: SV_DispatchThreadID) {
         params.paths.setMedia(path, uint4(STACK_EMPTY));
     }
     // What the set has to say about this segment: whether the volume stage
-    // owes it an event, and which interior — if any — the path is inside,
-    // which is what decides whether the hit below is a real interface or
-    // one priority cuts away. Asked once, and only where an answer can be
-    // anything but no.
-    //
-    // The set is read under that guard and not merely under `live`: a
-    // scene can carry a set with nothing to ask of it (glass, no media, no
-    // priority), and reading it there anyway measured +4…6% of this kernel
-    // and +1.0…1.2% of the frame on glass-of-water and spaceship. Whatever
-    // else comes to ask the set a question widens this guard rather than
-    // removing it — which is exactly what priority did.
+    // owes it an event, and which interior — if any — the path is inside.
+    // Asked once, and only where an answer can be anything but no: reading
+    // the set under `live` alone — a scene can carry a set with nothing to
+    // ask of it — measured +4…6% of this kernel on glass-of-water and
+    // spaceship. Whatever else comes to ask the set a question widens this
+    // guard rather than removing it.
     let media = (params.packed & FLAG_MEDIA) != 0;
     var owed = false;
     var interior = STACK_EMPTY;
@@ -138,16 +129,12 @@ void intersect(uint3 tid: SV_DispatchThreadID) {
         hit.primitive = query.CommittedPrimitiveIndex();
         hit.barycentrics = query.CommittedTriangleBarycentrics();
         params.paths.hit[path] = hit;
-        // A hit reached through a medium, or one that stopped at a
-        // boundary the path crosses rather than shades — a volume's, or an
-        // interface a higher-priority interior cuts away — owes the volume
-        // stage a visit before, or instead of, shading. Every other hit
-        // shades as ever.
-        //
-        // The `interior` clause is what keeps a priority-only scene from
-        // loading a geometry record for every hit: no interior, nothing to
-        // be lower-priority than. A scene with media loads it as it always
-        // did, and one with neither short-circuits both away.
+        // A hit reached through a medium, or one the path crosses rather
+        // than shades — a volume's boundary, or an interface the dominant
+        // interior cuts away — owes the volume stage a visit before, or
+        // instead of, shading. The `interior` clause keeps a priority-only
+        // scene from loading a geometry record for every hit: no interior,
+        // nothing to be lower-priority than.
         let event = (media || interior != STACK_EMPTY)
                     && (owed
                         || crossable(params.scene.geometry[hit.instance], interior));

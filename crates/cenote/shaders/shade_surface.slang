@@ -98,28 +98,19 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     let set = params.paths.media(path, interiors);
     let dominant = interiorOf(set);
     let interior = dominant & STACK_INDEX_MASK;
-    // What stands on the far side of this interface. A path inside one
-    // solid that reaches another refracts across the *ratio* of the two,
-    // not against vacuum — a drink's glass/water interface is 1.5/1.33,
-    // not 1.5/1. That exterior is the dominant interior of the set with
-    // this hit excluded, which covers both directions in one rule: a hit
-    // that leaves an interior is in the set and a hit that enters one is
-    // not, so excluding it names what is left over either way. Excluding
-    // it can only change the answer when the hit *is* the dominant, which
-    // is the one case worth a second pass over the set.
+    // What stands on the far side of this interface: the dominant interior
+    // of the set with this hit excluded — a hit that leaves an interior is
+    // in the set and one that enters is not, so the exclusion names the
+    // exterior either way, and it can only change the answer when the hit
+    // *is* the dominant. A path inside one solid that reaches another then
+    // refracts across the ratio of the two, not against vacuum.
     //
-    // All of it nested under the transmittance's own guard, and not for
-    // tidiness: an exterior can only exist where a dominant does, and
-    // asking at the top level instead — where this kernel's register
-    // allocation is already at the edge B7 found it — measured
-    // `shade_surface` +22% on zero-day, a scene that never nests and never
-    // takes the branch at all. Under the guard, and with the second pass
-    // skipped, the whole thing measures inside the noise band.
-    //
-    // The surrounding material is read raw rather than through
-    // `resolveMaterial`: neither `specular_ior` nor `specular_weight` is
-    // texturable, so the record already holds what that side refracts at —
-    // and this hit's UV would be the wrong one to ask with anyway.
+    // Everything here stays nested under the transmittance's guard: the
+    // same material load at the top level — on a branch media-free scenes
+    // never take — measured `shade_surface` +22% on zero-day. And the
+    // surrounding material is read raw, not through `resolveMaterial`:
+    // neither `specular_ior` nor `specular_weight` is texturable, and this
+    // hit's UV would be the wrong one to ask with anyway.
     var exteriorIor = 1.0;
     if (interior != STACK_EMPTY) {
         throughput.xyz *= interiorTransmittance(params.scene, interior,
