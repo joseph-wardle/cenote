@@ -96,10 +96,45 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     // it a second time for the scatter below measured worse than the four
     // registers it costs to keep.
     let set = params.paths.media(path, interiors);
-    let interior = interiorOf(set) & STACK_INDEX_MASK;
+    let dominant = interiorOf(set);
+    let interior = dominant & STACK_INDEX_MASK;
+    // What stands on the far side of this interface. A path inside one
+    // solid that reaches another refracts across the *ratio* of the two,
+    // not against vacuum — a drink's glass/water interface is 1.5/1.33,
+    // not 1.5/1. That exterior is the dominant interior of the set with
+    // this hit excluded, which covers both directions in one rule: a hit
+    // that leaves an interior is in the set and a hit that enters one is
+    // not, so excluding it names what is left over either way. Excluding
+    // it can only change the answer when the hit *is* the dominant, which
+    // is the one case worth a second pass over the set.
+    //
+    // All of it nested under the transmittance's own guard, and not for
+    // tidiness: an exterior can only exist where a dominant does, and
+    // asking at the top level instead — where this kernel's register
+    // allocation is already at the edge B7 found it — measured
+    // `shade_surface` +22% on zero-day, a scene that never nests and never
+    // takes the branch at all. Under the guard, and with the second pass
+    // skipped, the whole thing measures inside the noise band.
+    //
+    // The surrounding material is read raw rather than through
+    // `resolveMaterial`: neither `specular_ior` nor `specular_weight` is
+    // texturable, so the record already holds what that side refracts at —
+    // and this hit's UV would be the wrong one to ask with anyway.
+    var exteriorIor = 1.0;
     if (interior != STACK_EMPTY) {
         throughput.xyz *= interiorTransmittance(params.scene, interior,
                                                 origin, spawn.position);
+        var outer = dominant;
+        if (interior == hit.instance) {
+            // Whole-word compare: entries name distinct instances, so this
+            // clears the dominant's lane and no other. `STACK_EMPTY` has
+            // bit 31 clear and can never win the max that follows.
+            outer = interiorOf(select(set == uint4(dominant), uint4(STACK_EMPTY), set));
+        }
+        if (outer != STACK_EMPTY) {
+            let around = params.scene.materials[outer & STACK_INDEX_MASK];
+            exteriorIor = remapEta(around.specularIor, around.specularWeight);
+        }
     }
 
     // Emission. This hit is the BSDF strategy's way of reaching a light,
@@ -144,7 +179,8 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     // `exiting` is a membership question, not a dominance one: this hit
     // leaves the interior it bounds if the path is inside that instance,
     // whatever else the path is also inside.
-    let closure = resolveClosure(material, wo, insideMedium(set, hit.instance));
+    let closure = resolveClosure(material, wo, insideMedium(set, hit.instance),
+                                 exteriorIor);
 
     // The denoiser guides' remaining feature throughput: fully open on a
     // camera ray (which never reads the buffer), whatever the specular

@@ -345,6 +345,29 @@ float average(float3 v) {
     return (v.x + v.y + v.z) / 3.0;
 }
 
+// The IOR a dielectric interface actually refracts at, from the base IOR
+// reaching it and the `specular_weight` that remaps it: the weight scales
+// F0, and refraction has to follow the modulated ratio, so a surface at
+// weight 0 has no interface at all and reading its authored IOR would
+// invent one. η = 1 is degenerate — no reflection, an undefined refraction
+// half-vector — and is held just off unity instead.
+//
+// Shared, because the same question gets asked from the outside: when a
+// path is inside one solid and hits another, `shade_surface` reads the
+// surrounding material's η through here to hand `resolveClosure` a real
+// `exteriorIor`. The coat is deliberately not part of it — see the caller.
+public float remapEta(float ior, float specularWeight) {
+    let etaS = max(ior, 1e-4);
+    let f0 = (etaS - 1.0) * (etaS - 1.0) / ((etaS + 1.0) * (etaS + 1.0));
+    let weight = clamp(specularWeight, 0.0, f0 > 1e-6 ? 1.0 / f0 : 0.0);
+    let epsilon = sign(etaS - 1.0) * sqrt(weight * f0);
+    let eta = (1.0 + epsilon) / max(1e-3, 1.0 - epsilon);
+    if (abs(eta - 1.0) < 1e-3) {
+        return eta < 1.0 ? 1.0 - 1e-3 : 1.0 + 1e-3;
+    }
+    return eta;
+}
+
 // A reflection lobe's Fresnel-free energy, (E, E_avg), from the tables.
 // Lobes differing only in Fresnel share one fetch. E is floored off zero:
 // the scale below divides by it.
@@ -399,9 +422,10 @@ float3 coatDarkening(Material m, float rough, float mu, float baseFresnel) {
 // kernel knows from its medium stack): the closure degrades to the bare
 // dielectric interface at the inverted IOR — coat, fuzz, and base live
 // on the outside. `exteriorIor` is the IOR of the medium on the other
-// side of this boundary; the relative IOR is the ratio across it. Vacuum
-// until nested media hand a real exterior down, and `x / 1.0` is exact in
-// IEEE-754, so the default changes no image.
+// side of this boundary — `remapEta` of the material around it, which
+// `shade_surface` reads off the medium set; the relative IOR is the ratio
+// across it. Vacuum where nothing surrounds this hit, and `x / 1.0` is
+// exact in IEEE-754, so an unnested scene renders exactly as it did.
 public Closure resolveClosure(Material m, float3 wo, bool exiting,
                               float exteriorIor = 1.0) {
     Closure c;
@@ -426,23 +450,27 @@ public Closure resolveClosure(Material m, float3 wo, bool exiting,
 
     // The base IOR: refracted by the coat above it (with the spec's
     // total-internal-reflection fix — the boundary ratio inverted to stay
-    // above 1), then remapped by specular_weight, which scales F0 and
-    // keeps refraction consistent with the modulated ratio.
+    // above 1), then remapped by specular_weight (`remapEta`). f0 is the
+    // pre-remap normal-incidence reflectance the coat darkening below wants.
     var etaS = max(m.specularIor, 1e-4);
     if (m.coatWeight > 0.0 && !exiting) {
         let etaBc = m.coatIor > etaS ? m.coatIor / etaS : etaS / m.coatIor;
         etaS = lerp(etaS, etaBc, m.coatWeight);
     }
     let f0 = (etaS - 1.0) * (etaS - 1.0) / ((etaS + 1.0) * (etaS + 1.0));
-    let weight = clamp(m.specularWeight, 0.0, f0 > 1e-6 ? 1.0 / f0 : 0.0);
-    let epsilon = sign(etaS - 1.0) * sqrt(weight * f0);
-    var eta = (1.0 + epsilon) / max(1e-3, 1.0 - epsilon);
-    // η = 1 is a degenerate interface (no reflection, an undefined
-    // refraction half-vector); hold it just off unity instead.
-    if (abs(eta - 1.0) < 1e-3) {
-        eta = eta < 1.0 ? 1.0 - 1e-3 : 1.0 + 1e-3;
+    let eta = remapEta(etaS, m.specularWeight);
+    var relative = exiting ? exteriorIor / eta : eta / exteriorIor;
+    // Two nested solids of the same glass are one solid: the interface
+    // between them has a relative IOR of exactly 1, where reflection
+    // vanishes and the refraction half-vector is undefined. Only a real
+    // exterior can put the *ratio* back on unity — `remapEta` already held
+    // each side off it alone — and asking again where there is none would
+    // move materials whose own η sits just inside 1 ± 1e-3, which is where
+    // an unweighted specular interface lands.
+    if (exteriorIor != 1.0 && abs(relative - 1.0) < 1e-3) {
+        relative = relative < 1.0 ? 1.0 - 1e-3 : 1.0 + 1e-3;
     }
-    c.eta = exiting ? exteriorIor / eta : eta / exteriorIor;
+    c.eta = relative;
 
     // Fuzz at wo. The published fit skips cells whose reflectance is
     // ~zero (A = 0 there), so a degenerate read means "no fuzz lobe

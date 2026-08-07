@@ -900,6 +900,66 @@ fn a_nested_interior_gives_the_path_back_to_the_one_around_it() {
     );
 }
 
+/// Two nested solids of the same glass are one solid. The interface between
+/// them has a relative IOR of exactly 1 — there is no boundary there in any
+/// physical sense — so putting a second box inside the first must change
+/// nothing about what reaches the camera.
+///
+/// This is what a closure that always refracts against *vacuum* cannot do:
+/// with a one-deep interior the exterior was always empty and 1.0 was right,
+/// but once interiors nest, the inner box's two faces refract at 1.5 and
+/// 1/1.5 against air that is not there, taking a Fresnel share off each.
+/// Full specular weight, so the authored IOR reaches the interface
+/// unremapped.
+///
+/// The glass has to *absorb* for the difference to be visible at all: under
+/// a uniform sky a lossless dielectric is a furnace, and light turned back
+/// by a spurious interface returns exactly what it would have delivered
+/// anyway. With absorption the two are no longer interchangeable — a path
+/// reflected at the inner face escapes through one meter of glass instead of
+/// four, and arrives far *brighter* than the one that went through. That
+/// puts the box inside 3.5% over the box alone before this was fixed, and
+/// 0.06% after — the bar sits between them.
+#[test]
+fn nested_solids_of_one_glass_have_no_interface_between_them() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let sky = 0.75;
+    let glass = Material {
+        transmission_color: Vec3::splat(0.6),
+        transmission_depth: 1.0,
+        ..Material::glass(0.0, 1.5)
+    };
+    let box_of = |half: f32| Object {
+        mesh: crate::scene::cube(half),
+        transform: Mat4::from_translation(Vec3::Z * -6.0),
+        material: glass,
+        medium: None,
+    };
+    let camera = Camera {
+        position: Vec3::ZERO,
+        look_at: Vec3::NEG_Z,
+        up: Vec3::Y,
+        vfov_degrees: 1.0,
+        lens: None,
+    };
+    let sky_image = Environment::constant(Vec3::splat(sky));
+    let (size, samples) = (16, 1024);
+    let mean_of = |objects: &[Object]| {
+        let scene = Scene::new(&gpu, objects, camera, &sky_image).expect("scene");
+        let sum = bsdf_only_sum(&gpu, &scene, size, samples);
+        let count = f64::from(samples * size * size);
+        sum.chunks_exact(4).map(|p| f64::from(p[0])).sum::<f64>() / count
+    };
+    let alone = mean_of(&[box_of(2.0)]);
+    let nested = mean_of(&[box_of(2.0), box_of(1.0)]);
+    assert!(
+        (nested - alone).abs() / alone < 0.005,
+        "a box inside a box of the same glass: {nested} vs {alone} for the box alone"
+    );
+}
+
 /// Nesting, to the depth the stack holds and then past it. Three concentric
 /// boxes are three simultaneous memberships, and their extinctions still sum
 /// to the closed form; nine are more crossings than the march will make and
