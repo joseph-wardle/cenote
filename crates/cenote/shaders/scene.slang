@@ -138,11 +138,8 @@ public float3 extinctionOf(SceneTable* scene, uint instance) {
 // epsilon — the ray's `tmax` is bounded to the target (see `ShadowRay` in
 // pathstate.slang). Used by `trace_shadow`, for the queued next-event rays.
 //
-// `VOLUMES` is a specialization, not a flag: a scene with no volume-bounding
-// mesh compiles a copy with none of the machinery below, because leaving it
-// in behind a uniformly-false branch measured **+22% of this stage** on
-// zero-day — the loop-carried extent and membership are registers whether or
-// not they are ever written, and this kernel traverses.
+// `VOLUMES` is a specialization, not a flag — the reason is in
+// trace_shadow.slang, where the two entry points that instantiate it live.
 //
 // `inside` names the volumes the connection *starts* in. Volume extents are
 // measured, not marched: for one volume the optical depth over [0, tmax] is
@@ -155,6 +152,12 @@ public float3 extinctionOf(SceneTable* scene, uint instance) {
 // overlapping volumes were defined to *add*, since an ordered walk is the one
 // thing `Proceed()` cannot give. Membership at the far end is the same
 // order-free question, answered by parity.
+//
+// The price of unordered is cancellation: a thickness reaches this sum as
+// the difference of two distances measured from the connection's origin, so
+// a shell thin against its own range loses that difference to float32, and
+// at 1e-7 of it there is nothing left. Marching would subtract adjacent
+// crossings instead, which is the one thing this pass cannot do.
 public float3 shadowVisibility<let VOLUMES : int>(
     RaytracingAccelerationStructure tlas, SceneTable* scene, RayDesc ray,
     uint light, uint primitive, uint3 inside) {

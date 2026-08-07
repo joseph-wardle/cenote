@@ -324,11 +324,10 @@ struct TraceShadowParams {
     radiance: vk::DeviceAddress,
     /// Device address of the scene table — opacity attenuates connections.
     scene: vk::DeviceAddress,
-    /// The medium stack, for the volumes each connection starts inside —
-    /// null unless the scene has volume-bounding meshes, which is how this
-    /// stage knows there are none. A scene with interiors alone allocates a
-    /// stack whose volume lanes were never seeded, so the address is the
-    /// flag rather than the buffer.
+    /// The medium stack, for the volumes each connection starts inside.
+    /// Null unless the scene has volume-bounding meshes: a scene with
+    /// interiors alone allocates a stack whose volume lanes were never
+    /// seeded, so having one is not the same as having them.
     stack: vk::DeviceAddress,
 }
 
@@ -1126,12 +1125,11 @@ mod tests {
 
     /// The medium stack is residency a scene has to earn: a wave over
     /// opaque geometry must never allocate it, and one over glass or one
-    /// over a fog box must — the two halves of the stack are earned
-    /// separately, by different scene features, and either one alone pays
-    /// for the whole 16 bytes. The null address the first case leaves in
-    /// every kernel's push constants is only safe because no kernel
-    /// dereferences it, so this also stands in for "media-free scenes touch
-    /// no medium state".
+    /// over a fog box must — the two halves are earned separately, by
+    /// different scene features, and either alone pays for all 16 bytes.
+    /// The null address the first case leaves in every kernel's push
+    /// constants is only safe because no kernel dereferences it, so this
+    /// also stands in for "media-free scenes touch no medium state".
     #[test]
     fn either_half_of_the_medium_stack_earns_the_allocation() {
         let Some(gpu) = crate::gpu::test_context() else {

@@ -767,7 +767,11 @@ fn the_volumetric_furnace_closes() {
 /// the sky beyond arrives through vacuum. The two-box case pins the rule
 /// that makes overlap order-free: where they intersect the path is inside
 /// both, and their extinctions *add*, so the answer is the same product
-/// whether the boxes overlap, touch, or stand apart.
+/// whether the boxes overlap, touch, or stand apart. The four disjoint
+/// boxes pin the two things a chain of crossings can get wrong: a slot
+/// freed on the way out has to be usable on the way into the next box, and
+/// the eighth crossing is the last one `NULL_CROSSING_CAP` models — one off
+/// either way and the fourth box goes missing.
 ///
 /// A one-degree field keeps every ray within half a degree of the axis, so
 /// the slant a wide frame would add to each crossing stays under 4e-5 of the
@@ -808,6 +812,13 @@ fn bounded_volumes_absorb_over_exactly_the_extent_they_bound() {
             "two overlapping boxes",
             vec![fog(-5.0, absorbing(1.0)), fog(-6.0, absorbing(2.0))],
             2.0f32.mul_add(2.0, 2.0),
+        ),
+        (
+            "four boxes in a row",
+            (0..4u8)
+                .map(|n| fog(3.0f32.mul_add(-f32::from(n), -5.0), absorbing(1.0)))
+                .collect(),
+            8.0,
         ),
     ] {
         let scene = Scene::new(&gpu, &objects, camera, &sky_image).expect("scene");

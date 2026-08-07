@@ -28,19 +28,18 @@ public MediumRecord combineMedia(SceneTable* scene, uint interior, uint3 inside)
     }
     // A mixture's true phase function is the σ_s-weighted average of its
     // components', which one Henyey–Greenstein lobe cannot be; its
-    // anisotropy is that average instead. Exact wherever a single component
+    // anisotropy is that average instead — `total.g` carries the weighted
+    // sum until the division below. Exact wherever a single component
     // scatters, which is every case but two scattering volumes overlapping.
-    var anisotropy = 0.0;
     var weight = 0.0;
-    // The last pass is the open space the volumes stand in, which adds the
-    // same way they do.
     for (uint slot = 0; slot <= VOLUME_SLOTS; slot++) {
-        var index = scene.globalMedium;
-        if (slot < VOLUME_SLOTS) {
-            index = inside[slot] == STACK_EMPTY
-                        ? MEDIUM_NONE
-                        : scene.geometry[inside[slot]].medium;
-        }
+        // Slots first, then the open space they stand in, which adds the
+        // same way they do.
+        let index = slot < VOLUME_SLOTS
+                        ? (inside[slot] == STACK_EMPTY
+                               ? MEDIUM_NONE
+                               : scene.geometry[inside[slot]].medium)
+                        : scene.globalMedium;
         if (index == MEDIUM_NONE) {
             continue;
         }
@@ -48,10 +47,10 @@ public MediumRecord combineMedia(SceneTable* scene, uint interior, uint3 inside)
         total.sigmaT += record.sigmaT;
         total.sigmaS += record.sigmaS;
         let scattering = record.sigmaS.x + record.sigmaS.y + record.sigmaS.z;
-        anisotropy += scattering * record.g;
+        total.g += scattering * record.g;
         weight += scattering;
     }
-    total.g = weight > 0.0 ? anisotropy / weight : 0.0;
+    total.g = weight > 0.0 ? total.g / weight : 0.0;
     return total;
 }
 

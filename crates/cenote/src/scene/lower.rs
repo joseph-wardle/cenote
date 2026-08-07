@@ -313,25 +313,21 @@ fn lower_instances(
     for (name, instance) in description.instances() {
         // Apply validated the references and every transform, so lookups
         // can't miss and the inverses the records need exist.
-        let mut material = materials[instance.material.as_str()];
+        let authored = materials[instance.material.as_str()];
         let medium = instance
             .medium
             .as_ref()
             .map(|named| lower_medium(named, &description.media()[named]));
-        if medium.is_some() {
-            // A volume's boundary is crossed, never shaded, so nothing its
-            // material says can be honoured. Emission has to be *removed*
-            // rather than merely ignored: it would enter the light list, and
-            // next-event estimation would then reach a surface that path
-            // sampling can never hit — the two strategies disagreeing is
-            // bias, not a lost highlight.
-            if luminance(material.emission) > 0.0 || material.opacity < 1.0 {
-                log::warn!(
-                    "instance \"{name}\" bounds a medium, so its material is inert — dropping \
-                     its emission and opacity"
-                );
-            }
-            material.emission = Vec3::ZERO;
+        // A volume's boundary is crossed, never shaded, so nothing its
+        // material describes can be honoured; `boundary_material` says which
+        // parts have to be dropped rather than merely ignored, and this is
+        // the only place an author hears that they were.
+        let material = super::boundary_material(authored, medium.is_some());
+        if material != authored {
+            log::warn!(
+                "instance \"{name}\" bounds a medium, so its material is inert — dropping its \
+                 emission and opacity"
+            );
         }
         // The geometry fetch is per instance, not per element: N emissive
         // placements share one resolve and pay only the N×T light records.

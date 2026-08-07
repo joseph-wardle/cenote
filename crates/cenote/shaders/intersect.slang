@@ -100,10 +100,9 @@ void intersect(uint3 tid: SV_DispatchThreadID) {
 
     let media = (params.packed & FLAG_MEDIA) != 0;
     // The volumes this path is inside. Bounce 0 seeds them rather than
-    // reading them: raygen's push constants are full to Vulkan's guarantee
-    // and cannot reach the stack, so this is the first stage that can give
-    // the lanes a value — and every later one then reads without asking
-    // what bounce it is. The seed is the empty set; a camera that starts
+    // reading them — raygen's push constants are full to Vulkan's guarantee
+    // and cannot reach the stack — so every later stage reads without asking
+    // what bounce it is. The seed is the empty set: a camera that starts
     // inside a volume is not yet resolved (see `Instance::medium`).
     var inside = uint3(STACK_EMPTY);
     if ((params.packed & FLAG_VOLUMES) != 0) {

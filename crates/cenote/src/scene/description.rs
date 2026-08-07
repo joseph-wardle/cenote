@@ -298,10 +298,12 @@ pub struct Instance {
     /// be closed and outward-wound. Overlapping volumes add, which is what
     /// makes their order irrelevant.
     ///
-    /// A camera that starts *inside* one is not yet resolved: the initial
-    /// medium set is empty, so the first segment renders as if the camera
-    /// stood outside. Fill a whole room through
-    /// [`Settings::global_medium`] instead.
+    /// Three limits, each degrading toward *less* fog rather than more:
+    /// a path may be inside at most three volumes at once; a refractive
+    /// interior displaces them all while the path is inside it, rather than
+    /// nesting with them; and a camera that starts inside one renders its
+    /// first segment as if it stood outside, because the initial set is
+    /// empty. Fill a whole room through [`Settings::global_medium`] instead.
     pub medium: Option<String>,
 }
 

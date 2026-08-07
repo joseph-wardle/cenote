@@ -181,6 +181,33 @@ fn placement_boundary(placement: &Placement) -> u32 {
     boundary(&placement.material, placement.medium.is_some())
 }
 
+/// The material a mesh that bounds a medium renders with. A null boundary
+/// is crossed, never shaded, so no surface the author described may survive
+/// into the tables:
+///
+/// * emission is *removed* rather than ignored, because it would otherwise
+///   enter the light list and next-event estimation would reach a surface
+///   path sampling can never hit — two strategies covering different paths
+///   is bias, not a lost highlight;
+/// * opacity is forced full, because the boundary traverses as non-opaque
+///   so the shadow pass can see every crossing, and full coverage is what
+///   makes the stochastic test commit the nearest one.
+///
+/// Both scene paths call this where a material first meets its medium, so
+/// an emissive or fractional null boundary does not exist downstream —
+/// [`upload_instance_tables`] asserts as much rather than repairing it.
+fn boundary_material(material: Material, bounds_medium: bool) -> Material {
+    if !bounds_medium {
+        return material;
+    }
+    Material {
+        emission: Vec3::ZERO,
+        opacity: 1.0,
+        opacity_texture: TEXTURE_NONE,
+        ..material
+    }
+}
+
 /// Whether any placement has a closed transmissive interior — see
 /// [`Scene::has_interiors`].
 fn has_interiors(placements: &[Placement]) -> bool {
@@ -547,21 +574,26 @@ impl Scene {
             .collect::<Result<Vec<GpuMesh>>>()?;
         // Before the TLAS below, which is the first thing to read them.
         upload.finish()?;
+        // Resolved once, so the light list and the tables read the same
+        // surface — a mesh that bounds a medium has none.
+        let materials: Vec<Material> = objects
+            .iter()
+            .map(|object| boundary_material(object.material, object.medium.is_some()))
+            .collect();
         // The light list: every triangle of every emissive object, in
         // world space. The procedural path has no delta lights — those
         // are description objects, exercised through prep.
         let triangle_lights: Vec<TriangleLight> = objects
             .iter()
+            .zip(&materials)
             .enumerate()
-            // A volume's boundary is never shaded, so it must not enter the
-            // light list either — lowering says why.
-            .filter(|(_, object)| object.material.emission != Vec3::ZERO && object.medium.is_none())
-            .flat_map(|(index, object)| {
+            .filter(|(_, (_, material))| material.emission != Vec3::ZERO)
+            .flat_map(|(index, (object, material))| {
                 emissive_triangles(
                     &object.mesh.positions,
                     &object.mesh.triangles,
                     object.transform,
-                    object.material.emission,
+                    material.emission,
                     index as u32,
                 )
             })
@@ -569,10 +601,11 @@ impl Scene {
         let placements: Vec<Placement> = meshes
             .iter()
             .zip(objects)
-            .map(|(mesh, object)| Placement {
+            .zip(&materials)
+            .map(|((mesh, object), material)| Placement {
                 mesh,
                 transform: object.transform,
-                material: object.material,
+                material: *material,
                 camera_visible: true,
                 medium: object.medium,
             })
@@ -912,21 +945,14 @@ fn upload_instance_tables(
     global: Option<Medium>,
 ) -> Result<InstanceTables> {
     let light_records = crate::lights::build(triangle_lights, delta_lights);
+    assert!(
+        placements.iter().all(|placement| placement.medium.is_none()
+            || placement.material == boundary_material(placement.material, true)),
+        "a mesh that bounds a medium must reach the tables inert — see `boundary_material`"
+    );
     let materials: Vec<Material> = placements
         .iter()
-        .map(|placement| {
-            // A volume boundary traverses as non-opaque so the shadow pass
-            // can measure it, which puts it in front of the stochastic
-            // opacity test — and full coverage is what makes that test
-            // always commit, so the nearest crossing is the one the march
-            // resolves. Lowering warns where an author's opacity is lost.
-            let mut material = placement.material;
-            if placement.medium.is_some() {
-                material.opacity = 1.0;
-                material.opacity_texture = TEXTURE_NONE;
-            }
-            material
-        })
+        .map(|placement| placement.material)
         .collect();
     let (medium_indices, global_medium, media) =
         medium_table(placements.iter().map(placement_medium), global);
@@ -1192,6 +1218,34 @@ mod tests {
         );
     }
 
+    /// What a null boundary keeps of its material, and what it must not.
+    /// Emission is the load-bearing one: it would reach the light list, and
+    /// next-event estimation would then aim at a surface phase and BSDF
+    /// sampling can never hit. Opacity follows because the boundary has to
+    /// traverse as non-opaque and still commit.
+    #[test]
+    fn a_volume_boundary_describes_no_surface() {
+        let authored = Material {
+            emission: Vec3::splat(4.0),
+            opacity: 0.25,
+            opacity_texture: 7,
+            ..Material::matte(Vec3::ONE, 0.5)
+        };
+        assert_eq!(
+            boundary_material(authored, false),
+            authored,
+            "an ordinary surface keeps everything it was authored with"
+        );
+        let inert = boundary_material(authored, true);
+        assert_eq!(inert.emission, Vec3::ZERO);
+        assert!(inert.opacity >= 1.0);
+        assert_eq!(inert.opacity_texture, TEXTURE_NONE);
+        assert_eq!(
+            inert.base_color, authored.base_color,
+            "only what would be mistaken for a surface is dropped"
+        );
+    }
+
     /// Bounding an interior and filling one are separate questions: the
     /// depth-0 glass above is still a refractive boundary, but its tint
     /// sits on the interface, so it encloses vacuum and takes no record.
@@ -1301,6 +1355,12 @@ mod tests {
         assert_eq!(
             extremes.sigma_t.map(f32::to_bits),
             [1e-4f32, 1e-4, 1.0].map(|channel| (-channel.ln()).to_bits())
+        );
+        assert!(
+            extremes.sigma_s.iter().all(|channel| *channel <= 0.0),
+            "an interior never scatters: `combineMedia` returns vacuum for a path inside one, \
+             so a scattering interior would be routed to the volume stage and find nothing \
+             there to sample"
         );
     }
 

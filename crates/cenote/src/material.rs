@@ -24,7 +24,7 @@ pub const TEXTURE_NONE: u32 = u32::MAX;
 
 /// One instance's surface, as the shading kernel reads it.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
 pub struct Material {
     /// Diffuse albedo — and the conductor's F0 as `metalness` rises — in
     /// `ACEScg`; convert authored `Rec.709` values through

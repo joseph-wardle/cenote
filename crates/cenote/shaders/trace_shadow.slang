@@ -9,12 +9,12 @@
 // the adds deterministically.
 //
 // Two entry points from one body, `VOLUMES` apart, because register
-// allocation is per kernel: measuring a connection's way through bounded
-// volumes costs a loop-carried extent and membership, and carrying them
-// through a scene that has no volumes — behind a uniformly-false branch,
-// never written — measured **+25% of this stage** on zero-day. Which one a
-// wave records is `has_volumes`, host-side. It is the same trade that gave
-// medium events their own stage rather than a branch in shade_surface.
+// allocation is per *kernel*: measuring a connection's way through bounded
+// volumes costs a loop-carried extent and membership, and a scene with no
+// volumes was measured to pay for them anyway — a uniformly-false branch,
+// a hoisted tail, and a generic instantiated twice in one kernel all cost
+// the same quarter of this stage. Only the split recovers it. Which entry
+// point a wave records is `has_volumes`, host-side.
 
 import pathstate;
 import scene;

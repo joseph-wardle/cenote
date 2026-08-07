@@ -6,17 +6,15 @@
 // transmittance on to whatever intersect found.
 //
 // A segment that ends at a *null* boundary — a volume's surface, pure
-// extent with no surface response — is not over: the path crosses, the
-// medium behind the boundary is a different one, and the stage re-traces
-// and draws again. That march is why this stage binds the acceleration
-// structure, and it is the reason the volume queue exists at all rather
-// than the routing living in intersect's candidate loop: the crossings must
-// be resolved in order, and `Proceed()` delivers candidates in none.
+// extent with no surface response — is not over: the path crosses into a
+// different medium, and the stage re-traces and draws again. That march is
+// why this stage binds the acceleration structure, and why the routing
+// cannot live in intersect's candidate loop: the crossings must be resolved
+// in order, and `Proceed()` delivers candidates in none.
 //
-// A stage of its own rather than a branch in shade_surface: it is recorded
-// only when the scene has media, so media-free scenes keep a byte-identical
-// pass list and no scene pays register pressure for medium code it never
-// runs.
+// A stage of its own rather than a branch in shade_surface, so that
+// media-free scenes keep a byte-identical pass list and no scene pays
+// register pressure for medium code it never runs.
 //
 // Radiance bookkeeping matches shade_surface's: every write is a
 // pixel-owned add, and a path that ends here carries its pixel's one
@@ -50,6 +48,14 @@ static const uint NULL_CROSSING_CAP = 8;
 // where intersect's chain left off, so no two of a path's crossings this
 // bounce ever draw the same key.
 static const uint MARCH_CROSSING_CAP = TRANSPARENT_CAP * (NULL_CROSSING_CAP + 1);
+
+// How far past a crossing the next leg starts. Relative, so it holds at any
+// scene scale, and at least eight float32 ulps wide, so re-testing the same
+// triangle cannot return the boundary just crossed. Two boundaries closer
+// together than this read as one: the march misses the inner volume's near
+// face and then takes its far face for an entry, so coincident volume
+// surfaces are outside the model — see `crossVolume` in pathstate.slang.
+static const float MARCH_NUDGE = 1e-6;
 
 // The five queues this stage touches, behind one pointer: consuming one and
 // feeding four is more push-constant bytes than Vulkan guarantees. Their
@@ -143,13 +149,22 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
         // transmittance. Origin and the previous scatter's pdf are left
         // alone — they describe the vertex before all this, which is still
         // where the next stage's MIS weight is measured from.
+        //
+        // A path whose throughput has gone to zero leaves here too, even at
+        // a null boundary: it contributes nothing wherever it lands, and the
+        // surface stage is what records its pixel's terminal alpha.
         let boundary = hit.instance == INSTANCE_NONE
                            ? BOUNDARY_OPAQUE
                            : params.scene.geometry[hit.instance].boundary;
         if (boundary != BOUNDARY_NULL || !any(throughput.xyz > 0.0)) {
             params.paths.throughput[path] = throughput;
-            if (volumes && crossed != 0) {
-                params.paths.setInside(path, inside);
+            // Only a march has anything to write back: without one the hit
+            // is intersect's own and the membership is unchanged.
+            if (crossed != 0) {
+                params.paths.hit[path] = hit;
+                if (volumes) {
+                    params.paths.setInside(path, inside);
+                }
             }
             if (hit.instance == INSTANCE_NONE) {
                 params.queues.misses.push(path);
@@ -159,10 +174,9 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
             return;
         }
 
-        // Cross it, and trace on from just past it. Nudging the near end
+        // Cross it, and trace on from just past it. Moving the near end
         // rather than respawning from the surface keeps every distance in
-        // the original ray's parameter and needs no error bounds: the same
-        // triangle re-tested gives back the same t, which this now excludes.
+        // the original ray's parameter and needs no error bounds.
         crossed++;
         inside = crossVolume(inside, hit.instance);
         start = end;
@@ -176,7 +190,7 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
         RayDesc ray;
         ray.Origin = origin;
         ray.Direction = direction;
-        ray.TMin = start * (1.0 + 1e-6) + 1e-6;
+        ray.TMin = start * (1.0 + MARCH_NUDGE) + MARCH_NUDGE;
         ray.TMax = 1e30;
         RayQuery<RAY_FLAG_NONE> query;
         query.TraceRayInline(sceneTlas, RAY_FLAG_NONE, params.rayMask, ray);
@@ -205,11 +219,13 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
             hit.barycentrics = float2(0.0);
             end = 1e30;
         }
-        params.paths.hit[path] = hit;
     }
 
     let distance = start + event.distance;
     let position = origin + distance * direction;
+    // The scatter ends the segment, so the stale hit above is never read —
+    // the next bounce's intersect overwrites it. Membership is not stale:
+    // the connection below and the next bounce both measure from here.
     if (volumes && crossed != 0) {
         params.paths.setInside(path, inside);
     }

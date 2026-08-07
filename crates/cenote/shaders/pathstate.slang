@@ -168,8 +168,12 @@ public uint3 insideOf(uint4* stack, uint path) {
 // closed, outward-wound mesh, which is what the shadow pass's signed
 // distances need anyway.
 //
-// A fourth simultaneous volume has nowhere to go and is dropped; see
-// `VOLUME_SLOTS`.
+// Both failures of that agreement are one-sided by construction. A fourth
+// simultaneous volume has nowhere to go and is dropped, so its far face
+// reads as an entry and its *outside* fogs (see `VOLUME_SLOTS`); a crossing
+// the march could not separate from the one before it does the same. Either
+// way a path leaves carrying a volume it is no longer in, which the shadow
+// pass clamps to no shadow rather than to a medium that amplifies.
 public uint3 crossVolume(uint3 set, uint instance) {
     var free = VOLUME_SLOTS;
     for (uint slot = 0; slot < VOLUME_SLOTS; slot++) {
