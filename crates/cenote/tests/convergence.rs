@@ -110,18 +110,21 @@ fn indirect_glossy_scene(gpu: &Context) -> Scene {
                 * Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2),
             material: Material::glossy(Vec3::new(0.9, 0.8, 0.6), 0.0, 0.12).with_metalness(1.0),
             medium: None,
+            interior_priority: 0,
         },
         Object {
             mesh: ground_plane(4.0),
             transform: Mat4::IDENTITY,
             material: Material::matte(Vec3::splat(0.8), 0.5),
             medium: None,
+            interior_priority: 0,
         },
         Object {
             mesh: icosphere(2),
             transform: Mat4::from_translation(Vec3::new(0.9, 1.0, 0.6)),
             material: Material::matte(Vec3::new(0.75, 0.4, 0.35), 0.5),
             medium: None,
+            interior_priority: 0,
         },
         // The one-sided emitter: front face toward the panel, back to the
         // world, so nothing sees it but through the panel.
@@ -131,6 +134,7 @@ fn indirect_glossy_scene(gpu: &Context) -> Scene {
                 * Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2),
             material: Material::emitter(Vec3::splat(12.0)),
             medium: None,
+            interior_priority: 0,
         },
     ];
     let camera = Camera {

@@ -92,6 +92,9 @@ pub(super) struct InstanceSpec {
     /// ordinary surface. Some, and the surface is a null boundary: the
     /// medium fills it, and the material above is inert.
     pub(super) medium: Option<super::Medium>,
+    /// Which solid wins where refractive interiors overlap — see
+    /// [`description::Instance::interior_priority`].
+    pub(super) priority: u32,
 }
 
 /// The environment lowered from the description: the image when it must be
@@ -357,6 +360,7 @@ fn lower_instances(
                 material,
                 camera_visible: instance.camera_visible,
                 medium,
+                priority: instance.interior_priority,
             });
         }
     }

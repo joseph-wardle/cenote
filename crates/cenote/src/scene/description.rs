@@ -306,6 +306,30 @@ pub struct Instance {
     /// first segment as if it stood outside, because the initial set is
     /// empty. Fill a whole room through [`Settings::global_medium`] instead.
     pub medium: Option<String>,
+    /// Which solid wins where two refractive interiors overlap: the higher
+    /// number is the one that is really there, and the interface of the
+    /// lower one *inside* it is cut away — crossed without being shaded,
+    /// like a boolean subtraction. The classic case is a drink: model the
+    /// liquid so it interpenetrates the glass wall, give the glass the
+    /// higher priority, and the overlap renders as glass rather than as
+    /// two interfaces and twice the absorption.
+    ///
+    /// 0..=63; the default 0 is the weakest and everything participates,
+    /// which is why a scene that authors none renders exactly as it always
+    /// has (all-equal is never *strictly* less, so no interface is ever
+    /// false). Equal priorities both shade, which is the double refraction
+    /// priority exists to avoid — set them, or accept it.
+    ///
+    /// It lives on the instance, not the material, because two things
+    /// wearing one glass routinely need different priorities (the ice
+    /// cubes and the tumbler), and because `OpenPBR` has no priority
+    /// parameter for it to be a slug of. Authored the way Karma asks:
+    /// model at render scale and overlap *generously* — surfaces that
+    /// merely touch fall foul of the same coincidence limit volumes do.
+    ///
+    /// Only refractive surfaces have it; a volume's boundary or an opaque
+    /// one carries it harmlessly and nothing reads it.
+    pub interior_priority: u32,
 }
 
 impl Default for Instance {
@@ -318,6 +342,7 @@ impl Default for Instance {
             transforms: vec![Transform::default()],
             camera_visible: true,
             medium: None,
+            interior_priority: 0,
         }
     }
 }

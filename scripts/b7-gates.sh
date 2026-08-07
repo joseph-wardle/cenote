@@ -38,7 +38,9 @@ gate_spp=128
 reference_spp=4096
 
 # Drivers first (shading-bound), then the overhead controls, then the
-# transmission/coat coverage the drivers lack.
+# transmission/coat coverage the drivers lack — ending with the one scene
+# that authors a nesting priority and has no media at all, which is the
+# only place the volume stage's cost to a media-free scene can be seen.
 scenes=(
   "$root/scenes/corpus/bistro.ron:bistro"
   "$root/scenes/corpus/sanmiguel.ron:sanmiguel"
@@ -47,6 +49,7 @@ scenes=(
   "$root/scenes/brass-room.ron:brass-room"
   "$root/scenes/corpus/glass-of-water.ron:glass-of-water"
   "$root/scenes/corpus/spaceship.ron:spaceship"
+  "$root/scenes/nested-glass.ron:nested-glass"
 )
 
 filter=

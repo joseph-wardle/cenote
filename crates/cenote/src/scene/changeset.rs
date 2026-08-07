@@ -147,6 +147,8 @@ pub struct InstancePatch {
     /// The medium this mesh bounds, by name. Doubly optional: `None` leaves
     /// the reference alone, `Some(None)` clears it.
     pub medium: Option<Option<String>>,
+    /// Which solid wins where refractive interiors overlap.
+    pub interior_priority: Option<u32>,
 }
 
 /// Patch for a [`Material`](super::description::Material). Fields mirror
@@ -469,7 +471,8 @@ fn apply_op(objects: &mut Objects, dirty: &mut Dirty, op: &Op) -> Result<()> {
             merge!(mesh, patch; source);
         }),
         Op::Instance(patch) => upsert(&mut objects.instances, &name, |instance| {
-            merge!(instance, patch; mesh, material, transforms, camera_visible, medium);
+            merge!(instance, patch;
+                mesh, material, transforms, camera_visible, medium, interior_priority);
         }),
         Op::Material(patch) => upsert(&mut objects.materials, &name, |material| {
             merge!(material, patch;

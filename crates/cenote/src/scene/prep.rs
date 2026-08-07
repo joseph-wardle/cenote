@@ -121,6 +121,7 @@ impl Scene {
         let tabling = Instant::now();
         let has_interiors = super::has_interiors(&placements);
         let has_volumes = super::has_volumes(&placements);
+        let has_priority = super::has_priority(&placements);
         let instances = upload_instance_tables(
             gpu,
             &placements,
@@ -154,6 +155,7 @@ impl Scene {
             camera: host.camera.expect("a fresh build always adopts its camera"),
             has_interiors,
             has_volumes,
+            has_priority,
             env_size,
             env_power: power,
             env_source: spec.source.clone(),
@@ -245,6 +247,7 @@ impl Scene {
         let tabling = Instant::now();
         self.has_interiors = super::has_interiors(&placements);
         self.has_volumes = super::has_volumes(&placements);
+        self.has_priority = super::has_priority(&placements);
         self.resident.instances = upload_instance_tables(
             gpu,
             &placements,
@@ -343,6 +346,7 @@ fn placements<'a>(
             material: spec.material,
             camera_visible: spec.camera_visible,
             medium: spec.medium,
+            priority: spec.priority,
         })
         .collect()
 }

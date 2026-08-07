@@ -149,12 +149,33 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
         // where the next stage's MIS weight is measured from.
         //
         // A path whose throughput has gone to zero leaves here too, even at
-        // a null boundary: it contributes nothing wherever it lands, and the
-        // surface stage is what records its pixel's terminal alpha.
-        let boundary = hit.instance == INSTANCE_NONE
-                           ? BOUNDARY_OPAQUE
-                           : params.scene.geometry[hit.instance].boundary;
-        if (boundary != BOUNDARY_NULL || !any(throughput.xyz > 0.0)) {
+        // a boundary it would have crossed: it contributes nothing wherever
+        // it lands, and the surface stage is what records its pixel's
+        // terminal alpha.
+        //
+        // What the march may cross is `crossable`: a volume's boundary, or
+        // a refractive interface a higher-priority interior cuts away —
+        // a false interface being nothing more than a null boundary decided
+        // per path instead of per instance. One exception, and it applies to
+        // the false kind only: a crossing with no slot to go to is *not*
+        // crossed, it is shaded. Dropping it would leave the set claiming
+        // the path is outside a solid it is physically inside, and the far
+        // face would then read as an entry — a phantom that outlives the
+        // real dominant and takes over `interiorOf`. Shading instead
+        // degrades an overflowing scene smoothly back to no-priority, which
+        // is what `shade_surface` already does at `crossing.slot`. A
+        // dropped *null* boundary keeps marching, as it always has: too
+        // little fog beats a wall that is not there.
+        var toggled = Crossing(set, MEDIUM_SLOTS);
+        var cross = false;
+        if (hit.instance != INSTANCE_NONE) {
+            let mesh = params.scene.geometry[hit.instance];
+            if (crossable(mesh, interiorOf(set))) {
+                toggled = crossMedium(set, stackEntry(mesh, hit.instance));
+                cross = boundaryOf(mesh) == BOUNDARY_NULL || toggled.slot < MEDIUM_SLOTS;
+            }
+        }
+        if (!cross || !any(throughput.xyz > 0.0)) {
             params.paths.throughput[path] = throughput;
             // Only a march has anything to write back: without one the hit
             // is intersect's own and the membership is unchanged.
@@ -174,16 +195,20 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
         // rather than respawning from the surface keeps every distance in
         // the original ray's parameter and needs no error bounds.
         crossed++;
-        let entry = stackEntry(params.scene.geometry[hit.instance], hit.instance);
-        set = crossMedium(set, entry).set;
+        set = toggled.set;
         start = end;
 
         // Past the cap the march stops *tracking* media but keeps the
-        // geometry honest: the re-trace runs through null boundaries instead
-        // of stopping at them, so a pathological stack of shells reads as
-        // too little fog rather than as a wall that is not there. It also
-        // ends the loop — the hit it commits cannot be a null boundary.
+        // geometry honest: the re-trace runs through the boundaries it would
+        // have crossed instead of stopping at them, so a pathological stack
+        // of shells reads as too little fog rather than as a wall that is
+        // not there. It also ends the loop — the hit it commits cannot be
+        // one of them. The dominant interior is invariant across every
+        // crossing the march makes (a false one is strictly below it, a
+        // null one is not an interior at all), so reading it after the
+        // crossing is reading it before.
         let exhausted = crossed >= NULL_CROSSING_CAP;
+        let interior = interiorOf(set);
         RayDesc ray;
         ray.Origin = origin;
         ray.Direction = direction;
@@ -193,7 +218,7 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
         query.TraceRayInline(sceneTlas, RAY_FLAG_NONE, params.rayMask, ray);
         while (query.Proceed()) {
             let candidate = query.CandidateInstanceID();
-            if (exhausted && params.scene.geometry[candidate].boundary == BOUNDARY_NULL) {
+            if (exhausted && crossable(params.scene.geometry[candidate], interior)) {
                 continue;
             }
             let opacity = opacityAt(params.scene, candidate,

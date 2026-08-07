@@ -97,6 +97,10 @@ pub struct Object {
     /// description's [`description::Instance::medium`]. `Some`, and the
     /// mesh is a null boundary: `material` is never shaded.
     pub medium: Option<Medium>,
+    /// Which solid wins where refractive interiors overlap — the
+    /// procedural spelling of
+    /// [`description::Instance::interior_priority`], and 0 like it.
+    pub interior_priority: u32,
 }
 
 /// One mesh resident on the GPU. The vertex, normal, and index buffers stay
@@ -133,7 +137,11 @@ struct GeometryRecord {
     /// order, so a BSDF-sampled hit finds the pdf its MIS weight competes
     /// against at `light + primitive`.
     light: u32,
-    /// What crossing this instance's surface means — see [`boundary`].
+    /// What crossing this instance's surface means ([`boundary`]) and,
+    /// above it in the medium-set entry's `STACK_PRIORITY` field, which
+    /// solid wins where interiors overlap ([`interior_priority`]) — see
+    /// [`boundary_word`]. One word because the shader wants both together;
+    /// the Slang side reads the class back through `boundaryOf`.
     boundary: u32,
     /// Index into the medium table of what this instance's interior is
     /// filled with, or [`MEDIUM_NONE`] — see [`placement_medium`].
@@ -222,6 +230,66 @@ fn has_volumes(placements: &[Placement]) -> bool {
         .iter()
         .any(|placement| placement.medium.is_some())
 }
+
+/// Medium-set entry bits, mirroring `STACK_*` in `shaders/pathstate.slang`
+/// — where this side puts a priority inside [`GeometryRecord::boundary`],
+/// so the shader lifts it into an entry without shifting anything.
+const STACK_PRIORITY_SHIFT: u32 = 25;
+const STACK_INTERIOR: u32 = 1 << 31;
+
+/// How far a nesting priority may reach: the six bits the medium-set entry
+/// has room for, between the scattering flag at 24 and `STACK_INTERIOR` at
+/// 31 — which is what lets one `max` rank the whole set by priority. Held
+/// here, at the table, so no construction path can bypass it; the same
+/// place [`MAX_ANISOTROPY`] is held.
+const MAX_PRIORITY: u32 = 63;
+
+/// A placement's interior priority as the tables carry it. Zero on
+/// anything but a refractive boundary: a volume's boundary is displaced by
+/// any interior whatever its number, and an opaque one has no interface to
+/// cut away — so carrying a number there could only make [`has_priority`]
+/// disagree with what a shader can act on.
+fn interior_priority(placement: &Placement) -> u32 {
+    if placement_boundary(placement) != BOUNDARY_REFRACTIVE {
+        return 0;
+    }
+    if placement.priority > MAX_PRIORITY {
+        log::warn!(
+            "interior priority {} is higher than the medium set can rank — clamping to \
+             {MAX_PRIORITY}",
+            placement.priority
+        );
+    }
+    placement.priority.min(MAX_PRIORITY)
+}
+
+/// [`GeometryRecord::boundary`]: the class in the low byte, the nesting
+/// priority already sitting in the bits the medium-set entry reserves for
+/// it. Packed because `stackEntry` on the shader side wants both and would
+/// otherwise pay a second scalar load for six bits.
+fn boundary_word(placement: &Placement) -> u32 {
+    placement_boundary(placement) | (interior_priority(placement) << STACK_PRIORITY_SHIFT)
+}
+
+/// Whether any placement authors a priority the kernels can act on — see
+/// [`Scene::has_priority`]. Defined through [`interior_priority`] so that
+/// `has_priority` implies [`has_interiors`] by construction: 8d-0's lesson
+/// was that a flag which can disagree with the buffer it gates is a null
+/// dereference waiting to be found.
+///
+/// All-zero priorities are never *strictly* less than one another, so a
+/// scene that authors none can never suppress an interface — which is why
+/// it renders bit-identically rather than by a special case.
+fn has_priority(placements: &[Placement]) -> bool {
+    placements
+        .iter()
+        .any(|placement| interior_priority(placement) != 0)
+}
+
+// The class must survive the packing: `BOUNDARY_MASK` in `scene.slang` is
+// a byte, and the priority has to clear it and stay under `STACK_INTERIOR`.
+const _: () = assert!(BOUNDARY_NULL < 0xff && (1 << STACK_PRIORITY_SHIFT) > 0xff);
+const _: () = assert!(MAX_PRIORITY << STACK_PRIORITY_SHIFT < STACK_INTERIOR);
 
 /// A homogeneous medium as the renderer holds it: coefficients per `ACEScg`
 /// channel in inverse meters, and the phase function's anisotropy.
@@ -464,6 +532,8 @@ pub struct Scene {
     has_interiors: bool,
     /// Likewise for the volume-bounding meshes. See [`Scene::has_volumes`].
     has_volumes: bool,
+    /// Likewise for authored nesting priority. See [`Scene::has_priority`].
+    has_priority: bool,
     /// The environment's dimensions and emitted power (untinted), retained
     /// so a light edit can rebuild the scene table (its selection
     /// probability weighs the light list against the environment) without
@@ -608,11 +678,13 @@ impl Scene {
                 material: *material,
                 camera_visible: true,
                 medium: object.medium,
+                priority: object.interior_priority,
             })
             .collect();
         let tlas = build_scene_tlas(gpu, &placements)?;
         let has_interiors = has_interiors(&placements);
         let has_volumes = has_volumes(&placements);
+        let has_priority = has_priority(&placements);
         let instances = upload_instance_tables(gpu, &placements, &triangle_lights, &[], global)?;
         let GpuEnvironment {
             image,
@@ -659,6 +731,7 @@ impl Scene {
             camera,
             has_interiors,
             has_volumes,
+            has_priority,
             env_size,
             env_power: power,
             env_source: None,
@@ -705,6 +778,16 @@ impl Scene {
     #[must_use]
     pub fn has_volumes(&self) -> bool {
         self.has_volumes
+    }
+
+    /// Whether any interior is authored with a nesting priority the
+    /// kernels can act on — see [`has_priority`]. True, a hit can be an
+    /// interface a higher-priority interior cuts away, which is resolved
+    /// in the volume stage: so this is what makes that stage run in a
+    /// scene with no media at all.
+    #[must_use]
+    pub fn has_priority(&self) -> bool {
+        self.has_priority
     }
 
     /// The environment's emitted power as the selection heuristic weighs
@@ -850,6 +933,9 @@ struct Placement<'a> {
     /// The medium this mesh bounds, or `None` for an ordinary surface —
     /// see [`boundary`].
     medium: Option<Medium>,
+    /// Which solid wins where refractive interiors overlap — see
+    /// [`description::Instance::interior_priority`] and [`interior_priority`].
+    priority: u32,
 }
 
 /// Build the TLAS: one instance per placement, with `custom_index` =
@@ -975,7 +1061,7 @@ fn upload_instance_tables(
                 object_to_world: transform_rows(placement.transform),
                 world_to_object: transform_rows(inverse),
                 light,
-                boundary: placement_boundary(placement),
+                boundary: boundary_word(placement),
                 medium,
                 _pad0: 0,
             }

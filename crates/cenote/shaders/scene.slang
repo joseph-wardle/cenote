@@ -13,10 +13,11 @@ import textures;
 // What crossing an instance's surface means, classified at prep: an
 // ordinary surface, a refractive interface into a closed interior, or a
 // null boundary — pure medium extent, no surface response at all. Read by
-// intersect's route.
+// intersect's route, through `boundaryOf`.
 public static const uint BOUNDARY_OPAQUE = 0;
 public static const uint BOUNDARY_REFRACTIVE = 1;
 public static const uint BOUNDARY_NULL = 2;
+public static const uint BOUNDARY_MASK = 0xff;
 
 // A medium index that names vacuum — an index no table can reach.
 // Deliberately not pathstate's all-ones `STACK_EMPTY`: media and instances
@@ -52,10 +53,22 @@ public struct GeometryRecord {
     public float4 objectToWorld[3]; // rows of the instance's 3×4 transform
     public float4 worldToObject[3]; // rows of its inverse — normals, error bounds
     public uint light;              // index into the light list, or LIGHT_NONE
-    public uint boundary;           // BOUNDARY_* — what crossing this means
+    // What crossing this instance's surface means, and — above it, already
+    // shifted into the medium-set entry's `STACK_PRIORITY` field — which
+    // solid wins where interiors overlap. One word and not two because
+    // `stackEntry` below wants both and the record's fields reach a kernel
+    // as separate scalar loads: splitting them measured `shade_surface`
+    // +2…8% on the glass drivers, for a value that is six bits wide.
+    // Read through `boundaryOf`, never compared to a `BOUNDARY_*` raw.
+    uint boundary;
     public uint medium;             // this interior's record, or MEDIUM_NONE
     uint pad0;
 };
+
+// The boundary class alone — what `BOUNDARY_*` names.
+public uint boundaryOf(GeometryRecord mesh) {
+    return mesh.boundary & BOUNDARY_MASK;
+}
 
 // The medium-set entry naming an instance the path has just entered: its
 // TLAS custom index, and above it the flags that say what kind of medium
@@ -63,9 +76,47 @@ public struct GeometryRecord {
 // pathstate.slang), so insertion is the only place the flags can be set —
 // and an entry built without them ranks in `interiorOf` as something it is
 // not. Hence one builder for every insertion site, reading the boundary
-// word prep already classified rather than re-deciding from the material.
+// word prep already classified rather than re-deciding from the material —
+// and taking the priority out of that same word, which is why prep packs
+// the two together.
+//
+// A volume's entry carries no priority. Interiors displace volumes whatever
+// the numbers say, so a priority below `STACK_INTERIOR` could only reorder
+// volumes against each other, which nothing asks.
 public uint stackEntry(GeometryRecord mesh, uint instance) {
-    return instance | (mesh.boundary == BOUNDARY_REFRACTIVE ? STACK_INTERIOR : 0);
+    if (boundaryOf(mesh) != BOUNDARY_REFRACTIVE) {
+        return instance;
+    }
+    return instance | STACK_INTERIOR | (mesh.boundary & STACK_PRIORITY);
+}
+
+// Is a hit on this instance crossed rather than shaded? Two boundaries
+// are: a null one, which is pure medium extent with no surface response at
+// all, and a refractive interface *strictly below* the priority of the
+// interior the path is already inside — the nested-dielectric rule
+// (Schmidt & Budge 2002), which cuts the weaker solid away inside the
+// stronger one as though the two had been booleaned. `interior` is
+// `interiorOf(set)`, the entry and its flags — `STACK_EMPTY` carries no
+// priority bits, so a path inside nothing suppresses nothing without
+// needing a test of its own.
+//
+// The compare is masked on both sides and not whole-word: `STACK_SCATTERING`
+// sits at bit 24, *below* the priority field, so a whole-word compare would
+// rank a scattering interior above an equal-priority plain one and quietly
+// suppress a real interface. Harmless in `interiorOf`, where the tie-break
+// is arbitrary anyway; a bug here.
+//
+// The direction of the crossing is deliberately not asked. Entering a false
+// boundary and leaving one are both false, and both still toggle the set —
+// tracking is the whole point of the algorithm, else a path leaving the
+// dominant glass into the water it overlaps would find an empty set and
+// refract into air.
+public bool crossable(GeometryRecord mesh, uint interior) {
+    if (boundaryOf(mesh) == BOUNDARY_NULL) {
+        return true;
+    }
+    return boundaryOf(mesh) == BOUNDARY_REFRACTIVE
+        && (mesh.boundary & STACK_PRIORITY) < (interior & STACK_PRIORITY);
 }
 
 // The UV at barycentrics (b1, b2) of a triangle — weights on the second
@@ -184,7 +235,7 @@ public float3 shadowVisibility<let VOLUMES : int>(
         let instance = query.CandidateInstanceID();
         if (instance == light && query.CandidatePrimitiveIndex() == primitive) {
             query.CommitNonOpaqueTriangleHit();
-        } else if (VOLUMES != 0 && scene.geometry[instance].boundary == BOUNDARY_NULL) {
+        } else if (VOLUMES != 0 && boundaryOf(scene.geometry[instance]) == BOUNDARY_NULL) {
             // A volume's boundary is not a surface: it never occludes, and
             // committing it — which its full coverage would otherwise do —
             // would read a fog bank as a solid wall.

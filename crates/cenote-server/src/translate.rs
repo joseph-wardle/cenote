@@ -85,8 +85,10 @@ fn op(op: wire::Op) -> core::Op {
                 camera_visible,
                 // The wire protocol has no volume prims yet — Hydra's
                 // `UsdVolVolume` reader is Track A's, and until it lands
-                // nothing on this side can bound a medium.
+                // nothing on this side can bound a medium — nor author the
+                // priority that only matters where interiors overlap.
                 medium: None,
+                interior_priority: None,
             })
         }
         wire::Op::Material(patch) => {

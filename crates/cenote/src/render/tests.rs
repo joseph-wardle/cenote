@@ -60,6 +60,7 @@ fn furnace_scene(
         transform: Mat4::from_translation(center) * Mat4::from_scale(Vec3::splat(scale)),
         material,
         medium: None,
+        interior_priority: 0,
     };
     let camera = Camera {
         position: center + Vec3::new(0.0, scale, 0.0),
@@ -451,6 +452,7 @@ fn a_mirrored_emitter_lights_the_same_side() {
                 transform: Mat4::IDENTITY,
                 material: Material::matte(Vec3::splat(0.5), 0.0),
                 medium: None,
+                interior_priority: 0,
             },
             Object {
                 mesh: ground_plane(1.0),
@@ -460,6 +462,7 @@ fn a_mirrored_emitter_lights_the_same_side() {
                     ..Material::matte(Vec3::ZERO, 0.0)
                 },
                 medium: None,
+                interior_priority: 0,
             },
         ];
         let camera = Camera {
@@ -587,6 +590,7 @@ fn the_glass_furnace_closes() {
         transform: Mat4::from_translation(Vec3::Y * 2.0),
         material: Material::glass(0.2, 1.5),
         medium: None,
+        interior_priority: 0,
     }];
     let camera = Camera {
         position: Vec3::new(0.0, 2.0, 4.0),
@@ -657,6 +661,7 @@ fn a_global_medium_attenuates_by_beer_lambert() {
                 * Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2),
             material: Material::emitter(Vec3::splat(emission)),
             medium: None,
+            interior_priority: 0,
         }],
         Camera {
             position: Vec3::ZERO,
@@ -718,6 +723,7 @@ fn the_volumetric_furnace_closes() {
             transform: Mat4::from_scale(Vec3::splat(2.0)),
             material: Material::emitter(Vec3::splat(emission)),
             medium: None,
+            interior_priority: 0,
         }],
         Camera {
             position: Vec3::ZERO,
@@ -791,6 +797,7 @@ fn bounded_volumes_absorb_over_exactly_the_extent_they_bound() {
         transform: Mat4::from_translation(Vec3::Z * z),
         material: Material::matte(Vec3::ONE, 0.0),
         medium: Some(medium),
+        interior_priority: 0,
     };
     let absorbing = |scale: f32| crate::scene::Medium {
         absorption: sigma * scale,
@@ -877,6 +884,7 @@ fn a_nested_interior_gives_the_path_back_to_the_one_around_it() {
         transform: Mat4::from_translation(Vec3::Z * -6.0),
         material: glass,
         medium: None,
+        interior_priority: 0,
     };
     let camera = Camera {
         position: Vec3::ZERO,
@@ -936,6 +944,7 @@ fn nested_solids_of_one_glass_have_no_interface_between_them() {
         transform: Mat4::from_translation(Vec3::Z * -6.0),
         material: glass,
         medium: None,
+        interior_priority: 0,
     };
     let camera = Camera {
         position: Vec3::ZERO,
@@ -958,6 +967,208 @@ fn nested_solids_of_one_glass_have_no_interface_between_them() {
         (nested - alone).abs() / alone < 0.005,
         "a box inside a box of the same glass: {nested} vs {alone} for the box alone"
     );
+}
+
+/// Suppression is deletion. A glass sphere sealed inside a glass block of
+/// higher priority is not there at all: both of its interfaces are false,
+/// the path crosses them without spending a bounce or a surface event, and
+/// the render must come out *bit-identical* to the block on its own.
+///
+/// Not a tolerance — an equality, and deliberately so. The march's legs
+/// through the sphere sample the dominant interior, where `combineMedia`
+/// returns vacuum, so each weight is exactly 1.0; the extra legs draw from
+/// Sobol dimensions that are indexed rather than consumed, so spending
+/// `VOLUME_DISTANCE` costs the other dimensions nothing; and radiance
+/// writes are pixel-owned, so the extra queue hop cannot reorder anything.
+/// If this ever needs a tolerance, something else changed.
+///
+/// The last case is the test's own falsification: give the two solids
+/// *equal* priority and the sphere becomes a pair of true interfaces
+/// again, which must not match. And the whole thing runs a second time at
+/// a four-bounce cap, which is what pins "a false crossing costs no
+/// bounce": four is exactly enough to enter the block, cross the sphere,
+/// leave the block and reach the sky, so charging the crossing a bounce
+/// strands the path at the cap with nothing. The equal-priority scene,
+/// which really does spend two bounces in there, is stranded — that is
+/// what the second assertion sees.
+#[test]
+fn an_interior_inside_a_higher_priority_one_is_not_there() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let glass = Material {
+        transmission_color: Vec3::new(0.7, 0.8, 0.9),
+        transmission_depth: 1.0,
+        ..Material::glass(0.0, 1.5)
+    };
+    let block = |priority: u32| Object {
+        mesh: crate::scene::cube(2.0),
+        transform: Mat4::from_translation(Vec3::Z * -6.0),
+        material: glass,
+        medium: None,
+        interior_priority: priority,
+    };
+    // Half the block's extent and concentric with it, so it is sealed
+    // inside with room to spare on every face.
+    let sphere = |priority: u32| Object {
+        mesh: crate::scene::icosphere(3),
+        transform: Mat4::from_translation(Vec3::Z * -6.0),
+        material: glass,
+        medium: None,
+        interior_priority: priority,
+    };
+    let camera = Camera {
+        position: Vec3::ZERO,
+        look_at: Vec3::NEG_Z,
+        up: Vec3::Y,
+        vfov_degrees: 20.0,
+        lens: None,
+    };
+    let sky_image = Environment::constant(Vec3::splat(0.75));
+    let (size, samples) = (24, 64);
+    for bounces in [Wavefront::DEFAULT_MAX_BOUNCES, 4] {
+        let render = |objects: &[Object]| {
+            let scene = Scene::new(&gpu, objects, camera, &sky_image).expect("scene");
+            bsdf_only_sum_deep(&gpu, &scene, size, samples, bounces)
+        };
+        let alone = render(&[block(1)]);
+        assert_eq!(
+            render(&[block(1), sphere(0)]),
+            alone,
+            "a sealed lower-priority sphere must render as though it were not \
+             there ({bounces} bounces)"
+        );
+        assert_ne!(
+            render(&[block(0), sphere(0)]),
+            alone,
+            "at equal priority the sphere is two real interfaces, so this \
+             comparison proves nothing ({bounces} bounces)"
+        );
+    }
+}
+
+/// The drink: a glass wall the liquid interpenetrates, which is the whole
+/// reason priority exists. Straight down the axis with the specular weight
+/// at zero, so no interface reflects or bends and what arrives is
+/// Beer–Lambert alone — over each solid's *dominant* extent, which is the
+/// thing priority decides.
+///
+/// The glass outranks the water, so the overlap is glass: two meters of it
+/// from the near face to the far one, and only the half meter of water
+/// that sticks out past the glass counts as water. Without priority the
+/// water's near face is a real interface, and everything past it absorbs at
+/// whichever of the two `interiorOf` happened to rank higher — a different
+/// answer, which the second assertion pins.
+#[test]
+fn the_higher_priority_solid_owns_the_overlap() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let sky = 0.75;
+    let (glass_t, water_t) = (0.55, 0.85);
+    let solid = |transmission: f32| Material {
+        transmission_weight: 1.0,
+        specular_weight: 0.0,
+        transmission_color: Vec3::splat(transmission),
+        transmission_depth: 1.0,
+        ..Material::matte(Vec3::ONE, 0.0)
+    };
+    // Glass spans z ∈ [−7, −5], water z ∈ [−7.5, −5.5]: they share a meter
+    // and a half, and the water reaches half a meter past the glass.
+    let solid_at = |z: f32, transmission: f32, priority: u32| Object {
+        mesh: crate::scene::cube(1.0),
+        transform: Mat4::from_translation(Vec3::Z * z),
+        material: solid(transmission),
+        medium: None,
+        interior_priority: priority,
+    };
+    let camera = Camera {
+        position: Vec3::ZERO,
+        look_at: Vec3::NEG_Z,
+        up: Vec3::Y,
+        vfov_degrees: 1.0,
+        lens: None,
+    };
+    let sky_image = Environment::constant(Vec3::splat(sky));
+    let (size, samples) = (16, 256);
+    let mean_of = |glass_priority: u32| {
+        let objects = [
+            solid_at(-6.0, glass_t, glass_priority),
+            solid_at(-6.5, water_t, 0),
+        ];
+        let scene = Scene::new(&gpu, &objects, camera, &sky_image).expect("scene");
+        let sum = bsdf_only_sum(&gpu, &scene, size, samples);
+        let count = f64::from(samples * size * size);
+        sum.chunks_exact(4).map(|p| f64::from(p[0])).sum::<f64>() / count
+    };
+    let sigma = |transmission: f32| -f64::from(transmission).ln(); // depth is 1
+    let expected = f64::from(sky) * (-sigma(glass_t) * 2.0 - sigma(water_t) * 0.5).exp();
+    let ranked = mean_of(1);
+    assert!(
+        (ranked - expected).abs() / expected < 0.01,
+        "glass over water: {ranked} vs Beer–Lambert's {expected} over two meters \
+         of glass and half a meter of water"
+    );
+    let unranked = mean_of(0);
+    assert!(
+        (unranked - expected).abs() / expected > 0.05,
+        "without priority the overlap must not resolve to the same answer, \
+         got {unranked} against {expected}"
+    );
+}
+
+/// Priority past the depth the set holds. Five nested solids are one more
+/// membership than there are slots, so the innermost crossing finds none —
+/// and a false crossing with nowhere to go is *not* crossed, it is shaded,
+/// which walks the scene back toward its no-priority behaviour rather than
+/// leaving the set claiming the path is somewhere it is not. What that must
+/// produce is not an exact answer but a sound one: finite, non-negative,
+/// and one alpha per path.
+#[test]
+fn priority_nested_past_the_slots_stays_sound() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let glass = Material {
+        transmission_color: Vec3::splat(0.8),
+        transmission_depth: 1.0,
+        ..Material::glass(0.0, 1.5)
+    };
+    // Concentric, outermost first, each outranking everything inside it —
+    // so every interface but the outermost pair is false.
+    let solids: Vec<Object> = (1..=5)
+        .map(|n| Object {
+            mesh: crate::scene::cube(n as f32 * 0.4),
+            transform: Mat4::from_translation(Vec3::Z * -6.0),
+            material: glass,
+            medium: None,
+            interior_priority: n,
+        })
+        .collect();
+    let camera = Camera {
+        position: Vec3::ZERO,
+        look_at: Vec3::NEG_Z,
+        up: Vec3::Y,
+        vfov_degrees: 20.0,
+        lens: None,
+    };
+    let sky_image = Environment::constant(Vec3::splat(0.75));
+    let (size, samples) = (16, 64);
+    let scene = Scene::new(&gpu, &solids, camera, &sky_image).expect("scene");
+    let sum = bsdf_only_sum(&gpu, &scene, size, samples);
+    for chunk in sum.chunks_exact(4) {
+        for value in chunk {
+            assert!(
+                value.is_finite() && *value >= 0.0,
+                "five nested priorities must stay sound, got {value}"
+            );
+        }
+        assert!(
+            (chunk[3] - samples as f32).abs() < 1e-3,
+            "every path must finish exactly once, got alpha {}",
+            chunk[3]
+        );
+    }
 }
 
 /// Nesting, to the depth the stack holds and then past it. Three concentric
@@ -983,6 +1194,7 @@ fn nested_volumes_sum_until_the_march_runs_out_of_room() {
             scattering: Vec3::ZERO,
             anisotropy: 0.0,
         }),
+        interior_priority: 0,
     };
     let camera = Camera {
         position: Vec3::ZERO,
@@ -1052,6 +1264,7 @@ fn a_scattering_box_in_a_uniform_sky_disappears() {
                 scattering: Vec3::splat(0.5),
                 anisotropy: 0.4,
             }),
+            interior_priority: 0,
         }],
         Camera {
             position: Vec3::ZERO,
@@ -1107,6 +1320,7 @@ fn a_transparent_channel_reaches_the_environment() {
             transform: Mat4::from_translation(Vec3::Z * 20.0),
             material: Material::matte(Vec3::splat(0.5), 0.0),
             medium: None,
+            interior_priority: 0,
         }],
         Camera {
             position: Vec3::ZERO,
@@ -1180,6 +1394,7 @@ fn interior_absorption_is_spectral() {
         transform: Mat4::from_translation(Vec3::Y * 2.0),
         material,
         medium: None,
+        interior_priority: 0,
     }];
     let camera = Camera {
         position: Vec3::new(0.0, 2.0, 4.0),
@@ -1957,12 +2172,14 @@ fn indirect_light_bleeds_color() {
                 0.6,
             ),
             medium: None,
+            interior_priority: 0,
         },
         Object {
             mesh: ground_plane(5.0),
             transform: Mat4::IDENTITY,
             material: Material::matte(crate::color::acescg_from_rec709(Vec3::splat(0.65)), 0.1),
             medium: None,
+            interior_priority: 0,
         },
     ];
     let camera = Camera {

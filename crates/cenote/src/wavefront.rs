@@ -187,6 +187,11 @@ struct Media {
     volumes: bool,
     /// The open space between instances is filled.
     global: bool,
+    /// Some interior is authored with a nesting priority, so a hit can be
+    /// an interface priority cuts away — which the volume stage resolves,
+    /// and which is the one thing that makes it run in a scene with no
+    /// media at all.
+    priority: bool,
 }
 
 impl Media {
@@ -196,6 +201,7 @@ impl Media {
             interiors: scene.has_interiors(),
             volumes: scene.has_volumes(),
             global: scene.has_global_medium(),
+            priority: scene.has_priority(),
         }
     }
 
@@ -206,19 +212,29 @@ impl Media {
     fn set(self) -> bool {
         self.interiors || self.volumes
     }
+
+    /// Whether the volume stage runs at all. It owns both kinds of
+    /// boundary a segment crosses without shading: a volume's, and a
+    /// refractive interface a higher-priority interior cuts away. A scene
+    /// with neither records no volume pass and allocates no volume queue.
+    fn stage(self) -> bool {
+        self.any || self.priority
+    }
 }
 
 /// Pack `IntersectParams::packed`, mirrored by the unpack at the top of
 /// `intersect.slang`. `ray_mask` values fit a byte ([`ray_mask::ALL`] is
 /// 0xFF) and the bounce cap is asserted ≤ 255 by [`Wavefront::new`]. The
 /// flags gate the routing block — and the medium set it seeds and reads —
-/// and say whether open space counts as a medium.
+/// say whether open space counts as a medium, and whether any interior
+/// carries a priority that can cut an interface away.
 fn pack_intersect(ray_mask: u32, bounce: u32, media: Media) -> u32 {
     ray_mask
         | bounce << 8
         | u32::from(media.any) << 16
         | u32::from(media.set()) << 17
         | u32::from(media.global) << 18
+        | u32::from(media.priority) << 19
 }
 
 /// Push constants for the miss-shading kernel (`shaders/shade_miss.slang`).
@@ -816,7 +832,7 @@ impl Wavefront {
         if scene.has_interiors() || scene.has_volumes() {
             ensure(&self.paths.stack, gpu, "wavefront.stack", capacity * 16)?;
         }
-        if scene.has_media() {
+        if Media::of(scene).stage() {
             self.queues.ensure_volume(gpu, capacity)?;
         }
         let params = self.wave_params(scene, radiance, aov_table, width, height, sample);
@@ -1032,16 +1048,17 @@ impl Wavefront {
             // The bounce loop, recorded ahead of time: each round consumes
             // the ray queue, refills it with the paths that scattered, and
             // ends by tracing the round's next-event shadow rays. Rounds
-            // after every path has died dispatch nothing. A media-free
-            // scene records neither the volume stage's fill nor its
+            // after every path has died dispatch nothing. A scene with
+            // nothing for the volume stage to resolve — no media, no
+            // authored priority — records neither its fill nor its
             // dispatch, so its pass list is the pre-media engine's.
-            let media = scene.has_media();
+            let volume_stage = Media::of(scene).stage();
             let bounces = params.shade_surface.len() as u32;
             for bounce in 0..bounces {
                 passes.push(fill(queue::HIT));
                 passes.push(fill(queue::MISS));
                 passes.push(fill(queue::SHADOW));
-                if media {
+                if volume_stage {
                     passes.push(fill(queue::VOLUME));
                 }
                 passes.push(indirect(
@@ -1058,7 +1075,7 @@ impl Wavefront {
                 // Medium events resolve before the surface stage consumes
                 // the hit queue: a path that survives one is pushed there
                 // and shades as ever.
-                if media {
+                if volume_stage {
                     passes.push(indirect(
                         &self.shade_volume,
                         bytemuck::bytes_of(&params.shade_volume[bounce as usize]),
@@ -1147,6 +1164,7 @@ mod tests {
             transform: Mat4::from_translation(Vec3::Y),
             material,
             medium,
+            interior_priority: 0,
         };
         let fog = crate::scene::Medium {
             absorption: Vec3::splat(0.05),
@@ -1225,6 +1243,7 @@ mod tests {
                     transform: Mat4::from_translation(Vec3::Y),
                     material: Material::matte(Vec3::splat(0.5), 0.3),
                     medium: None,
+                    interior_priority: 0,
                 }],
                 camera,
                 &Environment::constant(Vec3::splat(0.4)),
@@ -1353,6 +1372,7 @@ mod tests {
                 transform: Mat4::from_translation(Vec3::Y),
                 material: Material::matte(Vec3::splat(0.5), 0.3),
                 medium: None,
+                interior_priority: 0,
             },
             Object {
                 // Large enough that the frame's bottom edge lands on it.
@@ -1360,6 +1380,7 @@ mod tests {
                 transform: Mat4::IDENTITY,
                 material: Material::matte(Vec3::splat(0.5), 0.1),
                 medium: None,
+                interior_priority: 0,
             },
         ];
         let camera = Camera {
@@ -1546,12 +1567,14 @@ mod tests {
                 transform: Mat4::from_translation(Vec3::Y),
                 material: Material::matte(Vec3::splat(0.5), 0.3),
                 medium: None,
+                interior_priority: 0,
             },
             Object {
                 mesh: ground_plane(12.0),
                 transform: Mat4::IDENTITY,
                 material: Material::matte(Vec3::splat(0.5), 0.1),
                 medium: None,
+                interior_priority: 0,
             },
         ];
         let camera = |lens| Camera {
@@ -1648,12 +1671,14 @@ mod tests {
                 transform: Mat4::from_translation(Vec3::Y),
                 material: Material::glossy(Vec3::splat(0.6), 0.4, 0.3).with_metalness(0.5),
                 medium: None,
+                interior_priority: 0,
             },
             Object {
                 mesh: ground_plane(4.0),
                 transform: Mat4::IDENTITY,
                 material: Material::glossy(Vec3::splat(0.7), 0.0, 0.2),
                 medium: None,
+                interior_priority: 0,
             },
             Object {
                 mesh: icosphere(2),
@@ -1661,6 +1686,7 @@ mod tests {
                     * Mat4::from_scale(Vec3::splat(0.6)),
                 material: Material::glass(0.4, 1.5),
                 medium: None,
+                interior_priority: 0,
             },
             Object {
                 // An emissive ball right above the sphere: big enough that
@@ -1671,6 +1697,7 @@ mod tests {
                     * Mat4::from_scale(Vec3::splat(0.7)),
                 material: Material::emitter(Vec3::splat(4.0)),
                 medium: None,
+                interior_priority: 0,
             },
         ];
         let camera = Camera {
@@ -1713,6 +1740,7 @@ mod tests {
                 transform: Mat4::IDENTITY,
                 material: Material::matte(Vec3::splat(0.6), 0.0),
                 medium: None,
+                interior_priority: 0,
             },
             Object {
                 mesh: icosphere(2),
@@ -1720,6 +1748,7 @@ mod tests {
                     * Mat4::from_scale(Vec3::splat(0.6)),
                 material: Material::emitter(Vec3::splat(8.0)),
                 medium: None,
+                interior_priority: 0,
             },
             Object {
                 mesh: icosphere(2),
@@ -1727,6 +1756,7 @@ mod tests {
                     * Mat4::from_scale(Vec3::splat(0.3)),
                 material: Material::emitter(Vec3::splat(1.5)),
                 medium: None,
+                interior_priority: 0,
             },
         ];
         let camera = Camera {
@@ -1778,6 +1808,7 @@ mod tests {
                 transform: Mat4::IDENTITY,
                 material: Material::matte(Vec3::splat(0.6), 0.0),
                 medium: None,
+                interior_priority: 0,
             },
             Object {
                 mesh: icosphere(2),
@@ -1785,6 +1816,7 @@ mod tests {
                     * Mat4::from_scale(Vec3::splat(0.5)),
                 material: Material::emitter(Vec3::splat(9.0)),
                 medium: None,
+                interior_priority: 0,
             },
             Object {
                 mesh: crate::scene::cube(1.0),
@@ -1798,6 +1830,7 @@ mod tests {
                     scattering: Vec3::new(0.10, 0.16, 0.22),
                     anisotropy: 0.3,
                 }),
+                interior_priority: 0,
             },
         ];
         let camera = Camera {
@@ -1832,12 +1865,14 @@ mod tests {
                 transform: Mat4::from_translation(Vec3::Y),
                 material: Material::glossy(Vec3::splat(0.6), 0.4, 0.3).with_metalness(0.5),
                 medium: None,
+                interior_priority: 0,
             },
             Object {
                 mesh: ground_plane(4.0),
                 transform: Mat4::IDENTITY,
                 material: Material::glossy(Vec3::splat(0.7), 0.0, 0.2),
                 medium: None,
+                interior_priority: 0,
             },
         ];
         let camera = Camera {

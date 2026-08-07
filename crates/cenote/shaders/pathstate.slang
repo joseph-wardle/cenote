@@ -47,7 +47,10 @@ public static const uint INSTANCE_NONE = 0xffffffff;
 // (σ_s > 0), which routes a segment to shade_volume. `STACK_INTERIOR`
 // marks a refractive interior, which *displaces* what surrounds it, as
 // against a null-bounded volume, which *adds* to it (see `combineMedia`).
-// Bits 25–30 are free, and are where a nesting priority will go.
+// `STACK_PRIORITY` is the nesting priority of an interior, in bits 25–30
+// — directly under `STACK_INTERIOR` so that the same `max` that finds an
+// interior at all ranks interiors against each other by priority, at no
+// cost.
 //
 // Built by `stackEntry` in scene.slang, which is where an instance's
 // boundary word lives — the flags are insertion's to set, and this module
@@ -55,6 +58,8 @@ public static const uint INSTANCE_NONE = 0xffffffff;
 public static const uint STACK_INDEX_MASK = 0xffffff;
 public static const uint STACK_EMPTY = STACK_INDEX_MASK;
 public static const uint STACK_SCATTERING = 1 << 24;
+public static const uint STACK_PRIORITY_SHIFT = 25;
+public static const uint STACK_PRIORITY = 63 << STACK_PRIORITY_SHIFT;
 public static const uint STACK_INTERIOR = 1 << 31;
 
 // How many media a path can be inside at once — one per lane of its stack
