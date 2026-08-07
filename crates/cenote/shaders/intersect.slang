@@ -109,7 +109,12 @@ void intersect(uint3 tid: SV_DispatchThreadID) {
         params.paths.setMedia(path, uint4(STACK_EMPTY));
     }
     // Whether the volume stage owes this segment an event — asked once,
-    // and only where the answer can be yes.
+    // and only where the answer can be yes. The set is read under that
+    // guard and not merely under `live`: a scene can carry a set with
+    // nothing to sample (glass, no medium), and reading it there anyway
+    // measured +4…6% of this kernel and +1.0…1.2% of the frame on
+    // glass-of-water and spaceship. Whatever else comes to ask the set a
+    // question widens this guard rather than removing it.
     let media = (params.packed & FLAG_MEDIA) != 0;
     var owed = false;
     if (media) {

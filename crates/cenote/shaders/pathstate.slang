@@ -48,6 +48,10 @@ public static const uint INSTANCE_NONE = 0xffffffff;
 // marks a refractive interior, which *displaces* what surrounds it, as
 // against a null-bounded volume, which *adds* to it (see `combineMedia`).
 // Bits 25–30 are free, and are where a nesting priority will go.
+//
+// Built by `stackEntry` in scene.slang, which is where an instance's
+// boundary word lives — the flags are insertion's to set, and this module
+// only ever matches on the index.
 public static const uint STACK_INDEX_MASK = 0xffffff;
 public static const uint STACK_EMPTY = STACK_INDEX_MASK;
 public static const uint STACK_SCATTERING = 1 << 24;

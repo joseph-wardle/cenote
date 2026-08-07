@@ -174,7 +174,8 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
         // rather than respawning from the surface keeps every distance in
         // the original ray's parameter and needs no error bounds.
         crossed++;
-        set = crossMedium(set, hit.instance).set;
+        let entry = stackEntry(params.scene.geometry[hit.instance], hit.instance);
+        set = crossMedium(set, entry).set;
         start = end;
 
         // Past the cap the march stops *tracking* media but keeps the

@@ -269,7 +269,7 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     // interior; thin walls have none. Every other scatter leaves the set
     // where it was, and writes nothing.
     if (interiors && scatter.lobe == LOBE_TRANSMISSION && material.thinWalled == 0) {
-        let crossing = crossMedium(set, hit.instance | STACK_INTERIOR);
+        let crossing = crossMedium(set, stackEntry(mesh, hit.instance));
         if (crossing.slot < MEDIUM_SLOTS) {
             params.paths.setSlot(path, crossing.slot, crossing.set[crossing.slot]);
         }

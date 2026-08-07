@@ -57,6 +57,17 @@ public struct GeometryRecord {
     uint pad0;
 };
 
+// The medium-set entry naming an instance the path has just entered: its
+// TLAS custom index, and above it the flags that say what kind of medium
+// this is. Crossing *out* matches on the index alone (`crossMedium` in
+// pathstate.slang), so insertion is the only place the flags can be set —
+// and an entry built without them ranks in `interiorOf` as something it is
+// not. Hence one builder for every insertion site, reading the boundary
+// word prep already classified rather than re-deciding from the material.
+public uint stackEntry(GeometryRecord mesh, uint instance) {
+    return instance | (mesh.boundary == BOUNDARY_REFRACTIVE ? STACK_INTERIOR : 0);
+}
+
 // The UV at barycentrics (b1, b2) of a triangle — weights on the second
 // and third corner, the convention ray-query barycentrics and the light
 // sampler's triangle parameterization share.
