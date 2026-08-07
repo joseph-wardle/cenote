@@ -27,10 +27,9 @@ struct Params {
     Queue<ShadowRay> shadows;
     float4* radiance; // the film's per-pixel accumulator for this wave
     SceneTable* scene; // materials — the opacity each crossing attenuates by
-    // The medium stack, for the volumes each connection *starts* inside.
+    // The medium set, for the volumes each connection *starts* inside.
     // Read only by the `trace_shadow_volumes` entry point, and null for the
-    // other — a scene with interiors alone allocates a stack whose volume
-    // lanes were never seeded, so having one is not the same as having them.
+    // other.
     uint4* stack;
 };
 
@@ -55,9 +54,10 @@ void traceShadow<let VOLUMES : int>(uint3 tid) {
     // the global extinction over its whole length, including the part still
     // inside the glass. The renderer applied no extinction at all there
     // before a global medium existed, so this is not a regression — but it
-    // is wrong, and only a per-crossing extent (which the interior lane, one
-    // instance wide, cannot express) fixes it. Until then, a scene with both
-    // a global medium and refractive interiors is approximate.
+    // is wrong, and only a per-crossing extent — which this pass measures
+    // for volumes and cannot for an interior, a connection being unable to
+    // refract out of one — fixes it. Until then, a scene with both a global
+    // medium and refractive interiors is approximate.
     var contribution = shadow.contribution;
     let global = params.scene.globalMedium;
     if (global != MEDIUM_NONE) {
@@ -84,9 +84,9 @@ void traceShadow<let VOLUMES : int>(uint3 tid) {
     // all live in `shadowVisibility` (scene.slang).
     // An `if`, not a select: `params.stack` is null in the other
     // specialization, and a select would have to evaluate the load.
-    var inside = uint3(STACK_EMPTY);
+    var inside = uint4(STACK_EMPTY);
     if (VOLUMES != 0) {
-        inside = insideOf(params.stack, shadow.path);
+        inside = params.stack[shadow.path];
     }
     let attenuation = shadowVisibility<VOLUMES>(sceneTlas, params.scene, ray,
                                                 shadow.light, shadow.primitive, inside);

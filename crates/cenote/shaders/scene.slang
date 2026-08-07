@@ -7,7 +7,7 @@
 import environment;
 import lights;
 import openpbr;
-import pathstate; // STACK_EMPTY, VOLUME_SLOTS, crossVolume
+import pathstate; // STACK_EMPTY, MEDIUM_SLOTS, crossMedium
 import textures;
 
 // What crossing an instance's surface means, classified at prep: an
@@ -141,7 +141,10 @@ public float3 extinctionOf(SceneTable* scene, uint instance) {
 // `VOLUMES` is a specialization, not a flag — the reason is in
 // trace_shadow.slang, where the two entry points that instantiate it live.
 //
-// `inside` names the volumes the connection *starts* in. Volume extents are
+// `inside` is the launching vertex's medium set; the volumes in it are what
+// this pass measures, and the interior — whose extent one instance index
+// cannot express — is the approximation the TODO in trace_shadow.slang
+// names. Volume extents are
 // measured, not marched: for one volume the optical depth over [0, tmax] is
 // σ_t times the extent inside it, and that extent is
 //
@@ -160,7 +163,7 @@ public float3 extinctionOf(SceneTable* scene, uint instance) {
 // crossings instead, which is the one thing this pass cannot do.
 public float3 shadowVisibility<let VOLUMES : int>(
     RaytracingAccelerationStructure tlas, SceneTable* scene, RayDesc ray,
-    uint light, uint primitive, uint3 inside) {
+    uint light, uint primitive, uint4 inside) {
     RayQuery<RAY_FLAG_NONE> query;
     query.TraceRayInline(tlas, RAY_FLAG_NONE, 0xFF, ray);
     var attenuation = 1.0;
@@ -177,7 +180,7 @@ public float3 shadowVisibility<let VOLUMES : int>(
             let t = query.CandidateTriangleRayT();
             extent += extinctionOf(scene, instance)
                       * (query.CandidateTriangleFrontFace() ? -t : t);
-            atEnd = crossVolume(atEnd, instance);
+            atEnd = crossMedium(atEnd, instance).set;
         } else {
             attenuation *= 1.0 - opacityAt(scene, instance,
                                            query.CandidatePrimitiveIndex(),
@@ -195,9 +198,11 @@ public float3 shadowVisibility<let VOLUMES : int>(
     if (VOLUMES == 0) {
         return float3(attenuation);
     }
-    for (uint slot = 0; slot < VOLUME_SLOTS; slot++) {
-        if (atEnd[slot] != STACK_EMPTY) {
-            extent += extinctionOf(scene, atEnd[slot]) * ray.TMax;
+    for (uint slot = 0; slot < MEDIUM_SLOTS; slot++) {
+        // Volumes only: an interior shares the set but not this sum, and
+        // the crossings above could only ever have added a null boundary.
+        if (atEnd[slot] != STACK_EMPTY && (atEnd[slot] & STACK_INTERIOR) == 0) {
+            extent += extinctionOf(scene, atEnd[slot] & STACK_INDEX_MASK) * ray.TMax;
         }
     }
     // A negative extent means a volume was entered and never left, or wound

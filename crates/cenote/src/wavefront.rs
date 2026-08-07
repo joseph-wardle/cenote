@@ -180,9 +180,10 @@ struct IntersectParams {
 struct Media {
     /// Some segment can owe a medium event, so the volume stage runs.
     any: bool,
-    /// The stack's x lane is live: some mesh closes a refractive interior.
+    /// Some mesh closes a refractive interior, so the medium set can hold
+    /// one and the surface stage has to look.
     interiors: bool,
-    /// Its other three lanes are: some mesh bounds a volume.
+    /// Some mesh bounds a volume, so connections have extents to measure.
     volumes: bool,
     /// The open space between instances is filled.
     global: bool,
@@ -197,20 +198,27 @@ impl Media {
             global: scene.has_global_medium(),
         }
     }
+
+    /// Whether the path pool carries a medium set at all. The same
+    /// predicate gates its allocation, so no kernel can read a buffer that
+    /// was never made — a scene whose only medium is the global one has
+    /// media but nothing to be inside of.
+    fn set(self) -> bool {
+        self.interiors || self.volumes
+    }
 }
 
 /// Pack `IntersectParams::packed`, mirrored by the unpack at the top of
 /// `intersect.slang`. `ray_mask` values fit a byte ([`ray_mask::ALL`] is
 /// 0xFF) and the bounce cap is asserted ≤ 255 by [`Wavefront::new`]. The
-/// flags gate the routing block, each half of the medium stack it reads,
-/// and whether open space counts as a medium.
+/// flags gate the routing block — and the medium set it seeds and reads —
+/// and say whether open space counts as a medium.
 fn pack_intersect(ray_mask: u32, bounce: u32, media: Media) -> u32 {
     ray_mask
         | bounce << 8
         | u32::from(media.any) << 16
-        | u32::from(media.interiors) << 17
+        | u32::from(media.set()) << 17
         | u32::from(media.global) << 18
-        | u32::from(media.volumes) << 19
 }
 
 /// Push constants for the miss-shading kernel (`shaders/shade_miss.slang`).
@@ -263,16 +271,15 @@ struct ShadeSurfaceParams {
 /// Pack the shading stages' `packed`, mirrored by the unpack at the top of
 /// `shade_surface.slang` and `shade_volume.slang` — one layout, because the
 /// two stages read the same things. Both byte-wide fields are asserted in
-/// range by [`Wavefront::new`]; the two flags gate the halves of the medium
-/// stack, which a scene without interiors and without volumes never
-/// allocated. Only the volume stage reads `volumes`; the surface stage is
-/// handed it so the two packings stay one.
+/// range by [`Wavefront::new`]; `interiors` says the medium set may hold an
+/// interior, which is the surface stage's only reason to read it, and
+/// [`Media::set`] says the set exists at all, which is the volume stage's.
 fn pack_shade(bounce: u32, max_bounces: u32, light_sampling: LightSampling, media: Media) -> u32 {
     bounce
         | max_bounces << 8
         | (light_sampling as u32) << 16
         | u32::from(media.interiors) << 24
-        | u32::from(media.volumes) << 25
+        | u32::from(media.set()) << 25
 }
 
 /// The five queues the volume kernel touches — `struct VolumeQueues` in
@@ -1123,15 +1130,15 @@ mod tests {
         .expect("radiance buffer")
     }
 
-    /// The medium stack is residency a scene has to earn: a wave over
-    /// opaque geometry must never allocate it, and one over glass or one
-    /// over a fog box must — the two halves are earned separately, by
-    /// different scene features, and either alone pays for all 16 bytes.
-    /// The null address the first case leaves in every kernel's push
-    /// constants is only safe because no kernel dereferences it, so this
-    /// also stands in for "media-free scenes touch no medium state".
+    /// The medium set is residency a scene has to earn: a wave over opaque
+    /// geometry must never allocate it, and one over glass or one over a
+    /// fog box must — either kind alone pays for all four slots, since
+    /// they share them. The null address the first case leaves in every
+    /// kernel's push constants is only safe because no kernel dereferences
+    /// it, so this also stands in for "media-free scenes touch no medium
+    /// state".
     #[test]
-    fn either_half_of_the_medium_stack_earns_the_allocation() {
+    fn either_kind_of_medium_earns_the_set() {
         let Some(gpu) = crate::gpu::test_context() else {
             return;
         };
@@ -1177,7 +1184,7 @@ mod tests {
             assert_eq!(
                 wavefront.paths.stack.get().is_some(),
                 interiors || volumes,
-                "the stack must exist exactly when the scene has one half of it or the other"
+                "the set must exist exactly when the scene has a medium to be inside of"
             );
             assert_eq!(
                 wavefront.queues.volume.get().is_some(),

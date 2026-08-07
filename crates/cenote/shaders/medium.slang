@@ -4,7 +4,7 @@
 // nothing to track along the segment and no majorant to bound.
 
 import openpbr; // Frame, PI
-import pathstate; // STACK_EMPTY, VOLUME_SLOTS
+import pathstate; // STACK_EMPTY, MEDIUM_SLOTS, interiorOf
 import scene;
 
 // The medium filling the segment a path is travelling: the volumes it is
@@ -15,15 +15,15 @@ import scene;
 //
 // A refractive interior displaces all of it — a path inside glass is not
 // also in the room's haze — and no interior has an event to sample yet, so
-// naming one returns vacuum here: its Beer–Lambert absorption stays the
+// one in the set returns vacuum here: its Beer–Lambert absorption stays the
 // surface stage's, applied once over the whole segment, exactly as it was
 // before volumes existed.
-public MediumRecord combineMedia(SceneTable* scene, uint interior, uint3 inside) {
+public MediumRecord combineMedia(SceneTable* scene, uint4 set) {
     MediumRecord total;
     total.sigmaT = float3(0.0);
     total.sigmaS = float3(0.0);
     total.g = 0.0;
-    if (interior != STACK_EMPTY) {
+    if (interiorOf(set) != STACK_EMPTY) {
         return total;
     }
     // A mixture's true phase function is the σ_s-weighted average of its
@@ -32,13 +32,13 @@ public MediumRecord combineMedia(SceneTable* scene, uint interior, uint3 inside)
     // sum until the division below. Exact wherever a single component
     // scatters, which is every case but two scattering volumes overlapping.
     var weight = 0.0;
-    for (uint slot = 0; slot <= VOLUME_SLOTS; slot++) {
+    for (uint slot = 0; slot <= MEDIUM_SLOTS; slot++) {
         // Slots first, then the open space they stand in, which adds the
         // same way they do.
-        let index = slot < VOLUME_SLOTS
-                        ? (inside[slot] == STACK_EMPTY
+        let index = slot < MEDIUM_SLOTS
+                        ? (set[slot] == STACK_EMPTY
                                ? MEDIUM_NONE
-                               : scene.geometry[inside[slot]].medium)
+                               : scene.geometry[set[slot] & STACK_INDEX_MASK].medium)
                         : scene.globalMedium;
         if (index == MEDIUM_NONE) {
             continue;

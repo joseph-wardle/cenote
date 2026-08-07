@@ -842,6 +842,64 @@ fn bounded_volumes_absorb_over_exactly_the_extent_they_bound() {
     }
 }
 
+/// One refractive interior inside another: the medium set has to hold both,
+/// and leaving the inner one has to put the path back in the outer rather
+/// than out of everything.
+///
+/// Two boxes of the same glass, so the answer does not depend on which of
+/// the two the path is judged to be *in* while it is in both — every meter
+/// between the outer faces absorbs the same. A set one entry deep cannot
+/// hold both: it overwrites the outer on the way in, empties on the way out
+/// of the inner, and leaves the far gap unabsorbed, landing three meters of
+/// extinction short of four.
+///
+/// The glass is authored at `specular_weight` 0, which drives the closure's
+/// relative IOR to 1: no refraction to bend the axial ray, no Fresnel to
+/// take a share off each of the four crossings, and what reaches the camera
+/// is Beer–Lambert alone.
+#[test]
+fn a_nested_interior_gives_the_path_back_to_the_one_around_it() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let sky = 0.75;
+    let transmission = 0.85;
+    let sigma = -f64::from(transmission).ln(); // per meter: depth is 1
+    let glass = Material {
+        transmission_weight: 1.0,
+        specular_weight: 0.0,
+        transmission_color: Vec3::splat(transmission),
+        transmission_depth: 1.0,
+        ..Material::matte(Vec3::ONE, 0.0)
+    };
+    let box_of = |half: f32| Object {
+        mesh: crate::scene::cube(half),
+        transform: Mat4::from_translation(Vec3::Z * -6.0),
+        material: glass,
+        medium: None,
+    };
+    let camera = Camera {
+        position: Vec3::ZERO,
+        look_at: Vec3::NEG_Z,
+        up: Vec3::Y,
+        vfov_degrees: 1.0,
+        lens: None,
+    };
+    let sky_image = Environment::constant(Vec3::splat(sky));
+    let (size, samples) = (16, 256);
+    let scene = Scene::new(&gpu, &[box_of(2.0), box_of(1.0)], camera, &sky_image).expect("scene");
+    let sum = bsdf_only_sum(&gpu, &scene, size, samples);
+    let count = f64::from(samples * size * size);
+    let mean = sum.chunks_exact(4).map(|p| f64::from(p[0])).sum::<f64>() / count;
+    let expected = f64::from(sky) * (-sigma * 4.0).exp();
+    assert!(
+        (mean - expected).abs() / expected < 0.015,
+        "nested glass: {mean} vs Beer–Lambert's {expected} over four meters \
+         (three would be {})",
+        f64::from(sky) * (-sigma * 3.0).exp()
+    );
+}
+
 /// Nesting, to the depth the stack holds and then past it. Three concentric
 /// boxes are three simultaneous memberships, and their extinctions still sum
 /// to the closed form; nine are more crossings than the march will make and

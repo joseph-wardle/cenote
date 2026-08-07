@@ -31,10 +31,10 @@ import scene;
 [vk::binding(0, 0)]
 RaytracingAccelerationStructure sceneTlas;
 
-// Bits 24 and 25 of `Params.packed`, as in shade_surface: the scene has
-// closed transmissive surfaces, and it has volume-bounding meshes.
-static const uint FLAG_INTERIORS = 1 << 24;
-static const uint FLAG_VOLUMES = 1 << 25;
+// Bit 25 of `Params.packed`, as in shade_surface: the path pool carries a
+// medium set. A scene whose only medium is the global one has none — there
+// is nothing to be inside of — and this stage still runs.
+static const uint FLAG_SET = 1 << 25;
 
 // Null boundaries one segment may cross before the march stops tracking
 // media and runs straight through the rest — the bound on a pathological
@@ -54,7 +54,7 @@ static const uint MARCH_CROSSING_CAP = TRANSPARENT_CAP * (NULL_CROSSING_CAP + 1)
 // triangle cannot return the boundary just crossed. Two boundaries closer
 // together than this read as one: the march misses the inner volume's near
 // face and then takes its far face for an entry, so coincident volume
-// surfaces are outside the model — see `crossVolume` in pathstate.slang.
+// surfaces are outside the model — see `crossMedium` in pathstate.slang.
 static const float MARCH_NUDGE = 1e-6;
 
 // The five queues this stage touches, behind one pointer: consuming one and
@@ -98,8 +98,6 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
     let bounce = params.packed & 0xff;
     let maxBounces = (params.packed >> 8) & 0xff;
     let lightSampling = (params.packed >> 16) & 0xff;
-    let interiors = (params.packed & FLAG_INTERIORS) != 0;
-    let volumes = (params.packed & FLAG_VOLUMES) != 0;
     uint path = params.queues.volumes.entries[tid.x];
     uint pixel = params.paths.pixel[path];
     var hit = params.paths.hit[path];
@@ -119,10 +117,10 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
     // one's length in origin's w lane, and the sentinel says there is no
     // far end.
     var end = hit.instance == INSTANCE_NONE ? 1e30 : origin4.w;
-    // The interior stays fixed across the march — a null boundary is not a
-    // refractive one, so crossing it enters no interior.
-    let interior = params.paths.arriving(path, bounce, interiors) & STACK_INDEX_MASK;
-    var inside = params.paths.inside(path, volumes);
+    // The media the path is travelling. Only volume slots move across the
+    // march — a null boundary is not a refractive one, so crossing it
+    // enters no interior, and a crossing at all implies the set exists.
+    var set = params.paths.media(path, (params.packed & FLAG_SET) != 0);
     // Continues intersect's transparency chain past its own cap, so the
     // march's stochastic-opacity draws can never repeat one it already made.
     var crossing = TRANSPARENT_CAP;
@@ -130,7 +128,7 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
     MediumEvent event;
     MediumRecord record;
     for (;;) {
-        record = combineMedia(params.scene, interior, inside);
+        record = combineMedia(params.scene, set);
         // The first sub-segment keeps the Sobol dimension the bounce block
         // reserved; the rest draw from the hash stream, having no reserved
         // dimensions of their own. A segment no boundary interrupts
@@ -162,9 +160,7 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
             // is intersect's own and the membership is unchanged.
             if (crossed != 0) {
                 params.paths.hit[path] = hit;
-                if (volumes) {
-                    params.paths.setInside(path, inside);
-                }
+                params.paths.setMedia(path, set);
             }
             if (hit.instance == INSTANCE_NONE) {
                 params.queues.misses.push(path);
@@ -178,7 +174,7 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
         // rather than respawning from the surface keeps every distance in
         // the original ray's parameter and needs no error bounds.
         crossed++;
-        inside = crossVolume(inside, hit.instance);
+        set = crossMedium(set, hit.instance).set;
         start = end;
 
         // Past the cap the march stops *tracking* media but keeps the
@@ -226,8 +222,8 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
     // The scatter ends the segment, so the stale hit above is never read —
     // the next bounce's intersect overwrites it. Membership is not stale:
     // the connection below and the next bounce both measure from here.
-    if (volumes && crossed != 0) {
-        params.paths.setInside(path, inside);
+    if (crossed != 0) {
+        params.paths.setMedia(path, set);
     }
     let aovOn = params.aov.enabled != 0;
     if (aovOn) {

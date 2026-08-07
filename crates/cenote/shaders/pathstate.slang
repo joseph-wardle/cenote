@@ -37,25 +37,31 @@ public struct Hit {
 // Above the 24-bit custom-index range every real instance lives in.
 public static const uint INSTANCE_NONE = 0xffffffff;
 
-// A medium-stack entry: an instance's TLAS custom index in the low 24
-// bits, flags above. The entry names the *instance* whose medium the
-// path travels, not what fills it — identity is what entering and exiting
+// A medium-set entry: an instance's TLAS custom index in the low 24 bits,
+// flags above. The entry names the *instance* whose medium the path
+// travels, not what fills it — identity is what entering and exiting
 // compare, and two instances can share one medium. `STACK_EMPTY` is the
-// all-ones index — a path outside everything, and an entry no instance can
-// claim (custom indices are 24 bits, and `raw_instance` in `accel.rs`
-// asserts they stay below this value). `STACK_SCATTERING` marks an entry
-// whose medium scatters (σ_s > 0), which routes a segment to shade_volume.
+// all-ones index — a slot no instance can claim (custom indices are 24
+// bits, and `raw_instance` in `accel.rs` asserts they stay below this
+// value). `STACK_SCATTERING` marks an entry whose medium scatters
+// (σ_s > 0), which routes a segment to shade_volume. `STACK_INTERIOR`
+// marks a refractive interior, which *displaces* what surrounds it, as
+// against a null-bounded volume, which *adds* to it (see `combineMedia`).
+// Bits 25–30 are free, and are where a nesting priority will go.
 public static const uint STACK_INDEX_MASK = 0xffffff;
 public static const uint STACK_EMPTY = STACK_INDEX_MASK;
 public static const uint STACK_SCATTERING = 1 << 24;
+public static const uint STACK_INTERIOR = 1 << 31;
 
-// How many null-bounded volumes a path can be inside at once — the y, z,
-// and w lanes of its stack entry. Overlap deeper than this is not modelled:
-// the fourth volume's boundary is ignored, which leaves its extent unfogged
-// (and, since the set is what exits compare against, leaves its far side
-// fogged instead). Three is what the layout affords; the volumes production
-// scenes overlap are one or two.
-public static const uint VOLUME_SLOTS = 3;
+// How many media a path can be inside at once — one per lane of its stack
+// entry, refractive interiors and null-bounded volumes sharing the four.
+// Sharing is what lets an interior nest, which a lane of its own could
+// never do, and the two kinds do not compete in practice: the scenes that
+// overlap volumes are not the scenes that nest glass. Deeper overlap is not
+// modelled — the fifth crossing is ignored, which leaves that medium's
+// extent empty (and, since the set is what exits compare against, fills its
+// far side instead).
+public static const uint MEDIUM_SLOTS = 4;
 
 // Bounces before this always survive — they carry most of the image's energy,
 // and killing them early would just trade traced rays for noise. From here on,
@@ -89,77 +95,78 @@ public struct Paths {
     // scatter that produced this ray, which the next vertex's emission
     // needs for MIS (0 on camera rays: no light-sampling strategy competed).
     public float4* throughput;
-    // The path's medium stack, allocated only for a scene that has
-    // interiors or volumes — so this address is null in a media-free
-    // scene, and every access sits behind the kernel flag for the half it
-    // reads. Two independent halves, because the two kinds nest
-    // differently and the surface stage only ever wants the first:
+    // The media the path is inside: one [`MEDIUM_SLOTS`]-wide set,
+    // allocated only for a scene that has interiors or volumes — so this
+    // address is null in a media-free scene, and every access sits behind
+    // the kernel flag for the kind it cares about. Slots are
+    // interchangeable and unordered; which kind an entry is, is its
+    // `STACK_INTERIOR` bit.
     //
-    //   x       the innermost refractive interior — `top`/`setTop`
-    //   y, z, w the null-bounded volumes the path is inside — `inside`/
-    //           `setInside`, an unordered set
+    // Intersect seeds the whole set at bounce 0, so every later stage may
+    // read it without asking what bounce it is — raygen cannot, its push
+    // constants being full at Vulkan's guaranteed 128 bytes.
     //
-    // Reach either through its accessors rather than indexing this
+    // Reach it through the accessors below rather than indexing this
     // directly: the sentinels and the store widths are theirs to keep.
     public uint4* stack;
 
-    // The innermost entry: the interior the ray is currently travelling,
-    // set when a refraction enters a closed surface and cleared when one
-    // leaves. Read at the next vertex for Beer–Lambert absorption, and by
-    // intersect for STACK_SCATTERING.
-    //
-    // Both touch one lane, not the vector: `stack[path].x` would load a
-    // whole uint4, and a full-width store measured +2.9% frame on
-    // glass-of-water. The pool is residency-bound — bytes moved are the
-    // cost. Written only by scatters, so bounce 0 must not read it: a
-    // camera ray starts in vacuum and raygen leaves the entry unwritten.
-    public uint top(uint path) { return ((uint*)stack)[path * 4]; }
-    public void setTop(uint path, uint entry) { stack[path].x = entry; }
-
-    // The interior the arriving segment travelled, or `STACK_EMPTY` for
-    // open space — the question intersect and shade_volume both ask (and
-    // shade_surface spells out again, for a reason recorded there).
-    // `interiors` is the kernel's flag: a scene without them never
-    // allocated the buffer. Bounce 0 must not read it either — a camera ray
-    // starts in vacuum and raygen leaves the entry unwritten.
-    public uint arriving(uint path, uint bounce, bool interiors) {
-        return interiors && bounce != 0 ? top(path) : STACK_EMPTY;
+    // The set as the stages read it. `live` is the kernel's flag: a scene
+    // with no medium to be inside of never allocated the buffer. The load
+    // is full width because the pool moves whole sectors regardless — it is
+    // *stores* that cost bytes here.
+    public uint4 media(uint path, bool live) {
+        return live ? stack[path] : uint4(STACK_EMPTY);
     }
 
+    // One crossing changes one slot, so that is what reaches memory: a
+    // full-width store of this vector measured +2.9% frame on
+    // glass-of-water, the pool being residency-bound.
+    public void setSlot(uint path, uint slot, uint entry) {
+        ((uint*)stack)[path * 4 + slot] = entry;
+    }
+
+    // The whole set at once, for the two writers that change every slot:
+    // intersect's bounce-0 seed and the volume march's write-back.
+    public void setMedia(uint path, uint4 set) { stack[path] = set; }
+
     // The segment length lane of `origin` — see the field above. A one-lane
-    // store, like `setTop`: the pool is residency-bound, and a full float4
-    // store measured +2.9% frame on glass-of-water.
+    // store, like `setSlot`, for the same reason.
     public void setSegment(uint path, float length) {
         ((float*)origin)[path * 4 + 3] = length;
     }
-
-    // The null-bounded volumes the path is inside: an unordered set, since
-    // overlapping volumes add and addition has no order. `volumes` is the
-    // kernel's flag — a scene with no volume-bounding mesh never seeds
-    // these lanes, so nothing may read them there. Intersect seeds them at
-    // bounce 0, which is why every later stage can read without asking
-    // what bounce it is.
-    public uint3 inside(uint path, bool volumes) {
-        return volumes ? stack[path].yzw : uint3(STACK_EMPTY);
-    }
-
-    // Three one-lane stores, for `setTop`'s reason: the pool is
-    // residency-bound and the x lane belongs to the surface stage.
-    public void setInside(uint path, uint3 set) {
-        stack[path].y = set.x;
-        stack[path].z = set.y;
-        stack[path].w = set.z;
-    }
 };
 
-// The volumes lanes of one stack entry — what `Paths::inside` reads, for a
-// stage that carries the stack alone rather than the whole pool.
-public uint3 insideOf(uint4* stack, uint path) {
-    return stack[path].yzw;
+// The refractive interior the path is inside, or `STACK_EMPTY` for none —
+// the entry, flags and all. Interiors displace what surrounds them, so this
+// alone decides what fills a segment when it is set.
+//
+// Three `max`es, not a search, which is what puts `STACK_INTERIOR` at the
+// *top* bit: an interior entry outranks every volume entry and every empty
+// slot, so the widest word in the set is an interior whenever the set holds
+// one. The bits below it rank interiors against each other.
+public uint interiorOf(uint4 set) {
+    let widest = max(max(set.x, set.y), max(set.z, set.w));
+    return (widest & STACK_INTERIOR) != 0 ? widest : STACK_EMPTY;
 }
 
-// Crossing a null boundary flips the instance's membership in `set`: it is
-// there, so this crossing leaves it; it is absent, so this one enters.
+// Is the path inside this instance? Membership, not dominance: a hit on a
+// surface the path is already inside *leaves* it, whichever of the media in
+// the set happens to fill the segment.
+public bool insideMedium(uint4 set, uint instance) {
+    return any((set & uint4(STACK_INDEX_MASK)) == uint4(instance));
+}
+
+// The set after a crossing, and the one slot it changed — `MEDIUM_SLOTS`
+// where the set was full and the crossing had to be dropped. The slot is
+// returned because one crossing is one store, and the writer needs to know
+// which.
+public struct Crossing {
+    public uint4 set;
+    public uint slot;
+};
+
+// Cross `entry`'s boundary: it is in the set, so this crossing leaves it;
+// it is absent, so this one enters, flags and all.
 //
 // Membership, not which way the triangle faces. A volume mesh authored
 // inside-out — the winding mistake every USD pipeline makes at least once —
@@ -168,27 +175,33 @@ public uint3 insideOf(uint4* stack, uint path) {
 // closed, outward-wound mesh, which is what the shadow pass's signed
 // distances need anyway.
 //
-// Both failures of that agreement are one-sided by construction. A fourth
-// simultaneous volume has nowhere to go and is dropped, so its far face
-// reads as an entry and its *outside* fogs (see `VOLUME_SLOTS`); a crossing
-// the march could not separate from the one before it does the same. Either
-// way a path leaves carrying a volume it is no longer in, which the shadow
-// pass clamps to no shadow rather than to a medium that amplifies.
-public uint3 crossVolume(uint3 set, uint instance) {
-    var free = VOLUME_SLOTS;
-    for (uint slot = 0; slot < VOLUME_SLOTS; slot++) {
-        if (set[slot] == instance) {
-            set[slot] = STACK_EMPTY;
-            return set;
+// Both failures of that agreement are one-sided by construction. A crossing
+// with no slot to go to is dropped, so its far face reads as an entry and
+// the medium's *outside* fills instead (see `MEDIUM_SLOTS`); a crossing the
+// march could not separate from the one before it does the same. Either way
+// a path leaves carrying a medium it is no longer in, which the shadow pass
+// clamps to no shadow rather than to one that amplifies.
+public Crossing crossMedium(uint4 set, uint entry) {
+    let instance = entry & STACK_INDEX_MASK;
+    Crossing crossing;
+    crossing.set = set;
+    crossing.slot = MEDIUM_SLOTS;
+    var free = MEDIUM_SLOTS;
+    for (uint slot = 0; slot < MEDIUM_SLOTS; slot++) {
+        if ((set[slot] & STACK_INDEX_MASK) == instance) {
+            crossing.set[slot] = STACK_EMPTY;
+            crossing.slot = slot;
+            return crossing;
         }
-        if (set[slot] == STACK_EMPTY && free == VOLUME_SLOTS) {
+        if (set[slot] == STACK_EMPTY && free == MEDIUM_SLOTS) {
             free = slot;
         }
     }
-    if (free < VOLUME_SLOTS) {
-        set[free] = instance;
+    if (free < MEDIUM_SLOTS) {
+        crossing.set[free] = entry;
+        crossing.slot = free;
     }
-    return set;
+    return crossing;
 }
 
 // The wave's AOV targets, one indirection behind the shading kernels'
@@ -273,9 +286,10 @@ public struct ShadowRay {
     public uint pixel;
     // The path that launched it — not to make this record depend on the
     // pool, but so the shadow stage can find the volumes the connection
-    // starts inside. Nothing writes that set between the launching stage
-    // and this one (a surface scatter moves the interior lane, never these),
-    // so the entry it reads is the one at the connection's own vertex.
+    // starts inside. The launching stage may go on to change the set before
+    // this one reads it, but only ever an *interior* slot, and the shadow
+    // pass measures volumes alone: the membership it reads is the one at the
+    // connection's own vertex.
     public uint path;
     public uint pad0;
     public uint pad1;
