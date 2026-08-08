@@ -46,15 +46,20 @@ struct Params {
 Params params;
 
 // Does the volume stage owe the arriving segment anything? A refractive
-// interior displaces whatever surrounds it and does not scatter — its
-// Beer–Lambert factor is shade_surface's closed form — so a path inside
-// one owes nothing. Otherwise any volume the path is inside owes an event,
-// even a purely absorbing one (nothing else can apply its extinction), and
-// so does a filled open space. Callers guard on FLAG_MEDIA and hand in the
-// dominant interior they already need for the routing test below.
+// interior displaces whatever surrounds it, so a path inside one owes
+// exactly what that interior's medium does: an event where it scatters,
+// nothing where it only absorbs (the Beer–Lambert factor stays
+// shade_surface's closed form). The bit is register-held state the caller
+// already has — no load answers this. Outside any interior, any volume
+// the path is inside owes an event, even a purely absorbing one (nothing
+// else can apply its extinction), and so does a filled open space.
+// Callers guard on FLAG_MEDIA and hand in the dominant interior they
+// already need for the routing test below.
 bool travelledMedium(uint4 set, uint interior, uint packed) {
-    return interior == STACK_EMPTY
-        && (any(set != STACK_EMPTY) || (packed & FLAG_GLOBAL) != 0);
+    if (interior != STACK_EMPTY) {
+        return (interior & STACK_SCATTERING) != 0;
+    }
+    return any(set != STACK_EMPTY) || (packed & FLAG_GLOBAL) != 0;
 }
 
 [shader("compute")]

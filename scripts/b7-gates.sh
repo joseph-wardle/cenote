@@ -50,6 +50,7 @@ scenes=(
   "$root/scenes/corpus/glass-of-water.ron:glass-of-water"
   "$root/scenes/corpus/spaceship.ron:spaceship"
   "$root/scenes/nested-glass.ron:nested-glass"
+  "$root/scenes/milk-glass.ron:milk-glass"
 )
 
 filter=

@@ -48,13 +48,22 @@ public static const uint INSTANCE_NONE = 0xffffffff;
 // (see `combineMedia`). `STACK_PRIORITY` is an interior's nesting
 // priority, directly under `STACK_INTERIOR` so the one `max` in
 // `interiorOf` finds the dominant interior and ranks interiors against
-// each other at once. Bit 24 is free.
+// each other at once. `STACK_SCATTERING` marks an interior whose medium
+// scatters — baked by prep exactly where the derived σ_s is nonzero, and
+// the single authority for everything that follows from that: intersect
+// routes the segment to the volume stage by it, `combineMedia` resolves
+// the segment's medium by it, and shade_surface withholds its closed-form
+// absorption by it, so no segment can be weighted twice or zero times.
+// Below `STACK_PRIORITY`, so among equal-priority overlapping interiors
+// the max tie-breaks toward a scattering one — ties were already
+// documented arbitrary, so this orders the undefined and nothing else.
 //
 // Built by `stackEntry` in scene.slang, which is where an instance's
 // boundary word lives — the flags are insertion's to set, and this module
 // only ever matches on the index.
 public static const uint STACK_INDEX_MASK = 0xffffff;
 public static const uint STACK_EMPTY = STACK_INDEX_MASK;
+public static const uint STACK_SCATTERING = 1 << 24;
 public static const uint STACK_PRIORITY_SHIFT = 25;
 public static const uint STACK_PRIORITY = 63 << STACK_PRIORITY_SHIFT;
 public static const uint STACK_INTERIOR = 1 << 31;
@@ -99,7 +108,12 @@ public struct Paths {
     public Hit* hit; // written by intersect, read by both shading stages
     // xyz = the path's accumulated weight; w = the solid-angle pdf of the
     // scatter that produced this ray, which the next vertex's emission
-    // needs for MIS (0 on camera rays: no light-sampling strategy competed).
+    // needs for MIS — 0 where no light-sampling strategy competed at the
+    // vertex that scattered: camera rays, and any vertex whose dominant
+    // interior scatters, since a connection from inside one could not
+    // refract through its boundary and next-event estimation is skipped
+    // there. Both MIS consumers then weight the emission 1, which is
+    // exactly the estimator that remains.
     public float4* throughput;
     // The media the path is inside: one [`MEDIUM_SLOTS`]-wide set,
     // allocated only for a scene that has interiors or volumes — so this

@@ -280,9 +280,15 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
 
     // Next-event estimation from inside the medium, drawn and weighted by
     // `sampleNeeVolume` (nee.slang); the connection's own transmittance is
-    // trace_shadow's to apply.
+    // trace_shadow's to apply. Skipped wherever the dominant interior
+    // scatters: a connection from inside one cannot refract through its
+    // boundary, and the boundary occludes every straight one — so
+    // directional sampling is the only strategy, conveyed to the next
+    // vertex as throughput.w = 0. The dominant is invariant across the
+    // march (see the loop), so reading it here is reading it at entry.
+    let scatterInterior = (interiorOf(set) & STACK_SCATTERING) != 0;
     let wo = -direction;
-    if (lightSampling != LIGHT_SAMPLING_BSDF
+    if (!scatterInterior && lightSampling != LIGHT_SAMPLING_BSDF
         && (params.scene.lightCount > 0 || params.scene.env.selectProb > 0.0)) {
         let uLight = sample_1d(pixel, params.sampleIndex,
                                bounceDimension(bounce, NEE_LIGHT));
@@ -331,9 +337,12 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
 
     // The path continues from inside the same media — a scatter crosses no
     // boundary, so neither half of the stack moves. Direction.w is zeroed:
-    // only camera rays have a camera to measure depth against.
+    // only camera rays have a camera to measure depth against. w = 0 where
+    // next-event estimation was skipped above: no strategy competed, so
+    // the next vertex's emission keeps weight 1.
     params.paths.origin[path] = float4(position, 0.0);
     params.paths.direction[path] = float4(scatter.wi, 0.0);
-    params.paths.throughput[path] = float4(scattered, scatter.pdf);
+    params.paths.throughput[path] =
+        float4(scattered, scatterInterior ? 0.0 : scatter.pdf);
     params.queues.rays.push(path);
 }

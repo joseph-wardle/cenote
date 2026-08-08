@@ -14,16 +14,24 @@ import scene;
 // traversal candidates.
 //
 // A refractive interior displaces all of it — a path inside glass is not
-// also in the room's haze — and no interior has an event to sample yet, so
-// one in the set returns vacuum here: its Beer–Lambert absorption stays the
-// surface stage's, applied once over the whole segment, exactly as it was
-// before volumes existed.
+// also in the room's haze. A *scattering* interior (the `STACK_SCATTERING`
+// bit, prep's single authority) is then the whole segment's medium: its
+// record, alone. An absorbing one returns vacuum here — its Beer–Lambert
+// absorption stays the surface stage's, applied once over the whole
+// segment, exactly as it was before volumes existed — which is why this
+// resolves by the register-held bit and never by re-reading σ_s: a second
+// spelling of that predicate could drift from the one intersect routed by,
+// and a segment would be weighted twice or not at all.
 public MediumRecord combineMedia(SceneTable* scene, uint4 set) {
     MediumRecord total;
     total.sigmaT = float3(0.0);
     total.sigmaS = float3(0.0);
     total.g = 0.0;
-    if (interiorOf(set) != STACK_EMPTY) {
+    let interior = interiorOf(set);
+    if (interior != STACK_EMPTY) {
+        if ((interior & STACK_SCATTERING) != 0) {
+            return scene.media[scene.geometry[interior & STACK_INDEX_MASK].medium];
+        }
         return total;
     }
     // A mixture's true phase function is the σ_s-weighted average of its

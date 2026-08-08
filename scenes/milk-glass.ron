@@ -1,0 +1,135 @@
+// nested-glass.ron's scattering twin, geometry for geometry — but the
+// content is milk, a refractive interior whose medium *scatters*, and the
+// priorities are inverted so the milk is the solid that wins: every
+// segment inside it is the volume stage's to sample, and every block face
+// buried in it is a suppressed crossing that splits the march into legs.
+// Measured against nested-glass, the cost delta is the price of
+// scattering interiors and nothing else.
+//
+// It is the 8d-b driver: transmission_scatter over a near-white
+// transmission color (so most of the extinction is the gray shift the
+// subtractive split adds back), anisotropy leaning forward the way real
+// milk does, and a mean free path a few times smaller than the block, so
+// paths turn several times before they leave.
+(
+    version: 2,
+    ops: [
+        Settings((name: "main", max_bounces: Some(12))),
+        Camera((
+            name: "main",
+            position: Some((0.0, 1.1, 3.2)),
+            look_at: Some((0.0, 0.55, 0.0)),
+            vfov_degrees: Some(32.0),
+        )),
+        Environment((
+            name: "sky",
+            path: Some(Some("../crates/cenote/assets/kloofendal_puresky.exr")),
+        )),
+
+        Mesh((
+            name: "cube",
+            source: Some(Inline(
+                positions: [
+                    (-0.5, -0.5, 0.5), (0.5, -0.5, 0.5), (0.5, 0.5, 0.5), (-0.5, 0.5, 0.5),
+                    (0.5, -0.5, -0.5), (-0.5, -0.5, -0.5), (-0.5, 0.5, -0.5), (0.5, 0.5, -0.5),
+                    (0.5, -0.5, 0.5), (0.5, -0.5, -0.5), (0.5, 0.5, -0.5), (0.5, 0.5, 0.5),
+                    (-0.5, -0.5, -0.5), (-0.5, -0.5, 0.5), (-0.5, 0.5, 0.5), (-0.5, 0.5, -0.5),
+                    (-0.5, 0.5, 0.5), (0.5, 0.5, 0.5), (0.5, 0.5, -0.5), (-0.5, 0.5, -0.5),
+                    (-0.5, -0.5, -0.5), (0.5, -0.5, -0.5), (0.5, -0.5, 0.5), (-0.5, -0.5, 0.5),
+                ],
+                normals: Some([
+                    (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1),
+                    (0, 0, -1), (0, 0, -1), (0, 0, -1), (0, 0, -1),
+                    (1, 0, 0), (1, 0, 0), (1, 0, 0), (1, 0, 0),
+                    (-1, 0, 0), (-1, 0, 0), (-1, 0, 0), (-1, 0, 0),
+                    (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0),
+                    (0, -1, 0), (0, -1, 0), (0, -1, 0), (0, -1, 0),
+                ]),
+                uvs: Some([
+                    (0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0), (1.0, 0.0),
+                    (1.0, 1.0), (0.0, 1.0), (0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0),
+                    (0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0), (1.0, 0.0),
+                    (1.0, 1.0), (0.0, 1.0), (0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0),
+                ]),
+                triangles: [
+                    (0, 1, 2), (0, 2, 3), (4, 5, 6), (4, 6, 7),
+                    (8, 9, 10), (8, 10, 11), (12, 13, 14), (12, 14, 15),
+                    (16, 17, 18), (16, 18, 19), (20, 21, 22), (20, 22, 23),
+                ],
+            )),
+        )),
+        Mesh((
+            name: "plane",
+            source: Some(Inline(
+                positions: [
+                    (-1.0, 0.0, -1.0), (-1.0, 0.0, 1.0), (1.0, 0.0, 1.0), (1.0, 0.0, -1.0),
+                ],
+                normals: Some([
+                    (0.0, 1.0, 0.0), (0.0, 1.0, 0.0), (0.0, 1.0, 0.0), (0.0, 1.0, 0.0),
+                ]),
+                uvs: Some([(0.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, 0.0)]),
+                triangles: [(0, 1, 2), (0, 2, 3)],
+            )),
+        )),
+
+        Material((
+            name: "glass",
+            specular_ior: Some(1.5),
+            specular_roughness: Some(Constant(0.02)),
+            transmission_weight: Some(1.0),
+            transmission_color: Some((0.92, 0.96, 0.94)),
+            transmission_depth: Some(0.4),
+        )),
+        Material((
+            name: "milk",
+            specular_ior: Some(1.35),
+            specular_roughness: Some(Constant(0.0)),
+            transmission_weight: Some(1.0),
+            transmission_color: Some((0.96, 0.94, 0.9)),
+            transmission_depth: Some(0.15),
+            transmission_scatter: Some((0.9, 0.85, 0.7)),
+            transmission_scatter_anisotropy: Some(0.7),
+        )),
+        Material((
+            name: "table",
+            base_color: Some(Constant((0.32, 0.30, 0.28))),
+            base_diffuse_roughness: Some(0.4),
+            specular_weight: Some(0.3),
+            specular_roughness: Some(Constant(0.25)),
+        )),
+
+        // Priorities inverted from nested-glass: here the *milk* outranks
+        // the block, so the volume the two share is the scattering one and
+        // every block face buried inside it is a suppressed crossing that
+        // splits the march into legs — the 8d-b combination this scene
+        // exists to price. The glass that clears the milk's top still
+        // shades and absorbs as ever.
+        Instance((
+            name: "block",
+            mesh: Some("cube"),
+            material: Some("glass"),
+            transforms: Some([Trs(
+                translate: (0.0, 0.55, 0.0),
+                scale: (0.8, 1.1, 0.8),
+            )]),
+        )),
+        // Overlapping generously rather than touching: surfaces closer
+        // together than the march's nudge read as one crossing.
+        Instance((
+            name: "milk",
+            mesh: Some("cube"),
+            material: Some("milk"),
+            interior_priority: Some(1),
+            transforms: Some([Trs(
+                translate: (0.0, 0.42, 0.0),
+                scale: (0.9, 0.72, 0.9),
+            )]),
+        )),
+        Instance((
+            name: "table",
+            mesh: Some("plane"),
+            material: Some("table"),
+            transforms: Some([Trs(scale: (6.0, 1.0, 6.0))]),
+        )),
+    ],
+)

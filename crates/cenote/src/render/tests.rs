@@ -765,6 +765,329 @@ fn the_volumetric_furnace_closes() {
     }
 }
 
+/// The furnace, inside milk: a *scattering refractive interior* at albedo
+/// exactly 1 — the transmission color is white, so the whole σ_t is the
+/// gray shift, and a neutral scatter makes σ_s equal it bit for bit — in
+/// the emissive shell, with a suppressed lower-priority boundary buried
+/// inside it. The march splits the interior's segments at that boundary
+/// and restarts its distance draws per leg, next-event estimation is
+/// skipped at every vertex the milk dominates, and the weight-1 emission
+/// `throughput.w = 0` promises is what the escaping paths carry — so if
+/// any of that chain loses or double-counts a factor, the frame drifts
+/// off the shell's radiance. MIS mode deliberately: BSDF-only would never
+/// read the skip.
+///
+/// A furnace at albedo 1 cannot tell "scattering, correctly weighted"
+/// from "accidentally inert", so the control renders the same scene with
+/// the scatter unauthored (clear glass) on the same sample streams and
+/// requires a different image: the volume stage demonstrably fired.
+#[test]
+fn a_scattering_interior_keeps_the_furnace_closed() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let emission = 0.5;
+    let milk = Material {
+        transmission_color: Vec3::ONE,
+        transmission_depth: 1.0,
+        transmission_scatter: Vec3::ONE,
+        transmission_scatter_anisotropy: 0.3,
+        ..Material::glass(0.1, 1.5)
+    };
+    // A tinted absorber the milk outranks: if its interfaces shade rather
+    // than cross — or the legs they split misweight — the furnace leaks.
+    let lurker = Material {
+        transmission_color: Vec3::new(0.2, 0.6, 0.9),
+        transmission_depth: 0.2,
+        ..Material::glass(0.05, 1.33)
+    };
+    let scene = |content: Material| {
+        Scene::new(
+            &gpu,
+            &[
+                Object {
+                    mesh: inside_out(crate::scene::icosphere(3)),
+                    transform: Mat4::from_scale(Vec3::splat(2.0)),
+                    material: Material::emitter(Vec3::splat(emission)),
+                    medium: None,
+                    interior_priority: 0,
+                },
+                Object {
+                    mesh: crate::scene::icosphere(3),
+                    transform: Mat4::from_translation(Vec3::NEG_Z * 1.2)
+                        * Mat4::from_scale(Vec3::splat(0.55)),
+                    material: content,
+                    medium: None,
+                    interior_priority: 2,
+                },
+                Object {
+                    mesh: crate::scene::icosphere(2),
+                    transform: Mat4::from_translation(Vec3::NEG_Z * 1.2)
+                        * Mat4::from_scale(Vec3::splat(0.3)),
+                    material: lurker,
+                    medium: None,
+                    interior_priority: 0,
+                },
+            ],
+            Camera {
+                position: Vec3::ZERO,
+                look_at: Vec3::NEG_Z,
+                up: Vec3::Y,
+                vfov_degrees: 60.0,
+                lens: None,
+            },
+            &Environment::constant(Vec3::ZERO),
+        )
+        .expect("scene")
+    };
+    // 64 bounces as the volumetric furnace: the milk is about an optical
+    // depth across, and truncated turns are energy, not noise.
+    let renderer = Renderer::with_max_bounces(&gpu, 64).expect("renderer");
+    let (size, samples) = (32, 128);
+    let sum = accumulate_sum(&gpu, &renderer, &scene(milk), size, samples);
+    for channel in 0..3 {
+        let mean = sum
+            .chunks_exact(4)
+            .map(|chunk| chunk[channel])
+            .sum::<f32>()
+            / (size * size * samples) as f32;
+        assert!(
+            (mean - emission).abs() / emission < 0.015,
+            "channel {channel}: milk furnace leaked, mean {mean} vs {emission}"
+        );
+    }
+    for chunk in sum.chunks_exact(4) {
+        assert!(
+            (chunk[3] - samples as f32).abs() < 1e-3,
+            "every path must finish exactly once, got alpha {}",
+            chunk[3]
+        );
+    }
+    let clear = accumulate_sum(
+        &gpu,
+        &renderer,
+        &scene(Material {
+            transmission_scatter: Vec3::ZERO,
+            ..milk
+        }),
+        size,
+        samples,
+    );
+    assert!(
+        sum != clear,
+        "the milk rendered exactly as clear glass — no medium event was ever sampled"
+    );
+}
+
+/// An emitter submerged in a scattering interior is phase sampling's
+/// alone: next-event estimation is skipped at every vertex the milk
+/// dominates, and the weight-1 emission `throughput.w = 0` promises is
+/// the whole estimator. The MIS image must therefore agree with the
+/// BSDF-only image, which never had another strategy to begin with.
+///
+/// This is where the *volume* half of the skip is load-bearing rather
+/// than hygiene, and this test fails without it: a connection from a
+/// scattering vertex to a submerged emitter crosses no boundary, so it
+/// is *visible* — but trace_shadow measures volumes, not interiors, so
+/// it arrives without the milk's transmittance and reads too bright,
+/// while the emission it competes with gets MIS-weighted down. The
+/// furnace above cannot see that error: its paths always exit through
+/// the wall, whose own skip rewrites w before any emission reads it.
+///
+/// The *surface* half has no oracle here — a submerged rock's NEE is
+/// visible-but-unattenuated too, and the power heuristic leans so far
+/// toward NEE for a small emitter that the emission down-weight nearly
+/// cancels the excess at any density this scene can converge — so the
+/// rock below extends the covered estimator combinations, and the
+/// surface half stands on the invariant (one register test, both
+/// kernels) plus the furnace's absorption gate rather than on a
+/// discriminating bound of its own.
+#[test]
+fn a_submerged_emitter_is_phase_samplings_alone() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let milk = Material {
+        transmission_color: Vec3::ONE,
+        transmission_depth: 1.0,
+        transmission_scatter: Vec3::ONE,
+        transmission_scatter_anisotropy: 0.3,
+        ..Material::glass(0.1, 1.5)
+    };
+    let objects = [
+        Object {
+            mesh: crate::scene::icosphere(3),
+            transform: Mat4::from_translation(Vec3::NEG_Z * 1.2)
+                * Mat4::from_scale(Vec3::splat(0.55)),
+            material: milk,
+            medium: None,
+            interior_priority: 0,
+        },
+        Object {
+            mesh: crate::scene::icosphere(2),
+            transform: Mat4::from_translation(Vec3::NEG_Z * 1.2)
+                * Mat4::from_scale(Vec3::splat(0.15)),
+            material: Material::emitter(Vec3::splat(5.0)),
+            medium: None,
+            interior_priority: 0,
+        },
+        // The rock: a submerged diffuse surface lit by the emitter beside
+        // it — the surface-half sub-path the doc above names.
+        Object {
+            mesh: crate::scene::icosphere(2),
+            transform: Mat4::from_translation(Vec3::new(0.25, 0.0, -1.2))
+                * Mat4::from_scale(Vec3::splat(0.12)),
+            material: Material::matte(Vec3::splat(0.8), 0.3),
+            medium: None,
+            interior_priority: 0,
+        },
+    ];
+    let camera = Camera {
+        position: Vec3::ZERO,
+        look_at: Vec3::NEG_Z,
+        up: Vec3::Y,
+        vfov_degrees: 60.0,
+        lens: None,
+    };
+    let environment = Environment::constant(Vec3::ZERO);
+    let scene = Scene::new(&gpu, &objects, camera, &environment).expect("scene");
+    let (size, samples) = (32, 256);
+    let renderer = Renderer::with_max_bounces(&gpu, 64).expect("renderer");
+    let mis = accumulate_sum(&gpu, &renderer, &scene, size, samples);
+    let bsdf = bsdf_only_sum_deep(&gpu, &scene, size, samples, 64);
+    let mean = |sum: &[f32]| {
+        sum.chunks_exact(4).map(|chunk| f64::from(chunk[0])).sum::<f64>()
+            / f64::from(size * size * samples)
+    };
+    let (mis, bsdf) = (mean(&mis), mean(&bsdf));
+    assert!(
+        (mis - bsdf).abs() / bsdf < 0.05,
+        "the two strategies disagree on a submerged emitter: MIS {mis} vs BSDF-only {bsdf}"
+    );
+}
+
+/// Suppression = deletion, at real parameters: a chromatic, absorbing
+/// *and* scattering juice whose interior buries a lower-priority shell
+/// must render as if the shell were deleted. Bit identity cannot say it
+/// — every suppressed crossing splits a march segment, and the split
+/// legs draw from different keys than the unsplit segment — so the claim
+/// is statistical: relMSE against the deleted scene, bounded by twice
+/// the deleted scene's own stream-to-stream noise floor, calibrated here
+/// on the same pixel counts rather than pinned as a magic constant. What
+/// albedo-1 cancellation hides above — the chromatic mixture pdf, the
+/// σ_s/σ_t bookkeeping, the gray shift — is exactly what drifts this
+/// bound if it drifts at all.
+#[test]
+fn a_suppressed_boundary_inside_juice_is_no_boundary_at_all() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    // Chromatic on both axes, but light must *survive* the core: an
+    // opaque-dark juice would extinguish everything near the lurker and
+    // the test would pass with suppression broken, having nothing to see.
+    let juice = Material {
+        transmission_color: Vec3::new(0.9, 0.8, 0.7),
+        transmission_depth: 0.25,
+        transmission_scatter: Vec3::new(0.5, 0.4, 0.3),
+        transmission_scatter_anisotropy: 0.3,
+        ..Material::glass(0.1, 1.5)
+    };
+    let lurker = Material {
+        transmission_color: Vec3::new(0.1, 0.5, 0.9),
+        transmission_depth: 0.1,
+        ..Material::glass(0.05, 1.33)
+    };
+    let scene = |with_lurker: bool| {
+        let mut objects = vec![
+            Object {
+                mesh: inside_out(crate::scene::icosphere(3)),
+                transform: Mat4::from_scale(Vec3::splat(2.0)),
+                material: Material::emitter(Vec3::splat(0.5)),
+                medium: None,
+                interior_priority: 0,
+            },
+            Object {
+                mesh: crate::scene::icosphere(3),
+                transform: Mat4::from_translation(Vec3::NEG_Z * 1.2)
+                    * Mat4::from_scale(Vec3::splat(0.55)),
+                material: juice,
+                medium: None,
+                interior_priority: 2,
+            },
+        ];
+        if with_lurker {
+            objects.push(Object {
+                mesh: crate::scene::icosphere(2),
+                transform: Mat4::from_translation(Vec3::NEG_Z * 1.2)
+                    * Mat4::from_scale(Vec3::splat(0.4)),
+                material: lurker,
+                medium: None,
+                interior_priority: 0,
+            });
+        }
+        Scene::new(
+            &gpu,
+            &objects,
+            Camera {
+                position: Vec3::ZERO,
+                look_at: Vec3::NEG_Z,
+                up: Vec3::Y,
+                vfov_degrees: 60.0,
+                lens: None,
+            },
+            &Environment::constant(Vec3::ZERO),
+        )
+        .expect("scene")
+    };
+    // Mean relative squared error between two per-pixel RGB means.
+    let relmse = |a: &[f32], b: &[f32]| {
+        a.chunks_exact(4)
+            .zip(b.chunks_exact(4))
+            .flat_map(|(pa, pb)| pa[..3].iter().zip(&pb[..3]))
+            .map(|(&va, &vb)| {
+                let delta = f64::from(va - vb);
+                delta * delta / (f64::from(vb) * f64::from(vb) + 1e-4)
+            })
+            .sum::<f64>()
+    };
+    let renderer = Renderer::with_max_bounces(&gpu, 64).expect("renderer");
+    let (size, samples) = (32, 192);
+    let scale = |sum: Vec<f32>| {
+        sum.iter()
+            .map(|value| value / samples as f32)
+            .collect::<Vec<f32>>()
+    };
+    // Two independent streams of the deleted scene from one film — the
+    // second block of samples is the difference of the running sums.
+    let deleted = scene(false);
+    let mut film = Film::new(&gpu, size, size).expect("film");
+    for _ in 0..samples {
+        renderer
+            .accumulate(&gpu, &deleted, &mut film)
+            .expect("accumulate");
+    }
+    let stream0 = download_f32(&gpu, &film.beauty.sum);
+    for _ in 0..samples {
+        renderer
+            .accumulate(&gpu, &deleted, &mut film)
+            .expect("accumulate");
+    }
+    let stream1: Vec<f32> = download_f32(&gpu, &film.beauty.sum)
+        .iter()
+        .zip(&stream0)
+        .map(|(total, first)| total - first)
+        .collect();
+    let suppressed = accumulate_sum(&gpu, &renderer, &scene(true), size, samples);
+    let (deleted0, deleted1, suppressed) = (scale(stream0), scale(stream1), scale(suppressed));
+    let floor = relmse(&deleted0, &deleted1);
+    let gap = relmse(&suppressed, &deleted1);
+    assert!(floor > 0.0, "the two calibration streams cannot be identical");
+    assert!(
+        gap < 2.0 * floor,
+        "suppressed vs deleted drifted past the noise floor: {gap} vs floor {floor}"
+    );
+}
+
 /// Looking through boxes of fog along a nearly axial ray: what arrives is
 /// the sky times Beer–Lambert over exactly the extent the boxes bound.
 ///

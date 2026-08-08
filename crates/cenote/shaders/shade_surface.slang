@@ -111,10 +111,22 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     // surrounding material is read raw, not through `resolveMaterial`:
     // neither `specular_ior` nor `specular_weight` is texturable, and this
     // hit's UV would be the wrong one to ask with anyway.
+    // A scattering interior owes this vertex nothing here: the volume
+    // stage sampled the segment against the full extinction, so the closed
+    // form would be the same absorption twice. The same register-held bit
+    // that routed the segment there withholds it, so the two cannot
+    // disagree. It also turns next-event estimation off below: a shadow
+    // ray from inside cannot refract through the boundary (the wall
+    // occludes every straight connection already), so the emission the
+    // path finds by sampling carries weight 1 instead — conveyed to the
+    // next vertex as throughput.w = 0.
+    let scatterInterior = (dominant & STACK_SCATTERING) != 0;
     var exteriorIor = 1.0;
     if (interior != STACK_EMPTY) {
-        throughput.xyz *= interiorTransmittance(params.scene, interior,
-                                                origin, spawn.position);
+        if (!scatterInterior) {
+            throughput.xyz *= interiorTransmittance(params.scene, interior,
+                                                    origin, spawn.position);
+        }
         var outer = dominant;
         if (interior == hit.instance) {
             // Whole-word compare: entries name distinct instances, so this
@@ -209,7 +221,9 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     // Next-event estimation: one candidate connection, drawn and weighted by
     // the shared `sampleNee` (nee.slang). The contribution is fully weighted
     // there; trace_shadow just adds it if the connection is unoccluded.
-    if (lightSampling != LIGHT_SAMPLING_BSDF
+    // Skipped wherever the dominant interior scatters — inside one,
+    // directional sampling is the only strategy (see `scatterInterior`).
+    if (!scatterInterior && lightSampling != LIGHT_SAMPLING_BSDF
         && (params.scene.lightCount > 0 || params.scene.env.selectProb > 0.0)) {
         let uLight = sample_1d(pixel, params.sampleIndex,
                                bounceDimension(bounce, NEE_LIGHT));
@@ -291,7 +305,11 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     let transmitted = scatter.wi.z < 0.0;
     params.paths.origin[path] = float4(transmitted ? spawn.below : spawn.position, 0.0);
     params.paths.direction[path] = float4(wiWorld, 0.0);
-    params.paths.throughput[path] = float4(scattered, scatter.pdf);
+    // w = 0 where next-event estimation was skipped above: no strategy
+    // competed with this scatter, so the next vertex's emission keeps
+    // weight 1 — pathstate.slang's documented meaning of the lane.
+    params.paths.throughput[path] =
+        float4(scattered, scatterInterior ? 0.0 : scatter.pdf);
     // A transmission through a closed surface crosses into (or out of) its
     // interior; thin walls have none. Every other scatter leaves the set
     // where it was, and writes nothing.

@@ -55,11 +55,11 @@ public struct GeometryRecord {
     public uint light;              // index into the light list, or LIGHT_NONE
     // What crossing this instance's surface means: the `BOUNDARY_*` class
     // in the low byte (read through `boundaryOf`, never compared raw) and,
-    // above it, the medium-set entry's flag bits — `STACK_INTERIOR` and
-    // the nesting priority — pre-baked by prep so `stackEntry` is one load
-    // and one OR. One word and not two because the record's fields reach a
-    // kernel as separate scalar loads: a second field measured
-    // `shade_surface` +2…8% on the glass drivers.
+    // above it, the medium-set entry's flag bits — `STACK_INTERIOR`, the
+    // nesting priority, and `STACK_SCATTERING` — pre-baked by prep so
+    // `stackEntry` is one load and one OR. One word and not two because
+    // the record's fields reach a kernel as separate scalar loads: a
+    // second field measured `shade_surface` +2…8% on the glass drivers.
     uint boundary;
     public uint medium;             // this interior's record, or MEDIUM_NONE
     uint pad0;
@@ -78,7 +78,7 @@ public uint boundaryOf(GeometryRecord mesh) {
 // insertion is the only place the flags can be set — and an entry built
 // without them ranks in `interiorOf` as something it is not.
 public uint stackEntry(GeometryRecord mesh, uint instance) {
-    return instance | (mesh.boundary & (STACK_INTERIOR | STACK_PRIORITY));
+    return instance | (mesh.boundary & (STACK_INTERIOR | STACK_PRIORITY | STACK_SCATTERING));
 }
 
 // Is a hit on this instance crossed rather than shaded? A null boundary
