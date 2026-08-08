@@ -1200,7 +1200,7 @@ fn upload_scene_table(
         camera_media: [STACK_EMPTY; 4],
     };
     // TRANSFER_SRC so tests can read back the one field a kernel writes
-    // (`camera_media`); the table is 208 bytes, so the flag is free.
+    // (`camera_media`).
     let usage = vk::BufferUsageFlags::STORAGE_BUFFER
         | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
         | vk::BufferUsageFlags::TRANSFER_SRC;

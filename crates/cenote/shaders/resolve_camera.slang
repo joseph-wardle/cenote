@@ -50,7 +50,7 @@ Params params;
 
 [shader("compute")]
 [numthreads(1, 1, 1)]
-void resolve_camera(uint3 tid: SV_DispatchThreadID) {
+void resolve_camera() {
     var set = uint4(STACK_EMPTY);
     var start = 0.0;
     for (uint crossed = 0; crossed < RESOLVE_CROSSING_CAP; crossed++) {

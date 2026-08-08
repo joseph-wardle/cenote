@@ -1336,7 +1336,25 @@ fn the_camera_seed_names_exactly_what_the_camera_is_inside_of() {
     ];
     let outer = STACK_INTERIOR;
     let inner = 1 | STACK_INTERIOR | (1 << STACK_PRIORITY_SHIFT) | STACK_SCATTERING;
-    for (name, position, expected) in [
+    let wavefront = Wavefront::new(
+        &gpu,
+        &Kernels::embedded(),
+        Wavefront::DEFAULT_CAPACITY,
+        2,
+        LightSampling::Mis,
+    )
+    .expect("wavefront");
+    let radiance = gpu
+        .create_buffer(
+            "test.radiance",
+            8 * 8 * 16,
+            vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                | vk::BufferUsageFlags::TRANSFER_DST,
+            MemoryLocation::GpuOnly,
+        )
+        .expect("radiance buffer");
+    for (name, position, mut expected) in [
         ("outside everything", Vec3::ZERO, vec![]),
         ("inside the outer glass only", Vec3::new(0.0, 0.0, -4.5), vec![outer]),
         ("inside both solids", Vec3::new(0.0, 0.0, -6.0), vec![outer, inner]),
@@ -1356,24 +1374,6 @@ fn the_camera_seed_names_exactly_what_the_camera_is_inside_of() {
             &Environment::constant(Vec3::splat(0.5)),
         )
         .expect("scene");
-        let wavefront = Wavefront::new(
-            &gpu,
-            &Kernels::embedded(),
-            Wavefront::DEFAULT_CAPACITY,
-            2,
-            LightSampling::Mis,
-        )
-        .expect("wavefront");
-        let radiance = gpu
-            .create_buffer(
-                "test.radiance",
-                8 * 8 * 16,
-                vk::BufferUsageFlags::STORAGE_BUFFER
-                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-                    | vk::BufferUsageFlags::TRANSFER_DST,
-                MemoryLocation::GpuOnly,
-            )
-            .expect("radiance buffer");
         wavefront
             .trace(&gpu, &scene, &radiance, 8, 8, 0)
             .expect("trace");
@@ -1381,10 +1381,9 @@ fn the_camera_seed_names_exactly_what_the_camera_is_inside_of() {
         let seed: [u32; 4] = bytemuck::pod_read_unaligned(&table[table.len() - 16..]);
         let mut entries: Vec<u32> = seed.into_iter().filter(|&e| e != STACK_EMPTY).collect();
         entries.sort_unstable();
-        let mut wanted = expected.clone();
-        wanted.sort_unstable();
+        expected.sort_unstable();
         assert_eq!(
-            entries, wanted,
+            entries, expected,
             "{name}: seed {seed:08x?} carries the wrong membership"
         );
     }
