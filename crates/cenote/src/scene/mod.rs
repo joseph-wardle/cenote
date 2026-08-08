@@ -246,9 +246,14 @@ fn has_scattering_interiors(placements: &[Placement]) -> bool {
 /// — [`boundary_word`] bakes them into [`GeometryRecord::boundary`], so
 /// the shader's `stackEntry` lifts them into an entry without shifting
 /// anything.
-const STACK_PRIORITY_SHIFT: u32 = 25;
-const STACK_SCATTERING: u32 = 1 << 24;
-const STACK_INTERIOR: u32 = 1 << 31;
+pub(crate) const STACK_PRIORITY_SHIFT: u32 = 25;
+pub(crate) const STACK_SCATTERING: u32 = 1 << 24;
+pub(crate) const STACK_INTERIOR: u32 = 1 << 31;
+
+/// The empty medium-set slot — `STACK_EMPTY` in `shaders/pathstate.slang`:
+/// the instance-index field at all ones, no flag bits. What
+/// [`SceneTable::camera_media`] uploads four of.
+pub(crate) const STACK_EMPTY: u32 = 0x00ff_ffff;
 
 /// How far a nesting priority may reach: the six bits the medium-set entry
 /// has room for, directly under `STACK_INTERIOR` — which is what lets one
@@ -508,11 +513,16 @@ struct SceneTable {
     light_count: u32,
     /// What fills the open space between instances, or [`MEDIUM_NONE`].
     global_medium: u32,
+    /// The camera's medium set — the bounce-0 seed. Uploaded
+    /// all-[`STACK_EMPTY`] and overwritten in place by `resolve_camera`
+    /// at every accumulation restart; sits last so the `uint4` lands on
+    /// its 16-byte alignment without padding.
+    camera_media: [u32; 4],
 }
 
 // The Slang side lays these out from its own rules, so the sizes are
 // pinned here: a mirror that drifts reads garbage rather than failing.
-const _: () = assert!(size_of::<SceneTable>() == 192);
+const _: () = assert!(size_of::<SceneTable>() == 208);
 
 /// Sample-time parameters of one bindless texture slot: the affine UV
 /// remap and the value multiplier a [`description::TextureRef`] carries
@@ -1187,8 +1197,13 @@ fn upload_scene_table(
         media: resident.instances.media.device_address(),
         light_count,
         global_medium: resident.instances.global_medium,
+        camera_media: [STACK_EMPTY; 4],
     };
-    let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
+    // TRANSFER_SRC so tests can read back the one field a kernel writes
+    // (`camera_media`); the table is 208 bytes, so the flag is free.
+    let usage = vk::BufferUsageFlags::STORAGE_BUFFER
+        | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+        | vk::BufferUsageFlags::TRANSFER_SRC;
     gpu.upload_buffer("scene.table", bytemuck::bytes_of(&table), usage)
 }
 

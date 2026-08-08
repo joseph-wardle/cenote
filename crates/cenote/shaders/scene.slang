@@ -134,6 +134,14 @@ public struct SceneTable {
     // infinite optical depth in every channel that extinguishes at all: the
     // environment and the distant lights are unreachable through one.
     public uint globalMedium;
+    // The camera's medium set — what the eye itself is inside of, and the
+    // seed intersect gives every path at bounce 0. It lives here because
+    // raygen's and intersect's push constants are both full to Vulkan's
+    // 128-byte guarantee: the one place a new scene-wide word can land.
+    // Uploaded all-`STACK_EMPTY` and overwritten in place by
+    // `resolve_camera` at the head of every accumulation restart — the one
+    // field of this table a kernel writes.
+    public uint4 cameraMedia;
 };
 
 // Crossings after this many commit as opaque, in whichever traversal is

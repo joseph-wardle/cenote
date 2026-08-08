@@ -105,12 +105,12 @@ void intersect(uint3 tid: SV_DispatchThreadID) {
     // Bounce 0 seeds the medium set for every stage that will read it —
     // raygen's push constants are full to Vulkan's guarantee and cannot
     // reach the pool, so this is the only place it can happen. The seed is
-    // empty: a camera that starts inside a medium is not yet resolved (see
-    // `Instance::medium`). A scene with interiors but nothing to sample
-    // seeds and never reads, which is why this is not under `media`.
+    // the camera's own set, from the scene table. A scene with interiors
+    // but nothing to sample seeds and never reads, which is why this is
+    // not under `media`.
     let live = (params.packed & FLAG_SET) != 0;
     if (live && bounce == 0) {
-        params.paths.setMedia(path, uint4(STACK_EMPTY));
+        params.paths.setMedia(path, params.scene.cameraMedia);
     }
     // What the set has to say about this segment: whether the volume stage
     // owes it an event, and which interior — if any — the path is inside.
@@ -123,8 +123,9 @@ void intersect(uint3 tid: SV_DispatchThreadID) {
     var owed = false;
     var interior = STACK_EMPTY;
     if ((params.packed & (FLAG_MEDIA | FLAG_PRIORITY)) != 0) {
-        let set = live && bounce != 0 ? params.paths.media(path, true)
-                                      : uint4(STACK_EMPTY);
+        let set = !live ? uint4(STACK_EMPTY)
+                  : bounce != 0 ? params.paths.media(path, true)
+                                : params.scene.cameraMedia;
         interior = interiorOf(set);
         owed = media && travelledMedium(set, interior, params.packed);
     }

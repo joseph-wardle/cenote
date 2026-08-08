@@ -298,13 +298,13 @@ pub struct Instance {
     /// be closed and outward-wound. Overlapping volumes add, which is what
     /// makes their order irrelevant.
     ///
-    /// Three limits, each degrading toward *less* fog rather than more: a
+    /// Two limits, each degrading toward *less* fog rather than more: a
     /// path may be inside at most four media at once, volumes and
-    /// refractive interiors sharing the four; a refractive interior
+    /// refractive interiors sharing the four; and a refractive interior
     /// displaces every volume while the path is inside it, rather than
-    /// nesting with them; and a camera that starts inside one renders its
-    /// first segment as if it stood outside, because the initial set is
-    /// empty. Fill a whole room through [`Settings::global_medium`] instead.
+    /// nesting with them. A camera that starts inside one just works: the
+    /// initial set is resolved by tracing at every restart (see
+    /// `resolve_camera.slang`).
     pub medium: Option<String>,
     /// Which solid wins where two refractive interiors overlap: the higher
     /// number is the one that is really there, and the interface of the

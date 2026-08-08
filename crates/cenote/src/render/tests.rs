@@ -765,6 +765,73 @@ fn the_volumetric_furnace_closes() {
     }
 }
 
+/// The volumetric furnace again, with the fog authored as a *bounded*
+/// volume that contains the shell and the camera alike, and no global
+/// medium anywhere. Inside the shell the two transports are the same
+/// integral, so the same pointwise identity must close — and the only
+/// thing connecting bounce 0 to the fog is the camera's seeded
+/// membership: before the seed, the set started empty and the first
+/// segment flew through vacuum.
+#[test]
+fn the_volumetric_furnace_closes_from_inside_a_bounded_fog() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let emission = 0.5;
+    let scene = Scene::new(
+        &gpu,
+        &[
+            Object {
+                mesh: inside_out(crate::scene::icosphere(3)),
+                transform: Mat4::from_scale(Vec3::splat(2.0)),
+                material: Material::emitter(Vec3::splat(emission)),
+                medium: None,
+                interior_priority: 0,
+            },
+            // The fog, as a mesh that bounds it — the global furnace's
+            // medium, reached through membership instead of FLAG_GLOBAL.
+            Object {
+                mesh: crate::scene::cube(3.0),
+                transform: Mat4::IDENTITY,
+                material: Material::matte(Vec3::ONE, 0.0),
+                medium: Some(crate::scene::Medium {
+                    absorption: Vec3::ZERO,
+                    scattering: Vec3::splat(0.25),
+                    anisotropy: 0.3,
+                }),
+                interior_priority: 0,
+            },
+        ],
+        Camera {
+            position: Vec3::ZERO,
+            look_at: Vec3::NEG_Z,
+            up: Vec3::Y,
+            vfov_degrees: 60.0,
+            lens: None,
+        },
+        &Environment::constant(Vec3::ZERO),
+    )
+    .expect("scene");
+
+    // 64 bounces for the same reason as the global furnace above.
+    let (size, samples) = (32, 16);
+    let sum = bsdf_only_sum_deep(&gpu, &scene, size, samples, 64);
+    for chunk in sum.chunks_exact(4) {
+        for channel in &chunk[..3] {
+            let value = channel / samples as f32;
+            assert!(
+                (value - emission).abs() / emission < 0.005,
+                "bounded furnace leaked: {value} vs {emission}"
+            );
+        }
+        assert!(
+            (chunk[3] - samples as f32).abs() < 1e-3,
+            "every path must finish exactly once, got alpha {}",
+            chunk[3]
+        );
+    }
+}
+
 /// Milk at albedo exactly 1: a white transmission color makes the whole
 /// `σ_t` the gray shift, and a neutral scatter makes `σ_s` equal it bit
 /// for bit — the furnace-exact scattering interior the tests below share.
@@ -1205,6 +1272,178 @@ fn a_nested_interior_gives_the_path_back_to_the_one_around_it() {
         "nested glass: {mean} vs Beer–Lambert's {expected} over four meters \
          (three would be {})",
         f64::from(sky) * (-sigma * 3.0).exp()
+    );
+}
+
+/// What the camera itself is inside of is resolved by tracing, not
+/// authored: sample 0 dispatches one `resolve_camera` thread whose ray
+/// walks from the camera position to infinity, toggling membership at
+/// every boundary surface it crosses, and writes the resulting medium set
+/// into the scene table — the word bounce 0 seeds every path from. Four
+/// cameras against one constellation, with the exact entries — flags and
+/// all — read back from the table: entries built anywhere but
+/// `stackEntry` would rank as something they are not.
+#[test]
+fn the_camera_seed_names_exactly_what_the_camera_is_inside_of() {
+    use crate::scene::{
+        Medium, STACK_EMPTY, STACK_INTERIOR, STACK_PRIORITY_SHIFT, STACK_SCATTERING,
+    };
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let glass = Material {
+        transmission_weight: 1.0,
+        transmission_color: Vec3::splat(0.9),
+        transmission_depth: 1.0,
+        ..Material::glass(0.0, 1.5)
+    };
+    // The inner solid scatters and outranks the outer, so its entry
+    // carries every flag the word can: interior, priority, scattering.
+    let milk = Material {
+        transmission_scatter: Vec3::splat(0.5),
+        ..glass
+    };
+    let fog = Medium {
+        absorption: Vec3::splat(0.1),
+        scattering: Vec3::splat(0.4),
+        anisotropy: 0.0,
+    };
+    // Instance 0: outer glass box, z in [-8, -4]. Instance 1: the milk
+    // inside it, z in [-7, -5], priority 1. Instance 2: a fog cube far
+    // off at x = 10, bounding a volume rather than closing an interior.
+    let objects = [
+        Object {
+            mesh: crate::scene::cube(2.0),
+            transform: Mat4::from_translation(Vec3::Z * -6.0),
+            material: glass,
+            medium: None,
+            interior_priority: 0,
+        },
+        Object {
+            mesh: crate::scene::cube(1.0),
+            transform: Mat4::from_translation(Vec3::Z * -6.0),
+            material: milk,
+            medium: None,
+            interior_priority: 1,
+        },
+        Object {
+            mesh: crate::scene::cube(1.0),
+            transform: Mat4::from_translation(Vec3::X * 10.0),
+            material: Material::matte(Vec3::ONE, 0.0),
+            medium: Some(fog),
+            interior_priority: 0,
+        },
+    ];
+    let outer = STACK_INTERIOR;
+    let inner = 1 | STACK_INTERIOR | (1 << STACK_PRIORITY_SHIFT) | STACK_SCATTERING;
+    for (name, position, expected) in [
+        ("outside everything", Vec3::ZERO, vec![]),
+        ("inside the outer glass only", Vec3::new(0.0, 0.0, -4.5), vec![outer]),
+        ("inside both solids", Vec3::new(0.0, 0.0, -6.0), vec![outer, inner]),
+        ("inside the fog", Vec3::new(10.0, 0.0, 0.0), vec![2]),
+    ] {
+        let camera = Camera {
+            position,
+            look_at: position + Vec3::NEG_Z,
+            up: Vec3::Y,
+            vfov_degrees: 40.0,
+            lens: None,
+        };
+        let scene = Scene::new(
+            &gpu,
+            &objects,
+            camera,
+            &Environment::constant(Vec3::splat(0.5)),
+        )
+        .expect("scene");
+        let wavefront = Wavefront::new(
+            &gpu,
+            &Kernels::embedded(),
+            Wavefront::DEFAULT_CAPACITY,
+            2,
+            LightSampling::Mis,
+        )
+        .expect("wavefront");
+        let radiance = gpu
+            .create_buffer(
+                "test.radiance",
+                8 * 8 * 16,
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                    | vk::BufferUsageFlags::TRANSFER_DST,
+                MemoryLocation::GpuOnly,
+            )
+            .expect("radiance buffer");
+        wavefront
+            .trace(&gpu, &scene, &radiance, 8, 8, 0)
+            .expect("trace");
+        let table = gpu.download_buffer(scene.table()).expect("download");
+        let seed: [u32; 4] = bytemuck::pod_read_unaligned(&table[table.len() - 16..]);
+        let mut entries: Vec<u32> = seed.into_iter().filter(|&e| e != STACK_EMPTY).collect();
+        entries.sort_unstable();
+        let mut wanted = expected.clone();
+        wanted.sort_unstable();
+        assert_eq!(
+            entries, wanted,
+            "{name}: seed {seed:08x?} carries the wrong membership"
+        );
+    }
+}
+
+/// The case the camera seed exists for: a camera *inside* tinted glass.
+/// The first segment runs through the interior, and before the seed it was
+/// attenuated by nothing — worse, the exit face then toggled the box *into*
+/// the empty set, and the path left carrying glass it was no longer in.
+/// With the seed, what reaches the camera is Beer–Lambert over the axial
+/// two meters to the face, exactly.
+///
+/// `specular_weight` 0 drives the interface's relative IOR to 1, as in the
+/// nested-interior test above: no refraction to bend the axial ray, no
+/// Fresnel share — the sky through one tinted pane.
+#[test]
+fn a_camera_inside_tinted_glass_sees_beer_lambert_from_its_first_segment() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let sky = 0.75;
+    let transmission = 0.85;
+    let sigma = -f64::from(transmission).ln(); // per meter: depth is 1
+    let glass = Material {
+        transmission_weight: 1.0,
+        specular_weight: 0.0,
+        transmission_color: Vec3::splat(transmission),
+        transmission_depth: 1.0,
+        ..Material::matte(Vec3::ONE, 0.0)
+    };
+    let camera = Camera {
+        position: Vec3::ZERO,
+        look_at: Vec3::NEG_Z,
+        up: Vec3::Y,
+        vfov_degrees: 1.0,
+        lens: None,
+    };
+    let scene = Scene::new(
+        &gpu,
+        &[Object {
+            mesh: crate::scene::cube(2.0),
+            transform: Mat4::IDENTITY,
+            material: glass,
+            medium: None,
+            interior_priority: 0,
+        }],
+        camera,
+        &Environment::constant(Vec3::splat(sky)),
+    )
+    .expect("scene");
+    let (size, samples) = (16, 256);
+    let sum = bsdf_only_sum(&gpu, &scene, size, samples);
+    let count = f64::from(samples * size * size);
+    let mean = sum.chunks_exact(4).map(|p| f64::from(p[0])).sum::<f64>() / count;
+    let expected = f64::from(sky) * (-sigma * 2.0).exp();
+    assert!(
+        (mean - expected).abs() / expected < 0.015,
+        "camera inside glass: {mean} vs Beer–Lambert's {expected} \
+         (the unattenuated sky is {sky})"
     );
 }
 

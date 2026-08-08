@@ -168,6 +168,20 @@ struct IntersectParams {
     packed: u32,
 }
 
+/// Push constants for the camera-medium resolve
+/// (`shaders/resolve_camera.slang`): one thread at the head of every
+/// restart wave, writing what the camera is inside of into the scene
+/// table's `cameraMedia` — the word intersect seeds every bounce-0 path
+/// from.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ResolveCameraParams {
+    camera_position: Vec3,
+    _pad0: u32,
+    /// Device address of the scene table — the one field a kernel writes.
+    scene: vk::DeviceAddress,
+}
+
 /// What a scene's media ask of the kernels, answered once per wave. Every
 /// stage's flag bits come from here, so the routing, the two halves of the
 /// medium stack, and the pass list cannot disagree about what the scene has.
@@ -661,6 +675,9 @@ pub struct Wavefront {
     /// The shadow stage specialized for bounded volumes — see
     /// `trace_shadow.slang`. One or the other is recorded, never both.
     trace_shadow_volumes: ComputePipeline,
+    /// The camera's own medium set, resolved once at the head of every
+    /// restart wave — recorded only when the scene has boundary instances.
+    resolve_camera: ComputePipeline,
     paths: PathPool,
     queues: Queues,
     /// The all-zero [`AovTableData`] a wave binds when the caller brings
@@ -739,6 +756,11 @@ impl Wavefront {
             trace_shadow_volumes: pipeline(
                 &kernels.trace_shadow_volumes,
                 size_of::<TraceShadowParams>(),
+                Bindings::Scene,
+            )?,
+            resolve_camera: pipeline(
+                &kernels.resolve_camera,
+                size_of::<ResolveCameraParams>(),
                 Bindings::Scene,
             )?,
             paths: PathPool::new(gpu, capacity)?,
@@ -907,8 +929,20 @@ impl Wavefront {
                 media,
             ),
         };
+        // The camera's own medium set, re-resolved at the head of every
+        // accumulation restart — sample 0 *is* the restart wave, whatever
+        // verb (camera move, scene edit, resize) caused it, and later
+        // samples reread the persisted word. Skipped where nothing bounds
+        // a medium: the table's uploaded all-empty default is already the
+        // answer.
+        let resolve = (sample == 0 && media.set()).then(|| ResolveCameraParams {
+            camera_position: scene.camera().position,
+            _pad0: 0,
+            scene: scene.table().device_address(),
+        });
         let bounces = self.max_bounces;
         WaveParams {
+            resolve,
             ranges,
             intersect: (0..bounces).map(intersect).collect(),
             shade_miss: (0..bounces)
@@ -1019,14 +1053,28 @@ impl Wavefront {
             value: 0,
         };
 
+        let mut passes = Vec::new();
+        // What the camera is inside of, resolved before the first bounce-0
+        // intersect seeds paths from it — the inter-pass barrier
+        // `submit_passes` places is what orders the write against that
+        // read. One thread; the whole wave behind it is the same barrier's
+        // wait either way.
+        if let Some(resolve) = &params.resolve {
+            passes.push(Pass::Dispatch {
+                pipeline: &self.resolve_camera,
+                scene: Some(bindings),
+                push_constants: bytemuck::bytes_of(resolve),
+                group_counts: [1, 1, 1],
+            });
+        }
         // Radiance accumulates across the wave's bounce rounds, so the
         // wave starts from zero rather than each pixel being written once.
-        let mut passes = vec![Pass::Fill {
+        passes.push(Pass::Fill {
             buffer: radiance,
             offset: 0,
             size: pixels * 16,
             value: 0,
-        }];
+        });
         // The AOV accumulators likewise: a pixel's guides can land at any
         // bounce (the specular pass-through), so they too are plain adds
         // onto zero. The guide scratch inside the table needs no fill —
@@ -1113,6 +1161,9 @@ impl Wavefront {
 
 /// One wave's push constants — see [`Wavefront::wave_params`].
 struct WaveParams {
+    /// The camera-medium resolve, on restart waves of scenes with boundary
+    /// instances; `None` records no dispatch.
+    resolve: Option<ResolveCameraParams>,
     /// One raygen instance per pool-sized pixel range.
     ranges: Vec<RaygenParams>,
     /// One instance per recorded bounce: bounce 0 traces with the camera

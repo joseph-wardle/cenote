@@ -59,6 +59,9 @@ pub struct Kernels {
     /// point of the same module, so that measuring a connection's way
     /// through them costs registers only where there are any.
     pub trace_shadow_volumes: Kernel,
+    /// The camera's own medium set, resolved into the scene table at every
+    /// accumulation restart — one thread, one ray.
+    pub resolve_camera: Kernel,
     /// Film: add a wave's sample into the running sums (NaN/Inf-guarded).
     pub accumulate: Kernel,
     /// Film: running sums → the resolved linear `ACEScg` average.
@@ -90,6 +93,7 @@ impl Kernels {
             shade_volume: kernel(spirv!("shade_volume"), c"shade_volume"),
             trace_shadow: kernel(spirv!("trace_shadow"), c"trace_shadow"),
             trace_shadow_volumes: kernel(spirv!("trace_shadow"), c"trace_shadow_volumes"),
+            resolve_camera: kernel(spirv!("resolve_camera"), c"resolve_camera"),
             accumulate: kernel(spirv!("accumulate"), c"accumulate"),
             resolve: kernel(spirv!("resolve"), c"resolve"),
             tonemap: kernel(spirv!("tonemap"), c"tonemap"),
@@ -114,6 +118,7 @@ impl Kernels {
             shade_surface,
             shade_volume,
             trace_shadow,
+            resolve_camera,
             accumulate,
             resolve,
             tonemap,
@@ -154,6 +159,10 @@ impl Kernels {
             trace_shadow: Kernel {
                 spirv: shadow,
                 entry: c"trace_shadow",
+            },
+            resolve_camera: Kernel {
+                spirv: resolve_camera?,
+                entry: c"resolve_camera",
             },
             accumulate: Kernel {
                 spirv: accumulate?,
@@ -278,7 +287,7 @@ mod tests {
         u32::from_le_bytes(bytes[..4].try_into().unwrap()) == 0x0723_0203
     }
 
-    fn all(kernels: &Kernels) -> [&Kernel; 10] {
+    fn all(kernels: &Kernels) -> [&Kernel; 11] {
         [
             &kernels.raygen,
             &kernels.intersect,
@@ -287,6 +296,7 @@ mod tests {
             &kernels.shade_volume,
             &kernels.trace_shadow,
             &kernels.trace_shadow_volumes,
+            &kernels.resolve_camera,
             &kernels.accumulate,
             &kernels.resolve,
             &kernels.tonemap,
