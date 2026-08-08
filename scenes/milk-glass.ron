@@ -6,11 +6,11 @@
 // Measured against nested-glass, the cost delta is the price of
 // scattering interiors and nothing else.
 //
-// It is the 8d-b driver: transmission_scatter over a near-white
-// transmission color (so most of the extinction is the gray shift the
-// subtractive split adds back), anisotropy leaning forward the way real
-// milk does, and a mean free path a few times smaller than the block, so
-// paths turn several times before they leave.
+// The milk exercises the whole derivation: transmission_scatter over a
+// near-white transmission color (so most of the extinction is the gray
+// shift the subtractive split adds back), anisotropy leaning forward the
+// way real milk does, and a mean free path a few times smaller than the
+// block, so paths turn several times before they leave.
 (
     version: 2,
     ops: [
@@ -101,9 +101,9 @@
         // Priorities inverted from nested-glass: here the *milk* outranks
         // the block, so the volume the two share is the scattering one and
         // every block face buried inside it is a suppressed crossing that
-        // splits the march into legs — the 8d-b combination this scene
-        // exists to price. The glass that clears the milk's top still
-        // shades and absorbs as ever.
+        // splits the march into legs — the combination this scene exists
+        // to price. The glass that clears the milk's top still shades and
+        // absorbs as ever.
         Instance((
             name: "block",
             mesh: Some("cube"),

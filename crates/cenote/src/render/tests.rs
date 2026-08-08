@@ -765,12 +765,60 @@ fn the_volumetric_furnace_closes() {
     }
 }
 
+/// Milk at albedo exactly 1: a white transmission color makes the whole
+/// `σ_t` the gray shift, and a neutral scatter makes `σ_s` equal it bit
+/// for bit — the furnace-exact scattering interior the tests below share.
+fn albedo_one_milk() -> Material {
+    Material {
+        transmission_color: Vec3::ONE,
+        transmission_depth: 1.0,
+        transmission_scatter: Vec3::ONE,
+        transmission_scatter_anisotropy: 0.3,
+        ..Material::glass(0.1, 1.5)
+    }
+}
+
+/// A sphere placed for the scattering-interior tests: translated to `at`,
+/// then scaled.
+fn sphere_at(
+    mesh: crate::scene::Mesh,
+    at: Vec3,
+    scale: f32,
+    material: Material,
+    interior_priority: u32,
+) -> Object {
+    Object {
+        mesh,
+        transform: Mat4::from_translation(at) * Mat4::from_scale(Vec3::splat(scale)),
+        material,
+        medium: None,
+        interior_priority,
+    }
+}
+
+/// The scattering-interior tests' one viewpoint: a camera at the origin
+/// looking down −Z, under a black sky, so every photon is the scene's own.
+fn scene_in_the_dark(gpu: &Context, objects: &[Object]) -> Scene {
+    Scene::new(
+        gpu,
+        objects,
+        Camera {
+            position: Vec3::ZERO,
+            look_at: Vec3::NEG_Z,
+            up: Vec3::Y,
+            vfov_degrees: 60.0,
+            lens: None,
+        },
+        &Environment::constant(Vec3::ZERO),
+    )
+    .expect("scene")
+}
+
 /// The furnace, inside milk: a *scattering refractive interior* at albedo
-/// exactly 1 — the transmission color is white, so the whole σ_t is the
-/// gray shift, and a neutral scatter makes σ_s equal it bit for bit — in
-/// the emissive shell, with a suppressed lower-priority boundary buried
-/// inside it. The march splits the interior's segments at that boundary
-/// and restarts its distance draws per leg, next-event estimation is
+/// exactly 1 (see [`albedo_one_milk`]) in the emissive shell, with a
+/// suppressed lower-priority boundary buried inside it. The march splits
+/// the interior's segments at that boundary and restarts its distance
+/// draws per leg, next-event estimation is
 /// skipped at every vertex the milk dominates, and the weight-1 emission
 /// `throughput.w = 0` promises is what the escaping paths carry — so if
 /// any of that chain loses or double-counts a factor, the frame drifts
@@ -787,13 +835,7 @@ fn a_scattering_interior_keeps_the_furnace_closed() {
         return;
     };
     let emission = 0.5;
-    let milk = Material {
-        transmission_color: Vec3::ONE,
-        transmission_depth: 1.0,
-        transmission_scatter: Vec3::ONE,
-        transmission_scatter_anisotropy: 0.3,
-        ..Material::glass(0.1, 1.5)
-    };
+    let milk = albedo_one_milk();
     // A tinted absorber the milk outranks: if its interfaces shade rather
     // than cross — or the legs they split misweight — the furnace leaks.
     let lurker = Material {
@@ -802,43 +844,20 @@ fn a_scattering_interior_keeps_the_furnace_closed() {
         ..Material::glass(0.05, 1.33)
     };
     let scene = |content: Material| {
-        Scene::new(
+        scene_in_the_dark(
             &gpu,
             &[
-                Object {
-                    mesh: inside_out(crate::scene::icosphere(3)),
-                    transform: Mat4::from_scale(Vec3::splat(2.0)),
-                    material: Material::emitter(Vec3::splat(emission)),
-                    medium: None,
-                    interior_priority: 0,
-                },
-                Object {
-                    mesh: crate::scene::icosphere(3),
-                    transform: Mat4::from_translation(Vec3::NEG_Z * 1.2)
-                        * Mat4::from_scale(Vec3::splat(0.55)),
-                    material: content,
-                    medium: None,
-                    interior_priority: 2,
-                },
-                Object {
-                    mesh: crate::scene::icosphere(2),
-                    transform: Mat4::from_translation(Vec3::NEG_Z * 1.2)
-                        * Mat4::from_scale(Vec3::splat(0.3)),
-                    material: lurker,
-                    medium: None,
-                    interior_priority: 0,
-                },
+                sphere_at(
+                    inside_out(crate::scene::icosphere(3)),
+                    Vec3::ZERO,
+                    2.0,
+                    Material::emitter(Vec3::splat(emission)),
+                    0,
+                ),
+                sphere_at(crate::scene::icosphere(3), Vec3::NEG_Z * 1.2, 0.55, content, 2),
+                sphere_at(crate::scene::icosphere(2), Vec3::NEG_Z * 1.2, 0.3, lurker, 0),
             ],
-            Camera {
-                position: Vec3::ZERO,
-                look_at: Vec3::NEG_Z,
-                up: Vec3::Y,
-                vfov_degrees: 60.0,
-                lens: None,
-            },
-            &Environment::constant(Vec3::ZERO),
         )
-        .expect("scene")
     };
     // 64 bounces as the volumetric furnace: the milk is about an optical
     // depth across, and truncated turns are energy, not noise.
@@ -888,7 +907,7 @@ fn a_scattering_interior_keeps_the_furnace_closed() {
 /// This is where the *volume* half of the skip is load-bearing rather
 /// than hygiene, and this test fails without it: a connection from a
 /// scattering vertex to a submerged emitter crosses no boundary, so it
-/// is *visible* — but trace_shadow measures volumes, not interiors, so
+/// is *visible* — but `trace_shadow` measures volumes, not interiors, so
 /// it arrives without the milk's transmittance and reads too bright,
 /// while the emission it competes with gets MIS-weighted down. The
 /// furnace above cannot see that error: its paths always exit through
@@ -907,50 +926,26 @@ fn a_submerged_emitter_is_phase_samplings_alone() {
     let Some(gpu) = crate::gpu::test_context() else {
         return;
     };
-    let milk = Material {
-        transmission_color: Vec3::ONE,
-        transmission_depth: 1.0,
-        transmission_scatter: Vec3::ONE,
-        transmission_scatter_anisotropy: 0.3,
-        ..Material::glass(0.1, 1.5)
-    };
     let objects = [
-        Object {
-            mesh: crate::scene::icosphere(3),
-            transform: Mat4::from_translation(Vec3::NEG_Z * 1.2)
-                * Mat4::from_scale(Vec3::splat(0.55)),
-            material: milk,
-            medium: None,
-            interior_priority: 0,
-        },
-        Object {
-            mesh: crate::scene::icosphere(2),
-            transform: Mat4::from_translation(Vec3::NEG_Z * 1.2)
-                * Mat4::from_scale(Vec3::splat(0.15)),
-            material: Material::emitter(Vec3::splat(5.0)),
-            medium: None,
-            interior_priority: 0,
-        },
+        sphere_at(crate::scene::icosphere(3), Vec3::NEG_Z * 1.2, 0.55, albedo_one_milk(), 0),
+        sphere_at(
+            crate::scene::icosphere(2),
+            Vec3::NEG_Z * 1.2,
+            0.15,
+            Material::emitter(Vec3::splat(5.0)),
+            0,
+        ),
         // The rock: a submerged diffuse surface lit by the emitter beside
         // it — the surface-half sub-path the doc above names.
-        Object {
-            mesh: crate::scene::icosphere(2),
-            transform: Mat4::from_translation(Vec3::new(0.25, 0.0, -1.2))
-                * Mat4::from_scale(Vec3::splat(0.12)),
-            material: Material::matte(Vec3::splat(0.8), 0.3),
-            medium: None,
-            interior_priority: 0,
-        },
+        sphere_at(
+            crate::scene::icosphere(2),
+            Vec3::new(0.25, 0.0, -1.2),
+            0.12,
+            Material::matte(Vec3::splat(0.8), 0.3),
+            0,
+        ),
     ];
-    let camera = Camera {
-        position: Vec3::ZERO,
-        look_at: Vec3::NEG_Z,
-        up: Vec3::Y,
-        vfov_degrees: 60.0,
-        lens: None,
-    };
-    let environment = Environment::constant(Vec3::ZERO);
-    let scene = Scene::new(&gpu, &objects, camera, &environment).expect("scene");
+    let scene = scene_in_the_dark(&gpu, &objects);
     let (size, samples) = (32, 256);
     let renderer = Renderer::with_max_bounces(&gpu, 64).expect("renderer");
     let mis = accumulate_sum(&gpu, &renderer, &scene, size, samples);
@@ -975,7 +970,7 @@ fn a_submerged_emitter_is_phase_samplings_alone() {
 /// the deleted scene's own stream-to-stream noise floor, calibrated here
 /// on the same pixel counts rather than pinned as a magic constant. What
 /// albedo-1 cancellation hides above — the chromatic mixture pdf, the
-/// σ_s/σ_t bookkeeping, the gray shift — is exactly what drifts this
+/// `σ_s`/`σ_t` bookkeeping, the gray shift — is exactly what drifts this
 /// bound if it drifts at all.
 #[test]
 fn a_suppressed_boundary_inside_juice_is_no_boundary_at_all() {
@@ -999,47 +994,29 @@ fn a_suppressed_boundary_inside_juice_is_no_boundary_at_all() {
     };
     let scene = |with_lurker: bool| {
         let mut objects = vec![
-            Object {
-                mesh: inside_out(crate::scene::icosphere(3)),
-                transform: Mat4::from_scale(Vec3::splat(2.0)),
-                material: Material::emitter(Vec3::splat(0.5)),
-                medium: None,
-                interior_priority: 0,
-            },
-            Object {
-                mesh: crate::scene::icosphere(3),
-                transform: Mat4::from_translation(Vec3::NEG_Z * 1.2)
-                    * Mat4::from_scale(Vec3::splat(0.55)),
-                material: juice,
-                medium: None,
-                interior_priority: 2,
-            },
+            sphere_at(
+                inside_out(crate::scene::icosphere(3)),
+                Vec3::ZERO,
+                2.0,
+                Material::emitter(Vec3::splat(0.5)),
+                0,
+            ),
+            sphere_at(crate::scene::icosphere(3), Vec3::NEG_Z * 1.2, 0.55, juice, 2),
         ];
         if with_lurker {
-            objects.push(Object {
-                mesh: crate::scene::icosphere(2),
-                transform: Mat4::from_translation(Vec3::NEG_Z * 1.2)
-                    * Mat4::from_scale(Vec3::splat(0.4)),
-                material: lurker,
-                medium: None,
-                interior_priority: 0,
-            });
+            objects.push(sphere_at(
+                crate::scene::icosphere(2),
+                Vec3::NEG_Z * 1.2,
+                0.4,
+                lurker,
+                0,
+            ));
         }
-        Scene::new(
-            &gpu,
-            &objects,
-            Camera {
-                position: Vec3::ZERO,
-                look_at: Vec3::NEG_Z,
-                up: Vec3::Y,
-                vfov_degrees: 60.0,
-                lens: None,
-            },
-            &Environment::constant(Vec3::ZERO),
-        )
-        .expect("scene")
+        scene_in_the_dark(&gpu, &objects)
     };
-    // Mean relative squared error between two per-pixel RGB means.
+    // Relative squared error, summed over pixels and channels — both
+    // sides of the bound below use the same pixel count, so the sum
+    // stands in for the mean.
     let relmse = |a: &[f32], b: &[f32]| {
         a.chunks_exact(4)
             .zip(b.chunks_exact(4))

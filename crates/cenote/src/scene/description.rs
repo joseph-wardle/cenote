@@ -384,7 +384,7 @@ pub struct Material {
     /// applies the tint at the interface itself.
     pub transmission_depth: f32,
     /// The part of that extinction which scatters rather than absorbs
-    /// (juice, milk): σ_s = `transmission_scatter` / `transmission_depth`.
+    /// (juice, milk): `σ_s` = `transmission_scatter` / `transmission_depth`.
     /// Zero — the default — keeps the interior purely absorbing.
     pub transmission_scatter: [f32; 3],
     /// Henyey–Greenstein anisotropy of the interior's scattering; 0 is

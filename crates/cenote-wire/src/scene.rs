@@ -214,9 +214,9 @@ pub struct InstancePatch {
     pub camera_visible: Option<bool>,
 }
 
-/// Mirror of `changeset::MaterialPatch` — the 22-field surface the drift
-/// guard exists for. Field meanings and defaults are `OpenPBR`'s; see the
-/// renderer's `description::Material`.
+/// Mirror of `changeset::MaterialPatch`, field for field — the surface
+/// the drift guard exists for. Field meanings and defaults are
+/// `OpenPBR`'s; see the renderer's `description::Material`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[expect(missing_docs, reason = "fields document themselves on the original")]
 pub struct MaterialPatch {

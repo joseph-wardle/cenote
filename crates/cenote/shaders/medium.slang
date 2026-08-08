@@ -18,10 +18,10 @@ import scene;
 // bit, prep's single authority) is then the whole segment's medium: its
 // record, alone. An absorbing one returns vacuum here — its Beer–Lambert
 // absorption stays the surface stage's, applied once over the whole
-// segment, exactly as it was before volumes existed — which is why this
-// resolves by the register-held bit and never by re-reading σ_s: a second
-// spelling of that predicate could drift from the one intersect routed by,
-// and a segment would be weighted twice or not at all.
+// segment, exactly as it was before volumes existed. Both resolve by the
+// register-held bit, never by re-reading σ_s: a second spelling of the
+// predicate could drift from the one intersect routed by, and a segment
+// would be weighted twice or not at all.
 public MediumRecord combineMedia(SceneTable* scene, uint4 set) {
     MediumRecord total;
     total.sigmaT = float3(0.0);

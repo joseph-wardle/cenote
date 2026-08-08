@@ -252,11 +252,10 @@ struct ShadeMissParams {
     aov: vk::DeviceAddress,
     /// Which strategies reach the lights — a [`LightSampling`] as `u32`.
     light_sampling: u32,
-    /// Which bounce this round's escapes left from. The kernel's "is this
-    /// a camera ray" test for the depth AOV and the guides reads this, not
-    /// `throughput.w == 0`: the pdf lane means "no light-sampling strategy
-    /// competed", which a vertex that skips next-event estimation also
-    /// writes, and the AOVs want the first vertex, not that.
+    /// Which bounce this round's escapes left from — the kernel's "is this
+    /// a camera ray" test for the AOVs. Not `throughput.w == 0`: that lane
+    /// means "no light-sampling strategy competed", which a vertex that
+    /// skips next-event estimation also writes.
     bounce: u32,
 }
 
@@ -390,8 +389,8 @@ struct PathPool {
     /// Hit record — instance + primitive + barycentrics; 16 B/path.
     hit: Buffer,
     /// xyz = the path's accumulated weight; w = the solid-angle pdf of the
-    /// scatter that produced this ray (0 on camera rays), kept for the next
-    /// vertex's MIS weight; 16 B/path.
+    /// scatter that produced this ray (0 where no light-sampling strategy
+    /// competed), kept for the next vertex's MIS weight; 16 B/path.
     throughput: Buffer,
     /// The medium stack — the innermost refractive interior plus the set
     /// of volumes the path is inside; 16 B/path, allocated by [`ensure`] on

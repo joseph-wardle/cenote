@@ -86,7 +86,8 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     let uv = interpolateUv(mesh, hit.primitive, hit.barycentrics);
     let material = resolveMaterial(params.scene.textureParams, params.scene.materials[hit.instance], uv);
     let spawn = spawnPoint(mesh, hit, direction);
-    // xyz = the path's weight; w = the previous scatter's pdf (0: camera ray).
+    // xyz = the path's weight; w = the previous scatter's pdf, 0 where no
+    // light-sampling strategy competed there (see pathstate.slang).
     var throughput = params.paths.throughput[path];
 
     // The interior the segment crossed: its medium's Beer–Lambert
@@ -111,15 +112,14 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     // surrounding material is read raw, not through `resolveMaterial`:
     // neither `specular_ior` nor `specular_weight` is texturable, and this
     // hit's UV would be the wrong one to ask with anyway.
-    // A scattering interior owes this vertex nothing here: the volume
-    // stage sampled the segment against the full extinction, so the closed
-    // form would be the same absorption twice. The same register-held bit
-    // that routed the segment there withholds it, so the two cannot
-    // disagree. It also turns next-event estimation off below: a shadow
-    // ray from inside cannot refract through the boundary (the wall
-    // occludes every straight connection already), so the emission the
-    // path finds by sampling carries weight 1 instead — conveyed to the
-    // next vertex as throughput.w = 0.
+    //
+    // A scattering interior owes this vertex no transmittance: the volume
+    // stage sampled the segment against the full extinction, and the same
+    // register-held bit that routed it there withholds the closed form,
+    // so the two cannot disagree. The bit also skips next-event
+    // estimation below — the boundary occludes every straight connection
+    // from inside — leaving directional sampling the only strategy,
+    // conveyed to the next vertex as throughput.w = 0.
     let scatterInterior = (dominant & STACK_SCATTERING) != 0;
     var exteriorIor = 1.0;
     if (interior != STACK_EMPTY) {
@@ -142,8 +142,8 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
 
     // Emission. This hit is the BSDF strategy's way of reaching a light,
     // so it is weighted against the probability that next-event sampling
-    // at the previous vertex would have picked the same point — except on
-    // camera rays, where no other strategy competed and the weight is 1.
+    // at the previous vertex would have picked the same point — except
+    // where w = 0, no strategy competed there, and the weight stays 1.
     // Emitters are one-sided (winding front), so a back-face hit adds
     // nothing — and NEE could not have sampled it either, keeping the two
     // strategies consistent for MIS.

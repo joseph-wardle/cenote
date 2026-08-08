@@ -358,11 +358,22 @@ const _: () = assert!(size_of::<MediumRecord>() == 32);
 /// lowering only warns that it happened.
 pub(super) const MAX_ANISOTROPY: f32 = 0.99;
 
+/// `g` as the table may carry it: bounded to ±[`MAX_ANISOTROPY`], with a
+/// NaN falling to isotropic — `clamp` alone would pass one straight
+/// through to the phase function.
+fn bounded_anisotropy(g: f32) -> f32 {
+    if g.is_nan() {
+        0.0
+    } else {
+        g.clamp(-MAX_ANISOTROPY, MAX_ANISOTROPY)
+    }
+}
+
 impl From<Medium> for MediumRecord {
     fn from(medium: Medium) -> Self {
         Self {
             sigma_t: (medium.absorption + medium.scattering).to_array(),
-            g: medium.anisotropy.clamp(-MAX_ANISOTROPY, MAX_ANISOTROPY),
+            g: bounded_anisotropy(medium.anisotropy),
             sigma_s: medium.scattering.to_array(),
             _pad0: 0.0,
         }
@@ -382,12 +393,12 @@ impl From<Medium> for MediumRecord {
 /// accurate side of that.
 ///
 /// The scattering split follows `OpenPBR`'s subtractive convention: the
-/// color/depth logarithm stays the *extinction* σ_t exactly as authored,
-/// σ_s = `transmission_scatter` / depth is the part of it that redirects,
-/// and σ_a is their difference. A channel whose scatter outruns its
-/// extinction would absorb negatively — amplify — so σ_a is repaired by
+/// color/depth logarithm stays the *extinction* `σ_t` exactly as authored,
+/// `σ_s` = `transmission_scatter` / depth is the part of it that redirects,
+/// and `σ_a` is their difference. A channel whose scatter outruns its
+/// extinction would absorb negatively — amplify — so `σ_a` is repaired by
 /// shifting it up uniformly (gray, keeping the hue the author picked)
-/// until nothing does, which grows σ_t by the same shift. The scatter
+/// until nothing does, which grows `σ_t` by the same shift. The scatter
 /// tests are written positively like the depth's, so a NaN falls to
 /// purely absorbing.
 fn interior(material: &Material) -> Option<MediumRecord> {
@@ -398,8 +409,9 @@ fn interior(material: &Material) -> Option<MediumRecord> {
             .to_array()
             .map(|channel| -channel.clamp(1e-4, 1.0).ln() / depth);
         let scatter = material.transmission_scatter.max(Vec3::ZERO);
-        if !(scatter.max_element() > 0.0) {
-            // Purely absorbing — today's record, bit for bit.
+        if !scatter.cmpgt(Vec3::ZERO).any() {
+            // Purely absorbing — the pre-scatter record, bit for bit: even
+            // adding a zero shift would flip a white channel's −0.0.
             return MediumRecord {
                 sigma_t,
                 g: 0.0,
@@ -411,9 +423,7 @@ fn interior(material: &Material) -> Option<MediumRecord> {
         let shift = (sigma_s - Vec3::from(sigma_t)).max_element().max(0.0);
         MediumRecord {
             sigma_t: (Vec3::from(sigma_t) + shift).to_array(),
-            g: material
-                .transmission_scatter_anisotropy
-                .clamp(-MAX_ANISOTROPY, MAX_ANISOTROPY),
+            g: bounded_anisotropy(material.transmission_scatter_anisotropy),
             sigma_s: sigma_s.to_array(),
             _pad0: 0.0,
         }
@@ -557,6 +567,10 @@ fn upload_texture_params<'k>(
 }
 
 /// The scene, resident on the GPU and ready to trace against.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "four independent scene predicates, each cached for a hot query"
+)]
 pub struct Scene {
     // Declared before `meshes`: the TLAS dies before the BLASes its
     // instances reference.
@@ -1518,7 +1532,7 @@ mod tests {
 
     /// The scattering split is `OpenPBR`'s subtractive read: the
     /// color/depth logarithm stays the extinction bit for bit, the scatter
-    /// carves σ_s out of it, and a channel whose scatter outruns the
+    /// carves `σ_s` out of it, and a channel whose scatter outruns the
     /// extinction it sits inside is repaired by a gray shift — a medium
     /// may fall short of the authored color, never amplify.
     #[test]
@@ -1560,6 +1574,19 @@ mod tests {
             (milk.sigma_t, milk.sigma_s),
             ([0.6; 3], [0.4, 0.5, 0.6]),
             "the gray shift grows σ_t just enough that no channel amplifies"
+        );
+        // A NaN anisotropy falls to isotropic rather than riding `clamp`
+        // through to the phase function.
+        let spun = interior(&Material {
+            transmission_scatter: Vec3::ONE,
+            transmission_scatter_anisotropy: f32::NAN,
+            ..absorbing
+        })
+        .expect("an interior");
+        assert_eq!(
+            spun.g.to_bits(),
+            0.0f32.to_bits(),
+            "a NaN anisotropy is no anisotropy at all"
         );
         // Malformed scatter falls to purely absorbing — the same record,
         // to the bit, as if it were never authored — mirroring how a

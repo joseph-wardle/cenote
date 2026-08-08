@@ -5,12 +5,12 @@
 // own next-event connection, and one that does not carries the segment's
 // transmittance on to whatever intersect found.
 //
-// A segment that ends at a *null* boundary — a volume's surface, pure
-// extent with no surface response — is not over: the path crosses into a
-// different medium, and the stage re-traces and draws again. That march is
-// why this stage binds the acceleration structure, and why the routing
-// cannot live in intersect's candidate loop: the crossings must be resolved
-// in order, and `Proceed()` delivers candidates in none.
+// A segment that ends at a crossable boundary — a volume's surface, or an
+// interface the dominant interior cuts away — is not over: the path
+// crosses into different media, and the stage re-traces and draws again.
+// That march is why this stage binds the acceleration structure, and why
+// the routing cannot live in intersect's candidate loop: the crossings
+// must be resolved in order, and `Proceed()` delivers candidates in none.
 //
 // A stage of its own rather than a branch in shade_surface, so that
 // media-free scenes keep a byte-identical pass list and no scene pays
@@ -117,9 +117,9 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
     // one's length in origin's w lane, and the sentinel says there is no
     // far end.
     var end = hit.instance == INSTANCE_NONE ? 1e30 : origin4.w;
-    // The media the path is travelling. Only volume slots move across the
-    // march — a null boundary is not a refractive one, so crossing it
-    // enters no interior, and a crossing at all implies the set exists.
+    // The media the path is travelling. The dominant interior never moves
+    // across the march — everything it crosses ranks strictly below it —
+    // and a crossing at all implies the set exists.
     var set = params.paths.media(path, (params.packed & FLAG_SET) != 0);
     // Continues intersect's transparency chain past its own cap, so the
     // march's stochastic-opacity draws can never repeat one it already made.

@@ -62,7 +62,7 @@ pub struct Material {
     /// absorption.
     pub transmission_depth: f32,
     /// The part of that extinction which scatters rather than absorbs
-    /// (juice, milk), in `ACEScg`: σ_s = `transmission_scatter` /
+    /// (juice, milk), in `ACEScg`: `σ_s` = `transmission_scatter` /
     /// `transmission_depth`, `OpenPBR`'s subtractive split. Zero keeps the
     /// interior purely absorbing — the surface stage's closed form. Read at
     /// prep (`scene::interior`), never by a kernel.
