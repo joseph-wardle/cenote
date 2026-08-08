@@ -42,10 +42,18 @@ HEADER = """\
 //    mid-gray and are curated to linearized image means below.
 //  - displacement / bump maps dropped scene-wide (rug, blanket, pillow,
 //    concrete) — bathroom/kitchen/crown class.
+//  - the x3/x4 value-scales on the exterior concrete import faithfully
+//    (linearized texels stay under 0.25, so pbrt's reflectance clamp at 1
+//    never fires and the unclamped sample-time scale agrees exactly) —
+//    but the correctly-brighter pavement amplifies the portal gap below:
+//    the full dome lights it where pbrt's portal keeps it dark, so its
+//    bounce into the room is the dominant term of the pbrt divergence.
 //  - diffusetransmission (Carpet, Blanket - Fringe) imports opaque diffuse.
-//  - homogeneous media: red-glass vases curated to Beer-Lambert
-//    transmission_color exp(-scale*(sigma_a+sigma_s)) at depth 1 —
-//    APPROXIMATE, sigma_s is nonzero so pbrt also in-scatters (M8 volumes);
+//  - homogeneous media: the red-glass vases carry the source medium
+//    exactly — sigma_t (0.8, 10, 10), sigma_s (0.4, 5, 5), isotropic —
+//    as transmission_color exp(-0.2*sigma_t) at depth 0.2 with
+//    transmission_scatter 0.2*sigma_s (a depth-1 bake of exp(-10) =
+//    4.5e-5 sits under the importer's 1e-4 color clamp);
 //    greenish-glass ("Glass - Set") extinction ~1e-4/unit, left clear.
 //  - "Fabric - Pillow" is a pbrt mix material (blue coateddiffuse / white
 //    diffuse by the Dots_Pillow mask): curated to one diffuse wearing a
@@ -86,10 +94,16 @@ PATCHES = {
         '                channel: None,\n'
         '            )))',
     },
-    # exp(-200*(sigma_a+sigma_s)) = exp(-(0.8, 10, 10)), depth 1.
+    # Source medium exactly: sigma_a = sigma_s = 200*(0.002, 0.025, 0.025),
+    # so sigma_t = (0.8, 10, 10), isotropic. Depth 0.2 because a depth-1
+    # bake of exp(-10) = 4.5e-5 sits under the importer's 1e-4 color clamp
+    # (sigma_t silently floored at 9.21); at 0.2 the bake exp(-(0.16, 2, 2))
+    # clears it and -ln(color)/depth recovers the source sigma_t exactly.
+    # scatter = sigma_s * depth.
     "Glass - Red": {
-        "transmission_color": "Some((0.449, 0.000045, 0.000045))",
-        "transmission_depth": "Some(1.0)",
+        "transmission_color": "Some((0.852144, 0.135335, 0.135335))",
+        "transmission_depth": "Some(0.2)",
+        "transmission_scatter": "Some((0.08, 1.0, 1.0))",
     },
     # directionmix covers: the visible face is the top, use the cover mean.
     "Magazine - version 1": {"base_color": "Some(Constant((0.672, 0.675, 0.681)))"},
@@ -112,7 +126,8 @@ PATCHES = {
 FIELD_ORDER = [
     "base_color", "base_diffuse_roughness", "base_metalness", "specular_weight",
     "specular_roughness", "specular_ior", "transmission_weight",
-    "transmission_color", "transmission_depth", "coat_weight", "coat_color",
+    "transmission_color", "transmission_depth", "transmission_scatter",
+    "transmission_scatter_anisotropy", "coat_weight", "coat_color",
     "coat_roughness", "coat_ior", "coat_darkening", "fuzz_weight", "fuzz_color",
     "fuzz_roughness", "emission_luminance", "emission_color",
     "geometry_opacity", "geometry_thin_walled", "geometry_normal",

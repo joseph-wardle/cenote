@@ -53,9 +53,10 @@ HEADER = """\
 //    blends of their arms; Tin 05's dirt mask becomes textured metalness.
 //  - the TiO2 conductor (white paint tubes) is not in the metal table and
 //    falls back to copper — curated to a neutral F0 0.198.
-//  - the brush-water medium ("liquid") is curated onto the cup's glass as
-//    Beer-Lambert transmission exp(-80*(sigma_a+sigma_s)) at depth 1 —
-//    APPROXIMATE, sigma_s is nonzero so pbrt also in-scatters (M8 volumes).
+//  - the brush-water medium ("liquid") is curated onto the cup's glass
+//    carrying the source medium exactly: sigma_t (0.48, 0.88, 0.4) as
+//    transmission_color exp(-sigma_t) at depth 1, sigma_s (0.24, 0.44,
+//    0.2) as transmission_scatter, isotropic.
 //  - "Leaves" diffusetransmission imports opaque (kitchen's Blinds class).
 //  - displacement dropped scene-wide (bathroom/kitchen/crown class).
 //  - the room is lit ENTIRELY by two portal'd copies of one infinite light
@@ -123,14 +124,19 @@ PATCHES = {
     "Metal - tins _dupe_dupe_dupe_dupe": {
         "base_color": "Some(Constant((0.198, 0.198, 0.198)))"
     },
-    # The brush-water: exp(-80*(sigma_a+sigma_s)) = exp(-(.48,.88,.4)).
+    # The brush-water, source medium exactly: sigma_a = sigma_s =
+    # 80*(0.003, 0.0055, 0.0025), so sigma_t = (0.48, 0.88, 0.4),
+    # isotropic. color = exp(-sigma_t) at depth 1 (the original bake,
+    # unchanged); scatter = sigma_s * depth.
     "Liquid - glass": {
         "transmission_color": "Some((0.619, 0.415, 0.670))",
         "transmission_depth": "Some(1.0)",
+        "transmission_scatter": "Some((0.24, 0.44, 0.2))",
     },
     "Liquid - glass_dupe": {
         "transmission_color": "Some((0.619, 0.415, 0.670))",
         "transmission_depth": "Some(1.0)",
+        "transmission_scatter": "Some((0.24, 0.44, 0.2))",
     },
     # mix(dark diffuse .1, default-conductor tin, 1.5*Dirt_03): the mask
     # becomes textured metalness (crown's pattern, exact now that the
@@ -209,7 +215,8 @@ PATCHES = {
 FIELD_ORDER = [
     "base_color", "base_diffuse_roughness", "base_metalness", "specular_weight",
     "specular_roughness", "specular_ior", "transmission_weight",
-    "transmission_color", "transmission_depth", "coat_weight", "coat_color",
+    "transmission_color", "transmission_depth", "transmission_scatter",
+    "transmission_scatter_anisotropy", "coat_weight", "coat_color",
     "coat_roughness", "coat_ior", "coat_darkening", "fuzz_weight", "fuzz_color",
     "fuzz_roughness", "emission_luminance", "emission_color",
     "geometry_opacity", "geometry_thin_walled", "geometry_normal",

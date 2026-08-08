@@ -29,3 +29,8 @@
 # high-spp reference EXRs the relMSE oracle compares against. Machine-local
 # (RTX 4070 Ti SUPER) — regenerate with scripts/b7-gates.sh.
 /b7-baselines/
+
+# B8 close captures: the 8e corpus sweep's EXRs and stats sidecars — the
+# post-media baseline future milestones measure against. Machine-local,
+# same class as /b7-baselines/.
+/b8-baselines/
