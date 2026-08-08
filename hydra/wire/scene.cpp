@@ -138,7 +138,7 @@ void encode(Writer& writer, const InstancePatch& value) {
 }
 
 void encode(Writer& writer, const MaterialPatch& value) {
-    writer.array_header(23);
+    writer.array_header(25);
     encode(writer, value.name);
     encode(writer, value.base_color);
     encode(writer, value.base_diffuse_roughness);
@@ -149,6 +149,8 @@ void encode(Writer& writer, const MaterialPatch& value) {
     encode(writer, value.transmission_weight);
     encode(writer, value.transmission_color);
     encode(writer, value.transmission_depth);
+    encode(writer, value.transmission_scatter);
+    encode(writer, value.transmission_scatter_anisotropy);
     encode(writer, value.coat_weight);
     encode(writer, value.coat_color);
     encode(writer, value.coat_roughness);

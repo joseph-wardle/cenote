@@ -61,6 +61,15 @@ pub struct Material {
     /// applies the tint at the interface itself instead of any interior
     /// absorption.
     pub transmission_depth: f32,
+    /// The part of that extinction which scatters rather than absorbs
+    /// (juice, milk), in `ACEScg`: σ_s = `transmission_scatter` /
+    /// `transmission_depth`, `OpenPBR`'s subtractive split. Zero keeps the
+    /// interior purely absorbing — the surface stage's closed form. Read at
+    /// prep (`scene::interior`), never by a kernel.
+    pub transmission_scatter: Vec3,
+    /// Henyey–Greenstein anisotropy of the interior's scattering; clamped
+    /// like a `Medium`'s on its way into the medium table.
+    pub transmission_scatter_anisotropy: f32,
     /// Tint the coat multiplies onto the base below it, in `ACEScg`.
     /// White is untinted.
     pub coat_color: Vec3,
@@ -113,7 +122,7 @@ pub struct Material {
 // offset with no host padding; this pins the total, so a reorder that
 // reintroduces a gap fails to compile instead of silently misreading on the
 // GPU.
-const _: () = assert!(size_of::<Material>() == 144);
+const _: () = assert!(size_of::<Material>() == 160);
 
 impl Material {
     /// A pure diffuse surface — no specular layer. The exact-energy base
@@ -131,6 +140,8 @@ impl Material {
             transmission_weight: 0.0,
             transmission_color: Vec3::ONE,
             transmission_depth: 0.0,
+            transmission_scatter: Vec3::ZERO,
+            transmission_scatter_anisotropy: 0.0,
             coat_color: Vec3::ONE,
             coat_weight: 0.0,
             coat_roughness: 0.0,

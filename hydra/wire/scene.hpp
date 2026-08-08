@@ -176,6 +176,8 @@ struct MaterialPatch {
     std::optional<float> transmission_weight{};
     std::optional<std::array<float, 3>> transmission_color{};
     std::optional<float> transmission_depth{};
+    std::optional<std::array<float, 3>> transmission_scatter{};
+    std::optional<float> transmission_scatter_anisotropy{};
     std::optional<float> coat_weight{};
     std::optional<std::array<float, 3>> coat_color{};
     std::optional<float> coat_roughness{};

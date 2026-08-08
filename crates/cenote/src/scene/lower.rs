@@ -414,6 +414,12 @@ fn lower_material(
     material.transmission_color =
         acescg_from_rec709(Vec3::from(source.transmission_color)).clamp(Vec3::ZERO, Vec3::ONE);
     material.transmission_depth = source.transmission_depth.max(0.0);
+    // Clamped at zero on the far side of the gamut like a medium's
+    // coefficients (`lower_medium`): a negative σ_s would be scattering
+    // that removes light. The anisotropy clamps at the medium table.
+    material.transmission_scatter =
+        acescg_from_rec709(Vec3::from(source.transmission_scatter)).max(Vec3::ZERO);
+    material.transmission_scatter_anisotropy = source.transmission_scatter_anisotropy;
     material.coat_color = coat_color;
     material.coat_weight = coat_weight;
     material.coat_roughness = source.coat_roughness.clamp(0.0, 1.0);

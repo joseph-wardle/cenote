@@ -277,6 +277,8 @@ fn genesis() -> ChangeSet {
                 transmission_weight: Some(0.5),
                 transmission_color: Some([0.9, 0.95, 1.0]),
                 transmission_depth: Some(0.1),
+                transmission_scatter: Some([0.05, 0.4, 0.7]),
+                transmission_scatter_anisotropy: Some(0.6),
                 coat_weight: Some(1.0),
                 coat_color: Some([1.0, 0.9, 0.8]),
                 coat_roughness: Some(0.05),

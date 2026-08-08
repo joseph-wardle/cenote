@@ -231,11 +231,23 @@ fn has_volumes(placements: &[Placement]) -> bool {
         .any(|placement| placement.medium.is_some())
 }
 
+/// Whether any placement closes a *scattering* interior — the one kind of
+/// interior that owes the volume stage an event, so it counts toward
+/// [`Scene::has_media`] where a purely absorbing one does not. Defined
+/// through [`boundary_word`], the same bit the kernels route on, so the
+/// volume stage runs exactly where a segment can reach it.
+fn has_scattering_interiors(placements: &[Placement]) -> bool {
+    placements
+        .iter()
+        .any(|placement| boundary_word(placement) & STACK_SCATTERING != 0)
+}
+
 /// Medium-set entry bits, mirroring `STACK_*` in `shaders/pathstate.slang`
 /// — [`boundary_word`] bakes them into [`GeometryRecord::boundary`], so
 /// the shader's `stackEntry` lifts them into an entry without shifting
 /// anything.
 const STACK_PRIORITY_SHIFT: u32 = 25;
+const STACK_SCATTERING: u32 = 1 << 24;
 const STACK_INTERIOR: u32 = 1 << 31;
 
 /// How far a nesting priority may reach: the six bits the medium-set entry
@@ -271,7 +283,17 @@ fn interior_priority(placement: &Placement) -> u32 {
 fn boundary_word(placement: &Placement) -> u32 {
     let class = placement_boundary(placement);
     let flags = if class == BOUNDARY_REFRACTIVE {
-        STACK_INTERIOR | interior_priority(placement) << STACK_PRIORITY_SHIFT
+        // The scattering bit is baked only where the derived medium truly
+        // scatters — which guarantees any entry carrying it names a medium
+        // record, asserted at [`upload_instance_tables`]. This bit is the
+        // single authority the kernels route on, gate the surface stage's
+        // closed-form absorption with, and resolve the segment's medium by:
+        // one value, so no two of those can disagree.
+        let scattering = interior(&placement.material)
+            .is_some_and(|record| record.sigma_s.iter().any(|&sigma| sigma > 0.0));
+        STACK_INTERIOR
+            | interior_priority(placement) << STACK_PRIORITY_SHIFT
+            | if scattering { STACK_SCATTERING } else { 0 }
     } else {
         0
     };
@@ -296,6 +318,7 @@ fn has_priority(placements: &[Placement]) -> bool {
 // a byte, and the priority has to clear it and stay under `STACK_INTERIOR`.
 const _: () = assert!(BOUNDARY_NULL < 0xff && (1 << STACK_PRIORITY_SHIFT) > 0xff);
 const _: () = assert!(MAX_PRIORITY << STACK_PRIORITY_SHIFT < STACK_INTERIOR);
+const _: () = assert!(STACK_SCATTERING > 0xff && STACK_SCATTERING < 1 << STACK_PRIORITY_SHIFT);
 
 /// A homogeneous medium as the renderer holds it: coefficients per `ACEScg`
 /// channel in inverse meters, and the phase function's anisotropy.
@@ -357,16 +380,43 @@ impl From<Medium> for MediumRecord {
 /// *relative* error where the color is near 1 and the logarithm near 0 —
 /// up to 9e-6 on the corpus's σ. The host's correctly rounded `ln` is the
 /// accurate side of that.
+///
+/// The scattering split follows `OpenPBR`'s subtractive convention: the
+/// color/depth logarithm stays the *extinction* σ_t exactly as authored,
+/// σ_s = `transmission_scatter` / depth is the part of it that redirects,
+/// and σ_a is their difference. A channel whose scatter outruns its
+/// extinction would absorb negatively — amplify — so σ_a is repaired by
+/// shifting it up uniformly (gray, keeping the hue the author picked)
+/// until nothing does, which grows σ_t by the same shift. The scatter
+/// tests are written positively like the depth's, so a NaN falls to
+/// purely absorbing.
 fn interior(material: &Material) -> Option<MediumRecord> {
     let depth = material.transmission_depth;
-    (boundary(material, false) == BOUNDARY_REFRACTIVE && depth > 0.0).then(|| MediumRecord {
-        sigma_t: material
+    (boundary(material, false) == BOUNDARY_REFRACTIVE && depth > 0.0).then(|| {
+        let sigma_t = material
             .transmission_color
             .to_array()
-            .map(|channel| -channel.clamp(1e-4, 1.0).ln() / depth),
-        g: 0.0,
-        sigma_s: [0.0; 3],
-        _pad0: 0.0,
+            .map(|channel| -channel.clamp(1e-4, 1.0).ln() / depth);
+        let scatter = material.transmission_scatter.max(Vec3::ZERO);
+        if !(scatter.max_element() > 0.0) {
+            // Purely absorbing — today's record, bit for bit.
+            return MediumRecord {
+                sigma_t,
+                g: 0.0,
+                sigma_s: [0.0; 3],
+                _pad0: 0.0,
+            };
+        }
+        let sigma_s = scatter / depth;
+        let shift = (sigma_s - Vec3::from(sigma_t)).max_element().max(0.0);
+        MediumRecord {
+            sigma_t: (Vec3::from(sigma_t) + shift).to_array(),
+            g: material
+                .transmission_scatter_anisotropy
+                .clamp(-MAX_ANISOTROPY, MAX_ANISOTROPY),
+            sigma_s: sigma_s.to_array(),
+            _pad0: 0.0,
+        }
     })
 }
 
@@ -540,6 +590,8 @@ pub struct Scene {
     has_volumes: bool,
     /// Likewise for authored nesting priority. See [`Scene::has_priority`].
     has_priority: bool,
+    /// Likewise for scattering interiors. See [`Scene::has_media`].
+    has_scattering_interiors: bool,
     /// The environment's dimensions and emitted power (untinted), retained
     /// so a light edit can rebuild the scene table (its selection
     /// probability weighs the light list against the environment) without
@@ -691,6 +743,7 @@ impl Scene {
         let has_interiors = has_interiors(&placements);
         let has_volumes = has_volumes(&placements);
         let has_priority = has_priority(&placements);
+        let has_scattering_interiors = has_scattering_interiors(&placements);
         let instances = upload_instance_tables(gpu, &placements, &triangle_lights, &[], global)?;
         let GpuEnvironment {
             image,
@@ -738,6 +791,7 @@ impl Scene {
             has_interiors,
             has_volumes,
             has_priority,
+            has_scattering_interiors,
             env_size,
             env_power: power,
             env_source: None,
@@ -765,10 +819,12 @@ impl Scene {
     /// Whether the scene has media — the things that route a path segment
     /// through the volume stage, and so record it at all. A pure-absorbing
     /// *interior* is not one: it has no event to sample, and shades through
-    /// the surface stage exactly as it did before media existed.
+    /// the surface stage exactly as it did before media existed. A
+    /// *scattering* interior is: its extinction and scatter are the volume
+    /// stage's to sample.
     #[must_use]
     pub fn has_media(&self) -> bool {
-        self.has_global_medium() || self.has_volumes()
+        self.has_global_medium() || self.has_volumes() || self.has_scattering_interiors
     }
 
     /// Whether the open space between instances is filled — the flag
@@ -1059,6 +1115,11 @@ fn upload_instance_tables(
                 "instance transform must be invertible, got {:?}",
                 placement.transform
             );
+            let boundary = boundary_word(placement);
+            assert!(
+                boundary & STACK_SCATTERING == 0 || medium != MEDIUM_NONE,
+                "an entry carrying the scattering bit must name a medium — see `boundary_word`"
+            );
             GeometryRecord {
                 positions: placement.mesh.vertices.device_address(),
                 normals: placement.mesh.normals.device_address(),
@@ -1067,7 +1128,7 @@ fn upload_instance_tables(
                 object_to_world: transform_rows(placement.transform),
                 world_to_object: transform_rows(inverse),
                 light,
-                boundary: boundary_word(placement),
+                boundary,
                 medium,
                 _pad0: 0,
             }
@@ -1450,10 +1511,72 @@ mod tests {
         );
         assert!(
             extremes.sigma_s.iter().all(|channel| *channel <= 0.0),
-            "an interior never scatters: `combineMedia` returns vacuum for a path inside one, \
-             so a scattering interior would be routed to the volume stage and find nothing \
-             there to sample"
+            "an interior with no authored scatter must derive none: σ_s is what routes its \
+             paths to the volume stage, and there would be nothing there to sample"
         );
+    }
+
+    /// The scattering split is `OpenPBR`'s subtractive read: the
+    /// color/depth logarithm stays the extinction bit for bit, the scatter
+    /// carves σ_s out of it, and a channel whose scatter outruns the
+    /// extinction it sits inside is repaired by a gray shift — a medium
+    /// may fall short of the authored color, never amplify.
+    #[test]
+    fn transmission_scatter_splits_the_extinction_subtractively() {
+        let absorbing = Material {
+            transmission_color: Vec3::new(0.25, 0.5, 0.8),
+            transmission_depth: 2.0,
+            ..Material::glass(0.1, 1.5)
+        };
+        let base = interior(&absorbing).expect("an interior");
+        let split = interior(&Material {
+            transmission_scatter: Vec3::new(0.1, 0.2, 0.0),
+            transmission_scatter_anisotropy: 0.7,
+            ..absorbing
+        })
+        .expect("an interior");
+        assert_eq!(
+            split.sigma_t.map(f32::to_bits),
+            base.sigma_t.map(f32::to_bits),
+            "scatter within the extinction leaves σ_t exactly the color's"
+        );
+        assert_eq!(
+            (split.sigma_s, split.g),
+            ([0.05, 0.1, 0.0], 0.7),
+            "σ_s = transmission_scatter / transmission_depth"
+        );
+        // Milk: a white color implies zero extinction, so every scattered
+        // channel is negative absorption until the shift repairs it — and
+        // the shift is gray, the same in every channel, so the repaired
+        // σ_a = σ_t − σ_s keeps the authored hue.
+        let milk = interior(&Material {
+            transmission_color: Vec3::ONE,
+            transmission_depth: 1.0,
+            transmission_scatter: Vec3::new(0.4, 0.5, 0.6),
+            ..Material::glass(0.1, 1.5)
+        })
+        .expect("an interior");
+        assert_eq!(
+            (milk.sigma_t, milk.sigma_s),
+            ([0.6; 3], [0.4, 0.5, 0.6]),
+            "the gray shift grows σ_t just enough that no channel amplifies"
+        );
+        // Malformed scatter falls to purely absorbing — the same record,
+        // to the bit, as if it were never authored — mirroring how a
+        // malformed depth falls to vacuum.
+        for scatter in [Vec3::splat(f32::NAN), Vec3::splat(-1.0), Vec3::ZERO] {
+            let fallen = interior(&Material {
+                transmission_scatter: scatter,
+                transmission_scatter_anisotropy: 0.7,
+                ..absorbing
+            })
+            .expect("an interior");
+            assert_eq!(
+                bytemuck::cast::<_, [u32; 8]>(fallen),
+                bytemuck::cast::<_, [u32; 8]>(base),
+                "scatter {scatter} is no scatter at all"
+            );
+        }
     }
 
     /// The ray basis must be orthogonal, oriented (up skyward, right = +X

@@ -122,6 +122,7 @@ impl Scene {
         let has_interiors = super::has_interiors(&placements);
         let has_volumes = super::has_volumes(&placements);
         let has_priority = super::has_priority(&placements);
+        let has_scattering_interiors = super::has_scattering_interiors(&placements);
         let instances = upload_instance_tables(
             gpu,
             &placements,
@@ -156,6 +157,7 @@ impl Scene {
             has_interiors,
             has_volumes,
             has_priority,
+            has_scattering_interiors,
             env_size,
             env_power: power,
             env_source: spec.source.clone(),
@@ -248,6 +250,7 @@ impl Scene {
         self.has_interiors = super::has_interiors(&placements);
         self.has_volumes = super::has_volumes(&placements);
         self.has_priority = super::has_priority(&placements);
+        self.has_scattering_interiors = super::has_scattering_interiors(&placements);
         self.resident.instances = upload_instance_tables(
             gpu,
             &placements,

@@ -161,6 +161,8 @@ ChangeSet genesis() {
             .transmission_weight = 0.5f,
             .transmission_color = std::array{0.9f, 0.95f, 1.0f},
             .transmission_depth = 0.1f,
+            .transmission_scatter = std::array{0.05f, 0.4f, 0.7f},
+            .transmission_scatter_anisotropy = 0.6f,
             .coat_weight = 1.0f,
             .coat_color = std::array{1.0f, 0.9f, 0.8f},
             .coat_roughness = 0.05f,

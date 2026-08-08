@@ -57,6 +57,11 @@ public struct Material {
     public float transmissionWeight; // dielectric base: 0 opaque, 1 glass
     public float3 transmissionColor; // Beer–Lambert target color, ACEScg
     public float transmissionDepth;  // meters to reach it; 0 tints the interface
+    // The interior's scattering split (σ_s · depth, and its anisotropy):
+    // prep derives the medium table from these, and no kernel reads them —
+    // they exist to keep the mirror field for field.
+    public float3 transmissionScatter;
+    public float transmissionScatterAnisotropy;
     public float3 coatColor;   // tint the coat multiplies onto its base
     public float coatWeight;   // clear coat: 0 none, 1 full
     public float coatRoughness; // GGX roughness of the coat lobe

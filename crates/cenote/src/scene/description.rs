@@ -383,6 +383,13 @@ pub struct Material {
     /// Distance in meters at which `transmission_color` is reached; 0
     /// applies the tint at the interface itself.
     pub transmission_depth: f32,
+    /// The part of that extinction which scatters rather than absorbs
+    /// (juice, milk): σ_s = `transmission_scatter` / `transmission_depth`.
+    /// Zero — the default — keeps the interior purely absorbing.
+    pub transmission_scatter: [f32; 3],
+    /// Henyey–Greenstein anisotropy of the interior's scattering; 0 is
+    /// isotropic, positive leans forward.
+    pub transmission_scatter_anisotropy: f32,
     /// Weight of the clear coat layer. Default 0.
     pub coat_weight: f32,
     /// Tint the coat multiplies onto the base. White is untinted.
@@ -433,6 +440,8 @@ impl Default for Material {
             transmission_weight: 0.0,
             transmission_color: [1.0; 3],
             transmission_depth: 0.0,
+            transmission_scatter: [0.0; 3],
+            transmission_scatter_anisotropy: 0.0,
             coat_weight: 0.0,
             coat_color: [1.0; 3],
             coat_roughness: 0.0,

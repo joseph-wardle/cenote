@@ -214,7 +214,7 @@ pub struct InstancePatch {
     pub camera_visible: Option<bool>,
 }
 
-/// Mirror of `changeset::MaterialPatch` — the 20-field surface the drift
+/// Mirror of `changeset::MaterialPatch` — the 22-field surface the drift
 /// guard exists for. Field meanings and defaults are `OpenPBR`'s; see the
 /// renderer's `description::Material`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -231,6 +231,8 @@ pub struct MaterialPatch {
     pub transmission_weight: Option<f32>,
     pub transmission_color: Option<[f32; 3]>,
     pub transmission_depth: Option<f32>,
+    pub transmission_scatter: Option<[f32; 3]>,
+    pub transmission_scatter_anisotropy: Option<f32>,
     pub coat_weight: Option<f32>,
     pub coat_color: Option<[f32; 3]>,
     pub coat_roughness: Option<f32>,

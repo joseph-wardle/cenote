@@ -26,7 +26,7 @@ namespace cenote::wire {
 /// The protocol revision carried in Hello/Welcome — mirror of `PROTOCOL`.
 /// The Rust side bumps it on any change to any encoded shape; the two
 /// sides move in lockstep with the golden corpus.
-inline constexpr std::uint32_t PROTOCOL = 5;
+inline constexpr std::uint32_t PROTOCOL = 6;
 
 /// The most bytes one frame may claim — mirror of `MAX_MESSAGE_BYTES`,
 /// the transport's plausibility guard so a garbage or hostile length

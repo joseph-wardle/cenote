@@ -1182,16 +1182,24 @@ mod tests {
         let kernels = Kernels::embedded();
         let (width, height) = (16, 16);
         let matte = Material::matte(Vec3::splat(0.5), 0.3);
-        for (material, medium, interiors, volumes) in [
-            (matte, None, false, false),
-            (Material::glass(0.1, 1.5), None, true, false),
-            (matte, Some(fog), false, true),
+        // Milk: glass whose interior scatters — the one kind of *interior*
+        // that counts as media, since its events are the volume stage's.
+        let milk = Material {
+            transmission_depth: 1.0,
+            transmission_scatter: Vec3::splat(0.5),
+            ..Material::glass(0.1, 1.5)
+        };
+        for (material, medium, interiors, volumes, media) in [
+            (matte, None, false, false, false),
+            (Material::glass(0.1, 1.5), None, true, false, false),
+            (matte, Some(fog), false, true, true),
+            (milk, None, true, false, true),
         ] {
             let scene =
                 Scene::new(&gpu, &[object(material, medium)], camera, &environment).expect("scene");
             assert_eq!(
-                (scene.has_interiors(), scene.has_volumes()),
-                (interiors, volumes)
+                (scene.has_interiors(), scene.has_volumes(), scene.has_media()),
+                (interiors, volumes, media)
             );
             let wavefront =
                 Wavefront::new(&gpu, &kernels, 4096, 2, LightSampling::Mis).expect("wavefront");
@@ -1206,8 +1214,8 @@ mod tests {
             );
             assert_eq!(
                 wavefront.queues.volume.get().is_some(),
-                volumes,
-                "only the volume scene has a medium event to route"
+                media,
+                "only a scene with media has an event to route"
             );
         }
     }
