@@ -18,7 +18,7 @@ struct Params {
     float4* radiance;   // the film's per-pixel accumulator for this wave
     AovTable* aov;      // the wave's AOV targets; enabled = 0 skips them
     uint lightSampling; // LIGHT_SAMPLING_*: which strategies reach the lights
-    uint pad0;          // matches the host's tail padding to 8-byte alignment
+    uint bounce;        // which bounce this round's escapes left from
 };
 
 [vk::push_constant]
@@ -32,7 +32,8 @@ void shade_miss(uint3 tid: SV_DispatchThreadID) {
     }
     uint path = params.misses.entries[tid.x];
     let direction = params.paths.direction[path].xyz;
-    // xyz = the path's weight; w = the previous scatter's pdf (0: camera ray).
+    // xyz = the path's weight; w = the previous scatter's pdf — 0 where no
+    // light-sampling strategy competed there.
     let throughput = params.paths.throughput[path];
 
     var weight = 1.0;
@@ -51,9 +52,11 @@ void shade_miss(uint3 tid: SV_DispatchThreadID) {
 
     uint pixel = params.paths.pixel[path];
     if (params.aov.enabled != 0) {
-        // throughput.w = 0 marks a camera ray — the same test the MIS
-        // weight above leans on.
-        let cameraRay = throughput.w == 0.0;
+        // The bounce, not `throughput.w == 0`: the pdf lane means "no
+        // light-sampling strategy competed at the previous vertex", which
+        // a vertex that skips next-event estimation also writes — and the
+        // depth AOV wants the first vertex, not that.
+        let cameraRay = params.bounce == 0;
         if (cameraRay) {
             // Nothing was hit, so the pixel has no depth: +inf, the
             // value the film's guard deliberately lets through.

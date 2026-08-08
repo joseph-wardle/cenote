@@ -252,9 +252,12 @@ struct ShadeMissParams {
     aov: vk::DeviceAddress,
     /// Which strategies reach the lights — a [`LightSampling`] as `u32`.
     light_sampling: u32,
-    /// Explicit tail padding to the struct's 8-byte alignment (`Pod` forbids the
-    /// implicit padding a lone trailing `u32` would leave).
-    _pad0: u32,
+    /// Which bounce this round's escapes left from. The kernel's "is this
+    /// a camera ray" test for the depth AOV and the guides reads this, not
+    /// `throughput.w == 0`: the pdf lane means "no light-sampling strategy
+    /// competed", which a vertex that skips next-event estimation also
+    /// writes, and the AOVs want the first vertex, not that.
+    bounce: u32,
 }
 
 /// Push constants for the surface-shading kernel
@@ -909,15 +912,17 @@ impl Wavefront {
         WaveParams {
             ranges,
             intersect: (0..bounces).map(intersect).collect(),
-            shade_miss: ShadeMissParams {
-                paths: self.paths.addresses(),
-                misses: self.queues.addresses(queue::MISS, &self.queues.miss),
-                scene: scene.table().device_address(),
-                radiance: radiance.device_address(),
-                aov: aov_table.device_address(),
-                light_sampling: self.light_sampling as u32,
-                _pad0: 0,
-            },
+            shade_miss: (0..bounces)
+                .map(|bounce| ShadeMissParams {
+                    paths: self.paths.addresses(),
+                    misses: self.queues.addresses(queue::MISS, &self.queues.miss),
+                    scene: scene.table().device_address(),
+                    radiance: radiance.device_address(),
+                    aov: aov_table.device_address(),
+                    light_sampling: self.light_sampling as u32,
+                    bounce,
+                })
+                .collect(),
             shade_surface: (0..bounces)
                 .map(|bounce| ShadeSurfaceParams {
                     paths: self.paths.addresses(),
@@ -1084,7 +1089,7 @@ impl Wavefront {
                 }
                 passes.push(indirect(
                     &self.shade_miss,
-                    bytemuck::bytes_of(&params.shade_miss),
+                    bytemuck::bytes_of(&params.shade_miss[bounce as usize]),
                     queue::MISS,
                 ));
                 passes.push(indirect(
@@ -1115,8 +1120,9 @@ struct WaveParams {
     /// visibility bit, later bounces with all bits, and each keys its own
     /// transparency stream.
     intersect: Vec<IntersectParams>,
-    /// One instance for every bounce — nothing in it varies per round.
-    shade_miss: ShadeMissParams,
+    /// One instance per recorded bounce — the bounce is the only field
+    /// that varies, and only the AOV stamps read it.
+    shade_miss: Vec<ShadeMissParams>,
     /// One instance per recorded bounce; its length is the wave's bounce count.
     shade_surface: Vec<ShadeSurfaceParams>,
     /// One instance per recorded bounce, like `shade_surface` — and empty in
