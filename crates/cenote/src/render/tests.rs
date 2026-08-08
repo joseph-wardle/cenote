@@ -635,12 +635,12 @@ fn inside_out(mut mesh: crate::scene::Mesh) -> crate::scene::Mesh {
 /// atmosphere with a different extinction in every channel, must read
 /// exactly `L·exp(-σ_t·d)`.
 ///
-/// This is the transmittance half of the volume estimator on its own —
-/// the branch where the sampled distance runs past the surface — and the
-/// analytic answer catches what a furnace cannot: the sampling density
-/// divided out here is the *mixture* over the three channels, so dividing
-/// by any single channel's density (the tempting simplification) lands a
-/// visibly wrong color rather than a wrong energy.
+/// A purely absorbing medium takes `sampleMedium`'s closed-form branch —
+/// no distance is drawn and no density divided — so what this pins is
+/// that branch alone: the exact exponential, per channel, end to end
+/// through the global-medium routing. The mixture density has its own
+/// oracle in `a_transparent_channel_reaches_the_environment`, which
+/// scatters.
 ///
 /// The field of view is degrees wide so every ray's path length is the
 /// center ray's to within 1e-4 — the assertion is against one distance.
@@ -765,69 +765,64 @@ fn the_volumetric_furnace_closes() {
     }
 }
 
-/// The volumetric furnace again, with the fog authored as a *bounded*
-/// volume that contains the shell and the camera alike, and no global
-/// medium anywhere. Inside the shell the two transports are the same
-/// integral, so the same pointwise identity must close — and the only
-/// thing connecting bounce 0 to the fog is the camera's seeded
-/// membership: before the seed, the set started empty and the first
-/// segment flew through vacuum.
+/// A camera standing *inside* a bounded fog attenuates from its very first
+/// segment: the resolve walk finds the membership, bounce 0 seeds it, and
+/// intersect owes the volume stage a visit before anything is hit — so
+/// what arrives is the sky times Beer–Lambert over exactly the axial
+/// meters between the camera and the fog's far face, per channel.
+///
+/// The closed form is what makes this discriminating where a furnace
+/// cannot be: an albedo-1 fog conserves energy whether or not the seed
+/// works, but an *absorbing* one darkens iff bounce 0 really knows it is
+/// inside — a broken seed, or a bounce-0 routing that never asks the
+/// camera's set, reads the unattenuated sky and misses by e^σd.
 #[test]
-fn the_volumetric_furnace_closes_from_inside_a_bounded_fog() {
+fn a_camera_inside_a_bounded_fog_attenuates_from_its_first_segment() {
     let Some(gpu) = crate::gpu::test_context() else {
         return;
     };
-    let emission = 0.5;
+    let sky = Vec3::splat(0.75);
+    let sigma = Vec3::new(0.15, 0.35, 0.6);
+    // Half-extent 3 around the origin: three axial meters of fog between
+    // the camera and the far face at z = −3.
     let scene = Scene::new(
         &gpu,
-        &[
-            Object {
-                mesh: inside_out(crate::scene::icosphere(3)),
-                transform: Mat4::from_scale(Vec3::splat(2.0)),
-                material: Material::emitter(Vec3::splat(emission)),
-                medium: None,
-                interior_priority: 0,
-            },
-            // The fog, as a mesh that bounds it — the global furnace's
-            // medium, reached through membership instead of FLAG_GLOBAL.
-            Object {
-                mesh: crate::scene::cube(3.0),
-                transform: Mat4::IDENTITY,
-                material: Material::matte(Vec3::ONE, 0.0),
-                medium: Some(crate::scene::Medium {
-                    absorption: Vec3::ZERO,
-                    scattering: Vec3::splat(0.25),
-                    anisotropy: 0.3,
-                }),
-                interior_priority: 0,
-            },
-        ],
+        &[Object {
+            mesh: crate::scene::cube(3.0),
+            transform: Mat4::IDENTITY,
+            material: Material::matte(Vec3::ONE, 0.0),
+            medium: Some(crate::scene::Medium {
+                absorption: sigma,
+                scattering: Vec3::ZERO,
+                anisotropy: 0.0,
+            }),
+            interior_priority: 0,
+        }],
         Camera {
             position: Vec3::ZERO,
             look_at: Vec3::NEG_Z,
             up: Vec3::Y,
-            vfov_degrees: 60.0,
+            vfov_degrees: 1.0,
             lens: None,
         },
-        &Environment::constant(Vec3::ZERO),
+        &Environment::constant(sky),
     )
     .expect("scene");
-
-    // 64 bounces for the same reason as the global furnace above.
-    let (size, samples) = (32, 16);
-    let sum = bsdf_only_sum_deep(&gpu, &scene, size, samples, 64);
-    for chunk in sum.chunks_exact(4) {
-        for channel in &chunk[..3] {
-            let value = channel / samples as f32;
-            assert!(
-                (value - emission).abs() / emission < 0.005,
-                "bounded furnace leaked: {value} vs {emission}"
-            );
-        }
+    let (size, samples) = (8, 64);
+    let sum = bsdf_only_sum(&gpu, &scene, size, samples);
+    let count = f64::from(samples * size * size);
+    for channel in 0..3 {
+        let mean = sum
+            .chunks_exact(4)
+            .map(|pixel| f64::from(pixel[channel]))
+            .sum::<f64>()
+            / count;
+        let expected = f64::from(sky[channel]) * f64::from(-sigma[channel] * 3.0).exp();
         assert!(
-            (chunk[3] - samples as f32).abs() < 1e-3,
-            "every path must finish exactly once, got alpha {}",
-            chunk[3]
+            (mean - expected).abs() / expected < 0.005,
+            "channel {channel}: {mean} vs Beer–Lambert's {expected} \
+             (the unattenuated sky is {})",
+            sky[channel]
         );
     }
 }
@@ -879,6 +874,47 @@ fn scene_in_the_dark(gpu: &Context, objects: &[Object]) -> Scene {
         &Environment::constant(Vec3::ZERO),
     )
     .expect("scene")
+}
+
+/// The closed-form family's one viewpoint: the origin looking down −Z
+/// through a one-degree field under a constant sky, so every ray's path
+/// length through whatever stands on the axis is the center ray's to
+/// within 4e-5 — what lets these tests assert Beer–Lambert exactly rather
+/// than on a loose mean.
+fn axial_scene(gpu: &Context, objects: &[Object], sky: f32) -> Scene {
+    Scene::new(
+        gpu,
+        objects,
+        Camera {
+            position: Vec3::ZERO,
+            look_at: Vec3::NEG_Z,
+            up: Vec3::Y,
+            vfov_degrees: 1.0,
+            lens: None,
+        },
+        &Environment::constant(Vec3::splat(sky)),
+    )
+    .expect("scene")
+}
+
+/// Channel-0 mean of a BSDF-only render — the reduction every axial
+/// closed-form test asserts against.
+fn axial_mean(gpu: &Context, scene: &Scene, size: u32, samples: u32) -> f64 {
+    let sum = bsdf_only_sum(gpu, scene, size, samples);
+    sum.chunks_exact(4).map(|p| f64::from(p[0])).sum::<f64>() / f64::from(samples * size * size)
+}
+
+/// Every path finished exactly once: each sample's one terminal add
+/// carries alpha 1, so a pixel's alpha is exactly its sample count — the
+/// mechanical check that no path was dropped or double-terminated.
+fn assert_all_paths_finished(sum: &[f32], samples: u32) {
+    for chunk in sum.chunks_exact(4) {
+        assert!(
+            (chunk[3] - samples as f32).abs() < 1e-3,
+            "every path must finish exactly once, got alpha {}",
+            chunk[3]
+        );
+    }
 }
 
 /// The furnace, inside milk: a *scattering refractive interior* at albedo
@@ -942,13 +978,7 @@ fn a_scattering_interior_keeps_the_furnace_closed() {
             "channel {channel}: milk furnace leaked, mean {mean} vs {emission}"
         );
     }
-    for chunk in sum.chunks_exact(4) {
-        assert!(
-            (chunk[3] - samples as f32).abs() < 1e-3,
-            "every path must finish exactly once, got alpha {}",
-            chunk[3]
-        );
-    }
+    assert_all_paths_finished(&sum, samples);
     let clear = accumulate_sum(
         &gpu,
         &renderer,
@@ -1137,14 +1167,21 @@ fn a_suppressed_boundary_inside_juice_is_no_boundary_at_all() {
 ///
 /// The one-box case pins the whole march — the boundary routes to this
 /// stage, the crossing enters the medium, the far crossing leaves it, and
-/// the sky beyond arrives through vacuum. The two-box case pins the rule
-/// that makes overlap order-free: where they intersect the path is inside
+/// the sky beyond arrives through vacuum. The inside-out box must answer
+/// identically: membership is crossing parity, not winding, so the
+/// USD-pipeline mistake bounds exactly its own interior rather than
+/// fogging the world outside it. The two-box case pins the rule that
+/// makes overlap order-free: where they intersect the path is inside
 /// both, and their extinctions *add*, so the answer is the same product
 /// whether the boxes overlap, touch, or stand apart. The four disjoint
 /// boxes pin the two things a chain of crossings can get wrong: a slot
-/// freed on the way out has to be usable on the way into the next box, and
-/// the eighth crossing is the last one `NULL_CROSSING_CAP` models — one off
-/// either way and the fourth box goes missing.
+/// freed on the way out has to be usable on the way into the next box,
+/// and the eighth crossing is the last one `MARCH_BOUNDARY_CAP` models.
+/// Five boxes are ten crossings — past the cap — and pin the overflow
+/// from both sides at once: the march models exactly the first four
+/// boxes, then runs *through* the fifth to the sky, so the answer is the
+/// eight-meter product exactly. A larger cap would darken by the fifth
+/// box; a march that stopped at it would read a wall that is not there.
 ///
 /// A one-degree field keeps every ray within half a degree of the axis, so
 /// the slant a wide frame would add to each crossing stays under 4e-5 of the
@@ -1171,31 +1208,33 @@ fn bounded_volumes_absorb_over_exactly_the_extent_they_bound() {
         scattering: Vec3::ZERO,
         anisotropy: 0.0,
     };
-    let camera = Camera {
-        position: Vec3::ZERO,
-        look_at: Vec3::NEG_Z,
-        up: Vec3::Y,
-        vfov_degrees: 1.0,
-        lens: None,
+    let row = |boxes: u8| -> Vec<Object> {
+        (0..boxes)
+            .map(|n| fog(3.0f32.mul_add(-f32::from(n), -5.0), absorbing(1.0)))
+            .collect()
     };
-    let sky_image = Environment::constant(sky);
     let (size, samples) = (8, 64);
     for (name, objects, depth) in [
         ("one box", vec![fog(-5.0, absorbing(1.0))], 2.0),
+        (
+            "one box, inside out",
+            vec![Object {
+                mesh: inside_out(crate::scene::cube(1.0)),
+                ..fog(-5.0, absorbing(1.0))
+            }],
+            2.0,
+        ),
         (
             "two overlapping boxes",
             vec![fog(-5.0, absorbing(1.0)), fog(-6.0, absorbing(2.0))],
             2.0f32.mul_add(2.0, 2.0),
         ),
-        (
-            "four boxes in a row",
-            (0..4u8)
-                .map(|n| fog(3.0f32.mul_add(-f32::from(n), -5.0), absorbing(1.0)))
-                .collect(),
-            8.0,
-        ),
+        ("four boxes in a row", row(4), 8.0),
+        // Ten crossings against a cap of eight: the fifth box is run
+        // through untracked, so exactly the first four absorb.
+        ("five boxes in a row", row(5), 8.0),
     ] {
-        let scene = Scene::new(&gpu, &objects, camera, &sky_image).expect("scene");
+        let scene = axial_scene(&gpu, &objects, sky.x);
         let sum = bsdf_only_sum(&gpu, &scene, size, samples);
         let count = f64::from(samples * size * size);
         for channel in 0..3 {
@@ -1214,6 +1253,63 @@ fn bounded_volumes_absorb_over_exactly_the_extent_they_bound() {
             );
         }
     }
+}
+
+/// A refractive interior *displaces* the medium around it — a path inside
+/// glass is not also in the fog the glass stands in. A glass box sealed
+/// inside a fog volume must read Beer–Lambert with the fog's σ over
+/// exactly the fog meters *outside* the glass and the glass's σ over its
+/// own meter: `combineMedia` resolving an interior additively — fog and
+/// glass at once — would land a factor of `exp(σ_fog · glass extent)` darker,
+/// and the surface stage double-applying fog where the volume stage
+/// already owned the segment would too. Every medium here only absorbs,
+/// so each side of the split is a closed form and the bound stays tight.
+#[test]
+fn an_interior_displaces_the_medium_it_stands_in() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let sky = 0.75;
+    let (sigma_fog, transmission) = (0.5, 0.85);
+    let sigma_glass = -f64::from(transmission).ln(); // per meter: depth is 1
+    // Fog z ∈ [−7, −5]; the glass z ∈ [−6.5, −5.5], sealed inside it: one
+    // axial meter of glass, and one of fog split around it.
+    let objects = [
+        Object {
+            mesh: crate::scene::cube(1.0),
+            transform: Mat4::from_translation(Vec3::Z * -6.0),
+            material: Material::matte(Vec3::ONE, 0.0),
+            medium: Some(crate::scene::Medium {
+                absorption: Vec3::splat(sigma_fog),
+                scattering: Vec3::ZERO,
+                anisotropy: 0.0,
+            }),
+            interior_priority: 0,
+        },
+        Object {
+            mesh: crate::scene::cube(0.5),
+            transform: Mat4::from_translation(Vec3::Z * -6.0),
+            material: Material {
+                transmission_weight: 1.0,
+                specular_weight: 0.0,
+                transmission_color: Vec3::splat(transmission),
+                transmission_depth: 1.0,
+                ..Material::matte(Vec3::ONE, 0.0)
+            },
+            medium: None,
+            interior_priority: 0,
+        },
+    ];
+    let (size, samples) = (8, 64);
+    let scene = axial_scene(&gpu, &objects, sky);
+    let mean = axial_mean(&gpu, &scene, size, samples);
+    let expected = f64::from(sky) * (-f64::from(sigma_fog) - sigma_glass).exp();
+    assert!(
+        (mean - expected).abs() / expected < 0.005,
+        "glass in fog: {mean} vs Beer–Lambert's {expected} over one meter of each \
+         (fog filling the glass too would read {})",
+        f64::from(sky) * (-f64::from(sigma_fog) * 2.0 - sigma_glass).exp()
+    );
 }
 
 /// One refractive interior inside another: the medium set has to hold both,
@@ -1253,19 +1349,9 @@ fn a_nested_interior_gives_the_path_back_to_the_one_around_it() {
         medium: None,
         interior_priority: 0,
     };
-    let camera = Camera {
-        position: Vec3::ZERO,
-        look_at: Vec3::NEG_Z,
-        up: Vec3::Y,
-        vfov_degrees: 1.0,
-        lens: None,
-    };
-    let sky_image = Environment::constant(Vec3::splat(sky));
     let (size, samples) = (16, 256);
-    let scene = Scene::new(&gpu, &[box_of(2.0), box_of(1.0)], camera, &sky_image).expect("scene");
-    let sum = bsdf_only_sum(&gpu, &scene, size, samples);
-    let count = f64::from(samples * size * size);
-    let mean = sum.chunks_exact(4).map(|p| f64::from(p[0])).sum::<f64>() / count;
+    let scene = axial_scene(&gpu, &[box_of(2.0), box_of(1.0)], sky);
+    let mean = axial_mean(&gpu, &scene, size, samples);
     let expected = f64::from(sky) * (-sigma * 4.0).exp();
     assert!(
         (mean - expected).abs() / expected < 0.015,
@@ -1284,6 +1370,10 @@ fn a_nested_interior_gives_the_path_back_to_the_one_around_it() {
 /// all — read back from the table: entries built anywhere but
 /// `stackEntry` would rank as something they are not.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one constellation, five cameras — splitting it would rebuild the scene per case"
+)]
 fn the_camera_seed_names_exactly_what_the_camera_is_inside_of() {
     use crate::scene::{
         Medium, STACK_EMPTY, STACK_INTERIOR, STACK_PRIORITY_SHIFT, STACK_SCATTERING,
@@ -1311,6 +1401,11 @@ fn the_camera_seed_names_exactly_what_the_camera_is_inside_of() {
     // Instance 0: outer glass box, z in [-8, -4]. Instance 1: the milk
     // inside it, z in [-7, -5], priority 1. Instance 2: a fog cube far
     // off at x = 10, bounding a volume rather than closing an interior.
+    // Instance 3: an opaque prop sitting exactly on the resolve ray of the
+    // "inside the outer glass only" camera — walls hide nothing, because
+    // membership is geometric, not visibility. Instance 4: a thin-walled
+    // glass box far off at y = 20 — thin walls bound no interior, so a
+    // camera inside one is inside nothing.
     let objects = [
         Object {
             mesh: crate::scene::cube(2.0),
@@ -1331,6 +1426,21 @@ fn the_camera_seed_names_exactly_what_the_camera_is_inside_of() {
             transform: Mat4::from_translation(Vec3::X * 10.0),
             material: Material::matte(Vec3::ONE, 0.0),
             medium: Some(fog),
+            interior_priority: 0,
+        },
+        Object {
+            mesh: crate::scene::cube(0.15),
+            // (0, 0, -4.5) + 0.3 · the walk's fixed (1, 2, 3)/√14.
+            transform: Mat4::from_translation(Vec3::new(0.0802, 0.1604, -4.2595)),
+            material: Material::matte(Vec3::splat(0.5), 0.5),
+            medium: None,
+            interior_priority: 0,
+        },
+        Object {
+            mesh: crate::scene::cube(1.0),
+            transform: Mat4::from_translation(Vec3::Y * 20.0),
+            material: glass.thin_walled(),
+            medium: None,
             interior_priority: 0,
         },
     ];
@@ -1356,9 +1466,13 @@ fn the_camera_seed_names_exactly_what_the_camera_is_inside_of() {
         .expect("radiance buffer");
     for (name, position, mut expected) in [
         ("outside everything", Vec3::ZERO, vec![]),
+        // The opaque prop stands square on this camera's resolve ray and
+        // must change nothing: it is not a boundary, so it neither ends
+        // the walk nor spends its cap.
         ("inside the outer glass only", Vec3::new(0.0, 0.0, -4.5), vec![outer]),
         ("inside both solids", Vec3::new(0.0, 0.0, -6.0), vec![outer, inner]),
         ("inside the fog", Vec3::new(10.0, 0.0, 0.0), vec![2]),
+        ("inside a thin-walled box", Vec3::new(0.0, 20.0, 0.0), vec![]),
     ] {
         let camera = Camera {
             position,
@@ -1414,14 +1528,7 @@ fn a_camera_inside_tinted_glass_sees_beer_lambert_from_its_first_segment() {
         transmission_depth: 1.0,
         ..Material::matte(Vec3::ONE, 0.0)
     };
-    let camera = Camera {
-        position: Vec3::ZERO,
-        look_at: Vec3::NEG_Z,
-        up: Vec3::Y,
-        vfov_degrees: 1.0,
-        lens: None,
-    };
-    let scene = Scene::new(
+    let scene = axial_scene(
         &gpu,
         &[Object {
             mesh: crate::scene::cube(2.0),
@@ -1430,14 +1537,10 @@ fn a_camera_inside_tinted_glass_sees_beer_lambert_from_its_first_segment() {
             medium: None,
             interior_priority: 0,
         }],
-        camera,
-        &Environment::constant(Vec3::splat(sky)),
-    )
-    .expect("scene");
+        sky,
+    );
     let (size, samples) = (16, 256);
-    let sum = bsdf_only_sum(&gpu, &scene, size, samples);
-    let count = f64::from(samples * size * size);
-    let mean = sum.chunks_exact(4).map(|p| f64::from(p[0])).sum::<f64>() / count;
+    let mean = axial_mean(&gpu, &scene, size, samples);
     let expected = f64::from(sky) * (-sigma * 2.0).exp();
     assert!(
         (mean - expected).abs() / expected < 0.015,
@@ -1484,21 +1587,9 @@ fn nested_solids_of_one_glass_have_no_interface_between_them() {
         medium: None,
         interior_priority: 0,
     };
-    let camera = Camera {
-        position: Vec3::ZERO,
-        look_at: Vec3::NEG_Z,
-        up: Vec3::Y,
-        vfov_degrees: 1.0,
-        lens: None,
-    };
-    let sky_image = Environment::constant(Vec3::splat(sky));
     let (size, samples) = (16, 1024);
-    let mean_of = |objects: &[Object]| {
-        let scene = Scene::new(&gpu, objects, camera, &sky_image).expect("scene");
-        let sum = bsdf_only_sum(&gpu, &scene, size, samples);
-        let count = f64::from(samples * size * size);
-        sum.chunks_exact(4).map(|p| f64::from(p[0])).sum::<f64>() / count
-    };
+    let mean_of =
+        |objects: &[Object]| axial_mean(&gpu, &axial_scene(&gpu, objects, sky), size, samples);
     let alone = mean_of(&[box_of(2.0)]);
     let nested = mean_of(&[box_of(2.0), box_of(1.0)]);
     assert!(
@@ -1621,24 +1712,13 @@ fn the_higher_priority_solid_owns_the_overlap() {
         medium: None,
         interior_priority: priority,
     };
-    let camera = Camera {
-        position: Vec3::ZERO,
-        look_at: Vec3::NEG_Z,
-        up: Vec3::Y,
-        vfov_degrees: 1.0,
-        lens: None,
-    };
-    let sky_image = Environment::constant(Vec3::splat(sky));
     let (size, samples) = (16, 256);
     let mean_of = |glass_priority: u32| {
         let objects = [
             solid_at(-6.0, glass_t, glass_priority),
             solid_at(-6.5, water_t, 0),
         ];
-        let scene = Scene::new(&gpu, &objects, camera, &sky_image).expect("scene");
-        let sum = bsdf_only_sum(&gpu, &scene, size, samples);
-        let count = f64::from(samples * size * size);
-        sum.chunks_exact(4).map(|p| f64::from(p[0])).sum::<f64>() / count
+        axial_mean(&gpu, &axial_scene(&gpu, &objects, sky), size, samples)
     };
     let sigma = |transmission: f32| -f64::from(transmission).ln(); // depth is 1
     let expected = f64::from(sky) * (-sigma(glass_t) * 2.0 - sigma(water_t) * 0.5).exp();
@@ -1710,15 +1790,20 @@ fn priority_nested_past_the_slots_stays_sound() {
     }
 }
 
-/// Nesting, to the depth the stack holds and then past it. Three concentric
-/// boxes are three simultaneous memberships, and their extinctions still sum
-/// to the closed form; nine are more crossings than the march will make and
-/// more volumes than the set has room for, and what that must produce is not
-/// an exact answer but a *sound* one — finite, non-negative, and one alpha
-/// per path. Degrading toward too little fog is the deliberate choice; a NaN,
-/// a hang, or a path that never finishes would not be.
+/// Nesting, to the depth the set holds and then past it. Four concentric
+/// boxes are exactly the set's four slots as simultaneous memberships, and
+/// their eight crossings are exactly the march's cap: the extinctions
+/// still sum to the closed form with both limits saturated. Nine are past
+/// both, and what that must produce is not an exact answer but a *sound*
+/// one — finite, non-negative, and one alpha per path. No direction is
+/// promised out here: a dropped entry loses its shell's fog, but a shell
+/// whose exit outran the march is fog to the horizon (the far side of an
+/// unresolved membership reads as the medium's outside — `crossMedium`'s
+/// documented one-sided failure), so the camera can legitimately read
+/// near-black. A NaN, a hang, or a path that never finishes would not be
+/// legitimate.
 #[test]
-fn nested_volumes_sum_until_the_march_runs_out_of_room() {
+fn nested_volumes_sum_at_full_depth_and_stay_sound_past_it() {
     let Some(gpu) = crate::gpu::test_context() else {
         return;
     };
@@ -1735,44 +1820,33 @@ fn nested_volumes_sum_until_the_march_runs_out_of_room() {
         }),
         interior_priority: 0,
     };
-    let camera = Camera {
-        position: Vec3::ZERO,
-        look_at: Vec3::NEG_Z,
-        up: Vec3::Y,
-        vfov_degrees: 1.0,
-        lens: None,
-    };
-    let sky_image = Environment::constant(Vec3::splat(sky));
     let (size, samples) = (8, 64);
 
-    // Three shells of half-extent 1, 2, 3: the axial ray runs 2 + 4 + 6
+    // Shells of half-extent 1..=n: the axial ray runs 2 + 4 + … + 2n
     // meters of fog, and every meter of it is inside one shell or more.
-    let nested: Vec<Object> = (1..=3).map(|n| shell(n as f32)).collect();
-    let scene = Scene::new(&gpu, &nested, camera, &sky_image).expect("scene");
-    let sum = bsdf_only_sum(&gpu, &scene, size, samples);
-    let count = f64::from(samples * size * size);
-    let mean = sum.chunks_exact(4).map(|p| f64::from(p[0])).sum::<f64>() / count;
-    let expected = f64::from(sky) * f64::from(-sigma * (2.0 + 4.0 + 6.0)).exp();
-    assert!(
-        (mean - expected).abs() / expected < 0.005,
-        "three nested shells: {mean} vs Beer–Lambert's {expected}"
-    );
+    let depth = |shells: u32| f64::from(shells * (shells + 1)); // Σ 2n
+    for shells in [3u32, 4] {
+        let nested: Vec<Object> = (1..=shells).map(|n| shell(n as f32)).collect();
+        let scene = axial_scene(&gpu, &nested, sky);
+        let mean = axial_mean(&gpu, &scene, size, samples);
+        let expected = f64::from(sky) * (-f64::from(sigma) * depth(shells)).exp();
+        assert!(
+            (mean - expected).abs() / expected < 0.005,
+            "{shells} nested shells: {mean} vs Beer–Lambert's {expected}"
+        );
+    }
 
     let deep: Vec<Object> = (1..=9).map(|n| shell(n as f32)).collect();
-    let scene = Scene::new(&gpu, &deep, camera, &sky_image).expect("scene");
+    let scene = axial_scene(&gpu, &deep, sky);
     let sum = bsdf_only_sum(&gpu, &scene, size, samples);
+    assert_all_paths_finished(&sum, samples);
     for chunk in sum.chunks_exact(4) {
-        for value in chunk {
+        for value in &chunk[..3] {
             assert!(
-                value.is_finite() && *value >= 0.0,
-                "nine nested shells must stay sound, got {value}"
+                value.is_finite() && *value >= 0.0 && *value <= sky * 1.005 * samples as f32,
+                "nine nested shells must stay sound and never brighten, got {value}"
             );
         }
-        assert!(
-            (chunk[3] - samples as f32).abs() < 1e-3,
-            "every path must finish exactly once, got alpha {}",
-            chunk[3]
-        );
     }
 }
 
@@ -1904,13 +1978,7 @@ fn a_transparent_channel_reaches_the_environment() {
             mean(channel)
         );
     }
-    for chunk in sum.chunks_exact(4) {
-        assert!(
-            (chunk[3] - samples as f32).abs() < 1e-3,
-            "every path must finish exactly once, got alpha {}",
-            chunk[3]
-        );
-    }
+    assert_all_paths_finished(&sum, samples);
 }
 
 /// Beer–Lambert absorption, pinned per channel: a glass sphere whose

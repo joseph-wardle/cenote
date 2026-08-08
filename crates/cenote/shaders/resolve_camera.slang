@@ -23,7 +23,7 @@ RaytracingAccelerationStructure sceneTlas;
 // Boundary crossings the walk resolves before giving up and keeping what it
 // has: a bound on pathological nesting, far above anything the four-slot
 // set can express. Truncation past it is the same class of accepted error
-// as the march's `NULL_CROSSING_CAP`.
+// as the march's `MARCH_BOUNDARY_CAP`.
 static const uint RESOLVE_CROSSING_CAP = 32;
 
 // How far past a crossing the next leg starts — `MARCH_NUDGE`'s value and

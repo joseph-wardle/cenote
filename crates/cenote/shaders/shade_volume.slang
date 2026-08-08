@@ -36,18 +36,19 @@ RaytracingAccelerationStructure sceneTlas;
 // is nothing to be inside of — and this stage still runs.
 static const uint FLAG_SET = 1 << 25;
 
-// Null boundaries one segment may cross before the march stops tracking
-// media and runs straight through the rest — the bound on a pathological
-// stack of volume shells, mirroring `TRANSPARENT_CAP` for the other
+// Boundaries one segment may cross — null ones and the false interfaces a
+// dominant interior cuts away spend it alike — before the march stops
+// tracking media and runs straight through the rest: the bound on a
+// pathological stack of shells, mirroring `TRANSPARENT_CAP` for the other
 // unbounded traversal chain. Too-thin media beat both a black pixel and a
 // wall that is not there.
-static const uint NULL_CROSSING_CAP = 8;
+static const uint MARCH_BOUNDARY_CAP = 8;
 
 // The march's own budget of stochastic-opacity crossings, across every
 // re-trace it makes: what one traversal is allowed, once per leg. It starts
 // where intersect's chain left off, so no two of a path's crossings this
 // bounce ever draw the same key.
-static const uint MARCH_CROSSING_CAP = TRANSPARENT_CAP * (NULL_CROSSING_CAP + 1);
+static const uint MARCH_OPACITY_CAP = TRANSPARENT_CAP * (MARCH_BOUNDARY_CAP + 1);
 
 // How far past a crossing the next leg starts. Relative, so it holds at any
 // scene scale, and at least eight float32 ulps wide, so re-testing the same
@@ -132,7 +133,7 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
         // The first sub-segment keeps the Sobol dimension the bounce block
         // reserved; the rest draw from the hash stream, having no reserved
         // dimensions of their own. A segment no boundary interrupts
-        // therefore samples exactly as it did before the march existed.
+        // therefore draws exactly the samples an un-marched one would.
         let uDistance = crossed == 0
                             ? sample_2d(pixel, params.sampleIndex,
                                         bounceDimension(bounce, VOLUME_DISTANCE))
@@ -200,7 +201,7 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
         // of shells reads as too little fog rather than as a wall that is
         // not there. It also ends the loop — the hit it commits cannot be
         // one of them.
-        let exhausted = crossed >= NULL_CROSSING_CAP;
+        let exhausted = crossed >= MARCH_BOUNDARY_CAP;
         // The dominant interior is invariant across every crossing the
         // march makes — a false one is strictly below it, a null one is no
         // interior at all — so reading it here is reading it at entry.
@@ -223,7 +224,7 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
             let opacity = opacityAt(params.scene, candidate,
                                     query.CandidatePrimitiveIndex(),
                                     query.CandidateTriangleBarycentrics());
-            if (crossing >= MARCH_CROSSING_CAP
+            if (crossing >= MARCH_OPACITY_CAP
                 || hashUniform(pixel, params.sampleIndex, bounce, crossing) < opacity) {
                 query.CommitNonOpaqueTriangleHit();
             }

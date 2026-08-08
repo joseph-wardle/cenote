@@ -326,7 +326,7 @@ fn lower_instances(
         // parts have to be dropped rather than merely ignored, and this is
         // the only place an author hears that they were.
         let material = super::boundary_material(authored, medium.is_some());
-        if material != authored {
+        if medium.is_some() && !super::is_boundary_inert(&authored) {
             log::warn!(
                 "instance \"{name}\" bounds a medium, so its material is inert — dropping its \
                  emission and opacity"
@@ -438,6 +438,19 @@ fn lower_material(
     material.emission = acescg_from_rec709(Vec3::from(emission_color))
         * source.emission_luminance
         * Vec3::ONE.lerp(coat_color, coat_weight);
+    // Scatter without a filled interior derives no medium at all — milk
+    // authored at transmission_depth 0 renders as clear glass — and every
+    // downstream consumer reads the derived record, so this is the only
+    // place an author can hear that it vanished.
+    if warn
+        && material.transmission_scatter.cmpgt(Vec3::ZERO).any()
+        && super::interior(&material).is_none()
+    {
+        log::warn!(
+            "material \"{name}\": transmission_scatter is ignored — a scattering interior \
+             needs transmission_weight > 0, a positive transmission_depth, and no thin walls"
+        );
+    }
     // Every textured slot resolves to its bindless index through the shared
     // `textured_slots` list — the same list, in the same order, the
     // collection pass keyed on, so a slot can't be collected under one

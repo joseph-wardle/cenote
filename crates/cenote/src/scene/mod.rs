@@ -156,6 +156,9 @@ const _: () = assert!(size_of::<GeometryRecord>() == 144);
 const BOUNDARY_OPAQUE: u32 = 0;
 const BOUNDARY_REFRACTIVE: u32 = 1;
 const BOUNDARY_NULL: u32 = 2;
+/// The class's byte of the boundary word — `BOUNDARY_MASK` in
+/// `shaders/scene.slang`.
+const BOUNDARY_MASK: u32 = 0xff;
 
 /// A medium index that names vacuum — an index no table can reach. Matches
 /// `MEDIUM_NONE` in `shaders/scene.slang`. Deliberately not the stack's
@@ -216,30 +219,65 @@ fn boundary_material(material: Material, bounds_medium: bool) -> Material {
     }
 }
 
-/// Whether any placement has a closed transmissive interior — see
-/// [`Scene::has_interiors`].
-fn has_interiors(placements: &[Placement]) -> bool {
-    placements
-        .iter()
-        .any(|placement| placement_boundary(placement) == BOUNDARY_REFRACTIVE)
+/// Whether a material already is what [`boundary_material`] would leave of
+/// it. Tested on these three fields rather than by `==` on the whole
+/// struct, which a NaN in any *unrelated* float — authored NaNs pass
+/// through lowering — would fail: the warn in `lower.rs` would misreport
+/// an untouched material, and the assert at [`upload_instance_tables`]
+/// would panic over an invariant that holds.
+fn is_boundary_inert(material: &Material) -> bool {
+    material.emission == Vec3::ZERO
+        && material.opacity >= 1.0
+        && material.opacity_texture == TEXTURE_NONE
 }
 
-/// Whether any placement bounds a medium — see [`Scene::has_volumes`].
-fn has_volumes(placements: &[Placement]) -> bool {
-    placements
-        .iter()
-        .any(|placement| placement.medium.is_some())
+/// The placement-derived media predicates the `Scene::has_*` accessors
+/// cache — read in one pass through [`boundary_word`], the same
+/// classification the tables carry, so what the wavefront allocates and
+/// routes on can never disagree with what a kernel can act on.
+/// [`Scene::has_global_medium`] stays outside: settings carry it, not
+/// placements.
+#[derive(Clone, Copy)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "four independent placement predicates, cached together for the wavefront's \
+              per-wave read"
+)]
+struct PlacementMedia {
+    /// Some placement closes a refractive interior, so the medium set can
+    /// hold one — see [`Scene::has_interiors`].
+    interiors: bool,
+    /// Some placement bounds a medium: a null boundary, crossed never
+    /// shaded — see [`Scene::has_volumes`].
+    volumes: bool,
+    /// Some interior authors a nonzero nesting priority. Implies
+    /// `interiors` — only a refractive boundary carries priority bits — so
+    /// this can never gate a read of a buffer that was not allocated. And
+    /// all-zero priorities are never *strictly* less than one another, so
+    /// a scene that authors none can never suppress an interface — which
+    /// is why it renders bit-identically rather than by a special case.
+    priority: bool,
+    /// Some interior *scatters* — the one kind that owes the volume stage
+    /// an event, so it counts toward [`Scene::has_media`] where a purely
+    /// absorbing one does not.
+    scattering_interiors: bool,
 }
 
-/// Whether any placement closes a *scattering* interior — the one kind of
-/// interior that owes the volume stage an event, so it counts toward
-/// [`Scene::has_media`] where a purely absorbing one does not. Defined
-/// through [`boundary_word`], the same bit the kernels route on, so the
-/// volume stage runs exactly where a segment can reach it.
-fn has_scattering_interiors(placements: &[Placement]) -> bool {
-    placements
-        .iter()
-        .any(|placement| boundary_word(placement) & STACK_SCATTERING != 0)
+fn placement_media(placements: &[Placement]) -> PlacementMedia {
+    let mut media = PlacementMedia {
+        interiors: false,
+        volumes: false,
+        priority: false,
+        scattering_interiors: false,
+    };
+    for placement in placements {
+        let word = boundary_word(placement);
+        media.interiors |= word & BOUNDARY_MASK == BOUNDARY_REFRACTIVE;
+        media.volumes |= word & BOUNDARY_MASK == BOUNDARY_NULL;
+        media.priority |= word & (MAX_PRIORITY << STACK_PRIORITY_SHIFT) != 0;
+        media.scattering_interiors |= word & STACK_SCATTERING != 0;
+    }
+    media
 }
 
 /// Medium-set entry bits, mirroring `STACK_*` in `shaders/pathstate.slang`
@@ -305,25 +343,14 @@ fn boundary_word(placement: &Placement) -> u32 {
     class | flags
 }
 
-/// Whether any placement authors a priority the kernels can act on — see
-/// [`Scene::has_priority`]. Defined through [`interior_priority`], so
-/// `has_priority` implies [`has_interiors`] by construction and can never
-/// gate a read of a buffer that was not allocated.
-///
-/// All-zero priorities are never *strictly* less than one another, so a
-/// scene that authors none can never suppress an interface — which is why
-/// it renders bit-identically rather than by a special case.
-fn has_priority(placements: &[Placement]) -> bool {
-    placements
-        .iter()
-        .any(|placement| interior_priority(placement) != 0)
-}
-
-// The class must survive the packing: `BOUNDARY_MASK` in `scene.slang` is
-// a byte, and the priority has to clear it and stay under `STACK_INTERIOR`.
-const _: () = assert!(BOUNDARY_NULL < 0xff && (1 << STACK_PRIORITY_SHIFT) > 0xff);
-const _: () = assert!(MAX_PRIORITY << STACK_PRIORITY_SHIFT < STACK_INTERIOR);
-const _: () = assert!(STACK_SCATTERING > 0xff && STACK_SCATTERING < 1 << STACK_PRIORITY_SHIFT);
+// The class must survive the packing: the priority has to clear the
+// class's byte, fill exactly the bits directly under `STACK_INTERIOR` (one
+// `max` ranks the whole set only because nothing sits between them), and
+// leave the scattering bit its own gap.
+const _: () = assert!(BOUNDARY_NULL < BOUNDARY_MASK && (1 << STACK_PRIORITY_SHIFT) > BOUNDARY_MASK);
+const _: () = assert!((MAX_PRIORITY + 1) << STACK_PRIORITY_SHIFT == STACK_INTERIOR);
+const _: () =
+    assert!(STACK_SCATTERING > BOUNDARY_MASK && STACK_SCATTERING < 1 << STACK_PRIORITY_SHIFT);
 
 /// A homogeneous medium as the renderer holds it: coefficients per `ACEScg`
 /// channel in inverse meters, and the phase function's anisotropy.
@@ -389,13 +416,13 @@ impl From<Medium> for MediumRecord {
 /// `None` for vacuum: an opaque or thin-walled surface bounds none, and a
 /// depth of zero puts the tint on the interface, where the closure applies
 /// it instead. The depth test is written positively so that a NaN falls to
-/// vacuum, as it did on the device, rather than to a σ of NaN.
+/// vacuum rather than to a σ of NaN.
 ///
-/// Not bit-identical to the per-hit form it replaces: Vulkan specifies
-/// `log` only to 2^-21 *absolute* inside [0.5, 2], which is a large
-/// *relative* error where the color is near 1 and the logarithm near 0 —
-/// up to 9e-6 on the corpus's σ. The host's correctly rounded `ln` is the
-/// accurate side of that.
+/// σ derived here on the host and σ derived from the same color on the
+/// device differ: Vulkan specifies `log` only to 2^-21 *absolute* inside
+/// [0.5, 2], a large *relative* error where the color is near 1 and the
+/// logarithm near 0 — up to 9e-6 on the corpus's σ. The host's correctly
+/// rounded `ln` is the accurate side of that.
 ///
 /// The scattering split follows `OpenPBR`'s subtractive convention: the
 /// color/depth logarithm stays the *extinction* `σ_t` exactly as authored,
@@ -409,14 +436,21 @@ impl From<Medium> for MediumRecord {
 fn interior(material: &Material) -> Option<MediumRecord> {
     let depth = material.transmission_depth;
     (boundary(material, false) == BOUNDARY_REFRACTIVE && depth > 0.0).then(|| {
-        let sigma_t = material
-            .transmission_color
-            .to_array()
-            .map(|channel| -channel.clamp(1e-4, 1.0).ln() / depth);
+        let sigma_t = material.transmission_color.to_array().map(|channel| {
+            // `clamp` would pass a NaN channel straight into σ, poisoning
+            // every hit on the instance; it falls to transparent instead,
+            // in the spirit of the depth's vacuum.
+            if channel.is_nan() {
+                0.0
+            } else {
+                -channel.clamp(1e-4, 1.0).ln() / depth
+            }
+        });
         let scatter = material.transmission_scatter.max(Vec3::ZERO);
         if !scatter.cmpgt(Vec3::ZERO).any() {
-            // Purely absorbing — the pre-scatter record, bit for bit: even
-            // adding a zero shift would flip a white channel's −0.0.
+            // Purely absorbing: return σ_t untouched — even adding a zero
+            // shift would flip a white channel's −0.0, and an absorbing
+            // interior's record must be exactly its authored logarithm.
             return MediumRecord {
                 sigma_t,
                 g: 0.0,
@@ -577,10 +611,6 @@ fn upload_texture_params<'k>(
 }
 
 /// The scene, resident on the GPU and ready to trace against.
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "four independent scene predicates, each cached for a hot query"
-)]
 pub struct Scene {
     // Declared before `meshes`: the TLAS dies before the BLASes its
     // instances reference.
@@ -607,15 +637,9 @@ pub struct Scene {
     /// changes; every wave binds it next to the TLAS.
     descriptors: Vec<vk::DescriptorImageInfo>,
     camera: Camera,
-    /// Whether any instance has a closed transmissive interior —
-    /// recomputed on every build and update. See [`Scene::has_interiors`].
-    has_interiors: bool,
-    /// Likewise for the volume-bounding meshes. See [`Scene::has_volumes`].
-    has_volumes: bool,
-    /// Likewise for authored nesting priority. See [`Scene::has_priority`].
-    has_priority: bool,
-    /// Likewise for scattering interiors. See [`Scene::has_media`].
-    has_scattering_interiors: bool,
+    /// The placement-derived media predicates, recomputed on every build
+    /// and update — see [`PlacementMedia`].
+    media: PlacementMedia,
     /// The environment's dimensions and emitted power (untinted), retained
     /// so a light edit can rebuild the scene table (its selection
     /// probability weighs the light list against the environment) without
@@ -703,12 +727,13 @@ impl Scene {
 
     /// [`Scene::new`] with the open space around the objects filled by
     /// `global` — the procedural spelling of a description's global medium,
-    /// which is how the volumetric estimator tests reach it.
+    /// which is how the volumetric estimator tests reach it. Crate-only:
+    /// every caller is a test, and the description path is the real API.
     ///
     /// # Errors
     ///
     /// As [`Scene::new`].
-    pub fn new_in_medium(
+    pub(crate) fn new_in_medium(
         gpu: &Context,
         objects: &[Object],
         camera: Camera,
@@ -764,10 +789,7 @@ impl Scene {
             })
             .collect();
         let tlas = build_scene_tlas(gpu, &placements)?;
-        let has_interiors = has_interiors(&placements);
-        let has_volumes = has_volumes(&placements);
-        let has_priority = has_priority(&placements);
-        let has_scattering_interiors = has_scattering_interiors(&placements);
+        let media = placement_media(&placements);
         let instances = upload_instance_tables(gpu, &placements, &triangle_lights, &[], global)?;
         let GpuEnvironment {
             image,
@@ -812,10 +834,7 @@ impl Scene {
             textures: BTreeMap::new(),
             descriptors: Vec::new(),
             camera,
-            has_interiors,
-            has_volumes,
-            has_priority,
-            has_scattering_interiors,
+            media,
             env_size,
             env_power: power,
             env_source: None,
@@ -837,18 +856,18 @@ impl Scene {
     /// stack is never allocated and no kernel addresses it.
     #[must_use]
     pub fn has_interiors(&self) -> bool {
-        self.has_interiors
+        self.media.interiors
     }
 
     /// Whether the scene has media — the things that route a path segment
     /// through the volume stage, and so record it at all. A pure-absorbing
-    /// *interior* is not one: it has no event to sample, and shades through
-    /// the surface stage exactly as it did before media existed. A
+    /// *interior* is not one: it has no event to sample, and its
+    /// Beer–Lambert factor is the surface stage's closed form. A
     /// *scattering* interior is: its extinction and scatter are the volume
     /// stage's to sample.
     #[must_use]
     pub fn has_media(&self) -> bool {
-        self.has_global_medium() || self.has_volumes() || self.has_scattering_interiors
+        self.has_global_medium() || self.media.volumes || self.media.scattering_interiors
     }
 
     /// Whether the open space between instances is filled — the flag
@@ -863,17 +882,17 @@ impl Scene {
     /// volume stage marches across their boundaries.
     #[must_use]
     pub fn has_volumes(&self) -> bool {
-        self.has_volumes
+        self.media.volumes
     }
 
     /// Whether any interior is authored with a nesting priority the
-    /// kernels can act on — see [`has_priority`]. True, a hit can be an
+    /// kernels can act on — see [`PlacementMedia`]. True, a hit can be an
     /// interface a higher-priority interior cuts away, which is resolved
     /// in the volume stage: so this is what makes that stage run in a
     /// scene with no media at all.
     #[must_use]
     pub fn has_priority(&self) -> bool {
-        self.has_priority
+        self.media.priority
     }
 
     /// The environment's emitted power as the selection heuristic weighs
@@ -1048,7 +1067,7 @@ fn build_scene_tlas(gpu: &Context, placements: &[Placement]) -> Result<Accelerat
             // shadow traversal has to *see* each crossing to measure the
             // extent it bounds, and an opaque one would commit and read as
             // a solid occluder.
-            opaque: placement.medium.is_none()
+            opaque: placement_boundary(placement) != BOUNDARY_NULL
                 && placement.material.opacity >= 1.0
                 && placement.material.opacity_texture == TEXTURE_NONE,
         })
@@ -1118,8 +1137,10 @@ fn upload_instance_tables(
 ) -> Result<InstanceTables> {
     let light_records = crate::lights::build(triangle_lights, delta_lights);
     assert!(
-        placements.iter().all(|placement| placement.medium.is_none()
-            || placement.material == boundary_material(placement.material, true)),
+        placements
+            .iter()
+            .all(|placement| placement.medium.is_none()
+                || is_boundary_inert(&placement.material)),
         "a mesh that bounds a medium must reach the tables inert — see `boundary_material`"
     );
     let materials: Vec<Material> = placements
@@ -1431,10 +1452,10 @@ mod tests {
     /// Bounding an interior and filling one are separate questions: the
     /// depth-0 glass above is still a refractive boundary, but its tint
     /// sits on the interface, so it encloses vacuum and takes no record.
-    /// Where there is a medium, the record is the σ the kernel used to
-    /// recompute at every hit.
+    /// Everything that does fill something — interiors, authored media,
+    /// the global — interns into one table, keyed by value.
     #[test]
-    fn only_absorbing_interiors_take_a_medium_record() {
+    fn the_medium_table_interns_every_medium_by_value() {
         let clear = Material {
             transmission_depth: 0.0,
             ..Material::glass(0.1, 1.5)
@@ -1509,8 +1530,7 @@ mod tests {
 
     /// σ is per-instance data that outlives the prep pass, so a malformed
     /// material must resolve to vacuum here rather than to a coefficient
-    /// that poisons every hit on the instance. These are the inputs the
-    /// kernel's old `transmissionDepth > 0.0` test used to turn away.
+    /// that poisons every hit on the instance.
     #[test]
     fn a_malformed_interior_is_vacuum() {
         let glass = Material::glass(0.1, 1.5);
@@ -1525,9 +1545,8 @@ mod tests {
                 "depth {depth} is not an interior"
             );
         }
-        // Out-of-range channels clamp exactly as the kernel's did: a hard
-        // zero would take σ to infinity, and anything above 1 would make
-        // Beer–Lambert amplify.
+        // Out-of-range channels clamp: a hard zero would take σ to
+        // infinity, and anything above 1 would make Beer–Lambert amplify.
         let extremes = interior(&Material {
             transmission_color: Vec3::new(0.0, -3.0, 8.0),
             transmission_depth: 1.0,
@@ -1537,6 +1556,18 @@ mod tests {
         assert_eq!(
             extremes.sigma_t.map(f32::to_bits),
             [1e-4f32, 1e-4, 1.0].map(|channel| (-channel.ln()).to_bits())
+        );
+        // A NaN channel would ride `clamp` into the table; it falls to a
+        // transparent channel instead, and the others keep their σ.
+        let poisoned = interior(&Material {
+            transmission_color: Vec3::new(f32::NAN, 0.5, 0.5),
+            transmission_depth: 1.0,
+            ..glass
+        })
+        .expect("a NaN channel does not unmake the interior");
+        assert_eq!(
+            poisoned.sigma_t.map(f32::to_bits),
+            [0.0f32, -0.5f32.ln(), -0.5f32.ln()].map(f32::to_bits)
         );
         assert!(
             extremes.sigma_s.iter().all(|channel| *channel <= 0.0),

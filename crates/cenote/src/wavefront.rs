@@ -73,13 +73,44 @@ const SHADOW_RAY_SIZE: u64 = 64;
 const PUSH_CONSTANT_LIMIT: usize = 128;
 
 const _: () = {
-    assert!(size_of::<RaygenParams>() <= PUSH_CONSTANT_LIMIT);
-    assert!(size_of::<IntersectParams>() <= PUSH_CONSTANT_LIMIT);
+    // The first three are *exactly* full — the packed words exist because
+    // of it — so equality is asserted: a field added to one of them must
+    // come out of the packed scalars, not silently push past the limit.
+    assert!(size_of::<RaygenParams>() == PUSH_CONSTANT_LIMIT);
+    assert!(size_of::<IntersectParams>() == PUSH_CONSTANT_LIMIT);
+    assert!(size_of::<ShadeSurfaceParams>() == PUSH_CONSTANT_LIMIT);
     assert!(size_of::<ShadeMissParams>() <= PUSH_CONSTANT_LIMIT);
-    assert!(size_of::<ShadeSurfaceParams>() <= PUSH_CONSTANT_LIMIT);
     assert!(size_of::<ShadeVolumeParams>() <= PUSH_CONSTANT_LIMIT);
     assert!(size_of::<TraceShadowParams>() <= PUSH_CONSTANT_LIMIT);
+    assert!(size_of::<ResolveCameraParams>() <= PUSH_CONSTANT_LIMIT);
 };
+
+/// The media flag bits of the two packed push-constant words, named here
+/// because the shaders cannot share a header: each constant mirrors a
+/// `FLAG_*` in the named kernel, and renumbering either side without the
+/// other silently unroutes the medium code. The two words pack differently
+/// — intersect's flags sit above `ray_mask | bounce << 8`, the shading
+/// stages' above `bounce | max_bounces << 8 | light_sampling << 16` — which
+/// is why the same question ([`Media::set`]) rides bit 17 in one and bit 25
+/// in the other.
+mod flag {
+    /// `FLAG_MEDIA` in `intersect.slang`: some segment can owe a medium
+    /// event.
+    pub const INTERSECT_MEDIA: u32 = 1 << 16;
+    /// `FLAG_SET` in `intersect.slang`: the path pool carries a medium set.
+    pub const INTERSECT_SET: u32 = 1 << 17;
+    /// `FLAG_GLOBAL` in `intersect.slang`: the open space is filled.
+    pub const INTERSECT_GLOBAL: u32 = 1 << 18;
+    /// `FLAG_PRIORITY` in `intersect.slang`: some interior authors a
+    /// nesting priority.
+    pub const INTERSECT_PRIORITY: u32 = 1 << 19;
+    /// `FLAG_INTERIORS` in `shade_surface.slang` — the surface stage's one
+    /// flag; the volume stage never reads it.
+    pub const SHADE_INTERIORS: u32 = 1 << 24;
+    /// `FLAG_SET` in `shade_volume.slang` — the volume stage's one flag;
+    /// the surface stage never reads it.
+    pub const SHADE_SET: u32 = 1 << 25;
+}
 
 /// The path pool's field-buffer addresses — `struct Paths` in
 /// `shaders/pathstate.slang`, embedded in every stage's push constants.
@@ -188,7 +219,7 @@ struct ResolveCameraParams {
 #[derive(Clone, Copy)]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "four independent questions about one scene, each a flag bit downstream — \
+    reason = "five independent questions about one scene, each a flag bit downstream — \
               a two-variant enum apiece would name the same booleans twice"
 )]
 struct Media {
@@ -245,10 +276,10 @@ impl Media {
 fn pack_intersect(ray_mask: u32, bounce: u32, media: Media) -> u32 {
     ray_mask
         | bounce << 8
-        | u32::from(media.any) << 16
-        | u32::from(media.set()) << 17
-        | u32::from(media.global) << 18
-        | u32::from(media.priority) << 19
+        | (u32::from(media.any) * flag::INTERSECT_MEDIA)
+        | (u32::from(media.set()) * flag::INTERSECT_SET)
+        | (u32::from(media.global) * flag::INTERSECT_GLOBAL)
+        | (u32::from(media.priority) * flag::INTERSECT_PRIORITY)
 }
 
 /// Push constants for the miss-shading kernel (`shaders/shade_miss.slang`).
@@ -293,9 +324,9 @@ struct ShadeSurfaceParams {
     aov: vk::DeviceAddress,
     /// Which sample of every pixel's sequence this wave traces.
     sample_index: u32,
-    /// `bounce | max_bounces << 8 | light_sampling << 16 | interiors << 24`
-    /// — see [`pack_shade_surface`]. Packed because this block sits exactly
-    /// at [`PUSH_CONSTANT_LIMIT`]: the AOV pointer's 8 bytes came out of
+    /// `bounce | max_bounces << 8 | light_sampling << 16 | the flag bits`
+    /// — see [`pack_shade`]. Packed because this block sits exactly at
+    /// [`PUSH_CONSTANT_LIMIT`]: the AOV pointer's 8 bytes came out of
     /// these small scalars.
     packed: u32,
 }
@@ -310,8 +341,8 @@ fn pack_shade(bounce: u32, max_bounces: u32, light_sampling: LightSampling, medi
     bounce
         | max_bounces << 8
         | (light_sampling as u32) << 16
-        | u32::from(media.interiors) << 24
-        | u32::from(media.set()) << 25
+        | (u32::from(media.interiors) * flag::SHADE_INTERIORS)
+        | (u32::from(media.set()) * flag::SHADE_SET)
 }
 
 /// The five queues the volume kernel touches — `struct VolumeQueues` in
@@ -849,24 +880,31 @@ impl Wavefront {
             "radiance buffer smaller than the target"
         );
         let aov_table = aovs.map_or(&self.aov_disabled, |aov| aov.table);
+        // The wave's one reading of the scene's media — allocation, push
+        // constants, and the pass list all take this value, so they cannot
+        // disagree about what the scene has.
+        let media = Media::of(scene);
         // Residency the scene has to earn: without interiors there is no
         // medium stack, without media no volume queue, and the kernels
         // carry null addresses they never dereference.
         let capacity = u64::from(self.capacity);
-        if scene.has_interiors() || scene.has_volumes() {
+        if media.set() {
             ensure(&self.paths.stack, gpu, "wavefront.stack", capacity * 16)?;
         }
-        if Media::of(scene).stage() {
+        if media.stage() {
             self.queues.ensure_volume(gpu, capacity)?;
         }
-        let params = self.wave_params(scene, radiance, aov_table, width, height, sample);
-        let mut passes = self.record_wave(scene, radiance, aovs, pixels, &params);
+        let params = self.wave_params(scene, radiance, aov_table, width, height, sample, media);
+        let mut passes = self.record_wave(scene, radiance, aovs, pixels, &params, media);
         passes.extend_from_slice(trailing);
         gpu.submit_passes_timed(&passes, timer)
     }
 
     /// Every stage's push constants for one wave, built up front so the
     /// recorded passes can borrow them.
+    // `trace_timed`'s working set, handed through rather than re-derived —
+    // `media` in particular must be the wave's one reading.
+    #[expect(clippy::too_many_arguments)]
     fn wave_params(
         &self,
         scene: &Scene,
@@ -875,6 +913,7 @@ impl Wavefront {
         width: u32,
         height: u32,
         sample: u32,
+        media: Media,
     ) -> WaveParams {
         let pixels = u64::from(width) * u64::from(height);
         let mut basis = scene.camera().basis(width as f32 / height as f32);
@@ -910,7 +949,6 @@ impl Wavefront {
                 _pad1: 0,
             })
             .collect();
-        let media = Media::of(scene);
         let intersect = |bounce: u32| IntersectParams {
             paths: self.paths.addresses(),
             rays: self.queues.addresses(queue::RAY, &self.queues.ray),
@@ -984,8 +1022,9 @@ impl Wavefront {
     }
 
     /// The volume stage's push constants, one per bounce — or none at all,
-    /// which is what a media-free scene gets: `ensure` never built the block
-    /// of queue addresses they would point at, and no pass will read them.
+    /// which is what a scene with nothing for the stage to resolve gets:
+    /// the same [`Media::stage`] that skips them here skipped the volume
+    /// queue's allocation and skips the pass, so no pass can index them.
     fn volume_params(
         &self,
         scene: &Scene,
@@ -994,9 +1033,14 @@ impl Wavefront {
         sample: u32,
         media: Media,
     ) -> Vec<ShadeVolumeParams> {
-        let Some(block) = self.queues.volume_block.get() else {
+        if !media.stage() {
             return Vec::new();
-        };
+        }
+        let block = self
+            .queues
+            .volume_block
+            .get()
+            .expect("volume queues are ensured before wave_params on any wave that needs them");
         (0..self.max_bounces)
             .map(|bounce| ShadeVolumeParams {
                 paths: self.paths.addresses(),
@@ -1023,6 +1067,7 @@ impl Wavefront {
         aovs: Option<&AovTargets<'a>>,
         pixels: u64,
         params: &'a WaveParams,
+        media: Media,
     ) -> Vec<Pass<'a>> {
         // Every post-raygen stage touches a scene resource — the TLAS, the
         // sampled images, or both — and they share one descriptor layout,
@@ -1104,7 +1149,7 @@ impl Wavefront {
             // nothing for the volume stage to resolve — no media, no
             // authored priority — records neither its fill nor its
             // dispatch, so its pass list is the pre-media engine's.
-            let volume_stage = Media::of(scene).stage();
+            let volume_stage = media.stage();
             let bounces = params.shade_surface.len() as u32;
             for bounce in 0..bounces {
                 passes.push(fill(queue::HIT));
@@ -1119,8 +1164,9 @@ impl Wavefront {
                     queue::RAY,
                 ));
                 // The ray queue was just consumed; empty it for this
-                // round's shade_surface — except on the last recorded bounce,
-                // where the kernel terminates every path instead of pushing.
+                // round's scatters — except on the last recorded bounce,
+                // where both shading stages terminate every path instead
+                // of pushing.
                 if bounce + 1 < bounces {
                     passes.push(fill(queue::RAY));
                 }
@@ -1144,8 +1190,11 @@ impl Wavefront {
                     bytemuck::bytes_of(&params.shade_surface[bounce as usize]),
                     queue::HIT,
                 ));
+                // The same `media.volumes` that picked this pipeline handed
+                // `trace_shadow` its stack address: the volumes entry point
+                // never runs with a null one.
                 passes.push(indirect(
-                    if scene.has_volumes() {
+                    if media.volumes {
                         &self.trace_shadow_volumes
                     } else {
                         &self.trace_shadow

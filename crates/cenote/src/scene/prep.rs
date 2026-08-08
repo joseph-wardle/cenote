@@ -119,10 +119,7 @@ impl Scene {
         let placements = placements(&meshes, &host.instances);
         let tlas = build_scene_tlas(gpu, &placements)?;
         let tabling = Instant::now();
-        let has_interiors = super::has_interiors(&placements);
-        let has_volumes = super::has_volumes(&placements);
-        let has_priority = super::has_priority(&placements);
-        let has_scattering_interiors = super::has_scattering_interiors(&placements);
+        let media = super::placement_media(&placements);
         let instances = upload_instance_tables(
             gpu,
             &placements,
@@ -154,10 +151,7 @@ impl Scene {
             textures,
             descriptors,
             camera: host.camera.expect("a fresh build always adopts its camera"),
-            has_interiors,
-            has_volumes,
-            has_priority,
-            has_scattering_interiors,
+            media,
             env_size,
             env_power: power,
             env_source: spec.source.clone(),
@@ -247,10 +241,7 @@ impl Scene {
             self.tlas = build_scene_tlas(gpu, &placements)?;
         }
         let tabling = Instant::now();
-        self.has_interiors = super::has_interiors(&placements);
-        self.has_volumes = super::has_volumes(&placements);
-        self.has_priority = super::has_priority(&placements);
-        self.has_scattering_interiors = super::has_scattering_interiors(&placements);
+        self.media = super::placement_media(&placements);
         self.resident.instances = upload_instance_tables(
             gpu,
             &placements,

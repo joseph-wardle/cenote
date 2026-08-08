@@ -17,8 +17,9 @@ import scene;
 // also in the room's haze. A *scattering* interior (the `STACK_SCATTERING`
 // bit, prep's single authority) is then the whole segment's medium: its
 // record, alone. An absorbing one returns vacuum here — its Beer–Lambert
-// absorption stays the surface stage's, applied once over the whole
-// segment, exactly as it was before volumes existed. Both resolve by the
+// absorption is the surface stage's closed form, applied once over the
+// whole segment, so it stays bit-identical to a renderer with no volume
+// stage at all. Both resolve by the
 // register-held bit, never by re-reading σ_s: a second spelling of the
 // predicate could drift from the one intersect routed by, and a segment
 // would be weighted twice or not at all.

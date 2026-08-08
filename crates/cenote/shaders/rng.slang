@@ -140,8 +140,8 @@ public float hashUniform(uint pixel, uint sampleIndex, uint bounce, uint crossin
 // Same reasoning as above: the sub-segments a null boundary cuts a segment
 // into are unbounded in number, so they are keyed by crossing rather than
 // given Sobol dimensions the bounce block has no room to reserve. The first
-// keeps its Sobol dimension, which is what leaves an uninterrupted segment
-// sampling exactly as it did before the march existed.
+// keeps its Sobol dimension, which is what lets an uninterrupted segment
+// draw exactly the samples an un-marched one would.
 public float2 hashUniform2(uint pixel, uint sampleIndex, uint bounce, uint crossing) {
     var h = lowbias32(pixel ^ lowbias32(sampleIndex ^ 0x1b56c4e9u));
     h = lowbias32(h ^ (bounce << 8 | crossing));
