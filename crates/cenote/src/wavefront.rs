@@ -37,7 +37,7 @@ use crate::error::Result;
 use crate::gpu::{
     Bindings, Buffer, ComputePipeline, Context, MemoryLocation, Pass, PassTimer, SceneBindings,
 };
-use crate::scene::{Scene, ray_mask};
+use crate::scene::{MEDIUM_SLOTS, Scene, ray_mask};
 use crate::shaders::{Kernel, Kernels};
 use crate::stats::PassTimings;
 
@@ -63,7 +63,10 @@ const QUEUE_HEADER_SIZE: u64 = 16;
 /// Byte offset of that indirect command within a header.
 const INDIRECT_OFFSET: u64 = 4;
 
-/// Byte size of one `ShadowRay` record (`shaders/pathstate.slang`).
+/// Byte size of one `ShadowRay` record — sixteen words, counted from
+/// `struct ShadowRay` in `shaders/pathstate.slang`. No mirror struct pins
+/// this (the host never reads a record), so growing the Slang struct
+/// without this constant overruns the shadow queue: grow them together.
 const SHADOW_RAY_SIZE: u64 = 64;
 
 /// Push-constant bytes every Vulkan implementation guarantees. Several of
@@ -280,6 +283,14 @@ fn pack_intersect(ray_mask: u32, bounce: u32, media: Media) -> u32 {
         | (u32::from(media.set()) * flag::INTERSECT_SET)
         | (u32::from(media.global) * flag::INTERSECT_GLOBAL)
         | (u32::from(media.priority) * flag::INTERSECT_PRIORITY)
+}
+
+/// The visibility mask a bounce's rays trace with: camera rays see what the
+/// camera sees, every later bounce sees everything. One spelling, because
+/// [`ShadeVolumeParams::ray_mask`] promises the volume stage's re-traces
+/// use exactly the mask intersect traced that bounce with.
+fn mask_for(bounce: u32) -> u32 {
+    if bounce == 0 { ray_mask::CAMERA } else { ray_mask::ALL }
 }
 
 /// Push constants for the miss-shading kernel (`shaders/shade_miss.slang`).
@@ -858,9 +869,11 @@ impl Wavefront {
     /// kernels (first-hit depth, and the albedo/normal denoiser guides
     /// with their specular pass-through). Without, the kernels skip every
     /// AOV read and write.
-    // `trace`'s parameters plus two extensions; a struct would only scatter
-    // the call, since every caller already hands these values to `trace`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "`trace`'s parameters plus two extensions; a struct would only scatter \
+                  the call, since every caller already hands these values to `trace`"
+    )]
     pub fn trace_then(
         &self,
         gpu: &Context,
@@ -889,7 +902,8 @@ impl Wavefront {
         // carry null addresses they never dereference.
         let capacity = u64::from(self.capacity);
         if media.set() {
-            ensure(&self.paths.stack, gpu, "wavefront.stack", capacity * 16)?;
+            let stride = size_of::<[u32; MEDIUM_SLOTS]>() as u64;
+            ensure(&self.paths.stack, gpu, "wavefront.stack", capacity * stride)?;
         }
         if media.stage() {
             self.queues.ensure_volume(gpu, capacity)?;
@@ -902,7 +916,7 @@ impl Wavefront {
 
     /// Every stage's push constants for one wave, built up front so the
     /// recorded passes can borrow them.
-    // `trace_timed`'s working set, handed through rather than re-derived —
+    // `trace_then`'s working set, handed through rather than re-derived —
     // `media` in particular must be the wave's one reading.
     #[expect(clippy::too_many_arguments)]
     fn wave_params(
@@ -957,15 +971,7 @@ impl Wavefront {
             volumes: self.queues.volume_addresses(),
             scene: scene.table().device_address(),
             sample_index: sample,
-            packed: pack_intersect(
-                if bounce == 0 {
-                    ray_mask::CAMERA
-                } else {
-                    ray_mask::ALL
-                },
-                bounce,
-                media,
-            ),
+            packed: pack_intersect(mask_for(bounce), bounce, media),
         };
         // The camera's own medium set, re-resolved at the head of every
         // accumulation restart — sample 0 *is* the restart wave, whatever
@@ -1050,11 +1056,7 @@ impl Wavefront {
                 aov: aov_table.device_address(),
                 sample_index: sample,
                 packed: pack_shade(bounce, self.max_bounces, self.light_sampling, media),
-                ray_mask: if bounce == 0 {
-                    ray_mask::CAMERA
-                } else {
-                    ray_mask::ALL
-                },
+                ray_mask: mask_for(bounce),
                 _pad0: 0,
             })
             .collect()
@@ -1134,6 +1136,11 @@ impl Wavefront {
                 });
             }
         }
+        // A scene with nothing for the volume stage to resolve — no media,
+        // no authored priority — records neither its fill nor its dispatch,
+        // so its pass list is the pre-media engine's.
+        let volume_stage = media.stage();
+        let bounces = params.shade_surface.len() as u32;
         for raygen in &params.ranges {
             passes.push(fill(queue::RAY));
             passes.push(Pass::Dispatch {
@@ -1145,12 +1152,7 @@ impl Wavefront {
             // The bounce loop, recorded ahead of time: each round consumes
             // the ray queue, refills it with the paths that scattered, and
             // ends by tracing the round's next-event shadow rays. Rounds
-            // after every path has died dispatch nothing. A scene with
-            // nothing for the volume stage to resolve — no media, no
-            // authored priority — records neither its fill nor its
-            // dispatch, so its pass list is the pre-media engine's.
-            let volume_stage = media.stage();
-            let bounces = params.shade_surface.len() as u32;
+            // after every path has died dispatch nothing.
             for bounce in 0..bounces {
                 passes.push(fill(queue::HIT));
                 passes.push(fill(queue::MISS));

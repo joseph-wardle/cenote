@@ -749,6 +749,7 @@ fn the_volumetric_furnace_closes() {
     // the cap would take that energy off the top as a flat 6% deficit.
     let (size, samples) = (32, 16);
     let sum = bsdf_only_sum_deep(&gpu, &scene, size, samples, 64);
+    assert_all_paths_finished(&sum, samples);
     for chunk in sum.chunks_exact(4) {
         for channel in &chunk[..3] {
             let value = channel / samples as f32;
@@ -757,11 +758,6 @@ fn the_volumetric_furnace_closes() {
                 "volumetric furnace leaked: {value} vs {emission}"
             );
         }
-        assert!(
-            (chunk[3] - samples as f32).abs() < 1e-3,
-            "every path must finish exactly once, got alpha {}",
-            chunk[3]
-        );
     }
 }
 
@@ -785,7 +781,7 @@ fn a_camera_inside_a_bounded_fog_attenuates_from_its_first_segment() {
     let sigma = Vec3::new(0.15, 0.35, 0.6);
     // Half-extent 3 around the origin: three axial meters of fog between
     // the camera and the far face at z = −3.
-    let scene = Scene::new(
+    let scene = axial_scene(
         &gpu,
         &[Object {
             mesh: crate::scene::cube(3.0),
@@ -798,18 +794,11 @@ fn a_camera_inside_a_bounded_fog_attenuates_from_its_first_segment() {
             }),
             interior_priority: 0,
         }],
-        Camera {
-            position: Vec3::ZERO,
-            look_at: Vec3::NEG_Z,
-            up: Vec3::Y,
-            vfov_degrees: 1.0,
-            lens: None,
-        },
-        &Environment::constant(sky),
-    )
-    .expect("scene");
+        sky.x,
+    );
     let (size, samples) = (8, 64);
     let sum = bsdf_only_sum(&gpu, &scene, size, samples);
+    assert_all_paths_finished(&sum, samples);
     let count = f64::from(samples * size * size);
     for channel in 0..3 {
         let mean = sum
@@ -898,9 +887,12 @@ fn axial_scene(gpu: &Context, objects: &[Object], sky: f32) -> Scene {
 }
 
 /// Channel-0 mean of a BSDF-only render — the reduction every axial
-/// closed-form test asserts against.
+/// closed-form test asserts against. Asserts every path finished on the
+/// way: a closed form met by a population with a few dropped paths is met
+/// by accident.
 fn axial_mean(gpu: &Context, scene: &Scene, size: u32, samples: u32) -> f64 {
     let sum = bsdf_only_sum(gpu, scene, size, samples);
+    assert_all_paths_finished(&sum, samples);
     sum.chunks_exact(4).map(|p| f64::from(p[0])).sum::<f64>() / f64::from(samples * size * size)
 }
 
@@ -1152,6 +1144,7 @@ fn a_suppressed_boundary_inside_juice_is_no_boundary_at_all() {
         .map(|(total, first)| total - first)
         .collect();
     let suppressed = accumulate_sum(&gpu, &renderer, &scene(true), size, samples);
+    assert_all_paths_finished(&suppressed, samples);
     let (deleted0, deleted1, suppressed) = (scale(stream0), scale(stream1), scale(suppressed));
     let floor = relmse(&deleted0, &deleted1);
     let gap = relmse(&suppressed, &deleted1);
@@ -1236,6 +1229,7 @@ fn bounded_volumes_absorb_over_exactly_the_extent_they_bound() {
     ] {
         let scene = axial_scene(&gpu, &objects, sky.x);
         let sum = bsdf_only_sum(&gpu, &scene, size, samples);
+        assert_all_paths_finished(&sum, samples);
         let count = f64::from(samples * size * size);
         for channel in 0..3 {
             let mean = sum
@@ -1430,7 +1424,10 @@ fn the_camera_seed_names_exactly_what_the_camera_is_inside_of() {
         },
         Object {
             mesh: crate::scene::cube(0.15),
-            // (0, 0, -4.5) + 0.3 · the walk's fixed (1, 2, 3)/√14.
+            // (0, 0, -4.5) + 0.3 · the walk's fixed (1, 2, 3)/√14. If
+            // `RESOLVE_DIRECTION` in resolve_camera.slang ever changes,
+            // recompute this position — off the walk's ray the prop is
+            // decorative and the opaque-surfaces case asserts nothing.
             transform: Mat4::from_translation(Vec3::new(0.0802, 0.1604, -4.2595)),
             material: Material::matte(Vec3::splat(0.5), 0.5),
             medium: None,
@@ -1775,6 +1772,7 @@ fn priority_nested_past_the_slots_stays_sound() {
     let (size, samples) = (16, 64);
     let scene = Scene::new(&gpu, &solids, camera, &sky_image).expect("scene");
     let sum = bsdf_only_sum(&gpu, &scene, size, samples);
+    assert_all_paths_finished(&sum, samples);
     for chunk in sum.chunks_exact(4) {
         for value in chunk {
             assert!(
@@ -1782,11 +1780,6 @@ fn priority_nested_past_the_slots_stays_sound() {
                 "five nested priorities must stay sound, got {value}"
             );
         }
-        assert!(
-            (chunk[3] - samples as f32).abs() < 1e-3,
-            "every path must finish exactly once, got alpha {}",
-            chunk[3]
-        );
     }
 }
 
@@ -1892,6 +1885,7 @@ fn a_scattering_box_in_a_uniform_sky_disappears() {
 
     let (size, samples) = (16, 512);
     let sum = bsdf_only_sum_deep(&gpu, &scene, size, samples, 64);
+    assert_all_paths_finished(&sum, samples);
     for (index, chunk) in sum.chunks_exact(4).enumerate() {
         for (channel, total) in chunk.iter().enumerate().take(3) {
             let mean = f64::from(*total) / f64::from(samples);
@@ -1900,11 +1894,6 @@ fn a_scattering_box_in_a_uniform_sky_disappears() {
                 "pixel {index}, channel {channel}: {mean} vs the sky's {sky}"
             );
         }
-        assert!(
-            (chunk[3] - samples as f32).abs() < 1e-3,
-            "every path must finish exactly once, got alpha {}",
-            chunk[3]
-        );
     }
 }
 
@@ -3366,7 +3355,7 @@ fn standard_error_falls_as_one_over_sqrt_samples() {
 /// per-pixel noise, not the sample count. It is exactly zero below the metric's
 /// trust floor (`CONVERGENCE_MIN_SAMPLES`), reads a near-exact image as fully
 /// converged, and reads a noisier one at the same sample count as less. And the
-/// GPU tally matches, pixel for pixel, an independent host recount from the 6a
+/// GPU tally matches, pixel for pixel, an independent host recount from the
 /// variance substrate — the kernel computes exactly the documented relative
 /// standard-error formula, not an approximation of it.
 #[test]
@@ -3381,7 +3370,7 @@ fn converged_fraction_tracks_the_noise() {
         |rgb: &[f32]| rgb[0] * 0.272_228_72 + rgb[1] * 0.674_081_74 + rgb[2] * 0.053_689_517;
 
     // Accumulate `samples` of `scene`, then return the GPU converged fraction —
-    // after asserting it equals a host recount over the 6a substrate that
+    // after asserting it equals a host recount over the variance substrate that
     // mirrors the kernel exactly, gate and all: below the trust floor the kernel
     // counts nothing, so the mirror does too.
     let measure = |scene: &Scene, samples: u32| -> f32 {
@@ -3450,7 +3439,7 @@ fn converged_fraction_tracks_the_noise() {
 /// The runtime auto-stop threshold reaches the kernel: on one noisy
 /// film, loosening [`Renderer::set_noise_threshold`] counts strictly more pixels
 /// as converged than tightening it. Were the setter ignored, both would render
-/// at the 6b default and read identical — so the strict inequality proves the
+/// at the baked-in default and read identical — so the strict inequality proves the
 /// renderer's live threshold, not the baked-in constant, is what the accumulate
 /// kernel measures against (the substrate the CLI `--noise-threshold` and the
 /// session's convergence-idle both ride).

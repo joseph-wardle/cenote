@@ -56,8 +56,7 @@ fn demo_scene_matches_golden() {
     compare_with_golden("demo", &actual);
 }
 
-/// The step-11 checkpoint — batch and viewer agree because they are the
-/// same film. This golden is the demo accumulated to 64 spp and read back
+/// Batch and viewer agree because they are the same film. This golden is the demo accumulated to 64 spp and read back
 /// as its linear average: exactly the image `cenote-cli --spp 64` writes,
 /// and exactly the average the viewer is tonemapping 64 redraws after
 /// opening. Either path drifting from the other (or both from this

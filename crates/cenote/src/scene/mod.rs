@@ -290,8 +290,14 @@ pub(crate) const STACK_INTERIOR: u32 = 1 << 31;
 
 /// The empty medium-set slot — `STACK_EMPTY` in `shaders/pathstate.slang`:
 /// the instance-index field at all ones, no flag bits. What
-/// [`SceneTable::camera_media`] uploads four of.
+/// [`SceneTable::camera_media`] uploads [`MEDIUM_SLOTS`] of.
 pub(crate) const STACK_EMPTY: u32 = 0x00ff_ffff;
+
+/// How many media a path can be inside at once — `MEDIUM_SLOTS` in
+/// `shaders/pathstate.slang`, where the policy lives. The host knows it
+/// only as a width: [`SceneTable::camera_media`]'s, and the stack buffer's
+/// per-path stride in `wavefront.rs`.
+pub(crate) const MEDIUM_SLOTS: usize = 4;
 
 /// How far a nesting priority may reach: the six bits the medium-set entry
 /// has room for, directly under `STACK_INTERIOR` — which is what lets one
@@ -551,7 +557,7 @@ struct SceneTable {
     /// all-[`STACK_EMPTY`] and overwritten in place by `resolve_camera`
     /// at every accumulation restart; sits last so the `uint4` lands on
     /// its 16-byte alignment without padding.
-    camera_media: [u32; 4],
+    camera_media: [u32; MEDIUM_SLOTS],
 }
 
 // The Slang side lays these out from its own rules, so the sizes are
@@ -1218,7 +1224,7 @@ fn upload_scene_table(
         media: resident.instances.media.device_address(),
         light_count,
         global_medium: resident.instances.global_medium,
-        camera_media: [STACK_EMPTY; 4],
+        camera_media: [STACK_EMPTY; MEDIUM_SLOTS],
     };
     // TRANSFER_SRC so tests can read back the one field a kernel writes
     // (`camera_media`).
