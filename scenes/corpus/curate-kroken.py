@@ -19,6 +19,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from field_order import FIELD_ORDER
+
 CORPUS = Path(__file__).resolve().parent
 ROOT = CORPUS.parent.parent
 KROKEN = CORPUS / "sources/pbrt-v4-scenes/kroken"
@@ -120,20 +122,6 @@ PATCHES = {
     "Books - Pages": {"base_color": "Some(Constant((0.185, 0.169, 0.145)))"},
     "Books - Pages.1": {"base_color": "Some(Constant((0.185, 0.169, 0.145)))"},
 }
-
-# Field order as the importer emits it — each replacement is anchored on the
-# next field so multi-line values (texture refs) are replaced whole.
-FIELD_ORDER = [
-    "base_color", "base_diffuse_roughness", "base_metalness", "specular_weight",
-    "specular_roughness", "specular_ior", "transmission_weight",
-    "transmission_color", "transmission_depth", "transmission_scatter",
-    "transmission_scatter_anisotropy", "subsurface_weight", "subsurface_color",
-    "subsurface_radius", "subsurface_radius_scale",
-    "subsurface_scatter_anisotropy", "coat_weight", "coat_color",
-    "coat_roughness", "coat_ior", "coat_darkening", "fuzz_weight", "fuzz_color",
-    "fuzz_roughness", "emission_luminance", "emission_color",
-    "geometry_opacity", "geometry_thin_walled", "geometry_normal",
-]
 
 
 def run(cmd, **kwargs):

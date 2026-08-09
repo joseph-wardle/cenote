@@ -24,6 +24,9 @@
 # untracked head sources by curate-head.py, like the resampled skies
 /scenes/corpus/head-capped.ply
 
+# The curate scripts import field_order.py, and Python caches the bytecode
+/scenes/corpus/__pycache__/
+
 # Render output: scripts/benchmark.sh writes EXRs and stats sidecars wherever it
 # is pointed. /restir-baselines/ holds captures from the removed ReSTIR
 # estimator — nothing reads them; delete the directory to reclaim ~800 MB.

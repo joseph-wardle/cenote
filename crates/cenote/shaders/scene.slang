@@ -63,7 +63,7 @@ public struct GeometryRecord {
     uint boundary;
     public uint medium;             // this interior's record, or MEDIUM_NONE
     // The subsurface interior's record, or MEDIUM_NONE — interned by prep,
-    // unread until the walk kernel (rung 9b) marches it.
+    // unread until the subsurface walk kernel lands.
     uint subsurface;
 };
 

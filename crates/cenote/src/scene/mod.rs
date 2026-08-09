@@ -148,7 +148,7 @@ struct GeometryRecord {
     medium: u32,
     /// Index into the same table of the subsurface interior behind this
     /// instance's material, or [`MEDIUM_NONE`] — see [`subsurface`].
-    /// Interned but unread: the walk kernel that marches it is rung 9b.
+    /// Interned but unread until the subsurface walk kernel lands.
     subsurface: u32,
 }
 
@@ -1184,9 +1184,9 @@ fn upload_table<T: Pod>(gpu: &Context, name: &str, records: &[T]) -> Result<Buff
 
 /// Upload the per-instance tables: geometry records (each carrying the
 /// index of its instance's *first* light record, or [`LIGHT_NONE`], and of
-/// its interior's medium), the material array, the deduplicated medium
-/// table, and the light records — laid out in the contiguous primitive
-/// order `GeometryRecord.light` depends on.
+/// its interior's and subsurface media), the material array, the
+/// deduplicated medium table, and the light records — laid out in the
+/// contiguous primitive order `GeometryRecord.light` depends on.
 fn upload_instance_tables(
     gpu: &Context,
     placements: &[Placement],
@@ -1748,8 +1748,8 @@ mod tests {
             record.sigma_s[0] / record.sigma_t[0]
         };
         assert!(
-            alpha(0.0, 0.0) < 1e-4 && alpha(1.0, 0.0) > 0.999,
-            "black walks to no scatter, white to (nearly) pure scatter"
+            alpha(0.0, 0.0).to_bits() == 0 && alpha(1.0, 0.0) > 0.999,
+            "black is snapped to exactly no scatter, white walks to (nearly) pure"
         );
         let (low, mid, high) = (alpha(0.3, 0.0), alpha(0.6, 0.0), alpha(0.9, 0.0));
         assert!(
@@ -1797,6 +1797,13 @@ mod tests {
         for (name, material) in [
             ("zero weight", Material::matte(Vec3::splat(0.8), 0.0)),
             (
+                "negative weight",
+                Material {
+                    subsurface_weight: -1.0,
+                    ..marble
+                },
+            ),
+            (
                 "NaN weight",
                 Material {
                     subsurface_weight: f32::NAN,
@@ -1807,6 +1814,13 @@ mod tests {
                 "zero radius",
                 Material {
                     subsurface_radius: 0.0,
+                    ..marble
+                },
+            ),
+            (
+                "negative radius",
+                Material {
+                    subsurface_radius: -1.0,
                     ..marble
                 },
             ),
