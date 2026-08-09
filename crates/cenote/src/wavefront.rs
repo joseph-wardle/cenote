@@ -375,9 +375,11 @@ struct VolumeQueues {
 }
 
 /// One histogram bin per value the packed bounce byte can hold, so the
-/// instrumented volume kernel indexes it with the bounce unchecked.
+/// instrumented volume kernel indexes it with the bounce unchecked. A path
+/// scatters at most once per bounce, so a `u32` bin cannot overflow short
+/// of 2^32 camera paths in one accumulation.
 #[cfg(feature = "probes")]
-pub const PROBE_BINS: usize = 256;
+const PROBE_BINS: usize = 256;
 
 /// Push constants for the volume kernel (`shaders/shade_volume.slang`);
 /// recorded only when the scene has media. One instance per bounce — the

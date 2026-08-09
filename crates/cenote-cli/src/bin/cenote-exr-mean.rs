@@ -1,18 +1,15 @@
-//! `cenote-exr-mean`: per-channel mean of an EXR's RGB, on the unclamped
-//! linear HDR — the absolute-energy read the FLIP goldens deliberately
-//! blind themselves to. Sibling of `cenote-relmse`: that one asks "did the
-//! estimator get worse", this one asks "did energy go missing", which is
-//! the bounce-cap question — a capped walk terminates paths that still
-//! carried weight, and the deficit shows up here as a lower mean.
+//! `cenote-exr-mean`: per-channel mean of an EXR's unclamped linear RGB.
+//! Sibling of `cenote-relmse`: that one asks "did the estimator get
+//! worse", this one asks "did energy go missing" — the question a bounce
+//! cap poses.
 //!
 //! ```sh
 //! cenote-exr-mean render.exr                    # mean R G B + luminance
 //! cenote-exr-mean reference.exr render.exr      # both, plus the deficit
 //! ```
 //!
-//! With two images the second line reports the relative deficit
-//! `1 − mean(render)/mean(reference)` per channel and for luminance —
-//! positive means the render is darker than the reference.
+//! With two images the last line reports `1 − mean(render)/mean(reference)`
+//! per channel and for luminance — positive means the render is darker.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
