@@ -62,7 +62,9 @@ public struct GeometryRecord {
     // second field measured `shade_surface` +2…8% on the glass drivers.
     uint boundary;
     public uint medium;             // this interior's record, or MEDIUM_NONE
-    uint pad0;
+    // The subsurface interior's record, or MEDIUM_NONE — interned by prep,
+    // unread until the walk kernel (rung 9b) marches it.
+    uint subsurface;
 };
 
 // The boundary class alone — what `BOUNDARY_*` names.

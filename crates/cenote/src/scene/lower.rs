@@ -420,6 +420,15 @@ fn lower_material(
     material.transmission_scatter =
         acescg_from_rec709(Vec3::from(source.transmission_scatter)).max(Vec3::ZERO);
     material.transmission_scatter_anisotropy = source.transmission_scatter_anisotropy;
+    material.subsurface_weight = source.subsurface_weight.clamp(0.0, 1.0);
+    // An albedo: the inversion's fit is only defined on [0, 1], like the
+    // transmittance above.
+    material.subsurface_color =
+        acescg_from_rec709(Vec3::from(source.subsurface_color)).clamp(Vec3::ZERO, Vec3::ONE);
+    material.subsurface_radius = source.subsurface_radius.max(0.0);
+    // Lengths, not colors — no working-space conversion.
+    material.subsurface_radius_scale = Vec3::from(source.subsurface_radius_scale).max(Vec3::ZERO);
+    material.subsurface_scatter_anisotropy = source.subsurface_scatter_anisotropy;
     material.coat_color = coat_color;
     material.coat_weight = coat_weight;
     material.coat_roughness = source.coat_roughness.clamp(0.0, 1.0);

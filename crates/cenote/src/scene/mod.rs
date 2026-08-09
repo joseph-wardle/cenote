@@ -146,7 +146,10 @@ struct GeometryRecord {
     /// Index into the medium table of what this instance's interior is
     /// filled with, or [`MEDIUM_NONE`] — see [`placement_medium`].
     medium: u32,
-    _pad0: u32,
+    /// Index into the same table of the subsurface interior behind this
+    /// instance's material, or [`MEDIUM_NONE`] — see [`subsurface`].
+    /// Interned but unread: the walk kernel that marches it is rung 9b.
+    subsurface: u32,
 }
 
 const _: () = assert!(size_of::<GeometryRecord>() == 144);
@@ -473,6 +476,56 @@ fn interior(material: &Material) -> Option<MediumRecord> {
             _pad0: 0.0,
         }
     })
+}
+
+/// What fills the interior behind a subsurface material — or `None` where
+/// the lobe is off (weight or radius nonpositive, thin-walled has no
+/// interior). Gates are written positively so a NaN falls to `None`.
+///
+/// `σ_t` per channel is the reciprocal mean free path,
+/// 1 / (`subsurface_radius` · `subsurface_radius_scale`), floored at a
+/// micron so an authored zero stays a finite (just enormous) extinction.
+/// `σ_s` comes from van de Hulst's inversion — the fit `OpenPBR` pins —
+/// turning the authored *multiple*-scatter albedo `C` into the
+/// *single*-scatter albedo `α` that walks to it:
+/// `s` = 4.09712 + 4.20863·C − √(9.59217 + 41.6808·C + 17.7126·C²),
+/// `α` = (1 − s²) / (1 − g·s²). With `s²` in [0, 1] and `g` bounded
+/// inside (−1, 1), `α` lands in [0, 1) on its own: `σ_a` = `σ_t` − `σ_s`
+/// can never go negative, so unlike [`interior`] no repair shift is
+/// needed. A NaN color channel falls to 0 — purely absorbing, like the
+/// scatter tests above.
+fn subsurface(material: &Material) -> Option<MediumRecord> {
+    (material.subsurface_weight > 0.0
+        && material.subsurface_radius > 0.0
+        && material.thin_walled == 0)
+        .then(|| {
+            let g = bounded_anisotropy(material.subsurface_scatter_anisotropy);
+            let sigma_t = material.subsurface_radius_scale.to_array().map(|scale| {
+                1.0 / (material.subsurface_radius * scale.max(0.0)).max(1e-6)
+            });
+            let alpha = material.subsurface_color.to_array().map(|channel| {
+                // A NaN channel falls to black — and black is exact: the
+                // fit leaves a ~6e-6 residual at its black endpoint,
+                // snapped out so an unscattering channel is *purely*
+                // absorbing, not almost.
+                if channel.is_nan() || channel <= 0.0 {
+                    return 0.0;
+                }
+                let c = channel.min(1.0);
+                let s = 4.09712 + 4.20863 * c - (9.59217 + 41.6808 * c + 17.7126 * c * c).sqrt();
+                (1.0 - s * s) / (1.0 - g * s * s)
+            });
+            MediumRecord {
+                sigma_t,
+                g,
+                sigma_s: [
+                    alpha[0] * sigma_t[0],
+                    alpha[1] * sigma_t[1],
+                    alpha[2] * sigma_t[2],
+                ],
+                _pad0: 0.0,
+            }
+        })
 }
 
 /// What fills a placement: the medium its mesh bounds, or — for an ordinary
@@ -1153,13 +1206,21 @@ fn upload_instance_tables(
         .iter()
         .map(|placement| placement.material)
         .collect();
-    let (medium_indices, global_medium, media) =
-        medium_table(placements.iter().map(placement_medium), global);
+    // One intern pass over both kinds of interior — a subsurface interior
+    // that extinguishes like a transmissive one *is* the same medium.
+    let (medium_indices, global_medium, media) = medium_table(
+        placements
+            .iter()
+            .map(placement_medium)
+            .chain(placements.iter().map(|p| subsurface(&p.material))),
+        global,
+    );
+    let (interior_indices, subsurface_indices) = medium_indices.split_at(placements.len());
     let records: Vec<GeometryRecord> = placements
         .iter()
         .zip(first_light_indices(placements.len(), triangle_lights))
-        .zip(medium_indices)
-        .map(|((placement, light), medium)| {
+        .zip(interior_indices.iter().zip(subsurface_indices))
+        .map(|((placement, light), (&medium, &subsurface))| {
             let inverse = placement.transform.inverse();
             assert!(
                 inverse.is_finite(),
@@ -1181,7 +1242,7 @@ fn upload_instance_tables(
                 light,
                 boundary,
                 medium,
-                _pad0: 0,
+                subsurface,
             }
         })
         .collect();
@@ -1655,6 +1716,116 @@ mod tests {
                 bytemuck::cast::<_, [u32; 8]>(base),
                 "scatter {scatter} is no scatter at all"
             );
+        }
+    }
+
+    /// The van de Hulst inversion: the authored color is a *multiple*-
+    /// scatter albedo, so its single-scatter `α` must pin the endpoints —
+    /// black scatters nothing, white scatters everything — and land `σ_s`
+    /// inside `σ_t`, so the walk can never amplify.
+    #[test]
+    fn subsurface_inverts_the_multiple_scatter_albedo() {
+        let marble = Material {
+            subsurface_weight: 1.0,
+            subsurface_color: Vec3::new(0.8, 0.5, 0.2),
+            subsurface_radius: 2.0,
+            subsurface_radius_scale: Vec3::new(1.0, 0.5, 0.25),
+            ..Material::matte(Vec3::splat(0.8), 0.0)
+        };
+        let record = subsurface(&marble).expect("a weighted lobe fills an interior");
+        assert_eq!(
+            record.sigma_t.map(f32::to_bits),
+            [0.5f32, 1.0, 2.0].map(f32::to_bits),
+            "σ_t is the reciprocal mean free path, 1 / (radius · scale)"
+        );
+        let alpha = |color: f32, g: f32| {
+            let record = subsurface(&Material {
+                subsurface_color: Vec3::splat(color),
+                subsurface_scatter_anisotropy: g,
+                ..marble
+            })
+            .expect("an interior");
+            record.sigma_s[0] / record.sigma_t[0]
+        };
+        assert!(
+            alpha(0.0, 0.0) < 1e-4 && alpha(1.0, 0.0) > 0.999,
+            "black walks to no scatter, white to (nearly) pure scatter"
+        );
+        let (low, mid, high) = (alpha(0.3, 0.0), alpha(0.6, 0.0), alpha(0.9, 0.0));
+        assert!(
+            (0.0..=1.0).contains(&low) && low < mid && mid < high && high <= 1.0,
+            "α grows with the authored color and never leaves [0, 1]: \
+             σ_a = σ_t − σ_s cannot go negative, no repair shift needed"
+        );
+        assert!(
+            alpha(0.6, 0.7) > alpha(0.6, 0.0) && alpha(0.6, -0.7) < alpha(0.6, 0.0),
+            "forward scattering needs a higher α to walk to the same color"
+        );
+        // A NaN channel falls to purely absorbing; the others keep theirs.
+        let poisoned = subsurface(&Material {
+            subsurface_color: Vec3::new(f32::NAN, 0.5, 0.2),
+            ..marble
+        })
+        .expect("a NaN channel does not unmake the interior");
+        assert_eq!(
+            (poisoned.sigma_s[0].to_bits(), poisoned.sigma_s[1] > 0.0),
+            (0.0f32.to_bits(), true),
+            "a NaN color channel scatters nothing"
+        );
+        // A zero scale channel floors the mean free path at a micron —
+        // enormous extinction, never infinite.
+        let dense = subsurface(&Material {
+            subsurface_radius_scale: Vec3::new(0.0, 0.5, 0.25),
+            ..marble
+        })
+        .expect("an interior");
+        assert!(
+            dense.sigma_t[0].to_bits() == 1e6f32.to_bits()
+                && dense.sigma_t.iter().all(|sigma| sigma.is_finite()),
+            "σ_t stays finite where a channel's radius reaches zero"
+        );
+    }
+
+    /// The lobe's gates, written positively so a NaN falls to `None`: no
+    /// weight, no travel, or no interior at all means no medium record.
+    #[test]
+    fn a_gated_subsurface_is_no_interior() {
+        let marble = Material {
+            subsurface_weight: 1.0,
+            ..Material::matte(Vec3::splat(0.8), 0.0)
+        };
+        for (name, material) in [
+            ("zero weight", Material::matte(Vec3::splat(0.8), 0.0)),
+            (
+                "NaN weight",
+                Material {
+                    subsurface_weight: f32::NAN,
+                    ..marble
+                },
+            ),
+            (
+                "zero radius",
+                Material {
+                    subsurface_radius: 0.0,
+                    ..marble
+                },
+            ),
+            (
+                "NaN radius",
+                Material {
+                    subsurface_radius: f32::NAN,
+                    ..marble
+                },
+            ),
+            (
+                "thin-walled",
+                Material {
+                    thin_walled: 1,
+                    ..marble
+                },
+            ),
+        ] {
+            assert!(subsurface(&material).is_none(), "{name} is not an interior");
         }
     }
 

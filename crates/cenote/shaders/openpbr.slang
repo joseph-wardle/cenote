@@ -80,6 +80,17 @@ public struct Material {
     public uint emissionTexture; // multiplies onto `emission`
     public uint opacityTexture;  // multiplies onto `opacity`, in traversal
     public uint normalTexture;   // tangent-space, BC5 x/y
+    // The subsurface lobe's five slots: prep inverts them into the medium
+    // table (`scene::subsurface`), and no kernel reads them — they exist
+    // to keep the mirror field for field.
+    public float3 subsurfaceColor;      // multiple-scatter albedo, ACEScg
+    public float subsurfaceWeight;      // 0 removes the lobe
+    public float3 subsurfaceRadiusScale; // per-channel mean-free-path shape
+    public float subsurfaceRadius;      // mean free path, meters
+    public float subsurfaceScatterAnisotropy;
+    float pad0; // std430 rounds the record to its 16-byte alignment
+    float pad1;
+    float pad2;
 };
 
 // -- Lookup tables ---------------------------------------------------------

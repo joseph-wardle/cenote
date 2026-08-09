@@ -115,6 +115,26 @@ pub struct Material {
     pub opacity_texture: u32,
     /// Tangent-space normal map (BC5 x/y), or [`TEXTURE_NONE`].
     pub normal_texture: u32,
+    /// The color light has picked up after scattering many times through
+    /// the subsurface interior, in `ACEScg` — the multiple-scatter albedo
+    /// the van de Hulst inversion (`scene::subsurface`) turns into `σ_s`.
+    pub subsurface_color: Vec3,
+    /// Subsurface blend in [0, 1]: 0 removes the lobe. Like the
+    /// transmission split, these five are read at prep, never by a kernel.
+    pub subsurface_weight: f32,
+    /// Per-channel multipliers on `subsurface_radius` — the chromatic
+    /// shape of the mean free path.
+    pub subsurface_radius_scale: Vec3,
+    /// Mean free path in meters (before the per-channel scale):
+    /// `σ_t` = 1 / (`subsurface_radius` · `subsurface_radius_scale`).
+    pub subsurface_radius: f32,
+    /// Henyey–Greenstein anisotropy of the subsurface interior's
+    /// scattering; clamped like a `Medium`'s on its way into the medium
+    /// table.
+    pub subsurface_scatter_anisotropy: f32,
+    /// std430 rounds the record up to its 16-byte alignment; explicit so
+    /// `Pod` covers every byte the GPU strides over.
+    pub pad: [f32; 3],
 }
 
 // The GPU reads this as a std430 record, where every `float3` aligns to 16
@@ -122,7 +142,7 @@ pub struct Material {
 // offset with no host padding; this pins the total, so a reorder that
 // reintroduces a gap fails to compile instead of silently misreading on the
 // GPU.
-const _: () = assert!(size_of::<Material>() == 160);
+const _: () = assert!(size_of::<Material>() == 208);
 
 impl Material {
     /// A pure diffuse surface — no specular layer. The exact-energy base
@@ -158,6 +178,12 @@ impl Material {
             emission_texture: TEXTURE_NONE,
             opacity_texture: TEXTURE_NONE,
             normal_texture: TEXTURE_NONE,
+            subsurface_color: Vec3::splat(0.8),
+            subsurface_weight: 0.0,
+            subsurface_radius_scale: Vec3::new(1.0, 0.5, 0.25),
+            subsurface_radius: 1.0,
+            subsurface_scatter_anisotropy: 0.0,
+            pad: [0.0; 3],
         }
     }
 
