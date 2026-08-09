@@ -208,7 +208,14 @@ fn compile(src: &Path) -> Result<Vec<u8>> {
         "cenote-{stem}-{}-{unique}.spv",
         std::process::id()
     ));
-    slangc::run_slangc(src, &dst).map_err(Error::ShaderCompile)?;
+    // The same defines the build passed, so a hot reload cannot silently
+    // swap an instrumented kernel for a plain one.
+    let defines: &[&str] = if cfg!(feature = "probes") {
+        &["PROBES"]
+    } else {
+        &[]
+    };
+    slangc::run_slangc(src, &dst, defines).map_err(Error::ShaderCompile)?;
     let spirv = std::fs::read(&dst)?;
     // Best-effort tidy-up; a stale temp file is not worth failing a reload.
     let _ = std::fs::remove_file(&dst);

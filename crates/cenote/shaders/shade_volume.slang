@@ -68,6 +68,14 @@ struct VolumeQueues {
     Queue<uint> misses;       // segments that reached nothing
     Queue<uint> rays;         // the next bounce's input: scatters push here
     Queue<ShadowRay> shadows; // next-event connections, for trace_shadow
+#ifdef PROBES
+    // Measurement builds only: scatter events binned by bounce, one slot
+    // per possible bounce index. The bounce is uniform across a dispatch,
+    // so the whole dispatch contends on one word — accepted, because an
+    // instrumented build answers "how long are the walks", never "how fast
+    // is the kernel".
+    Atomic<uint>* probes;
+#endif
 };
 
 struct Params {
@@ -243,6 +251,9 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
         }
     }
 
+#ifdef PROBES
+    params.queues.probes[bounce].add(1);
+#endif
     let distance = start + event.distance;
     let position = origin + distance * direction;
     // The scatter ends the segment, so the stale hit above is never read —

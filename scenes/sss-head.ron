@@ -1,0 +1,119 @@
+// B9's skin-density driver: the pbrt-v4-scenes head scan ("Head of
+// Infinite Realities", CC-BY) as a scattering dielectric carrying Jensen's
+// measured skin1 coefficients, under the same small-warm-key + dim-dome
+// rig as the sss-teapot tiers (the source scene's dome-only rig would
+// hand interior transport a light it can find everywhere; rung 9-0 wants
+// the hard case). Camera pose is the source scene's.
+//
+// Requires two derived assets: `scenes/corpus/fetch.sh head`, then
+// `python3 scenes/corpus/curate-head.py` — the scan is an open face shell
+// (19 boundary loops; no back of head, no eyeballs), and a
+// membership-counted interior needs the capped, closed ply.
+//
+// Coefficients: head.pbrt gives mfp = 1/σ_t = (1.2953, 0.95238, 0.67114)
+// mm for skin1. With transmission_depth = 1 mm (the mesh is in meters),
+// transmission_color = exp(−σ_t·1mm) = (0.4621, 0.3499, 0.2254) rebuilds
+// exactly those σ_t, and transmission_scatter = σ_s·1mm = (0.740, 0.880,
+// 1.010) is skin1's reduced scattering — per-channel albedo (0.959,
+// 0.838, 0.678), chromatic on purpose: this tier is the real material,
+// the teapot tiers are the controlled ladder. eta and roughness are the
+// source scene's (1.33, 0.05).
+(
+    version: 2,
+    ops: [
+        Settings((
+            name: "main",
+            resolution: Some((1280, 720)),
+            spp: Some(64),
+            // The reference cap; the darkening protocol sweeps --depth
+            // below it.
+            max_bounces: Some(255),
+        )),
+        Camera((
+            name: "main",
+            position: Some((0.322839, 0.0534825, 0.504299)),
+            look_at: Some((-0.140808, -0.162727, -0.354936)),
+            up: Some((0.0355799, 0.964444, -0.261882)),
+            vfov_degrees: Some(30.0),
+        )),
+        Environment((
+            name: "sky",
+            path: Some(Some("../crates/cenote/assets/kloofendal_puresky.exr")),
+            tint: Some((0.05, 0.05, 0.05)),
+        )),
+
+        Mesh((
+            name: "head",
+            source: Some(Ply(path: "corpus/head-capped.ply")),
+        )),
+        Mesh((
+            name: "plane",
+            source: Some(Inline(
+                positions: [
+                    (-1.0, 0.0, -1.0), (-1.0, 0.0, 1.0), (1.0, 0.0, 1.0), (1.0, 0.0, -1.0),
+                ],
+                normals: Some([
+                    (0.0, 1.0, 0.0), (0.0, 1.0, 0.0), (0.0, 1.0, 0.0), (0.0, 1.0, 0.0),
+                ]),
+                uvs: Some([(0.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, 0.0)]),
+                triangles: [(0, 1, 2), (0, 2, 3)],
+            )),
+        )),
+        // The warm key, aimed at the face from camera-left; corners
+        // precomputed so no rotation transform is needed.
+        Mesh((
+            name: "key",
+            source: Some(Inline(
+                positions: [
+                    (0.2562, 0.1829, 0.4695), (0.219, 0.3171, 0.4137),
+                    (0.3438, 0.3171, 0.3305), (0.381, 0.1829, 0.3863),
+                ],
+                normals: Some([
+                    (-0.4963, -0.4467, -0.7444), (-0.4963, -0.4467, -0.7444),
+                    (-0.4963, -0.4467, -0.7444), (-0.4963, -0.4467, -0.7444),
+                ]),
+                uvs: Some([(0.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, 0.0)]),
+                triangles: [(0, 1, 2), (0, 2, 3)],
+            )),
+        )),
+
+        Material((
+            name: "skin1",
+            specular_ior: Some(1.33),
+            specular_roughness: Some(Constant(0.05)),
+            transmission_weight: Some(1.0),
+            transmission_color: Some((0.4621, 0.3499, 0.2254)),
+            transmission_depth: Some(0.001),
+            transmission_scatter: Some((0.740, 0.880, 1.010)),
+        )),
+        Material((
+            name: "table",
+            base_color: Some(Constant((0.32, 0.30, 0.28))),
+            base_diffuse_roughness: Some(0.4),
+            specular_weight: Some(0.3),
+            specular_roughness: Some(Constant(0.25)),
+        )),
+        Material((
+            name: "warm-key",
+            emission_color: Some(Constant((1.0, 0.72, 0.45))),
+            emission_luminance: Some(25.0),
+        )),
+
+        Instance((
+            name: "head",
+            mesh: Some("head"),
+            material: Some("skin1"),
+        )),
+        Instance((
+            name: "table",
+            mesh: Some("plane"),
+            material: Some("table"),
+            transforms: Some([Trs(translate: (0.0, -0.31, 0.0), scale: (2.0, 1.0, 2.0))]),
+        )),
+        Instance((
+            name: "key",
+            mesh: Some("key"),
+            material: Some("warm-key"),
+        )),
+    ],
+)

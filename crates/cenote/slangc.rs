@@ -30,13 +30,23 @@ pub const SLANGC_ARGS: &[&str] = &["-target", "spirv", "-fvk-use-entrypoint-name
 
 /// Compile `src` to SPIR-V at `dst` via the `slangc` subprocess.
 ///
+/// `defines` become `-D` flags — the measurement builds' hook (the `probes`
+/// feature passes `PROBES`), empty for every default build. Both compile
+/// paths hand their feature set through here, so an instrumented binary
+/// cannot embed uninstrumented kernels or vice versa.
+///
 /// # Errors
 ///
 /// The compiler's diagnostics if `src` doesn't compile — or, if `slangc`
 /// couldn't run at all, what went wrong launching it.
-pub fn run_slangc(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+pub fn run_slangc(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    defines: &[&str],
+) -> Result<(), String> {
     let output = std::process::Command::new("slangc")
         .args(SLANGC_ARGS)
+        .args(defines.iter().map(|name| format!("-D{name}")))
         .arg(src)
         .arg("-o")
         .arg(dst)

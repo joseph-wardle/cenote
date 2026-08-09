@@ -261,6 +261,17 @@ impl Renderer {
         self.accumulate_timed(gpu, scene, film, None).map(|_| ())
     }
 
+    /// Measurement builds only — the volume stage's scatter-event histogram,
+    /// straight from [`crate::wavefront::Wavefront::probes`].
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Gpu`] if the readback copy fails.
+    #[cfg(feature = "probes")]
+    pub fn probes(&self, gpu: &Context) -> Result<Vec<u32>> {
+        self.wavefront.probes(gpu)
+    }
+
     /// [`Renderer::accumulate`], reporting what the sample cost on the
     /// device — and, on the frames the timer resolves, what each kernel
     /// cost. Without a `timer` the submission is unchanged and the timings

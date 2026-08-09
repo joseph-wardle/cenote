@@ -32,6 +32,10 @@ serde = { version = "1.0.228", features = ["derive"] }
 # Builds `render --denoise` (the flag itself always parses, and names
 # this feature when the build lacks it).
 denoise = ["cenote/denoise"]
+# Measurement kernels: `render` also writes a `.probes.ron` sidecar with
+# the volume stage's scatter-event histogram. Never a perf build — see the
+# feature's note in crates/cenote/Cargo.toml.
+probes = ["cenote/probes"]
 
 [lints]
 workspace = true

@@ -368,7 +368,16 @@ struct VolumeQueues {
     misses: QueueAddrs,
     rays: QueueAddrs,
     shadows: QueueAddrs,
+    /// Measurement builds only: the scatter-event histogram the
+    /// instrumented volume kernel bins by bounce — see [`PROBE_BINS`].
+    #[cfg(feature = "probes")]
+    probes: vk::DeviceAddress,
 }
+
+/// One histogram bin per value the packed bounce byte can hold, so the
+/// instrumented volume kernel indexes it with the bounce unchecked.
+#[cfg(feature = "probes")]
+pub const PROBE_BINS: usize = 256;
 
 /// Push constants for the volume kernel (`shaders/shade_volume.slang`);
 /// recorded only when the scene has media. One instance per bounce — the
@@ -531,6 +540,12 @@ struct Queues {
     /// Allocated by [`ensure`] on the first wave over a scene with media
     /// and never before; the header slot always exists and stays zeroed.
     volume: OnceLock<Buffer>,
+    /// Measurement builds only: the scatter-event histogram, one `u32` bin
+    /// per bounce index, zeroed at allocation and accumulated across every
+    /// wave until read. Allocated with the volume queue — a scene without
+    /// media has no scatter events to bin.
+    #[cfg(feature = "probes")]
+    probes: OnceLock<Buffer>,
     /// The five queue addresses `shade_volume` works through, as one
     /// uploaded [`VolumeQueues`] block. Built after `volume` — it holds that
     /// buffer's address, and every other queue is created with the
@@ -577,6 +592,8 @@ impl Queues {
                 MemoryLocation::GpuOnly,
             )?,
             volume: OnceLock::new(),
+            #[cfg(feature = "probes")]
+            probes: OnceLock::new(),
             volume_block: OnceLock::new(),
         })
     }
@@ -587,6 +604,19 @@ impl Queues {
     /// first wave over a scene with media and never before.
     fn ensure_volume(&self, gpu: &Context, capacity: u64) -> Result<()> {
         ensure(&self.volume, gpu, "wavefront.queue.volume", capacity * 4)?;
+        // Uploaded zeroed rather than [`ensure`]d: the bins accumulate from
+        // zero, and `TRANSFER_SRC` is what lets the histogram come back.
+        #[cfg(feature = "probes")]
+        if self.probes.get().is_none() {
+            let buffer = gpu.upload_buffer(
+                "wavefront.probes",
+                &[0u8; PROBE_BINS * 4],
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                    | vk::BufferUsageFlags::TRANSFER_SRC,
+            )?;
+            let _ = self.probes.set(buffer);
+        }
         if self.volume_block.get().is_none() {
             let block = VolumeQueues {
                 volumes: self.volume_addresses(),
@@ -594,6 +624,12 @@ impl Queues {
                 misses: self.addresses(queue::MISS, &self.miss),
                 rays: self.addresses(queue::RAY, &self.ray),
                 shadows: self.addresses(queue::SHADOW, &self.shadow),
+                #[cfg(feature = "probes")]
+                probes: self
+                    .probes
+                    .get()
+                    .expect("allocated just above")
+                    .device_address(),
             };
             let buffer = gpu.upload_buffer(
                 "wavefront.queue.volume_block",
@@ -912,6 +948,23 @@ impl Wavefront {
         let mut passes = self.record_wave(scene, radiance, aovs, pixels, &params, media);
         passes.extend_from_slice(trailing);
         gpu.submit_passes_timed(&passes, timer)
+    }
+
+    /// Measurement builds only: the volume stage's scatter-event histogram
+    /// — events binned by the bounce they landed on, accumulated across
+    /// every wave since the first media scene allocated it. All zeros if no
+    /// media scene has run. Safe to read between waves: every submission
+    /// this engine makes blocks on its fence.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Gpu`] if the readback copy fails.
+    #[cfg(feature = "probes")]
+    pub fn probes(&self, gpu: &Context) -> Result<Vec<u32>> {
+        match self.queues.probes.get() {
+            Some(buffer) => Ok(bytemuck::pod_collect_to_vec(&gpu.download_buffer(buffer)?)),
+            None => Ok(vec![0; PROBE_BINS]),
+        }
     }
 
     /// Every stage's push constants for one wave, built up front so the

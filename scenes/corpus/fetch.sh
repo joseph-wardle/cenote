@@ -19,7 +19,7 @@ SOURCES="$(cd "$(dirname "$0")" && pwd)/sources"
 BITTERLI="bathroom coffee cornell-box glass-of-water kitchen spaceship
           teapot-full veach-ajar veach-bidir veach-mis volumetric-caustic
           water-caustic"
-PBRT_V4="bistro bmw-m6 crown kroken sanmiguel watercolor zero-day"
+PBRT_V4="bistro bmw-m6 crown head kroken sanmiguel watercolor zero-day"
 
 bitterli() { # <slug>
     dir="$SOURCES/bitterli/$1"

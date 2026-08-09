@@ -383,6 +383,8 @@ fn render_frame(
             started.elapsed().as_millis()
         );
     }
+    #[cfg(feature = "probes")]
+    write_probes(gpu, renderer, film, &args.out)?;
     if !args.no_stats {
         let report = recorder.report(
             gpu.device_summary().to_owned(),
@@ -398,6 +400,59 @@ fn render_frame(
             .with_context(|| format!("writing {}", sidecar.display()))?;
         println!("wrote {}", sidecar.display());
     }
+    Ok(())
+}
+
+/// Measurement builds only: the volume stage's scatter-event histogram as
+/// a `.probes.ron` sidecar beside the image, plus a one-line console read.
+/// The mean is per *camera path* — width × height × spp — so runs at
+/// different sizes or sample counts still compare.
+#[cfg(feature = "probes")]
+fn write_probes(
+    gpu: &cenote::gpu::Context,
+    renderer: &cenote::render::Renderer,
+    film: &cenote::render::Film,
+    out: &Path,
+) -> anyhow::Result<()> {
+    #[derive(serde::Serialize)]
+    struct ProbeReport {
+        /// Scatter events binned by the bounce they landed on, trailing
+        /// zeros trimmed.
+        events_by_bounce: Vec<u32>,
+        total_events: u64,
+        /// Camera paths traced: width × height × spp.
+        paths: u64,
+        mean_events_per_path: f64,
+    }
+    let mut events = renderer.probes(gpu)?;
+    let total_events: u64 = events.iter().map(|&events| u64::from(events)).sum();
+    while events.last() == Some(&0) {
+        events.pop();
+    }
+    let paths =
+        u64::from(film.width()) * u64::from(film.height()) * u64::from(film.samples());
+    // Precision loss starts past 2^52 events — the u32 bins overflow long
+    // before that matters.
+    #[expect(clippy::cast_precision_loss, reason = "far below f64's integer range")]
+    let mean_events_per_path = total_events as f64 / paths as f64;
+    let report = ProbeReport {
+        events_by_bounce: events,
+        total_events,
+        paths,
+        mean_events_per_path,
+    };
+    let sidecar = out.with_extension("probes.ron");
+    std::fs::write(
+        &sidecar,
+        ron::ser::to_string_pretty(&report, ron::ser::PrettyConfig::default())?,
+    )
+    .with_context(|| format!("writing {}", sidecar.display()))?;
+    println!(
+        "wrote {} ({} scatter events, {:.2} per path)",
+        sidecar.display(),
+        report.total_events,
+        report.mean_events_per_path
+    );
     Ok(())
 }
 

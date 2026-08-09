@@ -28,10 +28,17 @@ fn main() {
         println!("cargo::rustc-link-arg=-lstdc++");
     }
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
+    // The probes feature instruments the kernels themselves; cargo already
+    // rebuilds on a feature change, so no rerun-if is needed for it.
+    let defines: &[&str] = if env::var_os("CARGO_FEATURE_PROBES").is_some() {
+        &["PROBES"]
+    } else {
+        &[]
+    };
     for kernel in KERNELS {
         let src = format!("shaders/{kernel}.slang");
         let dst = out_dir.join(format!("{kernel}.spv"));
-        if let Err(message) = run_slangc(Path::new(&src), &dst) {
+        if let Err(message) = run_slangc(Path::new(&src), &dst, defines) {
             panic!("slangc failed for {src}:\n{message}");
         }
     }

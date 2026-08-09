@@ -48,6 +48,13 @@ thiserror = "2.0.18"
 # toggle. Off by default because building it needs the OpenImageDenoise
 # library installed — see the README's "Denoising" section.
 denoise = ["dep:oidn"]
+# Measurement kernels: compiles the shaders with -DPROBES, which adds the
+# volume stage's scatter-event histogram (events by bounce, read back after
+# a render). Perf numbers come from default builds — an instrumented build
+# answers "how long are the walks", never "how fast is the kernel". Off by
+# default; the default build's SPIR-V and behavior are identical to a tree
+# without this feature.
+probes = []
 
 [lints]
 workspace = true
