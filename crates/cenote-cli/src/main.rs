@@ -427,6 +427,24 @@ fn write_probes(
         /// Walks killed at the walk cap — the gate that must read zero on
         /// production materials.
         walk_cap_kills: u32,
+        /// Walks that ran out of geometry: the entry mesh is an open
+        /// shell, and the energy left through the hole. A property of the
+        /// asset, not the material — the gate a curated mesh must read
+        /// zero on.
+        walk_leak_deaths: u32,
+        /// Subsurface draws the sidedness guard turned away before the
+        /// walk began, and walks whose exit it turned away at the
+        /// boundary. Both are silent deaths in the image, and both are a
+        /// property of the *mesh* — how far its interpolated normals have
+        /// drifted from the triangles beneath them — rather than of the
+        /// material. Counted apart because they leave the same dark pixel
+        /// and only the split says which end was at fault.
+        ///
+        /// Counts, not energy: the two coincide only where throughput is
+        /// 1, which is the white-furnace diagnostic these were built for.
+        /// Elsewhere a count bounds the loss without measuring it.
+        walk_entry_rejects: u32,
+        walk_exit_rejects: u32,
         total_walk_events: u64,
         /// Camera paths traced: width × height × spp.
         paths: u64,
@@ -435,9 +453,17 @@ fn write_probes(
     }
     let bins = renderer.probes(gpu)?;
     let split = cenote::wavefront::PROBE_VOLUME_BINS;
+    // The two rejection counters sit above both stages' halves rather
+    // than inside either, so they come off first and the halves below
+    // keep the bin-for-bin meaning they have always had.
+    let walk_entry_rejects = bins[cenote::wavefront::PROBE_ENTRY_REJECT_BIN];
+    let walk_exit_rejects = bins[cenote::wavefront::PROBE_EXIT_REJECT_BIN];
     let mut events = bins[..split].to_vec();
-    let mut walk_exits = bins[split..].to_vec();
+    let mut walk_exits = bins[split..cenote::wavefront::PROBE_ENTRY_REJECT_BIN].to_vec();
+    // The two exitless deaths sit on top of the exit lengths, cap kills
+    // last — popped in that order, so what remains is exits alone.
     let walk_cap_kills = walk_exits.pop().unwrap_or(0);
+    let walk_leak_deaths = walk_exits.pop().unwrap_or(0);
     let total_events: u64 = events.iter().map(|&events| u64::from(events)).sum();
     let total_walk_events: u64 = walk_exits
         .iter()
@@ -460,6 +486,9 @@ fn write_probes(
         total_events,
         walk_exits_by_events: walk_exits,
         walk_cap_kills,
+        walk_leak_deaths,
+        walk_entry_rejects,
+        walk_exit_rejects,
         total_walk_events,
         paths,
         mean_events_per_path: total_events as f64 / paths as f64,
@@ -473,13 +502,16 @@ fn write_probes(
     .with_context(|| format!("writing {}", sidecar.display()))?;
     println!(
         "wrote {} ({} scatter events, {:.2} per path; {} walk events, {:.2} per path, \
-         {} cap kills)",
+         {} cap kills, {} leaks, {} entry rejects, {} exit rejects)",
         sidecar.display(),
         report.total_events,
         report.mean_events_per_path,
         report.total_walk_events,
         report.mean_walk_events_per_path,
-        report.walk_cap_kills
+        report.walk_cap_kills,
+        report.walk_leak_deaths,
+        report.walk_entry_rejects,
+        report.walk_exit_rejects
     );
     Ok(())
 }

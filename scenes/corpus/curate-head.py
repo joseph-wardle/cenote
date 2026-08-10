@@ -6,11 +6,23 @@ header) is an open face scan: 19 boundary loops, from the whole back of
 the scalp down to eye sockets and mouth. A membership-counted interior
 cannot tolerate that — a path that enters through the face and finds no
 back surface stays "inside" forever — so this script closes every loop
-with a centroid fan: the front stays untouched, the crude flat caps sit
-where no driver-scene camera looks. Every vertex property is carried
+with a centroid fan: the front stays untouched, and the caps are crude
+flat lids on surfaces the scan never had. One does show: head.ron drops
+the source's cropwindow, and full-frame the chest lid catches the sky as
+a cool rim along the silhouette. Every vertex property is carried
 through (the albedo texture's UVs matter to rung 9e); a cap centroid
 takes the mean of its loop's properties, except its normal, which is
-computed from the loop's winding.
+computed from the loop's winding. The lids are then unwelded from the
+shell so they shade by their own flat normal rather than by the scan's
+outward one — a hard edge, and a large correction rather than a nicety:
+the subsurface entry and exit reject any draw crossing the geometric
+plane, so a welded rim was discarding about a third of them per lid
+facet. Measured on the mesh, before and after, in the header comment.
+
+Deepening the lids into domes was tried and measured: leak counts move
+non-monotonically with cap depth, so the residual leaks are the scan's
+own thin folds — the eyelid creases — and not a wedge at a cap rim.
+Flat is what the evidence supports.
 
 The output is a *derived asset* (untracked, like the resampled corpus
 skies): only this script is committed. `./fetch.sh head` first.
@@ -81,11 +93,12 @@ def main():
             v = nxt[v]
         loops.append(loop)
 
+    cap_start = len(faces)
     capped = list(faces)
+    caps = []
     for loop in loops:
         centroid = [sum(verts[v][i] for v in loop) / len(loop) for i in range(stride)]
-        # The cap's normal: the loop's own winding, summed — good enough
-        # for shading a surface the driver cameras never see.
+        # The cap's normal: the loop's own winding, summed.
         normal = [0.0, 0.0, 0.0]
         for i, a in enumerate(loop):
             b = loop[(i + 1) % len(loop)]
@@ -103,6 +116,7 @@ def main():
         for i, a in enumerate(loop):
             b = loop[(i + 1) % len(loop)]
             capped.append((b, a, center))
+        caps.append((loop, center, list(centroid[3:6])))
 
     check = Counter()
     for a, b, c in capped:
@@ -110,6 +124,57 @@ def main():
         check[(b, c)] += 1
         check[(c, a)] += 1
     assert all(check.get((b, a), 0) == 1 for (a, b) in check), "cap failed"
+
+    # Now split the lids' shading off the shell's, which the closure test
+    # above had to see welded to be worth anything. A rim vertex carries
+    # the scan's outward normal, and lending it to a flat lid leaves the
+    # lid's own triangles shaded by a normal up to 90 degrees off their
+    # geometry. That is not cosmetic here: cenote draws the subsurface
+    # entry and exit as cosine lobes about the shading normal and discards
+    # any draw landing on the far side of the geometric plane
+    # (openpbr.slang, shade_subsurface.slang), so a welded fan threw away
+    # ~32% of the draws at each end of the walk, varying per facet, with
+    # steps up to 75% between neighbours. Each fan triangle gets its own
+    # three vertices instead: same positions, same UVs, its own facet
+    # normal. Flat is the honest shading for a lid the scan never had —
+    # there is no smooth surface underneath for a soft normal to stand in
+    # for. The surface is untouched and still closed; only the shading
+    # attributes split, which is what a hard edge is.
+    capped = capped[:cap_start]
+    dupes = []
+    for loop, center, lid in caps:
+        for i, a in enumerate(loop):
+            b = loop[(i + 1) % len(loop)]
+            tri = (b, a, center)
+            # The fan's own facet normal, not the lid's average: a boundary
+            # loop is a 3D curve, so a centroid fan is not planar, and one
+            # normal for the whole lid still left 45 degrees of disagreement.
+            # Oriented to the lid so the mesh stays coherently outward.
+            p = [verts[v][0:3] for v in tri]
+            e1 = [p[1][j] - p[0][j] for j in range(3)]
+            e2 = [p[2][j] - p[0][j] for j in range(3)]
+            n = [e1[1] * e2[2] - e1[2] * e2[1],
+                 e1[2] * e2[0] - e1[0] * e2[2],
+                 e1[0] * e2[1] - e1[1] * e2[0]]
+            length = max(sum(c * c for c in n) ** 0.5, 1e-20)
+            n = [c / length for c in n]
+            if sum(n[j] * lid[j] for j in range(3)) < 0.0:
+                n = [-c for c in n]
+            fresh = []
+            for v in tri:
+                copy = list(verts[v])
+                copy[3:6] = n
+                fresh.append(len(verts))
+                dupes.append((v, len(verts)))
+                verts.append(copy)
+            capped.append(tuple(fresh))
+
+    # The unweld is a shading change and nothing else: same triangle count,
+    # and every copy stands exactly where its original stands.
+    assert len(capped) == cap_start + sum(len(loop) for loop, _, _ in caps), \
+        "unweld changed the triangulation"
+    assert all(verts[v][0:3] == verts[w][0:3] for v, w in dupes), \
+        "unweld moved a vertex"
 
     with open(OUT, "wb") as out:
         out.write(b"ply\nformat binary_little_endian 1.0\n")

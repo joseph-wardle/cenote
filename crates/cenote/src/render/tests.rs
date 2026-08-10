@@ -100,6 +100,20 @@ fn bsdf_only_sum_deep(
     samples: u32,
     bounces: u32,
 ) -> Vec<f32> {
+    bsdf_only_trace(gpu, scene, size, samples, bounces).1
+}
+
+/// The engine under [`bsdf_only_sum_deep`], handing back the wavefront that
+/// traced the sums as well: the probe gates read their histogram off it,
+/// and a wavefront built per call is what makes the counts this scene's
+/// alone — the bins accumulate from allocation until they are read.
+fn bsdf_only_trace(
+    gpu: &Context,
+    scene: &Scene,
+    size: u32,
+    samples: u32,
+    bounces: u32,
+) -> (Wavefront, Vec<f32>) {
     let wavefront = Wavefront::new(
         gpu,
         &Kernels::embedded(),
@@ -128,7 +142,7 @@ fn bsdf_only_sum_deep(
             *total += value;
         }
     }
-    sum
+    (wavefront, sum)
 }
 
 /// Probe the demo image's invariants. Every pixel finishes exactly
@@ -475,6 +489,114 @@ fn subsurface_walks_to_the_authored_albedo() {
             (mean - expected).abs() < 0.03 * sky,
             "channel {channel} reflected {mean} for an authored {expected}"
         );
+    }
+}
+
+/// The walk's histogram, split the way the `.probes.ron` sidecar splits it:
+/// exit lengths, then the two deaths that never reach an exit.
+#[cfg(feature = "probes")]
+fn walk_probes(gpu: &Context, wavefront: &Wavefront) -> (Vec<u32>, u32, u32) {
+    let bins = wavefront.probes(gpu).expect("probes");
+    let walk = &bins[crate::wavefront::PROBE_VOLUME_BINS..];
+    let (exits, deaths) = walk.split_at(walk.len() - 2);
+    (exits.to_vec(), deaths[0], deaths[1])
+}
+
+/// The walk cap's contract, measured at the top of the band it claims to
+/// be exact over. `WALK_CAP` bounds the interior loop unconditionally, so
+/// what a production proof has to establish is not that the bound exists
+/// but that nothing reaches it: at a single-scatter albedo of 0.96 — just
+/// above the densest channel of Jensen's measured skin, 0.959 — no walk
+/// may be killed by it.
+///
+/// The sphere is the harshest geometry the claim has to survive, ~100 mean
+/// free paths across, so walks end by absorption and roulette rather than
+/// by stumbling on the boundary — which is what lets a walk get long at
+/// all. The authored color that inverts to α = 0.96 is 0.630271: the fit's
+/// C² term cancels against the radicand's, leaving the inverse *linear* in
+/// C, so the constant is exact rather than searched for.
+/// `scene::subsurface_inverts_the_multiple_scatter_albedo` pins it beside
+/// the fit it inverts.
+///
+/// Above the band nothing here claims zero, and the driver captures record
+/// rather than assert: 9-0 measured 69 kills per 1.18M paths at α = 0.98
+/// and 6870 at α = 0.995, worth 0.15% and 2.4% of darkening at depth. The
+/// α = 0.995 arm below is here so the zero above is evidence and not a
+/// counter that never fires — a stress regime the same geometry *does*
+/// drive into the cap. Should a later rung shorten deep walks enough to
+/// empty it (Dwivedi guiding would), that arm failing is the improvement
+/// announcing itself: re-pin the stress albedo, don't delete the arm.
+#[cfg(feature = "probes")]
+#[test]
+fn subsurface_cap_never_fires_at_production_albedo() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    // The colors that invert to α = 0.96 and α = 0.995, both pinned beside
+    // the fit in `scene::subsurface_inverts_the_multiple_scatter_albedo`.
+    for (color, alpha, exact) in [(0.630_271_f32, 0.96, true), (0.849_846, 0.995, false)] {
+        let scene = subsurface_furnace_scene(&gpu, walk_material(Vec3::splat(color), 0.02));
+        let (size, samples) = (64, 256);
+        let (wavefront, _) =
+            bsdf_only_trace(&gpu, &scene, size, samples, Wavefront::DEFAULT_MAX_BOUNCES);
+        let (exits, leaks, kills) = walk_probes(&gpu, &wavefront);
+        let walked: u64 = exits.iter().map(|&walks| u64::from(walks)).sum();
+        let paths = u64::from(size) * u64::from(size) * u64::from(samples);
+        assert_eq!(leaks, 0, "a closed convex shell cannot leak");
+        // The sphere covers about two thirds of the frame and is convex,
+        // so one walk per covered path: a floor, not a count, but it is
+        // the sample size the zero is evidence over — a gate that walked
+        // nothing would pass it silently.
+        assert!(
+            walked > paths / 2,
+            "only {walked} of {paths} paths walked at α = {alpha} — too few for the \
+             count to mean anything"
+        );
+        assert_eq!(
+            kills == 0,
+            exact,
+            "the walk cap fired {kills} times over {walked} walks at α = {alpha}"
+        );
+    }
+}
+
+/// The leak counter's own oracle. A leak is the one walk death that is a
+/// property of the *asset* rather than the material, so the head's
+/// zero-leak gate is only worth anything if the counter fires when a shell
+/// really is open — otherwise a mesh that never leaks and a probe that
+/// never counts read identically.
+///
+/// A plane is that open shell: the entry drives the path under a surface
+/// with no far side, so every walk runs out of geometry on its first leg,
+/// exits never happen, and the frame is exactly black — the leaked energy
+/// is a death, not a contribution.
+#[cfg(feature = "probes")]
+#[test]
+fn subsurface_leaks_are_counted_on_an_open_shell() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let scene = furnace_scene(
+        &gpu,
+        walk_material(Vec3::splat(0.8), 0.02),
+        Vec3::ZERO,
+        1.0,
+        None,
+    );
+    let (size, samples) = (32, 8);
+    let (wavefront, sum) =
+        bsdf_only_trace(&gpu, &scene, size, samples, Wavefront::DEFAULT_MAX_BOUNCES);
+    let (exits, leaks, kills) = walk_probes(&gpu, &wavefront);
+    let paths = size * size * samples;
+    assert_eq!(
+        (leaks, kills, exits.iter().sum::<u32>()),
+        (paths, 0, 0),
+        "every walk under an open shell leaks, and none of them exits"
+    );
+    for chunk in sum.chunks_exact(4) {
+        for channel in &chunk[..3] {
+            assert_eq!(channel.to_bits(), 0, "leaked energy reached the film");
+        }
     }
 }
 

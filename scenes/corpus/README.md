@@ -3,8 +3,8 @@
 The scenes the rendering literature measures on, as first-class cenote
 `.ron` files — curated by hand after a one-time `cenote-cli import`
 bootstrap, each RON's header telling its own story: provenance, license,
-and every knowing degradation with the feature that unlocks it. All 19 are
-here; 18 render, and `volumetric-caustic` waits as a documented placeholder
+and every knowing degradation with the feature that unlocks it. All 20 are
+here; 19 render, and `volumetric-caustic` waits as a documented placeholder
 until volumes exist.
 
 Sources are **not** in git (~8.5 GB): `./fetch.sh` materializes them into
@@ -18,10 +18,10 @@ cargo run --release -p cenote-viewer -- scenes/corpus/veach-ajar.ron   # or
 cargo run --release -p cenote-cli -- render scenes/corpus/veach-ajar.ron --out ajar.exr
 ```
 
-Seven scenes light themselves through a **derived sky** beside their RON
+Eight scenes light themselves through a **derived sky** beside their RON
 (`spaceship-sky.exr`, `teapot-full-sky.exr`, `bmw-m6-sky.exr`,
 `bistro-sky.exr`, `kroken-sky.exr`, `watercolor-sky.exr`,
-`sanmiguel-sky.exr`) —
+`sanmiguel-sky.exr`, `head-sky.exr`) —
 import-generated, gitignored like the sources. To (re)generate one,
 re-run the bootstrap
 import into scratch — never over the curated RON — and keep the sky it
@@ -31,6 +31,15 @@ writes beside its `--out`:
 cargo run --release -p cenote-cli -- import \
     sources/bitterli/<name>/scene-v4.pbrt --out /tmp/<name>.ron
 mv /tmp/<name>-sky.exr scenes/corpus/
+```
+
+`head` needs one derived asset beyond its sky. Its source is an open face
+scan, and a subsurface walk needs a closed interior to leave through, so
+`curate-head.py` caps the scan's 19 boundary loops into a gitignored
+`head-capped.ply` — the script is what the repo carries:
+
+```sh
+./fetch.sh head && python3 curate-head.py
 ```
 
 Every scene's own RON header repeats its provenance and gaps; this table is the
@@ -57,4 +66,5 @@ the equal-axis parameters every corpus scene uses, so it is not a gap anywhere.
 | bistro | pbrt-v4-scenes | CC BY 4.0 (Amazon Lumberyard, ORCA) | shape-alpha foliage (243 masks → 53 cutout materials); coateddiffuse is the dominant divergence — pbrt's simulated coat darkens ~32% vs OpenPBR's 20% (both-degraded pair agrees to 0.051 clamped); film iso ×1.1 + maxcomponentvalue dropped; CuZn curated to brass F0 |
 | kroken | pbrt-v4-scenes | CC-BY-ND 2.0 (Angelo Ferretti) — **RON not committed**, `curate-kroken.py` regenerates it locally | planar texture mappings ×14 + UV affine ×4 sample authored UVs (books/magazines; texture mapping modes); displacement + diffusetransmission dropped; red-glass media carry the source σ exactly (σ_t (0.8, 10, 10), σ_s (0.4, 5, 5), isotropic); pillow `mix` baked to a dots texture; env portal dropped (full dome vs pbrt's window-restricted domain); **alpha-0 invisible sun lands at half strength — open renderer bug, see the TODO in `shaders/nee.slang`**; coateddiffuse class (bistro) |
 | watercolor | pbrt-v4-scenes | CC-BY-ND 2.0 (Angelo Ferretti) — **RON not committed**, `curate-watercolor.py` regenerates it (+ five bakes) locally | mapping modes ×14 (cylindrical/planar position projection) sample authored UVs, so wall art scales wrong; six `mix` materials curated to arm-blends, walnut/rug/concrete to AO bakes, water medium carries the source σ exactly (σ_t (0.48, 0.88, 0.4), σ_s (0.24, 0.44, 0.2), isotropic), splatter decals to pre-inverted cutout masks; env portals dropped (full dome vs two window-restricted skylights — the dominant gap, kroken's class); diffusetransmission + displacement dropped; coateddiffuse class |
-| sanmiguel | pbrt-v4-scenes | per repo README (Guillermo M. Leal Llaguno) | 242 alpha foliage shapes → 97 cutout materials via shape-alpha; displacement ×64 + diffusetransmission ×7 (plant leaves) + textured coat/roughness ×4 dropped (documented classes); env sky derived like the other six; film cropwindow + motion-blur shutter dropped, so the comparison renders full-frame on both sides |
+| sanmiguel | pbrt-v4-scenes | per repo README (Guillermo M. Leal Llaguno) | 242 alpha foliage shapes → 97 cutout materials via shape-alpha; displacement ×64 + diffusetransmission ×7 (plant leaves) + textured coat/roughness ×4 dropped (documented classes); env sky derived like the other seven; film cropwindow + motion-blur shutter dropped, so the comparison renders full-frame on both sides |
+| head | pbrt-v4-scenes | CC-BY (Infinite Realities Inc.) | **derived mesh**, `curate-head.py` caps the open face scan (19 boundary loops) — the walk needs a closed interior, and 9.7e-7 of walks still leak through the scan's own thin folds at the eyelids; the albedo texture is flattened to its linear mean (0.451, 0.337, 0.277) — the dominant divergence, unlock = subsurface textures; film iso 200 dropped (zero-day class) and cropwindow dropped (sanmiguel class), which is what puts the crude chest cap in frame |

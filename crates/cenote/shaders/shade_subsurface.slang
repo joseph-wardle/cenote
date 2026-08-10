@@ -51,10 +51,17 @@ static const uint WALK_CAP = 256;
 
 #ifdef PROBES
 // The walk's histogram bins sit above the volume stage's 256 — walk
-// lengths at exit, cap kills in the last bin. See `PROBE_BINS` in
-// `wavefront.rs`, whose layout these mirror.
+// lengths at exit below, and the two ways a walk ends without one on
+// top: leaks in the second-to-last bin, cap kills in the last. See
+// `PROBE_BINS` in `wavefront.rs`, whose layout these mirror.
 static const uint PROBE_WALK_BASE = 256;
+static const uint PROBE_WALK_LEAK_BIN = 510;
 static const uint PROBE_WALK_CAP_BIN = 511;
+// Appended above both halves rather than carved out of the exit lengths
+// — `PROBE_ENTRY_REJECT_BIN` and `PROBE_EXIT_REJECT_BIN` in wavefront.rs,
+// whose comment carries the reasoning. This stage owns the second: a walk
+// that reached the boundary and drew an exit the geometric plane refused.
+static const uint PROBE_EXIT_REJECT_BIN = 513;
 #endif
 
 struct Params {
@@ -146,6 +153,13 @@ void shade_subsurface(uint3 tid: SV_DispatchThreadID) {
     for (;;) {
         if (!traceLeg(origin, direction, instance, exit, distance)) {
             // An open shell: the energy leaks — a death, never a loop.
+            // Counted, because a leak says something about the *mesh*
+            // rather than the material — a shell left open, or one whose
+            // thin folds a leg can slip past — and silence alone cannot
+            // tell an airtight shell from one nothing ever tested.
+#ifdef PROBES
+            params.probes[PROBE_WALK_LEAK_BIN].add(1);
+#endif
             params.radiance[pixel] += float4(0.0, 0.0, 0.0, 1.0);
             return;
         }
@@ -185,7 +199,7 @@ void shade_subsurface(uint3 tid: SV_DispatchThreadID) {
     }
 
 #ifdef PROBES
-    params.probes[min(PROBE_WALK_BASE + events, PROBE_WALK_CAP_BIN - 1)].add(1);
+    params.probes[min(PROBE_WALK_BASE + events, PROBE_WALK_LEAK_BIN - 1)].add(1);
 #endif
     if (!any(throughput > 0.0)) {
         params.radiance[pixel] += float4(0.0, 0.0, 0.0, 1.0);
@@ -226,6 +240,15 @@ void shade_subsurface(uint3 tid: SV_DispatchThreadID) {
         walkUniform2(pixel, params.sampleIndex, bounce, events, 2)).xyz;
     let wiWorld = frame.toWorld(local);
     if (local.z <= 0.0 || dot(wiWorld, spawn.normal) >= 0.0) {
+        // Counted, for the same reason leaks are: this is a death with no
+        // trace in the image but the pixel's terminal alpha, and the
+        // rate is a property of the *mesh* — how far the interpolated
+        // normal has drifted from the triangle under it — rather than of
+        // the material. Silence cannot tell a mesh that never rejects
+        // from one nothing ever asked.
+#ifdef PROBES
+        params.probes[PROBE_EXIT_REJECT_BIN].add(1);
+#endif
         params.radiance[pixel] += float4(0.0, 0.0, 0.0, 1.0);
         return;
     }

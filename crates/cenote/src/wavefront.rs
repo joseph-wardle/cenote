@@ -364,6 +364,15 @@ struct AuxQueues {
     /// walk queue — safe because a scene without one has `wSubsurface` 0
     /// everywhere, and the branch that would push never runs.
     walks: QueueAddrs,
+    /// Measurement builds only: the shared probes histogram, for the one
+    /// bin the surface stage owns — subsurface entries the sidedness guard
+    /// turned away (see [`PROBE_ENTRY_REJECT_BIN`]). It rides here for the
+    /// same reason the queues above do: `ShadeSurfaceParams` already sits
+    /// at Vulkan's guaranteed 128 push-constant bytes, so an address in
+    /// the block costs nothing where an address in the block's *pointer*
+    /// would cost more than the guarantee.
+    #[cfg(feature = "probes")]
+    probes: vk::DeviceAddress,
 }
 
 /// Pack the shading stages' `packed`, mirrored by the unpack at the top of
@@ -402,16 +411,44 @@ struct VolumeQueues {
 /// probes histogram ends and the subsurface walk's begins. The volume
 /// stage bins scatter events by bounce in `[0, PROBE_VOLUME_BINS)` — one
 /// bin per value the packed bounce byte can hold, indexed unchecked — and
-/// the walk bins walk lengths at exit above it, cap kills in the last bin
+/// the walk bins walk lengths at exit above it, with its two exitless
+/// deaths on top: leaks in the second-to-last bin, cap kills in the last
 /// (`PROBE_WALK_*` in `shade_subsurface.slang` mirror this split).
 #[cfg(feature = "probes")]
 pub const PROBE_VOLUME_BINS: usize = 256;
 
-/// The whole histogram: both stages side by side. A path scatters at most
-/// once per bounce and walks at most once per bounce, so a `u32` bin
-/// cannot overflow short of 2^32 camera paths in one accumulation.
+/// Where the sidedness-rejection counters sit: appended above both
+/// stages' halves rather than carved out of the walk's exit lengths,
+/// which would move the length every deep walk aggregates at — and skin,
+/// at 6870 cap kills, walks deep enough to notice. Appending leaves every
+/// existing bin's value untouched.
+///
+/// The two are counted apart because a walk that never began and one that
+/// could not leave are the same dark pixel, and telling them apart is the
+/// whole point: `PROBE_ENTRY_REJECT_BIN` counts subsurface draws whose
+/// entry direction failed `scatterExitsSurface` in `shade_surface.slang`,
+/// `PROBE_EXIT_REJECT_BIN` counts walks whose cosine-sampled exit failed
+/// the same test at the boundary in `shade_subsurface.slang`.
+///
+/// These are counts, not energy. The two coincide only where throughput
+/// is 1 — which is exactly the white-furnace diagnostic they were built
+/// for; anywhere else a count bounds the loss without measuring it. A
+/// throughput-weighted version would need float atomics and would stop
+/// being bit-comparable, and bit-comparability is what the gate rests on.
 #[cfg(feature = "probes")]
-const PROBE_BINS: usize = 2 * PROBE_VOLUME_BINS;
+pub const PROBE_ENTRY_REJECT_BIN: usize = 2 * PROBE_VOLUME_BINS;
+
+/// The walk's other end: exits the boundary's geometric plane refused,
+/// binned by `shade_subsurface.slang`. See [`PROBE_ENTRY_REJECT_BIN`].
+#[cfg(feature = "probes")]
+pub const PROBE_EXIT_REJECT_BIN: usize = PROBE_ENTRY_REJECT_BIN + 1;
+
+/// The whole histogram: both stages side by side, then the two rejection
+/// counters. A path scatters at most once per bounce and walks at most
+/// once per bounce, so a `u32` bin cannot overflow short of 2^32 camera
+/// paths in one accumulation.
+#[cfg(feature = "probes")]
+const PROBE_BINS: usize = PROBE_EXIT_REJECT_BIN + 1;
 
 /// Push constants for the volume kernel (`shaders/shade_volume.slang`);
 /// recorded only when the scene has media. One instance per bounce — the
@@ -614,10 +651,12 @@ struct Queues {
     /// queue.
     walk_shadow: OnceLock<Buffer>,
     /// Measurement builds only: the [`PROBE_BINS`] histogram, zeroed at
-    /// allocation and accumulated across every wave until read. Allocated
-    /// with whichever instrumented stage first runs — volume or walk.
+    /// allocation and accumulated across every wave until read. Built with
+    /// the wavefront rather than earned like the queues above it: the
+    /// surface stage bins into it, and the surface stage runs over every
+    /// scene, so there is no residency for it to wait on. Two kilobytes.
     #[cfg(feature = "probes")]
-    probes: OnceLock<Buffer>,
+    probes: Buffer,
     /// The five queue addresses `shade_volume` works through, as one
     /// uploaded [`VolumeQueues`] block. Built after `volume` — it holds that
     /// buffer's address, and every other queue is created with the
@@ -652,6 +691,14 @@ impl Queues {
             storage,
             MemoryLocation::GpuOnly,
         )?;
+        // Zeroed rather than [`ensure`]d — the bins accumulate from zero,
+        // and `TRANSFER_SRC` is what lets the histogram come back.
+        #[cfg(feature = "probes")]
+        let probes = gpu.upload_buffer(
+            "wavefront.probes",
+            &[0u8; PROBE_BINS * 4],
+            storage | vk::BufferUsageFlags::TRANSFER_SRC,
+        )?;
         // The default aux block: the shadow queue every scene needs, and a
         // walk queue whose entries address is null until a subsurface
         // scene earns the real one (see the field docs).
@@ -666,6 +713,8 @@ impl Queues {
                     state: headers.device_address() + queue::WALK * QUEUE_HEADER_SIZE,
                     entries: 0,
                 },
+                #[cfg(feature = "probes")]
+                probes: probes.device_address(),
             }),
             storage,
         )?;
@@ -694,29 +743,11 @@ impl Queues {
             walk: OnceLock::new(),
             walk_shadow: OnceLock::new(),
             #[cfg(feature = "probes")]
-            probes: OnceLock::new(),
+            probes,
             volume_block: OnceLock::new(),
             aux_block,
             aux_block_walks: OnceLock::new(),
         })
-    }
-
-    /// Measurement builds only: make the probes histogram exist. Uploaded
-    /// zeroed rather than [`ensure`]d — the bins accumulate from zero, and
-    /// `TRANSFER_SRC` is what lets the histogram come back.
-    #[cfg(feature = "probes")]
-    fn ensure_probes(&self, gpu: &Context) -> Result<()> {
-        if self.probes.get().is_none() {
-            let buffer = gpu.upload_buffer(
-                "wavefront.probes",
-                &[0u8; PROBE_BINS * 4],
-                vk::BufferUsageFlags::STORAGE_BUFFER
-                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-                    | vk::BufferUsageFlags::TRANSFER_SRC,
-            )?;
-            let _ = self.probes.set(buffer);
-        }
-        Ok(())
     }
 
     /// Make the walk stage's residency exist: its entry buffer and the
@@ -731,12 +762,12 @@ impl Queues {
             "wavefront.queue.walk_shadow",
             capacity * SHADOW_RAY_SIZE,
         )?;
-        #[cfg(feature = "probes")]
-        self.ensure_probes(gpu)?;
         if self.aux_block_walks.get().is_none() {
             let block = AuxQueues {
                 shadows: self.addresses(queue::SHADOW, &self.shadow),
                 walks: self.lazy_addresses(queue::WALK, &self.walk),
+                #[cfg(feature = "probes")]
+                probes: self.probes.device_address(),
             };
             let buffer = gpu.upload_buffer(
                 "wavefront.queue.aux_block_walks",
@@ -755,8 +786,6 @@ impl Queues {
     /// first wave over a scene with media and never before.
     fn ensure_volume(&self, gpu: &Context, capacity: u64) -> Result<()> {
         ensure(&self.volume, gpu, "wavefront.queue.volume", capacity * 4)?;
-        #[cfg(feature = "probes")]
-        self.ensure_probes(gpu)?;
         if self.volume_block.get().is_none() {
             let block = VolumeQueues {
                 volumes: self.lazy_addresses(queue::VOLUME, &self.volume),
@@ -765,11 +794,7 @@ impl Queues {
                 rays: self.addresses(queue::RAY, &self.ray),
                 shadows: self.addresses(queue::SHADOW, &self.shadow),
                 #[cfg(feature = "probes")]
-                probes: self
-                    .probes
-                    .get()
-                    .expect("allocated just above")
-                    .device_address(),
+                probes: self.probes.device_address(),
             };
             let buffer = gpu.upload_buffer(
                 "wavefront.queue.volume_block",
@@ -1109,10 +1134,9 @@ impl Wavefront {
     /// [`crate::Error::Gpu`] if the readback copy fails.
     #[cfg(feature = "probes")]
     pub fn probes(&self, gpu: &Context) -> Result<Vec<u32>> {
-        match self.queues.probes.get() {
-            Some(buffer) => Ok(bytemuck::pod_collect_to_vec(&gpu.download_buffer(buffer)?)),
-            None => Ok(vec![0; PROBE_BINS]),
-        }
+        Ok(bytemuck::pod_collect_to_vec(
+            &gpu.download_buffer(&self.queues.probes)?,
+        ))
     }
 
     /// Every stage's push constants for one wave, built up front so the
@@ -1279,8 +1303,6 @@ impl Wavefront {
                 probes: self
                     .queues
                     .probes
-                    .get()
-                    .expect("ensure_walk allocated the histogram")
                     .device_address(),
             })
             .collect()

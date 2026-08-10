@@ -52,6 +52,7 @@ use cenote::scene::changeset::{
 use cenote::scene::description::{
     Channel, ColorSpace, Light, MeshSource, Texturable, TextureRef, Transform, UvTransform,
 };
+use cenote::scene::multiple_scatter_color;
 use cenote::{Error, Result};
 use glam::{Mat3, Mat4, Vec3};
 
@@ -659,6 +660,23 @@ fn matrix16(numbers: &[f64]) -> Mat4 {
 fn matrix_transform(matrix: Mat4) -> Transform {
     let rows = matrix.transpose().to_cols_array_2d();
     Transform::Matrix([rows[0], rows[1], rows[2]])
+}
+
+/// What one of pbrt's interior descriptions yields: the color light walks
+/// to — absent where it was textured, and the schema's default stands —
+/// with the mean free path and its per-channel shape.
+type Interior = (Option<[f32; 3]>, f32, [f32; 3]);
+
+/// A per-channel mean free path onto `OpenPBR`'s scalar
+/// `subsurface_radius` and its per-channel scale: the longest channel takes
+/// the radius, so the shape lands in [0, 1] and a channel that travels
+/// nowhere keeps an exact zero. `None` where no channel travels at all, or
+/// where one is not a finite length — there is no interior to describe, and
+/// the caller warns rather than authoring a degenerate one.
+fn mean_free_path(mfp: [f32; 3]) -> Option<(f32, [f32; 3])> {
+    let radius = mfp.iter().copied().fold(0.0f32, f32::max);
+    (radius > 0.0 && mfp.iter().all(|channel| channel.is_finite()))
+        .then(|| (radius, mfp.map(|channel| (channel / radius).clamp(0.0, 1.0))))
 }
 
 /// Whether a transform mirrors — half of the trap-4 XOR.
@@ -1280,7 +1298,7 @@ impl Mapper {
                 );
                 patch.specular_weight = Some(0.0);
                 patch.coat_weight = Some(1.0);
-                patch.coat_ior = Some(self.dielectric_eta(directive, "")?);
+                patch.coat_ior = Some(self.dielectric_eta(directive, "", 1.5)?);
                 patch.coat_roughness = Some(self.coat_roughness(directive, "")?);
             }
             // A dielectric coat over a conductor base — the same clear coat
@@ -1295,7 +1313,7 @@ impl Mapper {
                 patch.base_color = Some(self.conductor_color(directive, "conductor.")?);
                 patch.specular_roughness = Some(self.roughness_slot(directive, "conductor.")?);
                 patch.coat_weight = Some(1.0);
-                patch.coat_ior = Some(self.dielectric_eta(directive, "interface.")?);
+                patch.coat_ior = Some(self.dielectric_eta(directive, "interface.", 1.5)?);
                 patch.coat_roughness = Some(self.coat_roughness(directive, "interface.")?);
             }
             // `metal` is pbrt-v3's name for what v4 calls `conductor`, with
@@ -1307,7 +1325,7 @@ impl Mapper {
             }
             "dielectric" | "thindielectric" => {
                 patch.transmission_weight = Some(1.0);
-                patch.specular_ior = Some(self.dielectric_eta(directive, "")?);
+                patch.specular_ior = Some(self.dielectric_eta(directive, "", 1.5)?);
                 if ty == "thindielectric" {
                     patch.geometry_thin_walled = Some(true);
                 } else {
@@ -1338,6 +1356,23 @@ impl Mapper {
                          opaque diffuse, the transmittance dropped",
                         directive.location
                     ));
+                }
+            }
+            // A BSSRDF under a dielectric interface — `OpenPBR`'s
+            // subsurface lobe under its specular one, weight 1. The
+            // interior itself is described three mutually exclusive ways,
+            // and pbrt picks between them in that order; see
+            // [`Self::subsurface_interior`].
+            "subsurface" => {
+                patch.subsurface_weight = Some(1.0);
+                patch.specular_ior = Some(self.dielectric_eta(directive, "", 1.33)?);
+                patch.specular_roughness = Some(self.roughness_slot(directive, "")?);
+                let g = params.float("g")?.unwrap_or(0.0);
+                patch.subsurface_scatter_anisotropy = Some(g);
+                if let Some((color, radius, scale)) = self.subsurface_interior(directive, g)? {
+                    patch.subsurface_color = color;
+                    patch.subsurface_radius = Some(radius);
+                    patch.subsurface_radius_scale = Some(scale);
                 }
             }
             other => {
@@ -1423,14 +1458,143 @@ impl Mapper {
         ))
     }
 
+    /// pbrt's three mutually exclusive descriptions of a subsurface
+    /// interior, tried in pbrt's own order, onto `OpenPBR`'s color, radius,
+    /// and radius scale. `None` leaves the schema defaults standing; a
+    /// `None` *color* inside a `Some` keeps the mean free path while
+    /// leaving the color alone.
+    ///
+    /// pbrt names an interior by its coefficients; `OpenPBR` names one by
+    /// the color light walks to and the distance it walks between events.
+    /// Those are the two ends of the same fit, so the conversion is closed
+    /// form: `α` = `σ_s`/`σ_t` back through [`multiple_scatter_color`] for
+    /// the color, 1/`σ_t` for the distance. `reflectance` and `mfp` are
+    /// already stated at cenote's end and need no conversion at all.
+    ///
+    /// Two things do not convert, and both warn by token name:
+    ///
+    /// * **`name`** reads a table of measured media compiled into pbrt.
+    ///   cenote carries no such table, and inventing coefficients for
+    ///   "skin1" would be a different medium wearing the name.
+    /// * **a textured `reflectance`** — `OpenPBR`'s subsurface color is a
+    ///   constant slot, so the mean free path imports and the texture is
+    ///   named as dropped.
+    ///
+    /// The divergence worth knowing about is in the `reflectance` path:
+    /// pbrt inverts a tabulated photon-beam-diffusion solution to reach the
+    /// stated reflectance, cenote inverts van de Hulst's fit. Same
+    /// quantity, different curve — so the color imports verbatim and the
+    /// two renderers still disagree slightly on what it means.
+    fn subsurface_interior(
+        &mut self,
+        directive: &Directive,
+        g: f32,
+    ) -> Result<Option<Interior>> {
+        let params = &directive.params;
+        // pbrt's `scale` multiplies whichever description wins — the
+        // coefficients directly, the mean free path as a length.
+        let scale = params.float("scale")?.unwrap_or(1.0);
+        if let Some(name) = params.string("name")? {
+            self.warn(format!(
+                "{}: subsurface \"name\" \"{name}\" names one of pbrt's measured media, \
+                 a table cenote does not carry — the interior imports at the defaults",
+                directive.location
+            ));
+            return Ok(None);
+        }
+        if let Some(reflectance) = self.color_slot(directive, "reflectance")? {
+            let color = match reflectance {
+                Texturable::Constant(color) => Some(color),
+                Texturable::Texture(_) => {
+                    self.warn(format!(
+                        "{}: subsurface \"reflectance\" cannot be textured — the mean free \
+                         path imports and the texture is dropped",
+                        directive.location
+                    ));
+                    None
+                }
+            };
+            let mfp = match self.color_slot(directive, "mfp")? {
+                Some(Texturable::Constant(mfp)) => mfp,
+                Some(Texturable::Texture(_)) => {
+                    self.warn(format!(
+                        "{}: subsurface \"mfp\" cannot be textured — pbrt's default 1 used",
+                        directive.location
+                    ));
+                    [1.0; 3]
+                }
+                None => [1.0; 3],
+            };
+            let Some((radius, shape)) = mean_free_path(mfp.map(|channel| channel * scale)) else {
+                self.warn(format!(
+                    "{}: subsurface \"mfp\" {mfp:?} is not a length — the interior imports \
+                     at the defaults",
+                    directive.location
+                ));
+                return Ok(None);
+            };
+            return Ok(Some((color, radius, shape)));
+        }
+        // pbrt's own fallback, its defaults included: a marble, in mm⁻¹.
+        let sigma_a = self.coefficients(directive, "sigma_a", [0.0011, 0.0024, 0.014])?;
+        let sigma_s = self.coefficients(directive, "sigma_s", [2.55, 3.21, 3.77])?;
+        let mut sigma_t = [0.0f32; 3];
+        let mut color = [0.0f32; 3];
+        for channel in 0..3 {
+            sigma_t[channel] = scale * (sigma_a[channel] + sigma_s[channel]);
+            // `scale` cancels out of the albedo, so it is read off the
+            // authored pair — the accurate side of the same quotient.
+            let total = sigma_a[channel] + sigma_s[channel];
+            color[channel] = multiple_scatter_color(sigma_s[channel] / total, g);
+        }
+        let Some((radius, shape)) = mean_free_path(sigma_t.map(|sigma| 1.0 / sigma)) else {
+            self.warn(format!(
+                "{}: subsurface \"sigma_a\" + \"sigma_s\" extinguishes nothing — the \
+                 interior imports at the defaults",
+                directive.location
+            ));
+            return Ok(None);
+        };
+        Ok(Some((Some(color), radius, shape)))
+    }
+
+    /// A per-channel extinction or scattering coefficient: RGB, a
+    /// broadcast float, or pbrt's default where the slot is absent. A
+    /// named or tabulated spectrum warns and takes the default — the
+    /// coefficients are the one place where guessing a curve would change
+    /// the medium rather than the shading.
+    fn coefficients(
+        &mut self,
+        directive: &Directive,
+        name: &str,
+        default: [f32; 3],
+    ) -> Result<[f32; 3]> {
+        let Some(param) = directive
+            .params
+            .take(name, &["rgb", "color", "float", "spectrum"])?
+        else {
+            return Ok(default);
+        };
+        if matches!(param.ty.as_str(), "rgb" | "color" | "float") {
+            return param.as_rgb_broadcast();
+        }
+        self.warn(format!(
+            "{}: a spectral \"{name}\" is not supported — pbrt's default {default:?} used",
+            param.location
+        ));
+        Ok(default)
+    }
+
     /// The dielectric IOR: a float (or float-typed spectrum degenerates
-    /// with a warning). pbrt's parameter name is `eta`, default 1.5.
-    fn dielectric_eta(&mut self, directive: &Directive, prefix: &str) -> Result<f32> {
+    /// with a warning). pbrt's parameter name is `eta`; its default is the
+    /// material's own — 1.5 for glass and the coats, 1.33 for `subsurface`,
+    /// which pbrt defaults to skin.
+    fn dielectric_eta(&mut self, directive: &Directive, prefix: &str, default: f32) -> Result<f32> {
         let Some(param) = directive
             .params
             .take(&format!("{prefix}eta"), &["float", "spectrum", "rgb", "color"])?
         else {
-            return Ok(1.5);
+            return Ok(default);
         };
         if param.ty == "float"
             && let [eta] = param.as_floats()?
@@ -1438,10 +1602,10 @@ impl Mapper {
             return Ok(*eta as f32);
         }
         self.warn(format!(
-            "{}: a spectral IOR (dispersion) is not supported — 1.5 used",
+            "{}: a spectral IOR (dispersion) is not supported — {default} used",
             param.location
         ));
-        Ok(1.5)
+        Ok(default)
     }
 
     /// Trap 2: pbrt roughness → the `OpenPBR` slug. Under the default
@@ -2305,6 +2469,122 @@ Translate 1 0 0
                 "{warnings:?}"
             );
         });
+    }
+
+    /// pbrt describes a subsurface interior by its coefficients; cenote
+    /// describes one by the color light walks to and how far it walks
+    /// between events. The importer converts through the same fit prep
+    /// inverts, so the test asserts the *round trip*: the color it authors
+    /// must walk back to the σ_s/σ_t it was given, and the radius must be
+    /// the scaled mean free path.
+    #[test]
+    fn subsurface_coefficients_invert_into_a_walked_color() {
+        let world = format!(
+            "MakeNamedMaterial \"jade\" \"string type\" \"subsurface\" \
+             \"rgb sigma_s\" [ 2 2 2 ] \"rgb sigma_a\" [ 0 1 3 ] \
+             \"float scale\" [ 2 ] \"float g\" [ 0.25 ]\n\
+             NamedMaterial \"jade\"\n{TRIANGLE}\n"
+        );
+        import_world("subsurface-sigma", &world, |set, warnings| {
+            let jade = material(set, "jade");
+            assert_eq!(jade.subsurface_weight, Some(1.0));
+            assert_eq!(jade.subsurface_scatter_anisotropy, Some(0.25));
+            // eta is absent, so pbrt's subsurface default stands — 1.33,
+            // not the 1.5 the glass materials default to.
+            assert_eq!(jade.specular_ior, Some(1.33));
+            // σ_t = scale · (σ_a + σ_s) = (4, 6, 10); the longest mean free
+            // path takes the radius and the rest ride as its shape.
+            let (radius, shape) = (
+                jade.subsurface_radius.expect("a radius"),
+                jade.subsurface_radius_scale.expect("a shape"),
+            );
+            assert!((radius - 0.25).abs() < 1e-6, "{radius}");
+            for (channel, expected) in shape.iter().zip([1.0, 4.0 / 6.0, 0.4]) {
+                assert!((channel - expected).abs() < 1e-6, "{shape:?}");
+            }
+            // And the colors walk back to the albedos they were made from.
+            let color = jade.subsurface_color.expect("a color");
+            for (channel, expected) in color.iter().zip([1.0, 2.0 / 3.0, 0.4]) {
+                let walked = cenote::scene::single_scatter_albedo(*channel, 0.25);
+                assert!(
+                    (walked - expected).abs() < 1e-4,
+                    "color {channel} walks to α = {walked}, not {expected}"
+                );
+            }
+            assert!(warnings.is_empty(), "{warnings:?}");
+        });
+    }
+
+    /// The other numeric form needs no conversion at all: `reflectance` is
+    /// already the walked-to color and `mfp` already the distance, `scale`
+    /// riding the latter as a length. Anything pbrt reads from a table it
+    /// compiled in — a measured `name`, a texture cenote's constant slot
+    /// cannot hold — is named in the warnings instead of guessed at.
+    #[test]
+    fn subsurface_reflectance_and_mfp_import_as_authored() {
+        let world = format!(
+            "MakeNamedMaterial \"skin\" \"string type\" \"subsurface\" \
+             \"rgb reflectance\" [ 0.63 0.44 0.35 ] \
+             \"rgb mfp\" [ 0.004 0.002 0.001 ] \"float scale\" [ 0.5 ]\n\
+             NamedMaterial \"skin\"\n{TRIANGLE}\n"
+        );
+        import_world("subsurface-reflectance", &world, |set, warnings| {
+            let skin = material(set, "skin");
+            assert_eq!(skin.subsurface_color, Some([0.63, 0.44, 0.35]));
+            assert_eq!(skin.subsurface_radius, Some(0.002));
+            assert_eq!(skin.subsurface_radius_scale, Some([1.0, 0.5, 0.25]));
+            assert!(warnings.is_empty(), "{warnings:?}");
+        });
+
+        // A measured medium: the table lives in pbrt, so the name is the
+        // warning and the interior imports at the defaults.
+        let world = format!(
+            "MakeNamedMaterial \"marble\" \"string type\" \"subsurface\" \
+             \"string name\" [ \"skin1\" ]\n\
+             NamedMaterial \"marble\"\n{TRIANGLE}\n"
+        );
+        import_world("subsurface-name", &world, |set, warnings| {
+            let marble = material(set, "marble");
+            assert_eq!(marble.subsurface_weight, Some(1.0));
+            assert_eq!(
+                (marble.subsurface_color, marble.subsurface_radius),
+                (None, None),
+                "an interior cenote cannot read must not be invented"
+            );
+            assert!(
+                warnings.iter().any(|warning| warning.contains("skin1")),
+                "{warnings:?}"
+            );
+        });
+
+        // A textured albedo: the mean free path still lands — it is the
+        // half of the description that *is* constant — and the texture is
+        // named as dropped.
+        let world = format!(
+            "Texture \"albedo\" \"spectrum\" \"imagemap\" \"string filename\" \"albedo.png\"\n\
+             MakeNamedMaterial \"head\" \"string type\" \"subsurface\" \
+             \"texture reflectance\" [ \"albedo\" ] \"rgb mfp\" [ 0.003 0.002 0.001 ]\n\
+             NamedMaterial \"head\"\n{TRIANGLE}\n"
+        );
+        import_files(
+            "subsurface-textured",
+            &[
+                ("scene.pbrt", format!("WorldBegin\n{world}\n").as_bytes()),
+                ("albedo.png", &png_header(2)),
+            ],
+            |set, warnings| {
+                let head = material(set, "head");
+                assert_eq!(head.subsurface_color, None);
+                assert_eq!(head.subsurface_radius, Some(0.003));
+                assert!(
+                    warnings
+                        .iter()
+                        .any(|warning| warning.contains("reflectance")
+                            && warning.contains("textured")),
+                    "{warnings:?}"
+                );
+            },
+        );
     }
 
     /// pbrt-v3's `metal` is v4's `conductor` under an older name; it

@@ -46,7 +46,22 @@ static const uint FLAG_INTERIORS = 1 << 24;
 struct AuxQueues {
     Queue<ShadowRay> shadows; // next-event connections, for trace_shadow
     Queue<uint> walks;        // subsurface entries, for shade_subsurface
+#ifdef PROBES
+    // The shared histogram, for the one bin this stage owns. It rides in
+    // the block for the same reason the queues do: `Params` below already
+    // sits at the guaranteed 128 bytes.
+    Atomic<uint>* probes;
+#endif
 };
+
+#ifdef PROBES
+// A subsurface draw whose entry direction the geometric plane refused —
+// see `PROBE_ENTRY_REJECT_BIN` in wavefront.rs. Its partner, the walk's
+// rejected *exit*, is binned next door by shade_subsurface.slang; the two
+// are counted apart because both leave the same dark pixel behind and
+// only the split says which end of the walk was at fault.
+static const uint PROBE_ENTRY_REJECT_BIN = 512;
+#endif
 
 struct Params {
     Paths paths;
@@ -270,6 +285,17 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
                   : throughput.xyz * evalBsdf(closure, scatter.wi, wo)
                         * (abs(scatter.wi.z) / scatter.pdf);
     }
+#ifdef PROBES
+    // Only the subsurface technique's rejections are binned. Every other
+    // lobe that fails here still has next-event estimation carrying its
+    // share of the same vertex, so a rejection dents its estimate; the
+    // walk has no such partner — `evalBsdf` holds no subsurface lobe, so
+    // the entry vertex's connection never covers it — and a refused entry
+    // is the whole of what that path would have contributed.
+    else if (scatter.lobe == LOBE_SUBSURFACE) {
+        params.aux.probes[PROBE_ENTRY_REJECT_BIN].add(1);
+    }
+#endif
 
     // A path that can carry nothing forward is done — lights themselves
     // scatter nothing (their base color is black), and continuing would

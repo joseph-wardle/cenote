@@ -1,0 +1,191 @@
+// Head — the "Head of Infinite Realities" photogrammetry scan (Infinite
+// Realities Inc., CC-BY, distributed in pbrt-v4-scenes), lit by a rural
+// road sky and shot at f/large with a 30-degree lens. The corpus's
+// subsurface-scattering scene: pbrt authors it as a `subsurface` material
+// carrying Jensen's skin1 mean free paths, which is what cenote's random
+// walk was built to render.
+//
+// Fetch:     scenes/corpus/fetch.sh head   (pbrt-v4-scenes @ 30cf4a0)
+//            then python3 scenes/corpus/curate-head.py
+// Bootstrap: cenote-cli import sources/pbrt-v4-scenes/head/head.pbrt
+//            (re-imports go to scratch for diffing — this file is curated
+//            by hand and is the source of truth; keep the head-sky.exr an
+//            import writes beside its --out)
+// Oracle:    pbrt-v4 volpath maxdepth 2, halton (native header; 4096 spp).
+//            Native film is iso 200 with a cropwindow, so the honest
+//            comparison rides a film-stripped, full-frame reference —
+//            zero-day's film-response class, sanmiguel's cropwindow class.
+//            Diagnostic only, by construction: pbrt solves this material
+//            with a tabulated diffusion BSSRDF and cenote with a random
+//            walk, so the side-by-side can catch a parameter-mapping
+//            error and cannot arbitrate the transport. No score is
+//            recorded here for that reason.
+//
+// What the side-by-side showed (1024 spp both, pbrt converted to ACEScg):
+// - Level and hue agree. Whole-frame means (0.185, 0.162, 0.143) against
+//   (0.171, 0.159, 0.142); both read as warm skin over a cool
+//   environment, cenote a little less saturated where the flattened
+//   albedo lost the ruddy cheeks and lips. The mean free paths are
+//   landing: the ear is translucent and warm in both, which a mfp wrong
+//   by even a factor of ten could not produce.
+// - cenote alone draws a triangle-scale sawtooth across the base of the
+//   neck, and it is OPEN. It was once written up here as the walk
+//   resolving interior structure a diffusion profile cannot see; that
+//   conclusion is withdrawn, because none of the oracles behind it
+//   discriminate. The white furnace and the directional-sky furnace both
+//   run at albedo 1, where the walk scatters many times and exits far
+//   from where it entered — averaging away the per-facet and near-entry
+//   effects that were the whole point of the test. The normal AOV shows
+//   the shading field, which is smooth by construction; what it cannot
+//   show is the faceted geometric field the shading one disagrees with.
+//   And the mean-free-path ladder (faint at a tenth of the authored
+//   radius, strongest at it, gone at ten times) fits a path-length story
+//   no better than it fits any multiplicative pattern viewed through a
+//   tonemapper, whose ends compress toward black and white alike.
+// - Two mesh-level explanations were measured and falsified. cenote draws
+//   the subsurface entry and exit as cosine lobes about the shading
+//   normal and discards any draw crossing the geometric plane, which is a
+//   per-triangle quantity and so a faceting mechanism by construction —
+//   but the scan's normals sit 3.9 degrees off its own facets, worth 0.2%
+//   of the draws and 0.4% between neighbours at the neck, far too small
+//   to draw this. The caps disagree badly and used to throw away a third
+//   of the draws at each end (see below), but no visible triangle in this
+//   frame has a cap within four mean free paths of it, and repairing them
+//   moved the image by at most 0.0016 at 1024 spp.
+// - The furnace deficit that once read as a second anomaly is CLOSED, and
+//   it was the oracle rather than the renderer. Of the 6% the white
+//   furnace lost frame-wide, about 4% is path truncation: that scene runs
+//   max_bounces 2, which cannot return 1.0 however exact the transport,
+//   because an exit ray that re-enters the head has no bounce left to
+//   reach the sky with. Raising the cap walks the frame back 0.941 →
+//   0.974 and the grazing neck crop 0.842 → 0.927, both converged by 16.
+//   The residual is the walk cap doing its job at an albedo it never
+//   promised to be exact at — white is alpha 1, where nothing terminates
+//   by absorption and 2.1% of walks reach WALK_CAP's 256 events — plus
+//   0.34% of entries and 0.30% of exits refused by the sidedness guard.
+//   A furnace at alpha 1 is simply not a clean energy oracle here.
+// - Those last two numbers are now measured rather than argued: a
+//   rejected entry and a rejected exit each carry their own probe bin
+//   (`PROBE_ENTRY_REJECT_BIN` in wavefront.rs). On this mesh they run
+//   0.61% of draws and 0.34% of walks — an order too small to draw the
+//   sawtooth, which the guard is therefore cleared of by measurement
+//   rather than by inference. What is left needs the rejections
+//   localized on screen, not counted, and that is the open question.
+//
+// Import fidelity (4 warnings at bootstrap):
+// - The albedo texture is the dominant divergence, and it is a *flatten*
+//   rather than a drop: OpenPBR's subsurface color is a constant slot, so
+//   the 2048-square map is curated to its own linear mean,
+//   (0.451443, 0.336683, 0.276702) — reproduce with
+//     oiiotool textures/head_albedomap.png --colorconvert sRGB linear \
+//       -d float -o /tmp/lin.exr && oiiotool --stats /tmp/lin.exr
+//   The map is all skin (min 0.0158, sigma ~0.05 of a 0.45 mean, no
+//   filler region), so the mean is a fair stand-in for its level and a
+//   poor one for its variation: the freckles, lip darkening, and brow
+//   shading all go. Unlock = subsurface textures.
+// - The scan is an open face shell — 19 boundary loops, the whole back of
+//   the scalp among them — and a walk needs a closed interior, so this
+//   scene traces the capped ply `curate-head.py` derives. What that ply
+//   still leaks is the scan's own thin folds rather than a hole: it is
+//   edge-manifold with no degenerate face, the leaks localize to the
+//   eyelid creases, and sinking the caps into a dome does not lower the
+//   count (measured non-monotone in cap depth). Twenty leaks in this
+//   frame — 9.7e-7 of 20.6 million walks at 64 spp.
+// - The lids shade by their own facet normals, not the rim's. Welded to
+//   the shell they inherited the scan's outward normals, landing 67
+//   degrees off the flat lid on average and losing 52% of the walk's
+//   draws across both ends, with steps up to 75% between neighbouring
+//   facets. Unwelding is a shading change only: the control — same split
+//   topology, old normals — leaks identically (17 of 219k walks at the
+//   probe settings, against 48 once the normals are right and the paths
+//   that were being discarded live to walk).
+// - Dropping the cropwindow renders the chest and shoulders the source
+//   never showed. The lids themselves are not what shows: they project
+//   behind the shell or below the frame, which is why repairing their
+//   shading — a 52% correction on those facets — moved this image by less
+//   than the noise floor at 1024 spp.
+// - pbrt's mean free paths (1.2953, 0.95238, 0.67114) mm import exactly as
+//   subsurface_radius 0.0012953 with the per-channel scale
+//   (1, 0.7352583, 0.5181348).
+// - Roughness is authored `remaproughness false` at 0.05 on both axes, so
+//   it imports as sqrt(0.05) = 0.2236 — the equal axes make the anisotropy
+//   warning exact, not a degradation.
+// - Film iso 200 and the cropwindow are dropped; the frame renders full,
+//   which is what the reference must also do.
+(
+    version: 2,
+    ops: [
+        Settings((
+            name: "main",
+            resolution: Some((1920, 1080)),
+            spp: Some(4096),
+            max_bounces: Some(2),
+            seed: None,
+            global_medium: None,
+        )),
+        Camera((
+            name: "main",
+            position: Some((0.322839, 0.05348249, -0.504299)),
+            look_at: Some((-0.14080805, -0.162727, 0.35493606)),
+            up: Some((0.035579793, 0.9644438, 0.26188222)),
+            vfov_degrees: Some(30.0),
+            focus_distance: Some(Some(0.573)),
+            aperture_radius: Some(0.0025),
+        )),
+        Environment((
+            name: "sky",
+            path: Some(Some("head-sky.exr")),
+            tint: None,
+            transform: None,
+        )),
+        Material((
+            name: "subsurface-0",
+            base_color: None,
+            base_diffuse_roughness: None,
+            base_metalness: None,
+            specular_weight: None,
+            specular_roughness: Some(Constant(0.2236068)),
+            specular_ior: Some(1.33),
+            transmission_weight: None,
+            transmission_color: None,
+            transmission_depth: None,
+            transmission_scatter: None,
+            transmission_scatter_anisotropy: None,
+            subsurface_weight: Some(1.0),
+            subsurface_color: Some((0.451443, 0.336683, 0.276702)),
+            subsurface_radius: Some(0.0012953),
+            subsurface_radius_scale: Some((1.0, 0.7352583, 0.5181348)),
+            subsurface_scatter_anisotropy: Some(0.0),
+            coat_weight: None,
+            coat_color: None,
+            coat_roughness: None,
+            coat_ior: None,
+            coat_darkening: None,
+            fuzz_weight: None,
+            fuzz_color: None,
+            fuzz_roughness: None,
+            emission_luminance: None,
+            emission_color: None,
+            geometry_opacity: None,
+            geometry_thin_walled: None,
+            geometry_normal: None,
+        )),
+        Mesh((
+            name: "head-0",
+            source: Some(Ply(
+                path: "head-capped.ply",
+            )),
+        )),
+        Instance((
+            name: "head-0",
+            mesh: Some("head-0"),
+            material: Some("subsurface-0"),
+            transforms: Some([
+                Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0))),
+            ]),
+            camera_visible: None,
+            medium: None,
+            interior_priority: None,
+        )),
+    ],
+)

@@ -76,7 +76,7 @@ pbrt renders spectrally and writes linear `Rec.709`; cenote renders RGB in
 
 ### The research corpus
 
-Beyond the three CI scenes, `scenes/corpus/` carries eighteen of the scenes the
+Beyond the three CI scenes, `scenes/corpus/` carries nineteen of the scenes the
 rendering literature measures on — Veach's ajar door, the Bistro, San Miguel,
 Zero-Day, Kroken, Watercolor — imported from their official pbrt-v4 sources and
 curated into cenote `.ron` files, each checked against a side-by-side pbrt-v4

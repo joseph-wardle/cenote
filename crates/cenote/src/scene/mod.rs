@@ -486,6 +486,68 @@ fn interior(material: &Material) -> Option<MediumRecord> {
     })
 }
 
+/// Van de Hulst's fit, as `OpenPBR` pins it — named so the two directions
+/// cannot drift apart. `F` is `B`² to the five digits the specification
+/// prints, which is what leaves [`multiple_scatter_color`] *linear*; the
+/// printed value is what the forward direction evaluates, so prep's
+/// arithmetic is the specification's to the bit.
+const FIT_A: f32 = 4.09712;
+const FIT_B: f32 = 4.20863;
+const FIT_D: f32 = 9.59217;
+const FIT_E: f32 = 41.6808;
+const FIT_F: f32 = 17.7126;
+
+/// The *single*-scatter albedo `α` a walk needs for its interior to arrive
+/// at the authored *multiple*-scatter albedo `color` (`C`), through van de
+/// Hulst's inversion: `s` = A + B·C − √(D + E·C + F·C²), then
+/// `α` = (1 − s²) / (1 − g·s²). With `s²` in [0, 1] and `g` bounded inside
+/// (−1, 1), `α` lands in [0, 1) on its own — `σ_a` = `σ_t` − `σ_s` can
+/// never go negative, so unlike [`interior`] no repair shift is needed.
+#[must_use]
+pub fn single_scatter_albedo(color: f32, g: f32) -> f32 {
+    // A NaN channel falls to black — and black is exact: the fit leaves a
+    // ~6e-6 residual at its black endpoint, snapped out so an unscattering
+    // channel is *purely* absorbing, not almost.
+    if color.is_nan() || color <= 0.0 {
+        return 0.0;
+    }
+    let g = bounded_anisotropy(g);
+    let c = color.min(1.0);
+    let s = FIT_A + FIT_B * c - (FIT_D + FIT_E * c + FIT_F * c * c).sqrt();
+    (1.0 - s * s) / (1.0 - g * s * s)
+}
+
+/// The way back: the `subsurface_color` that authors a given
+/// *single*-scatter albedo — what an importer needs when its source
+/// describes an interior by its coefficients rather than by the color they
+/// walk to.
+///
+/// Closed-form, not searched. Inverting the albedo gives `s²` =
+/// (1 − α) / (1 − g·α); squaring the fit then cancels its `F·C²` against
+/// the radicand's `B²·C²` — the two agree by construction — and what
+/// remains is linear:
+/// `C` = ((A − s)² − D) / (E − 2·B·(A − s)), whose denominator stays near
+/// 7 to 16 across the whole domain.
+///
+/// That numerator is written factored, `(A − √D − s)(A + √D − s)`, because
+/// unfactored it is a difference of two numbers near 9.6 that vanishes as
+/// `C` → 0 — the whole black end would be cancellation. Factored, `A − √D`
+/// is 0.999997 and the subtraction is between numbers of the size of the
+/// answer. The endpoints still clamp: the fit's own residual would
+/// otherwise put `C` a part in 10⁵ outside [0, 1].
+#[must_use]
+pub fn multiple_scatter_color(alpha: f32, g: f32) -> f32 {
+    let root = FIT_D.sqrt();
+    let g = bounded_anisotropy(g);
+    let alpha = if alpha.is_nan() {
+        0.0
+    } else {
+        alpha.clamp(0.0, 1.0)
+    };
+    let s = ((1.0 - alpha) / (1.0 - g * alpha)).max(0.0).sqrt();
+    ((FIT_A - root - s) * (FIT_A + root - s) / (FIT_E - 2.0 * FIT_B * (FIT_A - s))).clamp(0.0, 1.0)
+}
+
 /// What fills the interior behind a subsurface material — or `None` where
 /// the lobe is off (weight or radius nonpositive, thin-walled has no
 /// interior). Gates are written positively so a NaN falls to `None`.
@@ -493,15 +555,7 @@ fn interior(material: &Material) -> Option<MediumRecord> {
 /// `σ_t` per channel is the reciprocal mean free path,
 /// 1 / (`subsurface_radius` · `subsurface_radius_scale`), floored at a
 /// micron so an authored zero stays a finite (just enormous) extinction.
-/// `σ_s` comes from van de Hulst's inversion — the fit `OpenPBR` pins —
-/// turning the authored *multiple*-scatter albedo `C` into the
-/// *single*-scatter albedo `α` that walks to it:
-/// `s` = 4.09712 + 4.20863·C − √(9.59217 + 41.6808·C + 17.7126·C²),
-/// `α` = (1 − s²) / (1 − g·s²). With `s²` in [0, 1] and `g` bounded
-/// inside (−1, 1), `α` lands in [0, 1) on its own: `σ_a` = `σ_t` − `σ_s`
-/// can never go negative, so unlike [`interior`] no repair shift is
-/// needed. A NaN color channel falls to 0 — purely absorbing, like the
-/// scatter tests above.
+/// `σ_s` is [`single_scatter_albedo`] of the authored color.
 fn subsurface(material: &Material) -> Option<MediumRecord> {
     (material.subsurface_weight > 0.0
         && material.subsurface_radius > 0.0
@@ -511,18 +565,10 @@ fn subsurface(material: &Material) -> Option<MediumRecord> {
             let sigma_t = material.subsurface_radius_scale.to_array().map(|scale| {
                 1.0 / (material.subsurface_radius * scale.max(0.0)).max(1e-6)
             });
-            let alpha = material.subsurface_color.to_array().map(|channel| {
-                // A NaN channel falls to black — and black is exact: the
-                // fit leaves a ~6e-6 residual at its black endpoint,
-                // snapped out so an unscattering channel is *purely*
-                // absorbing, not almost.
-                if channel.is_nan() || channel <= 0.0 {
-                    return 0.0;
-                }
-                let c = channel.min(1.0);
-                let s = 4.09712 + 4.20863 * c - (9.59217 + 41.6808 * c + 17.7126 * c * c).sqrt();
-                (1.0 - s * s) / (1.0 - g * s * s)
-            });
+            let alpha = material
+                .subsurface_color
+                .to_array()
+                .map(|channel| single_scatter_albedo(channel, g));
             MediumRecord {
                 sigma_t,
                 g,
@@ -1777,6 +1823,20 @@ mod tests {
             alpha(0.6, 0.7) > alpha(0.6, 0.0) && alpha(0.6, -0.7) < alpha(0.6, 0.0),
             "forward scattering needs a higher α to walk to the same color"
         );
+        // The two colors the walk cap's gate is authored at — the top of
+        // the band it claims exact, and the stress regime that proves the
+        // counter fires — pinned where the fit that produces them lives.
+        // Isotropic, so α = 1 − s²; the fit's C² term cancels against the
+        // radicand's, leaving the inverse *linear* in C, so both are
+        // solved constants rather than searched ones. See
+        // `render::subsurface_cap_never_fires_at_production_albedo`.
+        for (color, target) in [(0.630_271_f32, 0.96_f32), (0.849_846, 0.995)] {
+            assert!(
+                (alpha(color, 0.0) - target).abs() < 1e-5,
+                "the cap gate's α = {target} constant drifted: {}",
+                alpha(color, 0.0)
+            );
+        }
         // A NaN channel falls to purely absorbing; the others keep theirs.
         let poisoned = subsurface(&Material {
             subsurface_color: Vec3::new(f32::NAN, 0.5, 0.2),
@@ -1799,6 +1859,84 @@ mod tests {
             dense.sigma_t[0].to_bits() == 1e6f32.to_bits()
                 && dense.sigma_t.iter().all(|sigma| sigma.is_finite()),
             "σ_t stays finite where a channel's radius reaches zero"
+        );
+    }
+
+    /// The inverse is a real inverse, tested in the direction that carries
+    /// the work: an importer holding `σ_s`/`σ_t` authors a color, and prep must
+    /// walk that color back to the α it started from.
+    ///
+    /// The other direction is deliberately *not* asserted tightly, and the
+    /// reason is worth keeping. The fit is stationary at white — dα/dC → 0
+    /// as C → 1 — so α saturates against 32-bit resolution there and a
+    /// color of 0.999 comes back 2e-4 away. That is the map's conditioning,
+    /// not a defect, and it costs nothing: every C in that tail describes
+    /// the same barely-absorbing interior. Read the other way the flatness
+    /// works *for* us, contracting the error instead of amplifying it.
+    #[test]
+    fn the_albedo_inversion_round_trips() {
+        for g in [-0.99f32, -0.5, 0.0, 0.5, 0.99] {
+            let mut worst: (f32, f32) = (0.0, 0.0);
+            for step in 0..=1000u32 {
+                let alpha = f32::from(u16::try_from(step).expect("in range")) / 1000.0;
+                let back = single_scatter_albedo(multiple_scatter_color(alpha, g), g);
+                if (back - alpha).abs() > worst.0 {
+                    worst = ((back - alpha).abs(), alpha);
+                }
+            }
+            // What sets the floor at the extremes is the *forward* path's
+            // own 32-bit arithmetic, not the inverse: at |g| near the
+            // table's bound, α = (1 − s²)/(1 − g·s²) divides two
+            // cancelling differences, and prep evaluates it in f32 like
+            // everything else. The inverse is the accurate side here.
+            let bound = if g.abs() > 0.9 { 2e-4 } else { 1e-5 };
+            assert!(
+                worst.0 < bound,
+                "at g = {g}, α = {} round-tripped {} away — over the {bound} bound",
+                worst.1,
+                worst.0
+            );
+        }
+        // And the colors themselves come back, over the range where the fit
+        // is not yet flat — which covers every material anyone authors.
+        for g in [-0.9f32, 0.0, 0.9] {
+            for step in 0..=95u32 {
+                let color = f32::from(u16::try_from(step).expect("in range")) / 100.0;
+                let back = multiple_scatter_color(single_scatter_albedo(color, g), g);
+                assert!(
+                    (back - color).abs() < 5e-5,
+                    "C = {color} at g = {g} came back as {back}"
+                );
+            }
+        }
+        // Black is exact — an interior that scatters nothing must author a
+        // color that walks back to *purely* absorbing, not almost, which is
+        // the same snap the forward direction makes. White is not, and
+        // cannot be: the fit itself lands 1.6e-6 short of α = 1 at C = 1,
+        // so the honest inverse of a non-absorbing interior is the color
+        // just below white rather than a snap that would not reach it
+        // anyway. What matters is that it stays inside the schema's range.
+        let (black, white) = (
+            multiple_scatter_color(0.0, 0.0),
+            multiple_scatter_color(1.0, 0.0),
+        );
+        assert_eq!(black.to_bits(), 0, "α = 0 authors exactly black");
+        assert!(
+            (0.9999..=1.0).contains(&white),
+            "α = 1 authors white to the fit's residual, and never past it: {white}"
+        );
+        // Out-of-domain input is clamped, never propagated: an importer
+        // handing over a σ_s that outran its σ_t, or a NaN channel, must
+        // still author a color the schema accepts.
+        assert_eq!(
+            [
+                multiple_scatter_color(-1.0, 0.0),
+                multiple_scatter_color(2.0, 0.0),
+                multiple_scatter_color(f32::NAN, 0.0),
+            ]
+            .map(f32::to_bits),
+            [black, white, black].map(f32::to_bits),
+            "α outside [0, 1] clamps to the endpoints, a NaN to black"
         );
     }
 

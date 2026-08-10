@@ -41,3 +41,12 @@
 # post-media baseline future milestones measure against. Machine-local,
 # same class as /b7-baselines/.
 /b8-baselines/
+
+# Where scripts/corpus-identity.sh renders the sweep it byte-compares.
+/corpus-identity/
+
+# B9 subsurface captures: the walk drivers' cost, references, and relMSE,
+# same class again. `probes-pinned/` is the exception in kind rather than
+# in tracking — the walk's histograms are deterministic, so those files
+# compare exactly across machines, but they still name a build.
+/b9-baselines/
