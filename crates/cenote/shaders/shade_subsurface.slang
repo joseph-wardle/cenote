@@ -9,24 +9,20 @@
 // depth cap never sees its interior events; the walk carries its own cap
 // instead.
 //
-// The boundary hit *is* the exit, always. A σ_t of zero (the
-// infinite-radius limit) or a thin crossing that never scatters leaves on
-// its first flight as pure diffuse translucency — the same code path, no
-// special case — and a walk that escapes an open shell dies as a leak
-// rather than looping. Interior legs trace against the entry instance
-// alone: embedded geometry is passed through, outside the model.
-//
-// The exit lobe is white — the walk's throughput already carries the
-// medium's color — and Fresnel-free on the way out (the entry carried the
-// interface's (1 − E) once, in `subsurfaceEntry`): the Chiang-style
-// diffuse boundary, which is what lets all lighting reach the interior
-// through exit connections instead of interior-vertex NEE.
+// The boundary hit *is* the exit, always: a walk that never scatters
+// (σ_t = 0, or a thin chord) leaves on its first flight as pure diffuse
+// translucency through the same code, and one that escapes an open shell
+// dies as a leak rather than looping. Interior legs trace against the
+// entry instance alone — embedded geometry is passed through, outside the
+// model. The exit lobe is white and Fresnel-free: the walk's throughput
+// already carries the medium's color, and the entry carried the
+// interface's (1 − E) once, in `subsurfaceEntry`.
 //
 // Radiance bookkeeping matches shade_surface's: a path that dies here
 // (leak, cap, spent throughput, a rejected exit) carries its pixel's one
 // terminal alpha; one that continues pushes the ray queue and adds
-// nothing. The guides recorded at the entry vertex — a subsurface draw
-// records like a diffuse scatter — so this stage never touches the AOVs.
+// nothing. The guides recorded at the entry vertex, so this stage never
+// touches the AOVs.
 
 import lights;
 import medium;
@@ -47,11 +43,10 @@ RaytracingAccelerationStructure sceneTlas;
 // connection exactly as it skipped the entry vertex's.
 static const uint FLAG_SET = 1 << 25;
 
-// Interior scatter events one walk may take before it is killed. Sized by
-// the 9-0 measurements: production materials (real skin's chromatic
-// albedo included) self-terminate far below it, so a kill here is
-// expected never — the probes histogram is the check — while the α ≥
-// 0.995 stress regime documents a ~1–2% loss instead of walking forever.
+// Interior scatter events one walk may take before it is killed.
+// Production materials self-terminate far below this, so a kill is
+// expected never — the probes histogram is the check — while the
+// α ≥ 0.995 stress regime trades a ~1–2% loss for boundedness.
 static const uint WALK_CAP = 256;
 
 #ifdef PROBES
@@ -64,9 +59,13 @@ static const uint PROBE_WALK_CAP_BIN = 511;
 
 struct Params {
     Paths paths;
-    Queue<uint> walks;        // this stage's input, pushed by shade_surface
-    Queue<uint> rays;         // the next bounce's input: exits push here
-    Queue<ShadowRay> shadows; // the exit's next-event connection
+    Queue<uint> walks; // this stage's input, pushed by shade_surface
+    Queue<uint> rays;  // the next bounce's input: exits push here
+    // The exit's next-event connection — a queue of its own, traced by the
+    // round's second trace_shadow dispatch: the entry vertex's connection
+    // for this same pixel is already in the main shadow queue, and one
+    // dispatch may carry at most one ray per pixel (trace_shadow.slang).
+    Queue<ShadowRay> shadows;
     SceneTable* scene;
     float4* radiance;         // the film's per-pixel accumulator for this wave
     uint sampleIndex;
@@ -83,10 +82,9 @@ Params params;
 
 // One leg: the next boundary of the entry instance along the ray, at any
 // distance. Every other instance is passed through, and traversal is
-// forced non-opaque so an instance whose BLAS baked the opaque flag still
-// surfaces as a candidate for the filter rather than committing past it.
-// Opacity itself is deliberately not consulted: the walk entered through
-// this surface, and its interior is bounded by geometry, not coverage.
+// forced non-opaque because a BLAS baked with the opaque flag would
+// otherwise auto-commit past the filter. Opacity itself is deliberately
+// not consulted: the interior is bounded by geometry, not coverage.
 bool traceLeg(float3 origin, float3 direction, uint instance, out Hit hit,
               out float distance) {
     RayDesc ray;
@@ -129,20 +127,18 @@ void shade_subsurface(uint3 tid: SV_DispatchThreadID) {
     let interior = params.scene.media[mesh.subsurface];
 
     // The walk. Every draw is keyed by (event, draw slot) on the walk's
-    // own hash stream, so every decision is replayable. `events` counts
-    // scatters; the exit's draws reuse the count it ends at — slots the
-    // interior never spends there. `stake` is the walk's own attenuation
-    // — what the roulette gambles: the path's arriving throughput was the entry
-    // roulette's business, and gambling it again would over-kill paths
-    // that arrived dim.
+    // own hash stream, so every decision is replayable; the exit's draws
+    // reuse the count it ends at, in slots the interior never spends.
+    // `stake` is the walk's own attenuation — what the roulette gambles:
+    // the arriving throughput was the entry roulette's business, and
+    // gambling it again would over-kill paths that arrived dim.
     Hit exit;
     var events = 0u;
     var distance = 0.0;
     var stake = float3(1.0);
     for (;;) {
         if (!traceLeg(origin, direction, instance, exit, distance)) {
-            // The shell is open here: the walk escaped its geometry. The
-            // energy leaks — a death, never a loop.
+            // An open shell: the energy leaks — a death, never a loop.
             params.radiance[pixel] += float4(0.0, 0.0, 0.0, 1.0);
             return;
         }
@@ -162,14 +158,9 @@ void shade_subsurface(uint3 tid: SV_DispatchThreadID) {
             params.radiance[pixel] += float4(0.0, 0.0, 0.0, 1.0);
             return;
         }
-        // Russian roulette against the walk's attenuation, with the outer
-        // loop's grace and reweighting. This — not the cap — is what ends
-        // a deep walk in an absorbing medium: absorption decays the
-        // throughput but never zeroes it, so without the gamble every
-        // deep walk would run to the cap carrying dust. A walk the
-        // roulette has reweighted carries O(1) throughput, so the rare
-        // cap kill after it drops real energy — the documented per-tier
-        // tail, not a rounding error.
+        // Roulette — not the cap — is what ends a deep walk: absorption
+        // decays the stake but never zeroes it. The outer loop's grace
+        // and reweighting.
         if (events >= ROULETTE_START) {
             let survival = min(1.0, max(stake.r, max(stake.g, stake.b)));
             if (walkUniform2(pixel, params.sampleIndex, bounce, events, 5).x
@@ -187,9 +178,7 @@ void shade_subsurface(uint3 tid: SV_DispatchThreadID) {
     }
 
 #ifdef PROBES
-    params.probes[PROBE_WALK_BASE + min(events, PROBE_WALK_CAP_BIN
-                                                    - PROBE_WALK_BASE - 1)]
-        .add(1);
+    params.probes[min(PROBE_WALK_BASE + events, PROBE_WALK_CAP_BIN - 1)].add(1);
 #endif
     if (!any(throughput > 0.0)) {
         params.radiance[pixel] += float4(0.0, 0.0, 0.0, 1.0);
@@ -207,48 +196,25 @@ void shade_subsurface(uint3 tid: SV_DispatchThreadID) {
     let set = params.paths.media(path, (params.packed & FLAG_SET) != 0);
     let scatterInterior = (interiorOf(set) & STACK_SCATTERING) != 0;
 
-    // The exit's next-event connection: `drawLight`'s composition with the
-    // Lambert lobe (f = 1/π) standing where the BSDF stood, weighted
-    // against the exit scatter below. Skipped inside a scattering interior
+    // The exit's next-event connection, drawn and weighted by the shared
+    // `sampleNeeExit` (nee.slang). Skipped inside a scattering interior
     // exactly as at the entry vertex — the boundary occludes every
     // straight connection — conveyed onward as throughput.w = 0.
     if (!scatterInterior && lightSampling != LIGHT_SAMPLING_BSDF
         && (params.scene.lightCount > 0 || params.scene.env.selectProb > 0.0)) {
         let uLight = walkUniform2(pixel, params.sampleIndex, bounce, events, 3).x;
         let uPoint = walkUniform2(pixel, params.sampleIndex, bounce, events, 4);
-        let draw = drawLight(params.scene, spawn.below, uLight, uPoint);
-        let cosine = dot(draw.direction, outward);
-        // The connection must leave through the real triangle's outside —
-        // the same shading-normal trade every scatter makes.
-        if (draw.pdf > 0.0 && cosine > 0.0
-            && dot(draw.direction, spawn.normal) < 0.0) {
-            let weight = !draw.delta && lightSampling == LIGHT_SAMPLING_MIS
-                       ? powerHeuristic(draw.pdf, cosine / PI)
-                       : 1.0;
-            let unshadowed = throughput * draw.radiance
-                           * (cosine / PI) * (weight / draw.pdf);
-            if (any(unshadowed > 0.0)) {
-                ShadowRay shadow;
-                shadow.origin = spawn.below;
-                shadow.light = draw.light;
-                shadow.direction = draw.direction;
-                shadow.primitive = draw.primitive;
-                shadow.contribution = unshadowed;
-                shadow.tmax = draw.tmax;
-                shadow.pixel = pixel;
-                shadow.path = path;
-                shadow.pad0 = 0;
-                shadow.pad1 = 0;
-                params.shadows.push(shadow);
-            }
+        let nee = sampleNeeExit(params.scene, spawn, outward, throughput,
+                                lightSampling, uLight, uPoint);
+        if (any(nee.unshadowed > 0.0)) {
+            params.shadows.push(shadowRay(nee, pixel, path));
         }
     }
 
-    // The exit scatter: cosine about the outward shading normal. The lobe
-    // samples its own density exactly, so f·cos/pdf is 1 and the
-    // throughput carries only what the walk already cost it. A draw that
-    // fails to leave the real triangle is the standard trade's sliver,
-    // and ends the path.
+    // The exit scatter: cosine about the outward shading normal — the
+    // lobe samples its own density exactly, so the throughput carries
+    // only what the walk cost it. A draw that fails to leave the real
+    // triangle is the standard trade's sliver, and ends the path.
     let local = sampleCosineHemisphere(
         walkUniform2(pixel, params.sampleIndex, bounce, events, 2)).xyz;
     let wiWorld = frame.toWorld(local);
@@ -257,9 +223,9 @@ void shade_subsurface(uint3 tid: SV_DispatchThreadID) {
         return;
     }
 
-    // The path continues: one bounce spent, however many events the walk
-    // took. w = the exit cosine's solid-angle pdf, for the next vertex's
-    // emission MIS — or 0 where no connection competed.
+    // One bounce spent, however many events the walk took. w = the exit
+    // cosine's solid-angle pdf, for the next vertex's emission MIS — or 0
+    // where no connection competed.
     params.paths.origin[path] = float4(spawn.below, 0.0);
     params.paths.direction[path] = float4(wiWorld, 0.0);
     params.paths.throughput[path] =

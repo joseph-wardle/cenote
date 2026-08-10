@@ -307,18 +307,7 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
         let nee = sampleNeeVolume(params.scene, position, record.g, wo,
                                   throughput.xyz, lightSampling, uLight, uPoint);
         if (any(nee.unshadowed > 0.0)) {
-            ShadowRay shadow;
-            shadow.origin = nee.origin;
-            shadow.light = nee.light;
-            shadow.direction = nee.direction;
-            shadow.primitive = nee.primitive;
-            shadow.contribution = nee.unshadowed;
-            shadow.tmax = nee.tmax;
-            shadow.pixel = pixel;
-            shadow.path = path;
-            shadow.pad0 = 0;
-            shadow.pad1 = 0;
-            params.queues.shadows.push(shadow);
+            params.queues.shadows.push(shadowRay(nee, pixel, path));
         }
     }
 

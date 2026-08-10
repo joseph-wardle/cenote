@@ -352,16 +352,14 @@ public struct Closure {
     float thinTShare;  // probability the spec technique picks transmission
     // The subsurface share of the diffuse slot — OpenPBR's nested mix puts
     // subsurface inside the opaque base, under transmission's outer mix.
-    // Gated exactly like the host's medium intern (weight and radius
-    // positive, not thin-walled), so a positive blend implies the walk
-    // kernel finds a medium record; 0 on an exiting hit, like the diffuse
-    // lobe it displaces.
+    // Gated exactly like the host's medium intern (`scene::subsurface`),
+    // so a positive blend implies the walk kernel finds a medium record;
+    // 0 on an exiting hit, like the diffuse lobe it displaces.
     float subsurfaceBlend;
     // One-sample MIS technique weights (unnormalized) and their sum.
     // wSubsurface joins the *selection* only: the lobe scatters nowhere at
-    // this vertex — its energy leaves through the walk kernel's exit — so
-    // it adds no density term in bsdfPdf, and sitting in wTotal is what
-    // correctly thins every other technique's mixture pdf by the
+    // this vertex, so it adds no density term in bsdfPdf — sitting in
+    // wTotal is what thins every other technique's mixture pdf by the
     // probability the draw walked away instead.
     float wFuzz;
     float wCoat;
@@ -994,12 +992,11 @@ public BsdfSample sampleBsdf(Closure c, float3 wo, float uLobe, float2 u) {
             }
         }
     } else if (pick < c.wFuzz + c.wCoat + c.wSpec + c.wSubsurface) {
-        // The subsurface technique scatters nowhere at this vertex: the
-        // entry direction is drawn cosine *into* the surface (the
-        // Lambertian-transmission boundary, mirrored like the thin sheet's)
-        // and the walk kernel owns everything after it. pdf carries the
-        // technique's selection probability — the one density the entry
-        // estimator divides by — never a solid-angle mixture density.
+        // The entry direction is drawn cosine *into* the surface (the
+        // Lambertian-transmission boundary) and the walk kernel owns
+        // everything after it. pdf carries the technique's selection
+        // probability — the one density the entry estimator divides by —
+        // never a solid-angle mixture density.
         result.lobe = LOBE_SUBSURFACE;
         let entry = sampleCosineHemisphere(u).xyz;
         result.wi = float3(entry.xy, -entry.z);

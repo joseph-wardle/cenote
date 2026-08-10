@@ -38,12 +38,11 @@ import textures;
 // — the buffer was never allocated.
 static const uint FLAG_INTERIORS = 1 << 24;
 
-// The two colder queues behind one pointer: this block sat exactly at
-// Vulkan's guaranteed 128 push-constant bytes, so the subsurface walk
-// queue could not ride inline — the shadow queue moved out with it, and
-// the per-thread-hot queues (hits, rays) stayed where they were. Mirrors
-// `struct AuxQueues` in `wavefront.rs`; addresses fixed for the
-// wavefront's lifetime.
+// The two colder queues behind one pointer: inline, they would push this
+// block past Vulkan's guaranteed 128 push-constant bytes, so only the
+// per-thread-hot queues (hits, rays) ride inline. Mirrors `struct
+// AuxQueues` in `wavefront.rs`; addresses fixed for the wavefront's
+// lifetime.
 struct AuxQueues {
     Queue<ShadowRay> shadows; // next-event connections, for trace_shadow
     Queue<uint> walks;        // subsurface entries, for shade_subsurface
@@ -246,18 +245,7 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
         let nee = sampleNee(params.scene, spawn, frame, closure, wo,
                             throughput.xyz, lightSampling, uLight, uPoint);
         if (any(nee.unshadowed > 0.0)) {
-            ShadowRay shadow;
-            shadow.origin = nee.origin;
-            shadow.light = nee.light;
-            shadow.direction = nee.direction;
-            shadow.primitive = nee.primitive;
-            shadow.contribution = nee.unshadowed;
-            shadow.tmax = nee.tmax;
-            shadow.pixel = pixel;
-            shadow.path = path;
-            shadow.pad0 = 0;
-            shadow.pad1 = 0;
-            params.aux.shadows.push(shadow);
+            params.aux.shadows.push(shadowRay(nee, pixel, path));
         }
     }
 
@@ -339,9 +327,7 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
         }
     }
     // A subsurface draw hands the path to the walk kernel instead of the
-    // next bounce: its origin already sits below the surface, its
-    // direction is the cosine entry, and the walk overwrites throughput.w
-    // at its exit. The medium set is untouched — a subsurface boundary is
+    // next bounce. The medium set is untouched — a subsurface boundary is
     // opaque, never a crossing.
     if (scatter.lobe == LOBE_SUBSURFACE) {
         params.aux.walks.push(path);

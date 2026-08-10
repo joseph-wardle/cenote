@@ -302,13 +302,11 @@ fn the_furnace_closes_through_a_thin_lens() {
 }
 
 /// A subsurface furnace scene: a closed unit icosphere of the given
-/// material under the same half-gray sky, the camera just above its pole
-/// looking obliquely down-forward so every camera ray lands on it (the
-/// sphere's horizon sits ~56° off the camera's vertical, the widest ray
-/// ~47°). The plane the other furnaces stand on is an open shell a walk
-/// would leak straight out of, which is why this one is a sphere — and
-/// convex, so an exited path can never re-enter and every path carries
-/// exactly one walk.
+/// material under a half-gray sky, the camera just above its pole looking
+/// obliquely down-forward so every camera ray lands on it. A sphere
+/// because the plane the other furnaces stand on is an open shell a walk
+/// would leak straight out of — and convex, so an exited path can never
+/// re-enter and every path carries exactly one walk.
 fn subsurface_furnace_scene(gpu: &Context, material: Material) -> Scene {
     let object = Object {
         mesh: crate::scene::icosphere(4),
@@ -346,26 +344,21 @@ fn walk_material(color: Vec3, radius: f32) -> Material {
     }
 }
 
-/// The subsurface white furnace, at both ends of the walk's regime. A
-/// subsurface color of 1 inverts to a single-scatter albedo of exactly 1
-/// (s(1) collapses below f32 epsilon), the achromatic extinction makes
-/// every distance draw's weight exactly 1, entry and exit lobes sample
-/// their own densities, and specular weight 0 removes the interface — so
-/// BSDF-only, every sample is the sky *exactly*, up to one sliver: an
-/// icosphere's smooth normals tilt off its facets, and a cosine draw that
-/// crosses the geometric horizon dies by the standard shading-normal
-/// trade, at the entry or at the exit. A death zeroes a whole sample —
-/// measured at 6e-5 (scattering) and 4e-4 (translucent) per walk — so the
-/// per-sample bound is one-sided: a sample may die to the trade, but no
-/// sample may ever *mint* energy. The mean carries the two-sided bound,
-/// with the death rate an order of magnitude under it.
+/// The subsurface white furnace, at both ends of the walk's regime: at
+/// radius 0.25 the sphere is ~8 mean free paths across and every path
+/// scatters (α = 1, so only geometry ends a walk); at 1e9 every walk
+/// crosses in one unscattered flight — the `σ_t` → 0 limit, closing the
+/// same furnace through the no-event path.
 ///
-/// The two radii are the walk's two disjoint regimes: at 0.25 the sphere
-/// is ~8 mean free paths across and every path scatters (α = 1, so only
-/// geometry ends a walk); at 1e9 the extinction is ~1e-9 and every walk
-/// crosses in one unscattered flight, leaving as pure diffuse
-/// translucency — the `σ_t` → 0 limit that must close the same furnace
-/// through the no-event path.
+/// A subsurface color of 1 inverts to an albedo of exactly 1, achromatic
+/// extinction makes every distance draw's weight exactly 1, and entry and
+/// exit lobes sample their own densities — so BSDF-only, every sample is
+/// the sky *exactly*, up to one sliver: a cosine draw that crosses the
+/// geometric horizon of the icosphere's smooth normals dies by the
+/// standard shading-normal trade (~1e-4 of walks), zeroing its whole
+/// sample. Hence the per-sample bound is one-sided — no sample may ever
+/// *mint* energy — and the mean carries the two-sided bound, the death
+/// rate an order of magnitude under it.
 #[test]
 fn subsurface_furnace_closes() {
     let Some(gpu) = crate::gpu::test_context() else {
@@ -395,18 +388,16 @@ fn subsurface_furnace_closes() {
     }
 }
 
-/// The slab-reflectance oracle: the walk must reflect the *authored*
-/// multiple-scatter albedo — that is the van de Hulst inversion's whole
-/// promise. An optically deep sphere (~100 mean free paths across, walks
-/// end by absorption long before the far side) under the uniform sky
-/// reads back, per channel, the subsurface color the material authored,
-/// through the full MIS renderer — so the exit's next-event connection,
-/// its power-heuristic weight against the exit cosine, and the emission
-/// weight the continuation carries are all in the loop. Measured:
-/// (0.8, 0.5, 0.2) reads back (0.410, 0.257, 0.103) against C·sky of
-/// (0.4, 0.25, 0.1) — a consistent +2–3% relative, the fit's Lambertian
-/// boundary assumption plus the limb's thin-chord translucency (<0.3% of
-/// pixels). The bound carries that bias with margin, not just noise.
+/// The slab-reflectance oracle: an optically deep sphere (~100 mean free
+/// paths across — walks end by absorption, never at the far side) under
+/// the uniform sky must read back, per channel, the *authored*
+/// multiple-scatter albedo — the van de Hulst inversion's whole promise —
+/// through the full MIS renderer, so the exit connection, its
+/// power-heuristic weight, and the continuation's emission weight are all
+/// in the loop. The reflectance sits a consistent +2–3% relative above
+/// C·sky (the fit's Lambertian-boundary assumption plus the limb's
+/// thin-chord translucency); the 0.03·sky bound carries that bias with
+/// margin, not just noise.
 #[test]
 fn subsurface_walks_to_the_authored_albedo() {
     let Some(gpu) = crate::gpu::test_context() else {

@@ -3,10 +3,11 @@
 // pixel. Fractional-opacity occluders attenuate the connection
 // *deterministically* — each crossing multiplies 1 − opacity — so alpha
 // cards cast correct soft shadows and this kernel stays RNG-free
-// (Cycles' shipped split of the transparency policy). Runs once per
-// bounce round, so a pixel sees at most one shadow ray per dispatch — the
-// plain += below stays race-free, and the barriers between rounds order
-// the adds deterministically.
+// (Cycles' shipped split of the transparency policy). A pixel sees at
+// most one shadow ray per dispatch — one vertex connection per round in
+// the main queue, one walk-exit connection in its own queue and dispatch
+// — so the plain += below stays race-free, and the barriers between
+// dispatches order the adds deterministically.
 //
 // Two entry points from one body, `VOLUMES` apart, because register
 // allocation is per *kernel*: measuring a connection's way through bounded

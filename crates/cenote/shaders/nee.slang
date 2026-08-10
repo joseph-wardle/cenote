@@ -17,6 +17,7 @@
 import lights;
 import medium;
 import openpbr;
+import pathstate;
 import scene;
 import surface;
 import textures;
@@ -180,6 +181,57 @@ public NeeCandidate sampleNee(SceneTable* scene, SpawnPoint spawn, Frame frame,
         }
     }
     return nee;
+}
+
+// The same connection from a subsurface walk's exit point: the Lambertian
+// transmission lobe (f = 1/π about `outward`, the negated shading normal)
+// stands where the BSDF stood, weighted against the walk's cosine-sampled
+// continuation. The connection must leave through the real triangle's
+// outside — the same shading-normal trade every scatter makes.
+public NeeCandidate sampleNeeExit(SceneTable* scene, SpawnPoint spawn,
+                                  float3 outward, float3 throughput,
+                                  uint lightSampling, float uLight, float2 uPoint) {
+    NeeCandidate nee;
+    nee.unshadowed = float3(0.0);
+    nee.origin = spawn.below;
+    nee.direction = float3(0.0);
+    nee.tmax = 0.0;
+    nee.light = LIGHT_NONE;
+    nee.primitive = 0;
+
+    let draw = drawLight(scene, spawn.below, uLight, uPoint);
+    let cosine = dot(draw.direction, outward);
+    if (draw.pdf > 0.0 && cosine > 0.0
+        && dot(draw.direction, spawn.normal) < 0.0) {
+        let weight = !draw.delta && lightSampling == LIGHT_SAMPLING_MIS
+                   ? powerHeuristic(draw.pdf, cosine / PI)
+                   : 1.0;
+        nee.unshadowed = throughput * draw.radiance
+                       * (cosine / PI) * (weight / draw.pdf);
+        nee.direction = draw.direction;
+        nee.tmax = draw.tmax;
+        nee.light = draw.light;
+        nee.primitive = draw.primitive;
+    }
+    return nee;
+}
+
+// A candidate as the shadow queue carries it — trace_shadow adds
+// `contribution` if the connection is unoccluded. The pads are wire
+// layout only.
+public ShadowRay shadowRay(NeeCandidate nee, uint pixel, uint path) {
+    ShadowRay shadow;
+    shadow.origin = nee.origin;
+    shadow.light = nee.light;
+    shadow.direction = nee.direction;
+    shadow.primitive = nee.primitive;
+    shadow.contribution = nee.unshadowed;
+    shadow.tmax = nee.tmax;
+    shadow.pixel = pixel;
+    shadow.path = path;
+    shadow.pad0 = 0;
+    shadow.pad1 = 0;
+    return shadow;
 }
 
 // The same connection from a scattering point inside a medium: no surface,
