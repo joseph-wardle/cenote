@@ -99,11 +99,18 @@ bool traceLeg(float3 origin, float3 direction, uint instance, out Hit hit,
             query.CommitNonOpaqueTriangleHit();
         }
     }
+    if (query.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
+        hit.instance = INSTANCE_NONE;
+        hit.primitive = 0;
+        hit.barycentrics = float2(0.0);
+        distance = 0.0;
+        return false;
+    }
     hit.instance = instance;
     hit.primitive = query.CommittedPrimitiveIndex();
     hit.barycentrics = query.CommittedTriangleBarycentrics();
     distance = query.CommittedRayT();
-    return query.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
+    return true;
 }
 
 [shader("compute")]

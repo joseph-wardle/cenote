@@ -388,6 +388,64 @@ fn subsurface_furnace_closes() {
     }
 }
 
+/// The partial-blend oracle, which the weight-0 and weight-1 gates cannot
+/// reach: strictly between them the diffuse lobe and the walk share one
+/// slot, and every factor that splits them has to appear exactly once.
+///
+/// Over an achromatic matte base of albedo `A` under a white subsurface
+/// color (α = 1, so the walk conserves exactly), the two techniques carry
+/// the *same* weight: the diffuse draw's `(1−w)·A/π · cos` over its
+/// mixture density `wDiffuse·(cos/π)/wTotal`, and the entry's `w` over its
+/// selection probability `wSubsurface/wTotal`, both land on `wTotal =
+/// (1−w)·A + w`. So every sample is exactly `wTotal · sky` whichever
+/// technique it drew, and any misplaced blend factor moves it: dropping
+/// (1−w) from the diffuse evaluation or w from the entry mints energy, and
+/// swapping the two shifts the mean (A ≠ 1 and w ≠ ½ keep the orderings
+/// apart). One-sided per sample and two-sided on the mean, as the white
+/// furnace above, for the same shading-normal sliver.
+#[test]
+fn subsurface_blends_with_the_diffuse_lobe() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let sky = 0.5;
+    let base = 0.2;
+    for weight in [0.25_f32, 0.75] {
+        for radius in [0.25_f32, 1e9] {
+            let scene = subsurface_furnace_scene(
+                &gpu,
+                Material {
+                    subsurface_weight: weight,
+                    subsurface_color: Vec3::ONE,
+                    subsurface_radius: radius,
+                    subsurface_radius_scale: Vec3::ONE,
+                    ..Material::matte(Vec3::splat(base), 0.0)
+                },
+            );
+            let samples = 4;
+            let expected = sky * ((1.0 - weight) * base + weight);
+            let sum = bsdf_only_sum(&gpu, &scene, 32, samples);
+            let mut mean = 0.0;
+            for chunk in sum.chunks_exact(4) {
+                for channel in &chunk[..3] {
+                    let value = channel / samples as f32;
+                    assert!(
+                        value < expected + 1e-3,
+                        "the blend minted energy at weight {weight}, radius {radius}: \
+                         {value} vs {expected}"
+                    );
+                }
+                mean += chunk[0] / samples as f32;
+            }
+            mean /= 32.0 * 32.0;
+            assert!(
+                (mean - expected).abs() < 1e-3,
+                "blended mean drifted at weight {weight}, radius {radius}: {mean} vs {expected}"
+            );
+        }
+    }
+}
+
 /// The slab-reflectance oracle: an optically deep sphere (~100 mean free
 /// paths across — walks end by absorption, never at the far side) under
 /// the uniform sky must read back, per channel, the *authored*
