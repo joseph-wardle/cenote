@@ -416,30 +416,54 @@ fn write_probes(
 ) -> anyhow::Result<()> {
     #[derive(serde::Serialize)]
     struct ProbeReport {
-        /// Scatter events binned by the bounce they landed on, trailing
-        /// zeros trimmed.
+        /// Volume-stage scatter events binned by the bounce they landed
+        /// on, trailing zeros trimmed.
         events_by_bounce: Vec<u32>,
         total_events: u64,
+        /// Subsurface walks binned by the scatter count they exited at
+        /// (the last bin aggregates everything past it), trailing zeros
+        /// trimmed.
+        walk_exits_by_events: Vec<u32>,
+        /// Walks killed at the walk cap — the gate that must read zero on
+        /// production materials.
+        walk_cap_kills: u32,
+        total_walk_events: u64,
         /// Camera paths traced: width × height × spp.
         paths: u64,
         mean_events_per_path: f64,
+        mean_walk_events_per_path: f64,
     }
-    let mut events = renderer.probes(gpu)?;
+    let bins = renderer.probes(gpu)?;
+    let split = cenote::wavefront::PROBE_VOLUME_BINS;
+    let mut events = bins[..split].to_vec();
+    let mut walk_exits = bins[split..].to_vec();
+    let walk_cap_kills = walk_exits.pop().unwrap_or(0);
     let total_events: u64 = events.iter().map(|&events| u64::from(events)).sum();
+    let total_walk_events: u64 = walk_exits
+        .iter()
+        .enumerate()
+        .map(|(length, &walks)| length as u64 * u64::from(walks))
+        .sum();
     while events.last() == Some(&0) {
         events.pop();
+    }
+    while walk_exits.last() == Some(&0) {
+        walk_exits.pop();
     }
     let paths =
         u64::from(film.width()) * u64::from(film.height()) * u64::from(film.samples());
     // Precision loss starts past 2^52 events — the u32 bins overflow long
     // before that matters.
     #[expect(clippy::cast_precision_loss, reason = "far below f64's integer range")]
-    let mean_events_per_path = total_events as f64 / paths as f64;
     let report = ProbeReport {
         events_by_bounce: events,
         total_events,
+        walk_exits_by_events: walk_exits,
+        walk_cap_kills,
+        total_walk_events,
         paths,
-        mean_events_per_path,
+        mean_events_per_path: total_events as f64 / paths as f64,
+        mean_walk_events_per_path: total_walk_events as f64 / paths as f64,
     };
     let sidecar = out.with_extension("probes.ron");
     std::fs::write(
@@ -448,10 +472,14 @@ fn write_probes(
     )
     .with_context(|| format!("writing {}", sidecar.display()))?;
     println!(
-        "wrote {} ({} scatter events, {:.2} per path)",
+        "wrote {} ({} scatter events, {:.2} per path; {} walk events, {:.2} per path, \
+         {} cap kills)",
         sidecar.display(),
         report.total_events,
-        report.mean_events_per_path
+        report.mean_events_per_path,
+        report.total_walk_events,
+        report.mean_walk_events_per_path,
+        report.walk_cap_kills
     );
     Ok(())
 }

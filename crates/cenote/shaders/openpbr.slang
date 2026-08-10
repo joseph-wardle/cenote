@@ -310,6 +310,9 @@ public static const uint LOBE_SPECULAR = 1;     // any base reflection
 public static const uint LOBE_TRANSMISSION = 2; // through the surface
 public static const uint LOBE_COAT = 3;
 public static const uint LOBE_FUZZ = 4;
+// The subsurface technique: the draw hands the path to the walk kernel
+// rather than continuing it, so this tag is what routes the push.
+public static const uint LOBE_SUBSURFACE = 5;
 
 public struct Closure {
     Material m;
@@ -347,11 +350,24 @@ public struct Closure {
     float thinScaleR;
     float thinScaleT;
     float thinTShare;  // probability the spec technique picks transmission
+    // The subsurface share of the diffuse slot — OpenPBR's nested mix puts
+    // subsurface inside the opaque base, under transmission's outer mix.
+    // Gated exactly like the host's medium intern (weight and radius
+    // positive, not thin-walled), so a positive blend implies the walk
+    // kernel finds a medium record; 0 on an exiting hit, like the diffuse
+    // lobe it displaces.
+    float subsurfaceBlend;
     // One-sample MIS technique weights (unnormalized) and their sum.
+    // wSubsurface joins the *selection* only: the lobe scatters nowhere at
+    // this vertex — its energy leaves through the walk kernel's exit — so
+    // it adds no density term in bsdfPdf, and sitting in wTotal is what
+    // correctly thins every other technique's mixture pdf by the
+    // probability the draw walked away instead.
     float wFuzz;
     float wCoat;
     float wSpec;
     float wDiffuse;
+    float wSubsurface;
     float wTotal;
     // The denoiser albedo guide's value at this vertex — see resolveClosure.
     public float3 aovAlbedo;
@@ -605,6 +621,15 @@ public Closure resolveClosure(Material m, float3 wo, bool exiting,
         c.thinTShare = total > 0.0 ? average(c.thinT) / total : 0.0;
     }
 
+    // The subsurface blend, mirroring the host gate that interns the
+    // medium record (`scene::subsurface`) — written positively, so a NaN
+    // weight or radius stays 0 exactly as it stays `None` there.
+    c.subsurfaceBlend = 0.0;
+    if (!exiting && m.subsurfaceWeight > 0.0 && m.subsurfaceRadius > 0.0
+        && m.thinWalled == 0) {
+        c.subsurfaceBlend = m.subsurfaceWeight;
+    }
+
     // Technique weights: each technique in proportion to the energy its
     // lobes are expected to carry. These only steer which technique gets
     // sampled — every lobe is still evaluated and pdf-weighted — but a
@@ -625,13 +650,19 @@ public Closure resolveClosure(Material m, float3 wo, bool exiting,
     c.wSpec = c.hasSpecular
             ? baseAvg * lerp(dielectricE, average(metalE), m.metalness)
             : 0.0;
+    // Subsurface splits the diffuse slot, its albedo estimate the authored
+    // multiple-scatter color — which is exactly what the walk reflects.
     c.wDiffuse = exiting ? 0.0
                : baseAvg * (1.0 - m.metalness) * (1.0 - m.transmissionWeight)
-                         * (1.0 - c.specE) * average(m.baseColor);
+                         * (1.0 - c.specE) * (1.0 - c.subsurfaceBlend)
+                         * average(m.baseColor);
+    c.wSubsurface = baseAvg * (1.0 - m.metalness) * (1.0 - m.transmissionWeight)
+                  * (1.0 - c.specE) * c.subsurfaceBlend
+                  * average(m.subsurfaceColor);
     if (exiting) {
         c.wSpec = 1.0;
     }
-    c.wTotal = c.wFuzz + c.wCoat + c.wSpec + c.wDiffuse;
+    c.wTotal = c.wFuzz + c.wCoat + c.wSpec + c.wDiffuse + c.wSubsurface;
 
     // The denoiser albedo guide's estimate of this surface: the same
     // technique estimates the weights above average into scalars, kept as
@@ -651,7 +682,8 @@ public Closure resolveClosure(Material m, float3 wo, bool exiting,
                     + c.fuzzAtten * m.coatWeight * c.coatE
                     + c.baseWeight * (specColor
                         + (1.0 - m.metalness) * (1.0 - m.transmissionWeight)
-                          * (1.0 - c.specE) * m.baseColor);
+                          * (1.0 - c.specE)
+                          * lerp(m.baseColor, m.subsurfaceColor, c.subsurfaceBlend));
     }
     return c;
 }
@@ -806,8 +838,11 @@ public float3 evalBsdf(Closure c, float3 wi, float3 wo) {
         base = baseReflection(c, wi, wo, h);
     }
     if (!c.exiting) {
+        // The diffuse lobe keeps only its share of the slot — the
+        // subsurface share leaves through the walk kernel and must not
+        // also be counted here, at the vertex's eval or its NEE.
         base += (1.0 - m.metalness) * (1.0 - m.transmissionWeight)
-              * (1.0 - c.specE)
+              * (1.0 - c.specE) * (1.0 - c.subsurfaceBlend)
               * eonBrdf(m.baseColor, m.baseRoughness, wi, wo);
     }
     return result + c.baseWeight * base;
@@ -822,7 +857,10 @@ float reflectProbability(Closure c, float fresnel) {
 }
 
 // The mixture's solid-angle pdf of wi — the balance heuristic over the
-// technique weights: Σ wᵢ·pdfᵢ / Σ wᵢ.
+// technique weights: Σ wᵢ·pdfᵢ / Σ wᵢ. The subsurface technique is in the
+// denominator's wTotal but contributes no numerator term: it produces no
+// direction at this vertex, so the true density of any wi is exactly the
+// other techniques' — thinned by the probability the draw walked away.
 public float bsdfPdf(Closure c, float3 wi, float3 wo) {
     if (wo.z <= 0.0 || wi.z == 0.0 || c.wTotal <= 0.0) {
         return 0.0;
@@ -955,6 +993,18 @@ public BsdfSample sampleBsdf(Closure c, float3 wo, float uLobe, float2 u) {
                 wi = refracted.xyz;
             }
         }
+    } else if (pick < c.wFuzz + c.wCoat + c.wSpec + c.wSubsurface) {
+        // The subsurface technique scatters nowhere at this vertex: the
+        // entry direction is drawn cosine *into* the surface (the
+        // Lambertian-transmission boundary, mirrored like the thin sheet's)
+        // and the walk kernel owns everything after it. pdf carries the
+        // technique's selection probability — the one density the entry
+        // estimator divides by — never a solid-angle mixture density.
+        result.lobe = LOBE_SUBSURFACE;
+        let entry = sampleCosineHemisphere(u).xyz;
+        result.wi = float3(entry.xy, -entry.z);
+        result.pdf = c.wSubsurface / c.wTotal;
+        return result;
     } else {
         result.lobe = LOBE_DIFFUSE;
         wi = sampleCosineHemisphere(u).xyz;
@@ -963,6 +1013,16 @@ public BsdfSample sampleBsdf(Closure c, float3 wo, float uLobe, float2 u) {
     result.wi = wi;
     result.pdf = bsdfPdf(c, wi, wo);
     return result;
+}
+
+// What the subsurface technique carries into the walk: the lobe's layering
+// under fuzz, coat, and the specular interface — exactly the diffuse
+// lobe's factors, with the walk standing where the EON albedo stood. The
+// caller divides by the technique's selection probability
+// (`BsdfSample.pdf`).
+public float3 subsurfaceEntry(Closure c) {
+    return c.baseWeight * ((1.0 - c.m.metalness) * (1.0 - c.m.transmissionWeight)
+                           * (1.0 - c.specE) * c.subsurfaceBlend);
 }
 
 // An orthonormal frame around a unit normal, branchless (Duff et al.,

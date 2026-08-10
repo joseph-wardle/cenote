@@ -148,6 +148,18 @@ public float2 hashUniform2(uint pixel, uint sampleIndex, uint bounce, uint cross
     return float2(toUnitFloat(h), toUnitFloat(lowbias32(h ^ 0x27d4eb2fu)));
 }
 
+// The subsurface walk's draws — each interior event's distance and phase
+// turn, and the exit's direction and next-event pair — keyed by (event,
+// draw). Like the march's sub-segments the events are unbounded in
+// number, so they ride a hash stream; salts of their own mean no walk
+// draw can ever repeat a transparency or march decision made this bounce.
+public float2 walkUniform2(uint pixel, uint sampleIndex, uint bounce,
+                           uint event, uint draw) {
+    var h = lowbias32(pixel ^ lowbias32(sampleIndex ^ 0x94d049bbu));
+    h = lowbias32(h ^ (bounce << 16 | event << 3 | draw));
+    return float2(toUnitFloat(h), toUnitFloat(lowbias32(h ^ 0xbf58476du)));
+}
+
 // A dimension's Owen-scrambled point at an *explicit* sample index — the
 // scramble half of the sampler, split from the per-dimension shuffle of
 // *which* index sample_2d/1d ask for. The scramble is keyed per (pixel,

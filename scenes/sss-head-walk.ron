@@ -1,0 +1,111 @@
+// B9's skin-density driver, walk-authored: the same head, rig, and
+// Jensen skin1 interior as sss-head.ron, driven through the subsurface
+// lobe. The per-channel mean free paths (1.2953, 0.95238, 0.67114) mm
+// land as subsurface_radius = 0.0012954 with radius_scale
+// (1, 0.735138, 0.518146), and skin1's per-channel single-scatter albedo
+// (0.959, 0.838, 0.678) is authored as the multiple-scatter color
+// (0.6251, 0.3835, 0.2394) the van de Hulst inversion maps back onto it.
+// Same boundary caveat as the teapot walk tiers: Lambertian transmission
+// here, refraction in the sibling — same regime, different pixels. No
+// 255-bounce cap: the whole walk is one path bounce.
+//
+// Requires the same derived asset: `scenes/corpus/fetch.sh head`, then
+// `python3 scenes/corpus/curate-head.py` (the scan is an open face shell;
+// the walk needs the capped, closed ply — its cap-leak seams die as
+// leaks, the documented 9c curation debt).
+(
+    version: 2,
+    ops: [
+        Settings((
+            name: "main",
+            resolution: Some((1280, 720)),
+            spp: Some(64),
+        )),
+        Camera((
+            name: "main",
+            position: Some((0.322839, 0.0534825, 0.504299)),
+            look_at: Some((-0.140808, -0.162727, -0.354936)),
+            up: Some((0.0355799, 0.964444, -0.261882)),
+            vfov_degrees: Some(30.0),
+        )),
+        Environment((
+            name: "sky",
+            path: Some(Some("../crates/cenote/assets/kloofendal_puresky.exr")),
+            tint: Some((0.05, 0.05, 0.05)),
+        )),
+
+        Mesh((
+            name: "head",
+            source: Some(Ply(path: "corpus/head-capped.ply")),
+        )),
+        Mesh((
+            name: "plane",
+            source: Some(Inline(
+                positions: [
+                    (-1.0, 0.0, -1.0), (-1.0, 0.0, 1.0), (1.0, 0.0, 1.0), (1.0, 0.0, -1.0),
+                ],
+                normals: Some([
+                    (0.0, 1.0, 0.0), (0.0, 1.0, 0.0), (0.0, 1.0, 0.0), (0.0, 1.0, 0.0),
+                ]),
+                uvs: Some([(0.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, 0.0)]),
+                triangles: [(0, 1, 2), (0, 2, 3)],
+            )),
+        )),
+        // The warm key, aimed at the face from camera-left; corners
+        // precomputed so no rotation transform is needed.
+        Mesh((
+            name: "key",
+            source: Some(Inline(
+                positions: [
+                    (0.2562, 0.1829, 0.4695), (0.219, 0.3171, 0.4137),
+                    (0.3438, 0.3171, 0.3305), (0.381, 0.1829, 0.3863),
+                ],
+                normals: Some([
+                    (-0.4963, -0.4467, -0.7444), (-0.4963, -0.4467, -0.7444),
+                    (-0.4963, -0.4467, -0.7444), (-0.4963, -0.4467, -0.7444),
+                ]),
+                uvs: Some([(0.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, 0.0)]),
+                triangles: [(0, 1, 2), (0, 2, 3)],
+            )),
+        )),
+
+        Material((
+            name: "skin1",
+            specular_ior: Some(1.33),
+            specular_roughness: Some(Constant(0.05)),
+            subsurface_weight: Some(1.0),
+            subsurface_color: Some((0.6251, 0.3835, 0.2394)),
+            subsurface_radius: Some(0.0012954),
+            subsurface_radius_scale: Some((1.0, 0.735138, 0.518146)),
+        )),
+        Material((
+            name: "table",
+            base_color: Some(Constant((0.32, 0.30, 0.28))),
+            base_diffuse_roughness: Some(0.4),
+            specular_weight: Some(0.3),
+            specular_roughness: Some(Constant(0.25)),
+        )),
+        Material((
+            name: "warm-key",
+            emission_color: Some(Constant((1.0, 0.72, 0.45))),
+            emission_luminance: Some(25.0),
+        )),
+
+        Instance((
+            name: "head",
+            mesh: Some("head"),
+            material: Some("skin1"),
+        )),
+        Instance((
+            name: "table",
+            mesh: Some("plane"),
+            material: Some("table"),
+            transforms: Some([Trs(translate: (0.0, -0.31, 0.0), scale: (2.0, 1.0, 2.0))]),
+        )),
+        Instance((
+            name: "key",
+            mesh: Some("key"),
+            material: Some("warm-key"),
+        )),
+    ],
+)

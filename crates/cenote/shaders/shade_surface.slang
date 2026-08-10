@@ -5,7 +5,10 @@
 // send one shadow ray toward the lights (the light list or the
 // environment, chosen by power), and scatter off the OpenPBR mixture —
 // reflection or, through the dielectric base, refraction — until the path
-// escapes to the sky, hits the depth cap, or loses Russian roulette.
+// escapes to the sky, hits the depth cap, or loses Russian roulette. A
+// draw of the subsurface technique instead hands the path to the walk
+// kernel (shade_subsurface.slang), which spends this same bounce inside
+// the surface and returns the path to the ray queue at its exit.
 //
 // Radiance bookkeeping: the wave's per-pixel accumulator starts at zero
 // and every write below is a plain +=. A pixel has one path and a path
@@ -35,11 +38,22 @@ import textures;
 // — the buffer was never allocated.
 static const uint FLAG_INTERIORS = 1 << 24;
 
+// The two colder queues behind one pointer: this block sat exactly at
+// Vulkan's guaranteed 128 push-constant bytes, so the subsurface walk
+// queue could not ride inline — the shadow queue moved out with it, and
+// the per-thread-hot queues (hits, rays) stayed where they were. Mirrors
+// `struct AuxQueues` in `wavefront.rs`; addresses fixed for the
+// wavefront's lifetime.
+struct AuxQueues {
+    Queue<ShadowRay> shadows; // next-event connections, for trace_shadow
+    Queue<uint> walks;        // subsurface entries, for shade_subsurface
+};
+
 struct Params {
     Paths paths;
     Queue<uint> hits;
     Queue<uint> rays;         // the next bounce's input: survivors push here
-    Queue<ShadowRay> shadows; // next-event connections, for trace_shadow
+    AuxQueues* aux;
     SceneTable* scene;
     float4* radiance;         // the film's per-pixel accumulator for this wave
     AovTable* aov;            // the wave's AOV targets; enabled = 0 skips them
@@ -243,7 +257,7 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
             shadow.path = path;
             shadow.pad0 = 0;
             shadow.pad1 = 0;
-            params.shadows.push(shadow);
+            params.aux.shadows.push(shadow);
         }
     }
 
@@ -260,8 +274,13 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
     let wiWorld = frame.toWorld(scatter.wi);
     var scattered = float3(0.0);
     if (scatterExitsSurface(scatter, wiWorld, spawn.normal)) {
-        scattered = throughput.xyz * evalBsdf(closure, scatter.wi, wo)
-                  * (abs(scatter.wi.z) / scatter.pdf);
+        // The subsurface technique's estimate is not f·cos/pdf: the walk
+        // *is* the lobe, and the entry carries only its layering over the
+        // selection probability (see `subsurfaceEntry`).
+        scattered = scatter.lobe == LOBE_SUBSURFACE
+                  ? throughput.xyz * subsurfaceEntry(closure) / scatter.pdf
+                  : throughput.xyz * evalBsdf(closure, scatter.wi, wo)
+                        * (abs(scatter.wi.z) / scatter.pdf);
     }
 
     // A path that can carry nothing forward is done — lights themselves
@@ -319,7 +338,16 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
             params.paths.setSlot(path, crossing.slot, crossing.set[crossing.slot]);
         }
     }
-    params.rays.push(path);
+    // A subsurface draw hands the path to the walk kernel instead of the
+    // next bounce: its origin already sits below the surface, its
+    // direction is the cosine entry, and the walk overwrites throughput.w
+    // at its exit. The medium set is untouched — a subsurface boundary is
+    // opaque, never a crossing.
+    if (scatter.lobe == LOBE_SUBSURFACE) {
+        params.aux.walks.push(path);
+    } else {
+        params.rays.push(path);
+    }
 
     // The path continues, but its pixel keeps the emission found here.
     if (any(contribution > 0.0)) {

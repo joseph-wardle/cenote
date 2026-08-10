@@ -52,7 +52,8 @@ mod queue {
     pub const MISS: u64 = 2;
     pub const SHADOW: u64 = 3;
     pub const VOLUME: u64 = 4;
-    pub const COUNT: u64 = 5;
+    pub const WALK: u64 = 5;
+    pub const COUNT: u64 = 6;
 }
 
 /// Byte size of one queue header — `struct QueueState` in
@@ -76,14 +77,17 @@ const SHADOW_RAY_SIZE: u64 = 64;
 const PUSH_CONSTANT_LIMIT: usize = 128;
 
 const _: () = {
-    // The first three are *exactly* full — the packed words exist because
+    // The first two are *exactly* full — the packed words exist because
     // of it — so equality is asserted: a field added to one of them must
     // come out of the packed scalars, not silently push past the limit.
+    // `ShadeSurfaceParams` sat there too until the aux block took the
+    // shadow queue out to make room for the walk queue's pointer.
     assert!(size_of::<RaygenParams>() == PUSH_CONSTANT_LIMIT);
     assert!(size_of::<IntersectParams>() == PUSH_CONSTANT_LIMIT);
-    assert!(size_of::<ShadeSurfaceParams>() == PUSH_CONSTANT_LIMIT);
+    assert!(size_of::<ShadeSurfaceParams>() <= PUSH_CONSTANT_LIMIT);
     assert!(size_of::<ShadeMissParams>() <= PUSH_CONSTANT_LIMIT);
     assert!(size_of::<ShadeVolumeParams>() <= PUSH_CONSTANT_LIMIT);
+    assert!(size_of::<ShadeSubsurfaceParams>() <= PUSH_CONSTANT_LIMIT);
     assert!(size_of::<TraceShadowParams>() <= PUSH_CONSTANT_LIMIT);
     assert!(size_of::<ResolveCameraParams>() <= PUSH_CONSTANT_LIMIT);
 };
@@ -222,7 +226,7 @@ struct ResolveCameraParams {
 #[derive(Clone, Copy)]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "five independent questions about one scene, each a flag bit downstream — \
+    reason = "six independent questions about one scene, each a flag bit downstream — \
               a two-variant enum apiece would name the same booleans twice"
 )]
 struct Media {
@@ -240,6 +244,9 @@ struct Media {
     /// and which is the one thing that makes it run in a scene with no
     /// media at all.
     priority: bool,
+    /// Some material carries an active subsurface lobe, so the surface
+    /// stage can draw the subsurface technique and the walk stage runs.
+    subsurface: bool,
 }
 
 impl Media {
@@ -250,6 +257,7 @@ impl Media {
             volumes: scene.has_volumes(),
             global: scene.has_global_medium(),
             priority: scene.has_priority(),
+            subsurface: scene.has_subsurface(),
         }
     }
 
@@ -325,8 +333,9 @@ struct ShadeSurfaceParams {
     hits: QueueAddrs,
     /// The next bounce's input: scattered paths push themselves back here.
     rays: QueueAddrs,
-    /// Next-event connections, consumed by this round's `trace_shadow`.
-    shadows: QueueAddrs,
+    /// Device address of the uploaded [`AuxQueues`] block — the shadow
+    /// queue and the subsurface walk queue, behind one pointer.
+    aux: vk::DeviceAddress,
     /// Device address of the scene table (geometry, materials, lights,
     /// the closure's lookup tables).
     scene: vk::DeviceAddress,
@@ -336,10 +345,26 @@ struct ShadeSurfaceParams {
     /// Which sample of every pixel's sequence this wave traces.
     sample_index: u32,
     /// `bounce | max_bounces << 8 | light_sampling << 16 | the flag bits`
-    /// — see [`pack_shade`]. Packed because this block sits exactly at
-    /// [`PUSH_CONSTANT_LIMIT`]: the AOV pointer's 8 bytes came out of
-    /// these small scalars.
+    /// — see [`pack_shade`]. Packed because this block sat exactly at
+    /// [`PUSH_CONSTANT_LIMIT`] before the aux block moved the shadow
+    /// queue out.
     packed: u32,
+}
+
+/// The two colder queues `shade_surface` reaches through one pointer —
+/// `struct AuxQueues` in `shaders/shade_surface.slang`. Split out because
+/// that kernel's push constants sat exactly at [`PUSH_CONSTANT_LIMIT`]:
+/// moving the shadow queue behind a pointer is what made room for the
+/// walk queue to exist at all, and only the two push paths pay the
+/// indirection.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct AuxQueues {
+    shadows: QueueAddrs,
+    /// Entries address null until the first subsurface scene allocates the
+    /// walk queue — safe because a scene without one has `wSubsurface` 0
+    /// everywhere, and the branch that would push never runs.
+    walks: QueueAddrs,
 }
 
 /// Pack the shading stages' `packed`, mirrored by the unpack at the top of
@@ -374,12 +399,20 @@ struct VolumeQueues {
     probes: vk::DeviceAddress,
 }
 
-/// One histogram bin per value the packed bounce byte can hold, so the
-/// instrumented volume kernel indexes it with the bounce unchecked. A path
-/// scatters at most once per bounce, so a `u32` bin cannot overflow short
-/// of 2^32 camera paths in one accumulation.
+/// Measurement builds only: where the volume stage's half of the shared
+/// probes histogram ends and the subsurface walk's begins. The volume
+/// stage bins scatter events by bounce in `[0, PROBE_VOLUME_BINS)` — one
+/// bin per value the packed bounce byte can hold, indexed unchecked — and
+/// the walk bins walk lengths at exit above it, cap kills in the last bin
+/// (`PROBE_WALK_*` in `shade_subsurface.slang` mirror this split).
 #[cfg(feature = "probes")]
-const PROBE_BINS: usize = 256;
+pub const PROBE_VOLUME_BINS: usize = 256;
+
+/// The whole histogram: both stages side by side. A path scatters at most
+/// once per bounce and walks at most once per bounce, so a `u32` bin
+/// cannot overflow short of 2^32 camera paths in one accumulation.
+#[cfg(feature = "probes")]
+const PROBE_BINS: usize = 2 * PROBE_VOLUME_BINS;
 
 /// Push constants for the volume kernel (`shaders/shade_volume.slang`);
 /// recorded only when the scene has media. One instance per bounce — the
@@ -406,6 +439,34 @@ struct ShadeVolumeParams {
     ray_mask: u32,
     /// Explicit tail padding to the struct's 8-byte alignment.
     _pad0: u32,
+}
+
+/// Push constants for the subsurface walk kernel
+/// (`shaders/shade_subsurface.slang`); recorded only when the scene has
+/// subsurface materials. One instance per bounce — the bounce inside
+/// `packed` is the only field that varies.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ShadeSubsurfaceParams {
+    paths: PathsAddrs,
+    /// This stage's input, pushed by `shade_surface`'s subsurface draws.
+    walks: QueueAddrs,
+    /// The next bounce's input: walk exits push here.
+    rays: QueueAddrs,
+    /// The exit's next-event connection, consumed by this round's
+    /// `trace_shadow`.
+    shadows: QueueAddrs,
+    scene: vk::DeviceAddress,
+    radiance: vk::DeviceAddress,
+    /// Which sample of every pixel's sequence this wave traces.
+    sample_index: u32,
+    /// `bounce | max_bounces << 8 | light_sampling << 16 | the flag bits`
+    /// — see [`pack_shade`].
+    packed: u32,
+    /// Measurement builds only: the shared probes histogram — the walk
+    /// bins its lengths above the volume stage's 256 (see [`PROBE_BINS`]).
+    #[cfg(feature = "probes")]
+    probes: vk::DeviceAddress,
 }
 
 /// Push constants for the shadow-ray kernel (`shaders/trace_shadow.slang`).
@@ -542,10 +603,14 @@ struct Queues {
     /// Allocated by [`ensure`] on the first wave over a scene with media
     /// and never before; the header slot always exists and stays zeroed.
     volume: OnceLock<Buffer>,
-    /// Measurement builds only: the scatter-event histogram, one `u32` bin
-    /// per bounce index, zeroed at allocation and accumulated across every
-    /// wave until read. Allocated with the volume queue — a scene without
-    /// media has no scatter events to bin.
+    /// Path indices that drew the subsurface technique — awaiting
+    /// `shade_subsurface`. Allocated by [`ensure`] on the first wave over
+    /// a scene with subsurface materials and never before; the header slot
+    /// always exists and stays zeroed.
+    walk: OnceLock<Buffer>,
+    /// Measurement builds only: the [`PROBE_BINS`] histogram, zeroed at
+    /// allocation and accumulated across every wave until read. Allocated
+    /// with whichever instrumented stage first runs — volume or walk.
     #[cfg(feature = "probes")]
     probes: OnceLock<Buffer>,
     /// The five queue addresses `shade_volume` works through, as one
@@ -553,6 +618,14 @@ struct Queues {
     /// buffer's address, and every other queue is created with the
     /// wavefront, so nothing in it can later go stale.
     volume_block: OnceLock<Buffer>,
+    /// The `shade_surface` [`AuxQueues`] block every scene binds: the
+    /// shadow queue plus a null walk entries address. Uploaded at
+    /// construction, since the shadow half is needed from the first wave.
+    aux_block: Buffer,
+    /// The same block with the walk queue's real address, built by
+    /// [`Queues::ensure_walk`] beside the queue itself — subsurface scenes
+    /// bind this one.
+    aux_block_walks: OnceLock<Buffer>,
 }
 
 impl Queues {
@@ -560,15 +633,39 @@ impl Queues {
         let paths = u64::from(capacity);
         let storage =
             vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
-        let headers = [[0u32, 0, 1, 1]; queue::COUNT as usize];
+        let header_init = [[0u32, 0, 1, 1]; queue::COUNT as usize];
+        let headers = gpu.upload_buffer(
+            "wavefront.queue.headers",
+            bytemuck::cast_slice(&header_init),
+            storage
+                | vk::BufferUsageFlags::INDIRECT_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_SRC,
+        )?;
+        let shadow = gpu.create_buffer(
+            "wavefront.queue.shadow",
+            paths * SHADOW_RAY_SIZE,
+            storage,
+            MemoryLocation::GpuOnly,
+        )?;
+        // The default aux block: the shadow queue every scene needs, and a
+        // walk queue whose entries address is null until a subsurface
+        // scene earns the real one (see the field docs).
+        let aux_block = gpu.upload_buffer(
+            "wavefront.queue.aux_block",
+            bytemuck::bytes_of(&AuxQueues {
+                shadows: QueueAddrs {
+                    state: headers.device_address() + queue::SHADOW * QUEUE_HEADER_SIZE,
+                    entries: shadow.device_address(),
+                },
+                walks: QueueAddrs {
+                    state: headers.device_address() + queue::WALK * QUEUE_HEADER_SIZE,
+                    entries: 0,
+                },
+            }),
+            storage,
+        )?;
         Ok(Self {
-            headers: gpu.upload_buffer(
-                "wavefront.queue.headers",
-                bytemuck::cast_slice(&headers),
-                storage
-                    | vk::BufferUsageFlags::INDIRECT_BUFFER
-                    | vk::BufferUsageFlags::TRANSFER_SRC,
-            )?,
+            headers,
             ray: gpu.create_buffer(
                 "wavefront.queue.ray",
                 paths * 4,
@@ -587,28 +684,22 @@ impl Queues {
                 storage,
                 MemoryLocation::GpuOnly,
             )?,
-            shadow: gpu.create_buffer(
-                "wavefront.queue.shadow",
-                paths * SHADOW_RAY_SIZE,
-                storage,
-                MemoryLocation::GpuOnly,
-            )?,
+            shadow,
             volume: OnceLock::new(),
+            walk: OnceLock::new(),
             #[cfg(feature = "probes")]
             probes: OnceLock::new(),
             volume_block: OnceLock::new(),
+            aux_block,
+            aux_block_walks: OnceLock::new(),
         })
     }
 
-    /// Make the volume stage's residency exist: its entry buffer and the
-    /// block of addresses it reads them through, in that order — the block
-    /// can only be built once the buffer it points at exists. Called on the
-    /// first wave over a scene with media and never before.
-    fn ensure_volume(&self, gpu: &Context, capacity: u64) -> Result<()> {
-        ensure(&self.volume, gpu, "wavefront.queue.volume", capacity * 4)?;
-        // Uploaded zeroed rather than [`ensure`]d: the bins accumulate from
-        // zero, and `TRANSFER_SRC` is what lets the histogram come back.
-        #[cfg(feature = "probes")]
+    /// Measurement builds only: make the probes histogram exist. Uploaded
+    /// zeroed rather than [`ensure`]d — the bins accumulate from zero, and
+    /// `TRANSFER_SRC` is what lets the histogram come back.
+    #[cfg(feature = "probes")]
+    fn ensure_probes(&self, gpu: &Context) -> Result<()> {
         if self.probes.get().is_none() {
             let buffer = gpu.upload_buffer(
                 "wavefront.probes",
@@ -619,6 +710,41 @@ impl Queues {
             )?;
             let _ = self.probes.set(buffer);
         }
+        Ok(())
+    }
+
+    /// Make the walk stage's residency exist: its entry buffer and the
+    /// [`AuxQueues`] block that carries its real address, in that order.
+    /// Called on the first wave over a scene with subsurface materials and
+    /// never before.
+    fn ensure_walk(&self, gpu: &Context, capacity: u64) -> Result<()> {
+        ensure(&self.walk, gpu, "wavefront.queue.walk", capacity * 4)?;
+        #[cfg(feature = "probes")]
+        self.ensure_probes(gpu)?;
+        if self.aux_block_walks.get().is_none() {
+            let block = AuxQueues {
+                shadows: self.addresses(queue::SHADOW, &self.shadow),
+                walks: self.walk_addresses(),
+            };
+            let buffer = gpu.upload_buffer(
+                "wavefront.queue.aux_block_walks",
+                bytemuck::bytes_of(&block),
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            )?;
+            // A concurrent winner just means this allocation drops.
+            let _ = self.aux_block_walks.set(buffer);
+        }
+        Ok(())
+    }
+
+    /// Make the volume stage's residency exist: its entry buffer and the
+    /// block of addresses it reads them through, in that order — the block
+    /// can only be built once the buffer it points at exists. Called on the
+    /// first wave over a scene with media and never before.
+    fn ensure_volume(&self, gpu: &Context, capacity: u64) -> Result<()> {
+        ensure(&self.volume, gpu, "wavefront.queue.volume", capacity * 4)?;
+        #[cfg(feature = "probes")]
+        self.ensure_probes(gpu)?;
         if self.volume_block.get().is_none() {
             let block = VolumeQueues {
                 volumes: self.volume_addresses(),
@@ -652,6 +778,15 @@ impl Queues {
         QueueAddrs {
             state: self.headers.device_address() + queue::VOLUME * QUEUE_HEADER_SIZE,
             entries: self.volume.get().map_or(0, Buffer::device_address),
+        }
+    }
+
+    /// The walk queue as kernels see it — same null-until-earned entries
+    /// as the volume queue's.
+    fn walk_addresses(&self) -> QueueAddrs {
+        QueueAddrs {
+            state: self.headers.device_address() + queue::WALK * QUEUE_HEADER_SIZE,
+            entries: self.walk.get().map_or(0, Buffer::device_address),
         }
     }
 
@@ -751,6 +886,7 @@ pub struct Wavefront {
     shade_miss: ComputePipeline,
     shade_surface: ComputePipeline,
     shade_volume: ComputePipeline,
+    shade_subsurface: ComputePipeline,
     trace_shadow: ComputePipeline,
     /// The shadow stage specialized for bounded volumes — see
     /// `trace_shadow.slang`. One or the other is recorded, never both.
@@ -826,6 +962,11 @@ impl Wavefront {
             shade_volume: pipeline(
                 &kernels.shade_volume,
                 size_of::<ShadeVolumeParams>(),
+                Bindings::Scene,
+            )?,
+            shade_subsurface: pipeline(
+                &kernels.shade_subsurface,
+                size_of::<ShadeSubsurfaceParams>(),
                 Bindings::Scene,
             )?,
             trace_shadow: pipeline(
@@ -946,6 +1087,9 @@ impl Wavefront {
         if media.stage() {
             self.queues.ensure_volume(gpu, capacity)?;
         }
+        if media.subsurface {
+            self.queues.ensure_walk(gpu, capacity)?;
+        }
         let params = self.wave_params(scene, radiance, aov_table, width, height, sample, media);
         let mut passes = self.record_wave(scene, radiance, aovs, pixels, &params, media);
         passes.extend_from_slice(trailing);
@@ -1060,7 +1204,7 @@ impl Wavefront {
                     paths: self.paths.addresses(),
                     hits: self.queues.addresses(queue::HIT, &self.queues.hit),
                     rays: self.queues.addresses(queue::RAY, &self.queues.ray),
-                    shadows: self.queues.addresses(queue::SHADOW, &self.queues.shadow),
+                    aux: self.aux_block(media).device_address(),
                     scene: scene.table().device_address(),
                     radiance: radiance.device_address(),
                     aov: aov_table.device_address(),
@@ -1069,6 +1213,7 @@ impl Wavefront {
                 })
                 .collect(),
             shade_volume: self.volume_params(scene, radiance, aov_table, sample, media),
+            shade_subsurface: self.subsurface_params(scene, radiance, sample, media),
             trace_shadow: TraceShadowParams {
                 shadows: self.queues.addresses(queue::SHADOW, &self.queues.shadow),
                 radiance: radiance.device_address(),
@@ -1080,6 +1225,54 @@ impl Wavefront {
                 },
             },
         }
+    }
+
+    /// The [`AuxQueues`] block this wave's `shade_surface` binds: the
+    /// walk-carrying one for subsurface scenes — [`Wavefront::trace_then`]
+    /// ensured it exists — and the null-walk default otherwise.
+    fn aux_block(&self, media: Media) -> &Buffer {
+        if media.subsurface {
+            self.queues
+                .aux_block_walks
+                .get()
+                .expect("walk queues are ensured before wave_params on any wave that needs them")
+        } else {
+            &self.queues.aux_block
+        }
+    }
+
+    /// The walk stage's push constants, one per bounce — or none at all
+    /// for a scene with no subsurface materials, which records no walk
+    /// pass to read them.
+    fn subsurface_params(
+        &self,
+        scene: &Scene,
+        radiance: &Buffer,
+        sample: u32,
+        media: Media,
+    ) -> Vec<ShadeSubsurfaceParams> {
+        if !media.subsurface {
+            return Vec::new();
+        }
+        (0..self.max_bounces)
+            .map(|bounce| ShadeSubsurfaceParams {
+                paths: self.paths.addresses(),
+                walks: self.queues.walk_addresses(),
+                rays: self.queues.addresses(queue::RAY, &self.queues.ray),
+                shadows: self.queues.addresses(queue::SHADOW, &self.queues.shadow),
+                scene: scene.table().device_address(),
+                radiance: radiance.device_address(),
+                sample_index: sample,
+                packed: pack_shade(bounce, self.max_bounces, self.light_sampling, media),
+                #[cfg(feature = "probes")]
+                probes: self
+                    .queues
+                    .probes
+                    .get()
+                    .expect("ensure_walk allocated the histogram")
+                    .device_address(),
+            })
+            .collect()
     }
 
     /// The volume stage's push constants, one per bounce — or none at all,
@@ -1117,6 +1310,11 @@ impl Wavefront {
             .collect()
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the wave's fixed pass sequence, recorded in order — splitting the bounce \
+                  round out would scatter the one place stage order is readable"
+    )]
     fn record_wave<'a>(
         &'a self,
         scene: &'a Scene,
@@ -1193,8 +1391,10 @@ impl Wavefront {
         }
         // A scene with nothing for the volume stage to resolve — no media,
         // no authored priority — records neither its fill nor its dispatch,
-        // so its pass list is the pre-media engine's.
+        // so its pass list is the pre-media engine's. The walk stage
+        // likewise: no subsurface materials, no walk passes.
         let volume_stage = media.stage();
+        let walk_stage = media.subsurface;
         let bounces = params.shade_surface.len() as u32;
         for raygen in &params.ranges {
             passes.push(fill(queue::RAY));
@@ -1214,6 +1414,9 @@ impl Wavefront {
                 passes.push(fill(queue::SHADOW));
                 if volume_stage {
                     passes.push(fill(queue::VOLUME));
+                }
+                if walk_stage {
+                    passes.push(fill(queue::WALK));
                 }
                 passes.push(indirect(
                     &self.intersect,
@@ -1247,6 +1450,16 @@ impl Wavefront {
                     bytemuck::bytes_of(&params.shade_surface[bounce as usize]),
                     queue::HIT,
                 ));
+                // The walk resolves between the surface pass that fed it
+                // and the shadow pass that consumes its exit connections —
+                // the inter-pass barriers order both handoffs.
+                if walk_stage {
+                    passes.push(indirect(
+                        &self.shade_subsurface,
+                        bytemuck::bytes_of(&params.shade_subsurface[bounce as usize]),
+                        queue::WALK,
+                    ));
+                }
                 // The same `media.volumes` that picked this pipeline handed
                 // `trace_shadow` its stack address: the volumes entry point
                 // never runs with a null one.
@@ -1284,6 +1497,9 @@ struct WaveParams {
     /// One instance per recorded bounce, like `shade_surface` — and empty in
     /// a media-free scene, which records no volume pass to read them.
     shade_volume: Vec<ShadeVolumeParams>,
+    /// One instance per recorded bounce — and empty in a scene without
+    /// subsurface materials, which records no walk pass to read them.
+    shade_subsurface: Vec<ShadeSubsurfaceParams>,
     trace_shadow: TraceShadowParams,
 }
 

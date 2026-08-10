@@ -53,6 +53,9 @@ pub struct Kernels {
     /// Medium events on path segments — recorded only when the scene has
     /// media.
     pub shade_volume: Kernel,
+    /// The subsurface random walk — recorded only when the scene has
+    /// subsurface materials.
+    pub shade_subsurface: Kernel,
     /// Occlusion tests for queued shadow rays.
     pub trace_shadow: Kernel,
     /// The same, for a scene with volume-bounding meshes: a second entry
@@ -91,6 +94,7 @@ impl Kernels {
             shade_miss: kernel(spirv!("shade_miss"), c"shade_miss"),
             shade_surface: kernel(spirv!("shade_surface"), c"shade_surface"),
             shade_volume: kernel(spirv!("shade_volume"), c"shade_volume"),
+            shade_subsurface: kernel(spirv!("shade_subsurface"), c"shade_subsurface"),
             trace_shadow: kernel(spirv!("trace_shadow"), c"trace_shadow"),
             trace_shadow_volumes: kernel(spirv!("trace_shadow"), c"trace_shadow_volumes"),
             resolve_camera: kernel(spirv!("resolve_camera"), c"resolve_camera"),
@@ -117,6 +121,7 @@ impl Kernels {
             shade_miss,
             shade_surface,
             shade_volume,
+            shade_subsurface,
             trace_shadow,
             resolve_camera,
             accumulate,
@@ -150,6 +155,10 @@ impl Kernels {
             shade_volume: Kernel {
                 spirv: shade_volume?,
                 entry: c"shade_volume",
+            },
+            shade_subsurface: Kernel {
+                spirv: shade_subsurface?,
+                entry: c"shade_subsurface",
             },
             trace_shadow_volumes: Kernel {
                 // The same module, a second entry point in it.
@@ -294,13 +303,14 @@ mod tests {
         u32::from_le_bytes(bytes[..4].try_into().unwrap()) == 0x0723_0203
     }
 
-    fn all(kernels: &Kernels) -> [&Kernel; 11] {
+    fn all(kernels: &Kernels) -> [&Kernel; 12] {
         [
             &kernels.raygen,
             &kernels.intersect,
             &kernels.shade_miss,
             &kernels.shade_surface,
             &kernels.shade_volume,
+            &kernels.shade_subsurface,
             &kernels.trace_shadow,
             &kernels.trace_shadow_volumes,
             &kernels.resolve_camera,

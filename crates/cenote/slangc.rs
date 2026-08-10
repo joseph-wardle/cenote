@@ -10,12 +10,13 @@
 /// `textures.slang`)
 /// compile into their importers, and test-only fixtures (`rng_test.slang`)
 /// compile at test time.
-pub const KERNELS: [&str; 10] = [
+pub const KERNELS: [&str; 11] = [
     "raygen",
     "intersect",
     "shade_miss",
     "shade_surface",
     "shade_volume",
+    "shade_subsurface",
     "trace_shadow",
     "resolve_camera",
     "accumulate",

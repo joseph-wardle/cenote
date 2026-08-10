@@ -63,8 +63,9 @@ public struct GeometryRecord {
     uint boundary;
     public uint medium;             // this interior's record, or MEDIUM_NONE
     // The subsurface interior's record, or MEDIUM_NONE — interned by prep,
-    // unread until the subsurface walk kernel lands.
-    uint subsurface;
+    // walked by shade_subsurface. A positive `subsurfaceBlend` in the
+    // closure implies this is a real index: both mirror the same gate.
+    public uint subsurface;
 };
 
 // The boundary class alone — what `BOUNDARY_*` names.

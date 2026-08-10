@@ -301,6 +301,134 @@ fn the_furnace_closes_through_a_thin_lens() {
     }
 }
 
+/// A subsurface furnace scene: a closed unit icosphere of the given
+/// material under the same half-gray sky, the camera just above its pole
+/// looking obliquely down-forward so every camera ray lands on it (the
+/// sphere's horizon sits ~56° off the camera's vertical, the widest ray
+/// ~47°). The plane the other furnaces stand on is an open shell a walk
+/// would leak straight out of, which is why this one is a sphere — and
+/// convex, so an exited path can never re-enter and every path carries
+/// exactly one walk.
+fn subsurface_furnace_scene(gpu: &Context, material: Material) -> Scene {
+    let object = Object {
+        mesh: crate::scene::icosphere(4),
+        transform: Mat4::IDENTITY,
+        material,
+        medium: None,
+        interior_priority: 0,
+    };
+    let camera = Camera {
+        position: Vec3::new(0.0, 1.2, 0.0),
+        look_at: Vec3::new(0.0, 0.5, -0.35),
+        up: Vec3::Y,
+        vfov_degrees: 40.0,
+        lens: None,
+    };
+    Scene::new(
+        gpu,
+        &[object],
+        camera,
+        &Environment::constant(Vec3::splat(0.5)),
+    )
+    .expect("subsurface furnace scene")
+}
+
+/// The subsurface material the walk furnaces share: the lobe at full
+/// weight over a black diffuse base with no specular interface, so the
+/// walk is the only technique and the entry carries no Fresnel.
+fn walk_material(color: Vec3, radius: f32) -> Material {
+    Material {
+        subsurface_weight: 1.0,
+        subsurface_color: color,
+        subsurface_radius: radius,
+        subsurface_radius_scale: Vec3::ONE,
+        ..Material::matte(Vec3::ZERO, 0.0)
+    }
+}
+
+/// The subsurface white furnace, at both ends of the walk's regime. A
+/// subsurface color of 1 inverts to a single-scatter albedo of exactly 1
+/// (s(1) collapses below f32 epsilon), the achromatic extinction makes
+/// every distance draw's weight exactly 1, entry and exit lobes sample
+/// their own densities, and specular weight 0 removes the interface — so
+/// BSDF-only, every sample is the sky *exactly*, up to one sliver: an
+/// icosphere's smooth normals tilt off its facets, and a cosine draw that
+/// crosses the geometric horizon dies by the standard shading-normal
+/// trade, at the entry or at the exit. A death zeroes a whole sample —
+/// measured at 6e-5 (scattering) and 4e-4 (translucent) per walk — so the
+/// per-sample bound is one-sided: a sample may die to the trade, but no
+/// sample may ever *mint* energy. The mean carries the two-sided bound,
+/// with the death rate an order of magnitude under it.
+///
+/// The two radii are the walk's two disjoint regimes: at 0.25 the sphere
+/// is ~8 mean free paths across and every path scatters (α = 1, so only
+/// geometry ends a walk); at 1e9 the extinction is ~1e-9 and every walk
+/// crosses in one unscattered flight, leaving as pure diffuse
+/// translucency — the `σ_t` → 0 limit that must close the same furnace
+/// through the no-event path.
+#[test]
+fn subsurface_furnace_closes() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let sky = 0.5;
+    for radius in [0.25_f32, 1e9] {
+        let scene = subsurface_furnace_scene(&gpu, walk_material(Vec3::ONE, radius));
+        let samples = 4;
+        let sum = bsdf_only_sum(&gpu, &scene, 32, samples);
+        let mut mean = 0.0;
+        for chunk in sum.chunks_exact(4) {
+            for channel in &chunk[..3] {
+                let value = channel / samples as f32;
+                assert!(
+                    value < sky + 1e-3,
+                    "the walk minted energy at radius {radius}: {value} vs {sky}"
+                );
+            }
+            mean += chunk[0] / samples as f32;
+        }
+        mean /= 32.0 * 32.0;
+        assert!(
+            (mean - sky).abs() < 1e-3,
+            "subsurface furnace mean drifted at radius {radius}: {mean} vs {sky}"
+        );
+    }
+}
+
+/// The slab-reflectance oracle: the walk must reflect the *authored*
+/// multiple-scatter albedo — that is the van de Hulst inversion's whole
+/// promise. An optically deep sphere (~100 mean free paths across, walks
+/// end by absorption long before the far side) under the uniform sky
+/// reads back, per channel, the subsurface color the material authored,
+/// through the full MIS renderer — so the exit's next-event connection,
+/// its power-heuristic weight against the exit cosine, and the emission
+/// weight the continuation carries are all in the loop. Measured:
+/// (0.8, 0.5, 0.2) reads back (0.410, 0.257, 0.103) against C·sky of
+/// (0.4, 0.25, 0.1) — a consistent +2–3% relative, the fit's Lambertian
+/// boundary assumption plus the limb's thin-chord translucency (<0.3% of
+/// pixels). The bound carries that bias with margin, not just noise.
+#[test]
+fn subsurface_walks_to_the_authored_albedo() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let renderer = Renderer::new(&gpu).expect("renderer");
+    let sky = 0.5;
+    let color = Vec3::new(0.8, 0.5, 0.2);
+    let scene = subsurface_furnace_scene(&gpu, walk_material(color, 0.02));
+    let samples = 64;
+    let sum = accumulate_sum(&gpu, &renderer, &scene, 32, samples);
+    for channel in 0..3 {
+        let mean = sum.chunks_exact(4).map(|chunk| chunk[channel]).sum::<f32>()
+            / (32.0 * 32.0 * samples as f32);
+        let expected = color[channel] * sky;
+        assert!(
+            (mean - expected).abs() < 0.03 * sky,
+            "channel {channel} reflected {mean} for an authored {expected}"
+        );
+    }
+}
+
 /// A white Lambert plane under a black sky, lit by exactly one delta
 /// light — built through the production path (description → prep), the
 /// only route delta lights exist on. The single light means selection

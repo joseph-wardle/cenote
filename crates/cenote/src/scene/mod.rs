@@ -147,8 +147,9 @@ struct GeometryRecord {
     /// filled with, or [`MEDIUM_NONE`] — see [`placement_medium`].
     medium: u32,
     /// Index into the same table of the subsurface interior behind this
-    /// instance's material, or [`MEDIUM_NONE`] — see [`subsurface`].
-    /// Interned but unread until the subsurface walk kernel lands.
+    /// instance's material, or [`MEDIUM_NONE`] — see [`subsurface`],
+    /// whose gate the closure mirrors so the walk kernel only ever reads
+    /// a real index.
     subsurface: u32,
 }
 
@@ -243,7 +244,7 @@ fn is_boundary_inert(material: &Material) -> bool {
 #[derive(Clone, Copy)]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "four independent placement predicates, cached together for the wavefront's \
+    reason = "five independent placement predicates, cached together for the wavefront's \
               per-wave read"
 )]
 struct PlacementMedia {
@@ -264,6 +265,11 @@ struct PlacementMedia {
     /// an event, so it counts toward [`Scene::has_media`] where a purely
     /// absorbing one does not.
     scattering_interiors: bool,
+    /// Some material carries an active subsurface lobe — the exact
+    /// condition [`subsurface`] interns a medium record under, so what the
+    /// wavefront records the walk stage for and what a closure can draw
+    /// can never disagree.
+    subsurface: bool,
 }
 
 fn placement_media(placements: &[Placement]) -> PlacementMedia {
@@ -272,6 +278,7 @@ fn placement_media(placements: &[Placement]) -> PlacementMedia {
         volumes: false,
         priority: false,
         scattering_interiors: false,
+        subsurface: false,
     };
     for placement in placements {
         let word = boundary_word(placement);
@@ -279,6 +286,7 @@ fn placement_media(placements: &[Placement]) -> PlacementMedia {
         media.volumes |= word & BOUNDARY_MASK == BOUNDARY_NULL;
         media.priority |= word & (MAX_PRIORITY << STACK_PRIORITY_SHIFT) != 0;
         media.scattering_interiors |= word & STACK_SCATTERING != 0;
+        media.subsurface |= subsurface(&placement.material).is_some();
     }
     media
 }
@@ -952,6 +960,14 @@ impl Scene {
     #[must_use]
     pub fn has_priority(&self) -> bool {
         self.media.priority
+    }
+
+    /// Whether any material carries an active subsurface lobe (see
+    /// [`subsurface`]). True, the wavefront allocates the walk queue and
+    /// records the subsurface walk stage after every surface pass.
+    #[must_use]
+    pub fn has_subsurface(&self) -> bool {
+        self.media.subsurface
     }
 
     /// The environment's emitted power as the selection heuristic weighs
