@@ -1364,15 +1364,15 @@ impl Mapper {
             // and pbrt picks between them in that order; see
             // [`Self::subsurface_interior`].
             "subsurface" => {
-                patch.subsurface_weight = Some(1.0);
+                patch.subsurface_weight = Some(Texturable::Constant(1.0));
                 patch.specular_ior = Some(self.dielectric_eta(directive, "", 1.33)?);
                 patch.specular_roughness = Some(self.roughness_slot(directive, "")?);
                 let g = params.float("g")?.unwrap_or(0.0);
-                patch.subsurface_scatter_anisotropy = Some(g);
+                patch.subsurface_scatter_anisotropy = Some(Texturable::Constant(g));
                 if let Some((color, radius, scale)) = self.subsurface_interior(directive, g)? {
-                    patch.subsurface_color = color;
-                    patch.subsurface_radius = Some(radius);
-                    patch.subsurface_radius_scale = Some(scale);
+                    patch.subsurface_color = color.map(Texturable::Constant);
+                    patch.subsurface_radius = Some(Texturable::Constant(radius));
+                    patch.subsurface_radius_scale = Some(Texturable::Constant(scale));
                 }
             }
             other => {
@@ -1934,6 +1934,20 @@ mod tests {
     const TRIANGLE: &str = r#"Shape "trianglemesh"
         "point3 P" [0 0 0  1 0 0  0 1 0] "integer indices" [0 1 2]"#;
 
+    /// A texturable slot's constant. pbrt describes a subsurface interior
+    /// numerically, so the importer writes those slots as constants and the
+    /// assertions want the value rather than the wrapper — and a slot that
+    /// somehow arrived textured should fail loudly rather than compare
+    /// unequal.
+    fn constant<T: Copy>(slot: Option<Texturable<T>>) -> Option<T> {
+        slot.map(|slot| match slot {
+            Texturable::Constant(value) => value,
+            Texturable::Texture(reference) => {
+                panic!("expected a constant, found the texture {:?}", reference.path)
+            }
+        })
+    }
+
     fn material<'a>(set: &'a ChangeSet, name: &str) -> &'a MaterialPatch {
         set.ops
             .iter()
@@ -2487,23 +2501,23 @@ Translate 1 0 0
         );
         import_world("subsurface-sigma", &world, |set, warnings| {
             let jade = material(set, "jade");
-            assert_eq!(jade.subsurface_weight, Some(1.0));
-            assert_eq!(jade.subsurface_scatter_anisotropy, Some(0.25));
+            assert_eq!(constant(jade.subsurface_weight.clone()), Some(1.0));
+            assert_eq!(constant(jade.subsurface_scatter_anisotropy.clone()), Some(0.25));
             // eta is absent, so pbrt's subsurface default stands — 1.33,
             // not the 1.5 the glass materials default to.
             assert_eq!(jade.specular_ior, Some(1.33));
             // σ_t = scale · (σ_a + σ_s) = (4, 6, 10); the longest mean free
             // path takes the radius and the rest ride as its shape.
             let (radius, shape) = (
-                jade.subsurface_radius.expect("a radius"),
-                jade.subsurface_radius_scale.expect("a shape"),
+                constant(jade.subsurface_radius.clone()).expect("a radius"),
+                constant(jade.subsurface_radius_scale.clone()).expect("a shape"),
             );
             assert!((radius - 0.25).abs() < 1e-6, "{radius}");
             for (channel, expected) in shape.iter().zip([1.0, 4.0 / 6.0, 0.4]) {
                 assert!((channel - expected).abs() < 1e-6, "{shape:?}");
             }
             // And the colors walk back to the albedos they were made from.
-            let color = jade.subsurface_color.expect("a color");
+            let color = constant(jade.subsurface_color.clone()).expect("a color");
             for (channel, expected) in color.iter().zip([1.0, 2.0 / 3.0, 0.4]) {
                 let walked = cenote::scene::single_scatter_albedo(*channel, 0.25);
                 assert!(
@@ -2530,9 +2544,12 @@ Translate 1 0 0
         );
         import_world("subsurface-reflectance", &world, |set, warnings| {
             let skin = material(set, "skin");
-            assert_eq!(skin.subsurface_color, Some([0.63, 0.44, 0.35]));
-            assert_eq!(skin.subsurface_radius, Some(0.002));
-            assert_eq!(skin.subsurface_radius_scale, Some([1.0, 0.5, 0.25]));
+            assert_eq!(constant(skin.subsurface_color.clone()), Some([0.63, 0.44, 0.35]));
+            assert_eq!(constant(skin.subsurface_radius.clone()), Some(0.002));
+            assert_eq!(
+                constant(skin.subsurface_radius_scale.clone()),
+                Some([1.0, 0.5, 0.25])
+            );
             assert!(warnings.is_empty(), "{warnings:?}");
         });
 
@@ -2545,9 +2562,12 @@ Translate 1 0 0
         );
         import_world("subsurface-name", &world, |set, warnings| {
             let marble = material(set, "marble");
-            assert_eq!(marble.subsurface_weight, Some(1.0));
+            assert_eq!(constant(marble.subsurface_weight.clone()), Some(1.0));
             assert_eq!(
-                (marble.subsurface_color, marble.subsurface_radius),
+                (
+                    marble.subsurface_color.clone(),
+                    marble.subsurface_radius.clone(),
+                ),
                 (None, None),
                 "an interior cenote cannot read must not be invented"
             );
@@ -2575,7 +2595,7 @@ Translate 1 0 0
             |set, warnings| {
                 let head = material(set, "head");
                 assert_eq!(head.subsurface_color, None);
-                assert_eq!(head.subsurface_radius, Some(0.003));
+                assert_eq!(constant(head.subsurface_radius.clone()), Some(0.003));
                 assert!(
                     warnings
                         .iter()

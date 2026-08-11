@@ -52,6 +52,12 @@ pub(crate) enum Usage {
     /// A single scalar from one source channel (roughness, metalness,
     /// opacity): BC4, linear.
     Scalar,
+    /// Three channels that are data rather than color — a per-channel
+    /// mean free path, say. The same BC7/BC6H encode [`Usage::Color`]
+    /// takes, because the storage question is identical, but linear by
+    /// default like a scalar mask, and sampled without the working-space
+    /// conversion: a length has no color space to convert *from*.
+    Vector,
     /// A tangent-space normal map: BC5 on x/y, always linear.
     Normal,
 }
@@ -63,6 +69,7 @@ impl Usage {
         match self {
             Self::Color => "color",
             Self::Scalar => "scalar",
+            Self::Vector => "vector",
             Self::Normal => "normal",
         }
     }
@@ -341,6 +348,9 @@ fn encode(
     let mut prepared = match usage {
         Usage::Color => encode_color(source, srgb),
         Usage::Scalar => encode_scalar(source, srgb, channel),
+        // Data, so the default flips: linear unless the reference says
+        // otherwise, the rule `encode_scalar` follows.
+        Usage::Vector => encode_color(source, Some(srgb == Some(true))),
         Usage::Normal => encode_normal(source),
     };
     prepared.hash = hash;

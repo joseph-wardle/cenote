@@ -9,10 +9,11 @@
 //! toward rough glass by `transmission_weight`, under an optional clear
 //! coat and a fuzz (sheen) layer, plus emission, fractional opacity, and
 //! thin-walled surfaces — each a named `OpenPBR` attribute. The texturable
-//! subset (base color, roughness, metalness, emission, opacity, plus a
-//! tangent-space normal map) carries a bindless-table index next to its
-//! constant; [`TEXTURE_NONE`] means constant-everywhere, and prep resolves
-//! scene-file texture references into live indices.
+//! subset (base color, roughness, metalness, emission, opacity, a
+//! tangent-space normal map, and all five subsurface slots) carries a
+//! bindless-table index next to its constant; [`TEXTURE_NONE`] means
+//! constant-everywhere, and prep resolves scene-file texture references
+//! into live indices.
 
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
@@ -132,9 +133,24 @@ pub struct Material {
     /// scattering; clamped like a `Medium`'s on its way into the medium
     /// table.
     pub subsurface_scatter_anisotropy: f32,
+    /// `subsurface_weight` map (scalar), or [`TEXTURE_NONE`]. This one and
+    /// the four below follow the same convention as the surface slots
+    /// above — the constant stands where the map does not — but they are
+    /// read on a different schedule: the weight decides the lobe at the
+    /// entry vertex, and the remaining four define the interior, which is
+    /// the walk kernel's business.
+    pub subsurface_weight_texture: u32,
+    /// `subsurface_color` map, or [`TEXTURE_NONE`].
+    pub subsurface_color_texture: u32,
+    /// `subsurface_radius` map (scalar), or [`TEXTURE_NONE`].
+    pub subsurface_radius_texture: u32,
+    /// `subsurface_radius_scale` map, or [`TEXTURE_NONE`].
+    pub subsurface_radius_scale_texture: u32,
+    /// `subsurface_scatter_anisotropy` map (scalar), or [`TEXTURE_NONE`].
+    pub subsurface_scatter_anisotropy_texture: u32,
     /// std430 rounds the record up to its 16-byte alignment; explicit so
     /// `Pod` covers every byte the GPU strides over.
-    pub pad: [f32; 3],
+    pub pad: [f32; 2],
 }
 
 // The GPU reads this as a std430 record, where every `float3` aligns to 16
@@ -142,7 +158,7 @@ pub struct Material {
 // offset with no host padding; this pins the total, so a reorder that
 // reintroduces a gap fails to compile instead of silently misreading on the
 // GPU.
-const _: () = assert!(size_of::<Material>() == 208);
+const _: () = assert!(size_of::<Material>() == 224);
 
 impl Material {
     /// A pure diffuse surface — no specular layer. The exact-energy base
@@ -183,7 +199,12 @@ impl Material {
             subsurface_radius_scale: Vec3::new(1.0, 0.5, 0.25),
             subsurface_radius: 1.0,
             subsurface_scatter_anisotropy: 0.0,
-            pad: [0.0; 3],
+            subsurface_weight_texture: TEXTURE_NONE,
+            subsurface_color_texture: TEXTURE_NONE,
+            subsurface_radius_texture: TEXTURE_NONE,
+            subsurface_radius_scale_texture: TEXTURE_NONE,
+            subsurface_scatter_anisotropy_texture: TEXTURE_NONE,
+            pad: [0.0; 2],
         }
     }
 

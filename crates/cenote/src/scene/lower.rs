@@ -420,15 +420,24 @@ fn lower_material(
     material.transmission_scatter =
         acescg_from_rec709(Vec3::from(source.transmission_scatter)).max(Vec3::ZERO);
     material.transmission_scatter_anisotropy = source.transmission_scatter_anisotropy;
-    material.subsurface_weight = source.subsurface_weight.clamp(0.0, 1.0);
+    // The five subsurface stand-ins are the schema defaults, not the
+    // identity: every one of these slots is *replaced* by its texel rather
+    // than multiplied by it, and a textured weight must still read as an
+    // active lobe here — prep interns the interior behind the constant, so
+    // a stand-in of 0 would gate the medium away before any texel could
+    // ask for it.
+    material.subsurface_weight = constant_or(&source.subsurface_weight, 1.0).clamp(0.0, 1.0);
     // An albedo: the inversion's fit is only defined on [0, 1], like the
     // transmittance above.
     material.subsurface_color =
-        acescg_from_rec709(Vec3::from(source.subsurface_color)).clamp(Vec3::ZERO, Vec3::ONE);
-    material.subsurface_radius = source.subsurface_radius.max(0.0);
+        acescg_from_rec709(Vec3::from(constant_or(&source.subsurface_color, [0.8; 3])))
+            .clamp(Vec3::ZERO, Vec3::ONE);
+    material.subsurface_radius = constant_or(&source.subsurface_radius, 1.0).max(0.0);
     // Lengths, not colors — no working-space conversion.
-    material.subsurface_radius_scale = Vec3::from(source.subsurface_radius_scale).max(Vec3::ZERO);
-    material.subsurface_scatter_anisotropy = source.subsurface_scatter_anisotropy;
+    material.subsurface_radius_scale =
+        Vec3::from(constant_or(&source.subsurface_radius_scale, [1.0, 0.5, 0.25])).max(Vec3::ZERO);
+    material.subsurface_scatter_anisotropy =
+        constant_or(&source.subsurface_scatter_anisotropy, 0.0);
     material.coat_color = coat_color;
     material.coat_weight = coat_weight;
     material.coat_roughness = source.coat_roughness.clamp(0.0, 1.0);
@@ -474,6 +483,11 @@ fn lower_material(
         emission_texture,
         opacity_texture,
         normal_texture,
+        subsurface_weight_texture,
+        subsurface_color_texture,
+        subsurface_radius_texture,
+        subsurface_radius_scale_texture,
+        subsurface_scatter_anisotropy_texture,
     ] = textured_slots(source).map(|(reference, usage)| {
         reference.map_or(TEXTURE_NONE, |reference| {
             indices[&texture_key(reference, usage)]
@@ -485,12 +499,19 @@ fn lower_material(
     material.emission_texture = emission_texture;
     material.opacity_texture = opacity_texture;
     material.normal_texture = normal_texture;
+    material.subsurface_weight_texture = subsurface_weight_texture;
+    material.subsurface_color_texture = subsurface_color_texture;
+    material.subsurface_radius_texture = subsurface_radius_texture;
+    material.subsurface_radius_scale_texture = subsurface_radius_scale_texture;
+    material.subsurface_scatter_anisotropy_texture = subsurface_scatter_anisotropy_texture;
     material
 }
 
 /// A texturable slot's constant, or `stand_in` when it is textured — the
 /// schema default for slots the kernel replaces per hit, the identity for
-/// slots it multiplies (emission, opacity).
+/// slots it multiplies (emission, opacity). `subsurface_weight` is the one
+/// slot whose stand-in is neither: prep reads it to decide whether the
+/// interior exists at all, so a textured weight stands in as present.
 fn constant_or<T: Copy>(value: &Texturable<T>, stand_in: T) -> T {
     match value {
         Texturable::Constant(constant) => *constant,
@@ -505,14 +526,16 @@ fn texture_key(reference: &TextureRef, usage: texture::Usage) -> texture::Key {
         // Normal maps are always linear; a stray override must not fork
         // the cache (its lowering warns instead).
         texture::Usage::Normal => None,
-        texture::Usage::Color | texture::Usage::Scalar => {
+        texture::Usage::Color | texture::Usage::Scalar | texture::Usage::Vector => {
             reference.color_space.map(|space| space == ColorSpace::Srgb)
         }
     };
     let channel = match usage {
         // Only the scalar bake reads a chosen channel; a stray selector
-        // on a color or normal slot must not fork the cache.
-        texture::Usage::Color | texture::Usage::Normal => texture::Channel::R,
+        // on a color, vector or normal slot must not fork the cache.
+        texture::Usage::Color | texture::Usage::Vector | texture::Usage::Normal => {
+            texture::Channel::R
+        }
         texture::Usage::Scalar => match reference.channel {
             None | Some(description::Channel::R) => texture::Channel::R,
             Some(description::Channel::G) => texture::Channel::G,
@@ -524,7 +547,7 @@ fn texture_key(reference: &TextureRef, usage: texture::Usage) -> texture::Key {
         // A normal is a direction, not a quantity — the multiplier must
         // not fork the cache (the schema documents the slot ignores it).
         texture::Usage::Normal => None,
-        texture::Usage::Color | texture::Usage::Scalar => reference.scale,
+        texture::Usage::Color | texture::Usage::Scalar | texture::Usage::Vector => reference.scale,
     };
     let params = texture::Params::new(
         reference
@@ -540,7 +563,7 @@ fn texture_key(reference: &TextureRef, usage: texture::Usage) -> texture::Key {
 /// [`lower_material`] (lowering) share, so a slot can never be collected
 /// under one usage and lowered under another. `description`'s own
 /// `Material::textures` walks the same six slots for validation.
-fn textured_slots(material: &description::Material) -> [(Option<&TextureRef>, texture::Usage); 6] {
+fn textured_slots(material: &description::Material) -> [(Option<&TextureRef>, texture::Usage); 11] {
     [
         (material.base_color.texture(), texture::Usage::Color),
         (material.base_metalness.texture(), texture::Usage::Scalar),
@@ -551,6 +574,19 @@ fn textured_slots(material: &description::Material) -> [(Option<&TextureRef>, te
         (material.emission_color.texture(), texture::Usage::Color),
         (material.geometry_opacity.texture(), texture::Usage::Scalar),
         (material.geometry_normal.as_ref(), texture::Usage::Normal),
+        (material.subsurface_weight.texture(), texture::Usage::Scalar),
+        (material.subsurface_color.texture(), texture::Usage::Color),
+        (material.subsurface_radius.texture(), texture::Usage::Scalar),
+        // A per-channel length, not a color — `Usage::Vector`, which bakes
+        // like a color and samples like data.
+        (
+            material.subsurface_radius_scale.texture(),
+            texture::Usage::Vector,
+        ),
+        (
+            material.subsurface_scatter_anisotropy.texture(),
+            texture::Usage::Scalar,
+        ),
     ]
 }
 
@@ -1374,6 +1410,89 @@ mod tests {
         assert_eq!(lowered.specular_ior, 1.8);
         assert_eq!(lowered.thin_walled, 1);
         assert_eq!(lowered.opacity, 0.5);
+    }
+
+    /// All five subsurface slots reach the record as live indices, and the
+    /// interior survives the lowering — the one way this feature can fail
+    /// silently. `subsurface_weight` is read by prep, not only by a kernel,
+    /// so its stand-in cannot be the schema default: a textured mask over a
+    /// zero constant would gate `scene::subsurface` off, the medium would
+    /// never be interned, and the walk would have no interior to enter
+    /// however bright the texel turned out to be.
+    #[test]
+    fn every_subsurface_slot_textures_without_gating_its_interior() {
+        use crate::material::TEXTURE_NONE;
+
+        fn map<T>(path: &str) -> Texturable<T> {
+            Texturable::Texture(TextureRef {
+                path: path.into(),
+                color_space: None,
+                channel: None,
+                scale: None,
+                uv: None,
+            })
+        }
+        let source = description::Material {
+            subsurface_weight: map("/mask.png"),
+            subsurface_color: map("/albedo.png"),
+            subsurface_radius: map("/depth.png"),
+            subsurface_radius_scale: map("/shape.png"),
+            subsurface_scatter_anisotropy: map("/aniso.png"),
+            ..description::Material::default()
+        };
+        let keys: Vec<texture::Key> = texture_keys(&source).collect();
+        assert_eq!(keys.len(), 5);
+        let indices: BTreeMap<&texture::Key, u32> = keys
+            .iter()
+            .enumerate()
+            .map(|(index, key)| (key, index as u32))
+            .collect();
+        let lowered = lower_material("skin", &source, false, &indices);
+        for slot in [
+            lowered.subsurface_weight_texture,
+            lowered.subsurface_color_texture,
+            lowered.subsurface_radius_texture,
+            lowered.subsurface_radius_scale_texture,
+            lowered.subsurface_scatter_anisotropy_texture,
+        ] {
+            assert_ne!(slot, TEXTURE_NONE);
+        }
+        // Five distinct images, five distinct slots — a slot collected
+        // under one usage and looked up under another would collide here
+        // rather than at a hit.
+        let resolved: BTreeSet<u32> = [
+            lowered.subsurface_weight_texture,
+            lowered.subsurface_color_texture,
+            lowered.subsurface_radius_texture,
+            lowered.subsurface_radius_scale_texture,
+            lowered.subsurface_scatter_anisotropy_texture,
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(resolved.len(), 5);
+        assert!(
+            crate::scene::subsurface(&lowered).is_some(),
+            "a fully textured lobe must still intern an interior"
+        );
+    }
+
+    /// A per-channel mean free path is baked apart from an albedo, even
+    /// from the same file: one is data and one is color, they decode
+    /// differently by default, and only one takes the working-space
+    /// conversion at sample time.
+    #[test]
+    fn a_vector_slot_preps_apart_from_a_color_one() {
+        let reference = TextureRef {
+            path: "/skin.png".into(),
+            color_space: None,
+            channel: None,
+            scale: None,
+            uv: None,
+        };
+        assert_ne!(
+            texture_key(&reference, texture::Usage::Vector),
+            texture_key(&reference, texture::Usage::Color),
+        );
     }
 
     /// The coat's tint on emission folds in at lowering — the one place

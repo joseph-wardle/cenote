@@ -178,11 +178,11 @@ struct MaterialPatch {
     std::optional<float> transmission_depth{};
     std::optional<std::array<float, 3>> transmission_scatter{};
     std::optional<float> transmission_scatter_anisotropy{};
-    std::optional<float> subsurface_weight{};
-    std::optional<std::array<float, 3>> subsurface_color{};
-    std::optional<float> subsurface_radius{};
-    std::optional<std::array<float, 3>> subsurface_radius_scale{};
-    std::optional<float> subsurface_scatter_anisotropy{};
+    std::optional<Texturable<float>> subsurface_weight{};
+    std::optional<Texturable<std::array<float, 3>>> subsurface_color{};
+    std::optional<Texturable<float>> subsurface_radius{};
+    std::optional<Texturable<std::array<float, 3>>> subsurface_radius_scale{};
+    std::optional<Texturable<float>> subsurface_scatter_anisotropy{};
     std::optional<float> coat_weight{};
     std::optional<std::array<float, 3>> coat_color{};
     std::optional<float> coat_roughness{};

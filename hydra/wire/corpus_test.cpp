@@ -163,11 +163,16 @@ ChangeSet genesis() {
             .transmission_depth = 0.1f,
             .transmission_scatter = std::array{0.05f, 0.4f, 0.7f},
             .transmission_scatter_anisotropy = 0.6f,
-            .subsurface_weight = 0.75f,
-            .subsurface_color = std::array{0.85f, 0.57f, 0.42f},
-            .subsurface_radius = 0.01f,
-            .subsurface_radius_scale = std::array{1.0f, 0.5f, 0.25f},
-            .subsurface_scatter_anisotropy = -0.3f,
+            .subsurface_weight = Constant{0.75f},
+            // The subsurface albedo is the slot a real asset textures — a
+            // head scan's map — so it carries the reference here and its
+            // four neighbours carry constants.
+            .subsurface_color = TextureRef{.path = "/textures/albedo.png",
+                                           .color_space = {},
+                                           .channel = {}},
+            .subsurface_radius = Constant{0.01f},
+            .subsurface_radius_scale = Constant{std::array{1.0f, 0.5f, 0.25f}},
+            .subsurface_scatter_anisotropy = Constant{-0.3f},
             .coat_weight = 1.0f,
             .coat_color = std::array{1.0f, 0.9f, 0.8f},
             .coat_roughness = 0.05f,

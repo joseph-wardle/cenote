@@ -391,21 +391,21 @@ pub struct Material {
     /// isotropic, positive leans forward.
     pub transmission_scatter_anisotropy: f32,
     /// Weight of the subsurface lobe; 0 — the default — removes it.
-    pub subsurface_weight: f32,
+    pub subsurface_weight: Texturable<f32>,
     /// The color light has picked up after scattering many times through
     /// the interior — the multiple-scatter albedo prep inverts (van de
     /// Hulst) into a single-scatter `σ_s`. Default 0.8 gray.
-    pub subsurface_color: [f32; 3],
+    pub subsurface_color: Texturable<[f32; 3]>,
     /// Scattering mean free path in meters, before the per-channel scale.
     /// Default 1.
-    pub subsurface_radius: f32,
+    pub subsurface_radius: Texturable<f32>,
     /// Per-channel multipliers on `subsurface_radius` — the chromatic
     /// shape of the mean free path. Default (1, 0.5, 0.25), skin-like:
     /// red travels farthest.
-    pub subsurface_radius_scale: [f32; 3],
+    pub subsurface_radius_scale: Texturable<[f32; 3]>,
     /// Henyey–Greenstein anisotropy of the subsurface interior's
     /// scattering; 0 is isotropic, positive leans forward.
-    pub subsurface_scatter_anisotropy: f32,
+    pub subsurface_scatter_anisotropy: Texturable<f32>,
     /// Weight of the clear coat layer. Default 0.
     pub coat_weight: f32,
     /// Tint the coat multiplies onto the base. White is untinted.
@@ -458,11 +458,11 @@ impl Default for Material {
             transmission_depth: 0.0,
             transmission_scatter: [0.0; 3],
             transmission_scatter_anisotropy: 0.0,
-            subsurface_weight: 0.0,
-            subsurface_color: [0.8; 3],
-            subsurface_radius: 1.0,
-            subsurface_radius_scale: [1.0, 0.5, 0.25],
-            subsurface_scatter_anisotropy: 0.0,
+            subsurface_weight: Texturable::Constant(0.0),
+            subsurface_color: Texturable::Constant([0.8; 3]),
+            subsurface_radius: Texturable::Constant(1.0),
+            subsurface_radius_scale: Texturable::Constant([1.0, 0.5, 0.25]),
+            subsurface_scatter_anisotropy: Texturable::Constant(0.0),
             coat_weight: 0.0,
             coat_color: [1.0; 3],
             coat_roughness: 0.0,
@@ -482,9 +482,10 @@ impl Default for Material {
 
 impl Material {
     /// Every texture reference this material holds — validation walks
-    /// these, and prep collects them for upload. The same six slots, paired
-    /// with their texture usage, drive prep's collection and lowering; a new
-    /// textured parameter joins here, there, and `MaterialPatch`.
+    /// these, and prep collects them for upload. The same eleven slots,
+    /// paired with their texture usage, drive prep's collection and
+    /// lowering; a new textured parameter joins here, there, and
+    /// `MaterialPatch`.
     pub(crate) fn textures(&self) -> impl Iterator<Item = &TextureRef> {
         [
             self.base_color.texture(),
@@ -493,6 +494,11 @@ impl Material {
             self.emission_color.texture(),
             self.geometry_opacity.texture(),
             self.geometry_normal.as_ref(),
+            self.subsurface_weight.texture(),
+            self.subsurface_color.texture(),
+            self.subsurface_radius.texture(),
+            self.subsurface_radius_scale.texture(),
+            self.subsurface_scatter_anisotropy.texture(),
         ]
         .into_iter()
         .flatten()

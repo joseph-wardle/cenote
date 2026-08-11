@@ -170,11 +170,11 @@ pub struct MaterialPatch {
     pub transmission_depth: Option<f32>,
     pub transmission_scatter: Option<[f32; 3]>,
     pub transmission_scatter_anisotropy: Option<f32>,
-    pub subsurface_weight: Option<f32>,
-    pub subsurface_color: Option<[f32; 3]>,
-    pub subsurface_radius: Option<f32>,
-    pub subsurface_radius_scale: Option<[f32; 3]>,
-    pub subsurface_scatter_anisotropy: Option<f32>,
+    pub subsurface_weight: Option<Texturable<f32>>,
+    pub subsurface_color: Option<Texturable<[f32; 3]>>,
+    pub subsurface_radius: Option<Texturable<f32>>,
+    pub subsurface_radius_scale: Option<Texturable<[f32; 3]>>,
+    pub subsurface_scatter_anisotropy: Option<Texturable<f32>>,
     pub coat_weight: Option<f32>,
     pub coat_color: Option<[f32; 3]>,
     pub coat_roughness: Option<f32>,
@@ -211,6 +211,21 @@ impl MaterialPatch {
                 .as_mut()
                 .and_then(Texturable::texture_mut),
             self.geometry_normal.as_mut().and_then(Option::as_mut),
+            self.subsurface_weight
+                .as_mut()
+                .and_then(Texturable::texture_mut),
+            self.subsurface_color
+                .as_mut()
+                .and_then(Texturable::texture_mut),
+            self.subsurface_radius
+                .as_mut()
+                .and_then(Texturable::texture_mut),
+            self.subsurface_radius_scale
+                .as_mut()
+                .and_then(Texturable::texture_mut),
+            self.subsurface_scatter_anisotropy
+                .as_mut()
+                .and_then(Texturable::texture_mut),
         ]
         .into_iter()
         .flatten()
