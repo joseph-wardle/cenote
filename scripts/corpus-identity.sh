@@ -5,7 +5,7 @@
 # means the images moved, and the only question left is whether that was
 # intended.
 #
-#   scripts/corpus-identity.sh                    # vs b8-baselines/corpus
+#   scripts/corpus-identity.sh                    # vs b9-baselines/corpus
 #   scripts/corpus-identity.sh <baseline-dir>     # vs some other sweep
 #   scripts/corpus-identity.sh <baseline-dir> <out-dir>
 #
@@ -19,13 +19,19 @@
 #
 # Minting a new sweep is deliberate and separate: render into a fresh
 # directory, review why it moved, and only then point later runs at it.
+# The default moved from the B8-close capture to `b9-baselines/corpus` for
+# exactly that reason — a colour-space correction to watercolor's baked
+# textures was reviewed, attributed, and only then minted, and the head
+# gained its first baseline in the same sweep. Each capture directory
+# carries the account in its own `capture-meta.txt`; the older one stays
+# put rather than being edited under a scene it no longer describes.
 # `kroken` and `watercolor` need their curate scripts run first, and every
 # corpus scene needs `scenes/corpus/fetch.sh`.
 set -uo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 cli=$root/target/release/cenote-cli
-base=${1:-$root/b8-baselines/corpus}
+base=${1:-$root/b9-baselines/corpus}
 out=${2:-$root/corpus-identity}
 
 width=2560

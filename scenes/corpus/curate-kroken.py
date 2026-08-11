@@ -154,10 +154,14 @@ def main():
     )
 
     # Bake the pillow: lerp(blue (0.02, 0.015, 0.1), white (0.8), mask), the
-    # mask linearized the way pbrt reads an 8-bit float imagemap.
+    # mask linearized the way pbrt reads an 8-bit float imagemap — to linear
+    # Rec.709 named outright, never OCIO's `linear` role, which every
+    # current config points at ACEScg (see curate-watercolor.py). This one
+    # bake is indifferent: it keeps a single channel of a gray mask, and
+    # gray is a fixed point of the conversion. Its neighbours were not.
     run(
         ["oiiotool", str(KROKEN / "textures/Dots_Pillow.png"),
-         "--colorconvert", "srgb", "linear", "--ch", "0,0,0",
+         "--colorconvert", "srgb", "lin_rec709", "--ch", "0,0,0",
          "--chnames", "R,G,B",
          "--mulc", "0.78,0.785,0.7", "--addc", "0.02,0.015,0.1",
          "-d", "half", "-o", str(DOTS)],

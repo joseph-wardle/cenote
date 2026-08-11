@@ -247,7 +247,12 @@ def main():
     )
 
     tex = WATERCOLOR / "textures"
-    lin = ["--colorconvert", "srgb", "linear"]
+    # The destination is named outright rather than through OCIO's `linear`
+    # role, which resolves to ACEScg in every current config — the ACES one
+    # a DCC installs and OIIO's own built-in alike. A bake that took the
+    # role landed in the working space, and prep then converted it a second
+    # time on the way in: 3-6% desaturated on average, 11% at the tail.
+    lin = ["--colorconvert", "srgb", "lin_rec709"]
     # The AO masks are single-channel; broadcast them to R,G,B before a
     # per-channel --mul (a 3ch × 1ch multiply collapses to red alone).
     rgb = ["--ch", "0,0,0", "--chnames", "R,G,B"]
