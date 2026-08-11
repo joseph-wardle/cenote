@@ -97,12 +97,17 @@ if [[ $set_name == b7 ]]; then
 else
   # The three optical-depth tiers, then the skin-density head: the tiers
   # share geometry and differ only in sigma, so a number that moves on one
-  # and not the others is the medium's doing rather than the scene's.
+  # and not the others is the medium's doing rather than the scene's. Last
+  # is that same head with its albedo map, the only driver whose interior
+  # is resolved per entry point instead of read from the table — it and
+  # `head` differ in one patch field, so what separates them is the cost
+  # and the spread of a textured interior and nothing else.
   scenes=(
     "$root/scenes/sss-teapot-wax-walk.ron:wax"
     "$root/scenes/sss-teapot-marble-walk.ron:marble"
     "$root/scenes/sss-teapot-skin-walk.ron:skin"
     "$root/scenes/sss-head-walk.ron:head"
+    "$root/scenes/sss-head-mapped-walk.ron:head-mapped"
   )
   width=512
   height=288

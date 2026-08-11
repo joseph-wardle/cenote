@@ -22,16 +22,20 @@
 //            recorded here for that reason.
 //
 // What the side-by-side showed (1024 spp both, pbrt converted to ACEScg):
-// - Level and hue agree. Whole-frame means (0.185, 0.162, 0.143) against
-//   (0.178, 0.158, 0.141); both read as warm skin over a cool
-//   environment. What is left is nearly a flat deficit — 3.5, 2.2 and 1.7
-//   percent — rather than a hue error, which is the shape a boundary
-//   model and a flattened albedo should leave behind. It did not read
-//   that way before the colour-space repair described below: red alone
-//   was 7.3 percent short, the frame looked desaturated, and that was the
-//   double conversion rather than anything about the transport. The mean
-//   free paths are landing: the ear is translucent and warm in both,
-//   which a mfp wrong by even a factor of ten could not produce.
+// - Level and hue agree, and closely. Whole-frame means (0.185, 0.162,
+//   0.143) against (0.184, 0.161, 0.142) — under one percent short in
+//   every channel, and flat across them. That is closer than this
+//   comparison has any right to promise: the two renderers solve this
+//   material by different transport and meet at different boundaries, so
+//   agreement to a percent is a coincidence of this frame, not a
+//   tolerance anything should be held to. It is still worth recording
+//   which way the number moved. With the albedo flattened to a constant
+//   the deficit was 3.5, 2.2 and 1.7 percent; with the real map it is
+//   0.6, 0.7 and 0.8. And before the colour-space repair described below
+//   it was 7.3 percent in red alone — a hue error, not a level one, and
+//   that was the double conversion rather than anything about transport.
+//   The mean free paths are landing: the ear is translucent and warm in
+//   both, which a mfp wrong by even a factor of ten could not produce.
 // - cenote alone draws a triangle-scale sawtooth across the base of the
 //   neck, and it is OPEN. It was once written up here as the walk
 //   resolving interior structure a diffusion profile cannot see; that
@@ -76,29 +80,30 @@
 //   rather than by inference. What is left needs the rejections
 //   localized on screen, not counted, and that is the open question.
 //
-// Import fidelity (4 warnings at bootstrap):
-// - The albedo texture is the dominant divergence, and it is a *flatten*
-//   rather than a drop: OpenPBR's subsurface color is a constant slot, so
-//   the 2048-square map is curated to its own linear mean,
-//   (0.537348, 0.322367, 0.264772) — reproduce with
-//     oiiotool textures/head_albedomap.png --colorconvert sRGB lin_rec709 \
-//       -d float -o /tmp/lin.exr && oiiotool --stats /tmp/lin.exr
-//   The destination is spelled out because OCIO's `linear` is a role, and
-//   every current config — the ACES one a DCC installs, and OIIO's own
-//   built-in — points that role at ACEScg. This scene shipped the mean
-//   the role produced, so a value already in the working space went into
-//   a slot documented as linear Rec.709 and prep converted it again: the
-//   red channel arrived at 0.404 instead of 0.451, an albedo the walk
-//   inverts to alpha 0.854 where 0.885 was authored, and 6.8 scattering
-//   events deep where the map asks for 8.7. That is most of the red
-//   deficit against pbrt recorded above, and it was the recipe rather
-//   than the flatten.
-//   The map is all skin (min 0.0185, sigma ~0.07 of a 0.54 mean, no
-//   filler region), so the mean is a fair stand-in for its level and a
-//   poor one for its variation: the freckles, lip darkening, and brow
-//   shading all go — and it cannot stand in at all for the *spread*,
-//   which runs alpha 0.72 to 0.96 across the map in red, 3.5 to 23
-//   scattering events. Unlock = subsurface textures.
+// Import fidelity (3 warnings at bootstrap):
+// - The albedo map imports, which it did not always. OpenPBR's subsurface
+//   color was a constant slot here until the walk learned to resolve its
+//   own interior, and this scene carried the 2048-square map flattened to
+//   its own linear mean, (0.537348, 0.322367, 0.264772). What a mean
+//   cannot stand in for is the *spread*: across the map the walk's
+//   single-scatter albedo runs 0.72 to 0.96 in red — 3.5 to 23 scattering
+//   events deep — where one constant renders every texel at 8.7. The
+//   freckles, the lip darkening and the brow shading are the visible half
+//   of that; the invisible half is that the inversion is curved, so the
+//   albedo of the mean is not the mean of the albedo, and the flatten was
+//   never merely a loss of detail.
+// - The constant it carried was also in the wrong space, and the lesson
+//   outlives it. It was produced by
+//     oiiotool textures/head_albedomap.png --colorconvert sRGB linear ...
+//   and OCIO's `linear` is a *role*, which every current config — the ACES
+//   one a DCC installs, and OIIO's own built-in — points at ACEScg. So a
+//   value already in the working space went into a slot documented as
+//   linear Rec.709 and prep converted it a second time: red arrived at
+//   0.404 instead of 0.451, an albedo the walk inverts to alpha 0.854
+//   where 0.885 was authored. Name the destination outright —
+//   `lin_rec709` — and never the role. The map itself never had the
+//   problem: the texture path decodes sRGB in hardware and converts once,
+//   in the shader.
 // - The scan is an open face shell — 19 boundary loops, the whole back of
 //   the scalp among them — and a walk needs a closed interior, so this
 //   scene traces the capped ply `curate-head.py` derives. What that ply
@@ -168,7 +173,11 @@
             transmission_scatter: None,
             transmission_scatter_anisotropy: None,
             subsurface_weight: Some(Constant(1.0)),
-            subsurface_color: Some(Constant((0.537348, 0.322367, 0.264772))),
+            subsurface_color: Some(Texture((
+                path: "sources/pbrt-v4-scenes/head/textures/head_albedomap.png",
+                color_space: None,
+                channel: None,
+            ))),
             subsurface_radius: Some(Constant(0.0012953)),
             subsurface_radius_scale: Some(Constant((1.0, 0.7352583, 0.5181348))),
             subsurface_scatter_anisotropy: Some(Constant(0.0)),
