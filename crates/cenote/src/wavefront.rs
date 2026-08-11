@@ -443,12 +443,21 @@ pub const PROBE_ENTRY_REJECT_BIN: usize = 2 * PROBE_VOLUME_BINS;
 #[cfg(feature = "probes")]
 pub const PROBE_EXIT_REJECT_BIN: usize = PROBE_ENTRY_REJECT_BIN + 1;
 
-/// The whole histogram: both stages side by side, then the two rejection
-/// counters. A path scatters at most once per bounce and walks at most
-/// once per bounce, so a `u32` bin cannot overflow short of 2^32 camera
-/// paths in one accumulation.
+/// Walks the interior roulette ended, appended for the same reason and by
+/// the same rule as the two above. It closes the walk's last uncounted
+/// death: leaks, cap kills and both rejections each carry a bin, and
+/// roulette — which ends more walks than all of them together — carried
+/// none, so every mean the sidecar reports is conditioned on the walk
+/// having survived to exit, without saying so.
 #[cfg(feature = "probes")]
-const PROBE_BINS: usize = PROBE_EXIT_REJECT_BIN + 1;
+pub const PROBE_ROULETTE_BIN: usize = PROBE_EXIT_REJECT_BIN + 1;
+
+/// The whole histogram: both stages side by side, then the rejection and
+/// roulette counters. A path scatters at most once per bounce and walks at
+/// most once per bounce, so a `u32` bin cannot overflow short of 2^32
+/// camera paths in one accumulation.
+#[cfg(feature = "probes")]
+const PROBE_BINS: usize = PROBE_ROULETTE_BIN + 1;
 
 /// Push constants for the volume kernel (`shaders/shade_volume.slang`);
 /// recorded only when the scene has media. One instance per bounce — the

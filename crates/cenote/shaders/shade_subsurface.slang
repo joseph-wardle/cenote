@@ -62,6 +62,8 @@ static const uint PROBE_WALK_CAP_BIN = 511;
 // whose comment carries the reasoning. This stage owns the second: a walk
 // that reached the boundary and drew an exit the geometric plane refused.
 static const uint PROBE_EXIT_REJECT_BIN = 513;
+// And the walk's last uncounted death, appended by the same rule.
+static const uint PROBE_ROULETTE_BIN = 514;
 #endif
 
 struct Params {
@@ -186,6 +188,13 @@ void shade_subsurface(uint3 tid: SV_DispatchThreadID) {
             let survival = min(1.0, max(stake.r, max(stake.g, stake.b)));
             if (walkUniform2(pixel, params.sampleIndex, bounce, events, 5).x
                 >= survival) {
+                // Counted like the leaks and the rejections: a death with
+                // no trace in the image but the pixel's terminal alpha,
+                // and the one the exit histogram cannot imply — every
+                // length it records belongs to a walk this branch spared.
+#ifdef PROBES
+                params.probes[PROBE_ROULETTE_BIN].add(1);
+#endif
                 params.radiance[pixel] += float4(0.0, 0.0, 0.0, 1.0);
                 return;
             }

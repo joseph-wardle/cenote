@@ -445,6 +445,14 @@ fn write_probes(
         /// Elsewhere a count bounds the loss without measuring it.
         walk_entry_rejects: u32,
         walk_exit_rejects: u32,
+        /// Walks the interior roulette ended — the walk's largest death
+        /// mode by far, and the one that makes every figure below
+        /// conditional: a roulette death contributes no exit length, so
+        /// the histogram and the totals drawn from it describe walks that
+        /// reached the boundary, not walks that were started.
+        walk_roulette_deaths: u32,
+        /// Summed over [`Self::walk_exits_by_events`], and therefore over
+        /// exits alone — see [`Self::walk_roulette_deaths`].
         total_walk_events: u64,
         /// Camera paths traced: width × height × spp.
         paths: u64,
@@ -458,6 +466,7 @@ fn write_probes(
     // keep the bin-for-bin meaning they have always had.
     let walk_entry_rejects = bins[cenote::wavefront::PROBE_ENTRY_REJECT_BIN];
     let walk_exit_rejects = bins[cenote::wavefront::PROBE_EXIT_REJECT_BIN];
+    let walk_roulette_deaths = bins[cenote::wavefront::PROBE_ROULETTE_BIN];
     let mut events = bins[..split].to_vec();
     let mut walk_exits = bins[split..cenote::wavefront::PROBE_ENTRY_REJECT_BIN].to_vec();
     // The two exitless deaths sit on top of the exit lengths, cap kills
@@ -489,6 +498,7 @@ fn write_probes(
         walk_leak_deaths,
         walk_entry_rejects,
         walk_exit_rejects,
+        walk_roulette_deaths,
         total_walk_events,
         paths,
         mean_events_per_path: total_events as f64 / paths as f64,
@@ -502,7 +512,8 @@ fn write_probes(
     .with_context(|| format!("writing {}", sidecar.display()))?;
     println!(
         "wrote {} ({} scatter events, {:.2} per path; {} walk events, {:.2} per path, \
-         {} cap kills, {} leaks, {} entry rejects, {} exit rejects)",
+         {} cap kills, {} leaks, {} entry rejects, {} exit rejects, \
+         {} roulette deaths)",
         sidecar.display(),
         report.total_events,
         report.mean_events_per_path,
@@ -511,7 +522,8 @@ fn write_probes(
         report.walk_cap_kills,
         report.walk_leak_deaths,
         report.walk_entry_rejects,
-        report.walk_exit_rejects
+        report.walk_exit_rejects,
+        report.walk_roulette_deaths
     );
     Ok(())
 }

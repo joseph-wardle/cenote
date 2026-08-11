@@ -211,6 +211,10 @@ if [[ $mode == probes ]]; then
     skipped "$entry" && continue
     scene=${entry%%:*} label=${entry##*:}
     echo "== $label probes =="
+    # Cleared first: a CLI built without the feature writes no sidecar at
+    # all, and an existence check alone would then compare the last run's
+    # file and report the gate unchanged.
+    rm -f "$out/probes/$label.probes.ron"
     "$probes_cli" render "$scene" --spp $probe_spp --width $width --height $height \
       --out "$out/probes/$label.exr"
     [[ -f $out/probes/$label.probes.ron ]] || {
@@ -223,7 +227,10 @@ if [[ $mode == probes ]]; then
         echo "   pinned: unchanged"
       else
         echo "   pinned: CHANGED — the walk's histogram is deterministic, so this is transport"
-        diff "$pinned" "$out/probes/$label.probes.ron" | head -20
+        # `|| true`: diff exits 1 on a difference, which under pipefail
+        # would end the run at the first drifted scene and leave the rest
+        # unmeasured — the gate must report all of them, then fail once.
+        diff "$pinned" "$out/probes/$label.probes.ron" | head -20 || true
         drifted=1
       fi
     else
