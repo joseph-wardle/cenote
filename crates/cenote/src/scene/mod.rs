@@ -582,6 +582,28 @@ fn subsurface(material: &Material) -> Option<MediumRecord> {
         })
 }
 
+/// Set above a [`GeometryRecord::subsurface`] index where a map rather than
+/// a constant decides what the interior is made of — `SUBSURFACE_TEXTURED`
+/// in `shaders/scene.slang`, whose comment carries the reasoning.
+const SUBSURFACE_TEXTURED: u32 = 1 << 31;
+
+/// Whether the interior behind this material varies across its surface —
+/// the three slots the medium record is computed *from*, plus the
+/// anisotropy the inversion divides by. The weight is deliberately not
+/// among them: it decides whether the lobe is drawn at all, which the
+/// closure settles at the entry vertex from the resolved material, and it
+/// never reaches the record's coefficients.
+fn subsurface_textured(material: &Material) -> bool {
+    [
+        material.subsurface_color_texture,
+        material.subsurface_radius_texture,
+        material.subsurface_radius_scale_texture,
+        material.subsurface_scatter_anisotropy_texture,
+    ]
+    .iter()
+    .any(|&slot| slot != TEXTURE_NONE)
+}
+
 /// What fills a placement: the medium its mesh bounds, or — for an ordinary
 /// surface — whatever its material's interior holds. A mesh that bounds a
 /// medium is a null boundary, so the material's own interior can never also
@@ -1304,7 +1326,16 @@ fn upload_instance_tables(
                 light,
                 boundary,
                 medium,
-                subsurface,
+                // The flag rides only over a live index: MEDIUM_NONE
+                // already carries every bit, and marking a lobe that
+                // does not exist would say nothing.
+                subsurface: if subsurface != MEDIUM_NONE
+                    && subsurface_textured(&placement.material)
+                {
+                    subsurface | SUBSURFACE_TEXTURED
+                } else {
+                    subsurface
+                },
             }
         })
         .collect();
@@ -2071,6 +2102,158 @@ mod tests {
         assert_eq!(first_light_indices(3, &mixed), vec![1, LIGHT_NONE, 0]);
         assert_eq!(first_light_indices(3, &[]), vec![LIGHT_NONE; 3]);
         assert!(first_light_indices(0, &[]).is_empty());
+    }
+
+    /// The GPU's copy of the inversion against the host's, on the hardware
+    /// it ships on. These two compute one quantity by two routes and no
+    /// render can compare them — a material is textured or it is not, so
+    /// one path or the other runs, never both. What is checked here is the
+    /// arithmetic itself, over the domain a *texel* can hand it rather than
+    /// the one a scene file can: a map is not clamped on its way in, so
+    /// negative, above-one, and NaN channels all reach the fit, and each
+    /// has a defined answer the host already gives.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the anisotropy is a clamp on both sides, so it must land exactly"
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the cases, the dispatch and the comparison read as one argument — \
+                  the table of inputs is only meaningful beside the bound it feeds"
+    )]
+    fn the_gpu_inverts_the_subsurface_albedo_as_the_host_does() {
+        /// Mirrors `struct Params` in `shaders/subsurface_test.slang`.
+        #[repr(C)]
+        #[derive(Clone, Copy, Pod, Zeroable)]
+        struct Params {
+            materials: vk::DeviceAddress,
+            extinction: vk::DeviceAddress,
+            scattering: vk::DeviceAddress,
+            count: u32,
+            _pad: [u32; 3],
+        }
+
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let sample = |color: Vec3, radius: f32, scale: Vec3, g: f32| Material {
+            subsurface_weight: 1.0,
+            subsurface_color: color,
+            subsurface_radius: radius,
+            subsurface_radius_scale: scale,
+            subsurface_scatter_anisotropy: g,
+            ..Material::matte(Vec3::ZERO, 0.0)
+        };
+        let skin = Vec3::new(0.6251, 0.3835, 0.2394);
+        let materials = vec![
+            // The three authored tiers and the head, at their own shapes.
+            sample(Vec3::splat(0.596), 0.23, Vec3::ONE, 0.0),
+            sample(Vec3::splat(0.722), 0.069, Vec3::ONE, 0.0),
+            sample(Vec3::splat(0.850), 0.023, Vec3::ONE, 0.0),
+            sample(skin, 0.001_295_3, Vec3::new(1.0, 0.735_258_3, 0.518_134_8), 0.0),
+            // Anisotropy, including past the bound and NaN.
+            sample(skin, 0.01, Vec3::ONE, 0.6),
+            sample(skin, 0.01, Vec3::ONE, -0.9995),
+            sample(skin, 0.01, Vec3::ONE, f32::NAN),
+            // The fit's endpoints, and the domain only a texel reaches.
+            sample(Vec3::new(0.0, 1.0, 0.5), 0.01, Vec3::ONE, 0.0),
+            sample(Vec3::new(-0.25, 1.75, f32::NAN), 0.01, Vec3::ONE, 0.2),
+            // The micron floor, and a zero channel of the shape hitting it
+            // too. A radius of *zero* is deliberately absent: it is the one
+            // value both gates refuse, so the walk never sees it — a texel
+            // that reads zero turns the lobe off at the entry vertex, where
+            // the closure resolves the same map.
+            sample(skin, 1e-9, Vec3::ONE, 0.0),
+            sample(skin, 0.01, Vec3::new(1.0, 0.0, -1.0), 0.0),
+        ];
+
+        let usage = vk::BufferUsageFlags::STORAGE_BUFFER
+            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+            | vk::BufferUsageFlags::TRANSFER_SRC
+            | vk::BufferUsageFlags::TRANSFER_DST;
+        let count = materials.len();
+        let table = upload_table(&gpu, "test.subsurface.materials", &materials)
+            .expect("material table");
+        let extinction = gpu
+            .create_buffer(
+                "test.subsurface.extinction",
+                (count * 16) as u64,
+                usage,
+                gpu_allocator::MemoryLocation::GpuOnly,
+            )
+            .expect("extinction buffer");
+        let scattering = gpu
+            .create_buffer(
+                "test.subsurface.scattering",
+                (count * 16) as u64,
+                usage,
+                gpu_allocator::MemoryLocation::GpuOnly,
+            )
+            .expect("scattering buffer");
+
+        let spirv =
+            crate::shaders::compile_fixture("subsurface_test").expect("compile subsurface_test");
+        let pipeline = gpu
+            .create_compute_pipeline(
+                &spirv,
+                c"subsurface_test",
+                size_of::<Params>() as u32,
+                crate::gpu::Bindings::None,
+            )
+            .expect("pipeline");
+        let params = Params {
+            materials: table.device_address(),
+            extinction: extinction.device_address(),
+            scattering: scattering.device_address(),
+            count: count as u32,
+            _pad: [0; 3],
+        };
+        gpu.dispatch(&pipeline, None, bytemuck::bytes_of(&params), [1, 1, 1])
+            .expect("dispatch");
+        let extinction: Vec<f32> =
+            bytemuck::pod_collect_to_vec(&gpu.download_buffer(&extinction).expect("download"));
+        let scattering: Vec<f32> =
+            bytemuck::pod_collect_to_vec(&gpu.download_buffer(&scattering).expect("download"));
+
+        // A relative bound, not equality: the two evaluate the same
+        // expression, but a GPU may contract a multiply and an add into one
+        // fused operation where the host does not, which moves the last
+        // place or two. That is the whole tolerable difference, and it is
+        // worth stating a number for rather than waving at — anything
+        // larger is a transcription error, and this is what would catch it.
+        let mut worst = 0.0f32;
+        for (index, material) in materials.iter().enumerate() {
+            let host = subsurface(material).expect("every case here has a live lobe");
+            let gpu_sigma_t = &extinction[index * 4..index * 4 + 3];
+            let gpu_sigma_s = &scattering[index * 4..index * 4 + 3];
+            assert_eq!(
+                extinction[index * 4 + 3],
+                host.g,
+                "case {index}: anisotropy is a clamp, not a computation, and must land exactly"
+            );
+            for (channel, (&theirs, &ours)) in gpu_sigma_t
+                .iter()
+                .zip(host.sigma_t.iter())
+                .chain(gpu_sigma_s.iter().zip(host.sigma_s.iter()))
+                .enumerate()
+            {
+                let scale = ours.abs().max(theirs.abs());
+                let relative = if scale > 0.0 {
+                    (theirs - ours).abs() / scale
+                } else {
+                    0.0
+                };
+                assert!(
+                    relative < 1e-5,
+                    "case {index} channel {channel}: GPU {theirs} vs host {ours}"
+                );
+                worst = worst.max(relative);
+            }
+        }
+        // Loud on purpose: if the two ever start drifting, the run that
+        // notices should say by how much before the bound catches it.
+        println!("worst relative disagreement {worst:e}");
     }
 
     /// Two BLASes and the TLAS build without errors on real hardware

@@ -73,6 +73,16 @@ public float sampleScalar(TextureParams *params, uint index, float2 uv) {
     return sampleTexture(params, index, uv).r * params[index].scale;
 }
 
+// Three channels that are data rather than color — a per-channel mean free
+// path. Baked like a color (`Usage::Vector` in texture.rs, the same BC7 or
+// BC6H) and sampled like a scalar: the working-space matrix is what makes a
+// color a color, and a length has no space to be converted from. Without
+// this the constant and the map would disagree, since prep converts one
+// and not the other.
+public float3 sampleVector(TextureParams *params, uint index, float2 uv) {
+    return sampleTexture(params, index, uv).rgb * params[index].scale;
+}
+
 // A tangent-space normal-map texel as a unit vector: BC5 stores x and y,
 // z rebuilds from unit length (normal maps point out of the surface, so
 // the root's positive branch is the whole upper hemisphere). The UV remap
@@ -104,6 +114,34 @@ public Material resolveMaterial(TextureParams *params, Material material, float2
     }
     if (material.emissionTexture != TEXTURE_NONE) {
         material.emission *= sampleColor(params, material.emissionTexture, uv);
+    }
+    return resolveSubsurface(params, material, uv);
+}
+
+// The subsurface five, split out because they have two readers on two
+// schedules: the surface stage resolves the whole material at the entry
+// vertex, where the weight and the color decide the lobe's share of the
+// closure, and the walk kernel resolves *only* these at that same vertex,
+// to invert into the interior it is about to walk. Splitting keeps the
+// walk from sampling a base-color or emission map it will never look at,
+// and keeps one list of the five rather than two that can drift.
+public Material resolveSubsurface(TextureParams *params, Material material, float2 uv) {
+    if (material.subsurfaceWeightTexture != TEXTURE_NONE) {
+        material.subsurfaceWeight = sampleScalar(params, material.subsurfaceWeightTexture, uv);
+    }
+    if (material.subsurfaceColorTexture != TEXTURE_NONE) {
+        material.subsurfaceColor = sampleColor(params, material.subsurfaceColorTexture, uv);
+    }
+    if (material.subsurfaceRadiusTexture != TEXTURE_NONE) {
+        material.subsurfaceRadius = sampleScalar(params, material.subsurfaceRadiusTexture, uv);
+    }
+    if (material.subsurfaceRadiusScaleTexture != TEXTURE_NONE) {
+        material.subsurfaceRadiusScale =
+            sampleVector(params, material.subsurfaceRadiusScaleTexture, uv);
+    }
+    if (material.subsurfaceScatterAnisotropyTexture != TEXTURE_NONE) {
+        material.subsurfaceScatterAnisotropy =
+            sampleScalar(params, material.subsurfaceScatterAnisotropyTexture, uv);
     }
     return material;
 }

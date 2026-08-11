@@ -63,6 +63,64 @@ public MediumRecord combineMedia(SceneTable* scene, uint4 set) {
     return total;
 }
 
+// -- The subsurface interior, resolved on the GPU -------------------------
+// The mirror of `scene::subsurface` and `scene::single_scatter_albedo`, and
+// the *only* place the walk's interior is computed rather than looked up.
+// Prep interns a record per material and the walk reads it; that stays true
+// for every interior a scene writes as constants, which is why a textureless
+// scene renders to the bit it always did. It stops being possible the moment
+// a map decides the albedo, the mean free path or its shape, because those
+// vary per texel and there is no per-texel table — so the walk resolves the
+// material at its own entry point and inverts here instead.
+//
+// Two arithmetics for one quantity is a drift risk, and the answer is not to
+// hope they agree: the host's version is the authority, this one runs only
+// where the host has no answer to give, and `SUBSURFACE_TEXTURED` (scene.slang)
+// is the switch between them. Nothing compares their outputs, because
+// nothing has to — no scene evaluates both.
+static const float FIT_A = 4.09712;
+static const float FIT_B = 4.20863;
+static const float FIT_D = 9.59217;
+static const float FIT_E = 41.6808;
+static const float FIT_F = 17.7126;
+// `MAX_ANISOTROPY` in scene/mod.rs.
+static const float MAX_ANISOTROPY = 0.99;
+
+// The single-scatter albedo a walk needs for its interior to arrive at the
+// authored multiple-scatter albedo, van de Hulst's inversion. Black is
+// snapped exact for the same reason the host snaps it: the fit leaves a
+// residual there, and a channel authored black must be purely absorbing
+// rather than almost.
+float singleScatterAlbedo(float color, float g) {
+    if (isnan(color) || color <= 0.0) {
+        return 0.0;
+    }
+    let c = min(color, 1.0);
+    let s = FIT_A + FIT_B * c - sqrt(FIT_D + FIT_E * c + FIT_F * c * c);
+    return (1.0 - s * s) / (1.0 - g * s * s);
+}
+
+// What fills the interior behind a resolved subsurface material. The caller
+// has already established the lobe is live — the closure's `subsurfaceBlend`
+// gate and the host's intern gate are the same predicate — so this asks no
+// questions and only clamps, exactly where `scene::subsurface` clamps: the
+// mean free path floored at a micron so an authored zero stays a finite
+// extinction, and `g` bounded and NaN-swept before the fit divides by it.
+public MediumRecord subsurfaceMedium(Material m) {
+    let g = isnan(m.subsurfaceScatterAnisotropy)
+                ? 0.0
+                : clamp(m.subsurfaceScatterAnisotropy, -MAX_ANISOTROPY, MAX_ANISOTROPY);
+    let radius = max(m.subsurfaceRadius, 0.0);
+    MediumRecord record;
+    record.sigmaT = 1.0 / max(radius * max(m.subsurfaceRadiusScale, 0.0), 1e-6);
+    record.g = g;
+    record.sigmaS = float3(singleScatterAlbedo(m.subsurfaceColor.r, g),
+                           singleScatterAlbedo(m.subsurfaceColor.g, g),
+                           singleScatterAlbedo(m.subsurfaceColor.b, g))
+                    * record.sigmaT;
+    return record;
+}
+
 // Where a path's segment ended in a medium, and what carrying it there
 // costs. `weight` already divides by the density the distance was drawn
 // with, and on a scatter it carries σ_s too: the caller multiplies it into

@@ -65,8 +65,24 @@ public struct GeometryRecord {
     // The subsurface interior's record, or MEDIUM_NONE — interned by prep,
     // walked by shade_subsurface. A positive `subsurfaceBlend` in the
     // closure implies this is a real index: both mirror the same gate.
+    // Above the index rides `SUBSURFACE_TEXTURED`, so mask before use.
     public uint subsurface;
 };
+
+// Set in `GeometryRecord::subsurface` where a map, not a constant, decides
+// what the interior is made of — then the interned record below it is a
+// stand-in and the walk must resolve the material at its own entry point
+// and invert (`subsurfaceMedium`, medium.slang). Read the index through
+// `SUBSURFACE_INDEX`, never raw.
+//
+// The bit rides the index word because `GeometryRecord` has no spare one
+// and this is the word the fact is about. Its one sharp edge: MEDIUM_NONE
+// is all ones and so carries the bit too, which costs nothing here — the
+// walk only ever reaches a record whose lobe is live, and the closure gate
+// guarantees that — but a reader that tests the bit before the sentinel
+// would find every textureless instance "textured".
+public static const uint SUBSURFACE_TEXTURED = 1u << 31;
+public static const uint SUBSURFACE_INDEX = ~SUBSURFACE_TEXTURED;
 
 // The boundary class alone — what `BOUNDARY_*` names.
 public uint boundaryOf(GeometryRecord mesh) {

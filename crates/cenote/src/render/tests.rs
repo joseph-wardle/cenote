@@ -3772,3 +3772,196 @@ fn the_noise_threshold_reaches_the_kernel() {
         "a looser threshold must converge strictly more pixels: {loose} vs {tight}"
     );
 }
+
+/// A closed box with a unit UV parameterization on every face, flat-shaded
+/// so the shading and geometric normals agree and the walk's sidedness
+/// guard refuses nothing. Closed because a walk needs an interior to be
+/// inside of: the plane the other textured tests use would leak every walk
+/// on its first leg.
+fn uv_box(half: f32) -> crate::scene::description::MeshSource {
+    let h = half;
+    // Each face: four corners counter-clockwise seen from outside, and the
+    // outward normal. u runs across the face, v down it, the same storage
+    // convention `an_emission_map_pins_uv_orientation_and_the_idt` pins.
+    let faces: [([[f32; 3]; 4], [f32; 3]); 6] = [
+        ([[-h, -h, h], [h, -h, h], [h, h, h], [-h, h, h]], [0.0, 0.0, 1.0]),
+        ([[h, -h, -h], [-h, -h, -h], [-h, h, -h], [h, h, -h]], [0.0, 0.0, -1.0]),
+        ([[h, -h, h], [h, -h, -h], [h, h, -h], [h, h, h]], [1.0, 0.0, 0.0]),
+        ([[-h, -h, -h], [-h, -h, h], [-h, h, h], [-h, h, -h]], [-1.0, 0.0, 0.0]),
+        ([[-h, h, h], [h, h, h], [h, h, -h], [-h, h, -h]], [0.0, 1.0, 0.0]),
+        ([[-h, -h, -h], [h, -h, -h], [h, -h, h], [-h, -h, h]], [0.0, -1.0, 0.0]),
+    ];
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut uvs = Vec::new();
+    let mut triangles = Vec::new();
+    for (corners, normal) in faces {
+        let base = positions.len() as u32;
+        positions.extend_from_slice(&corners);
+        normals.extend_from_slice(&[normal; 4]);
+        uvs.extend_from_slice(&[[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]);
+        triangles.push([base, base + 1, base + 2]);
+        triangles.push([base, base + 2, base + 3]);
+    }
+    crate::scene::description::MeshSource::Inline {
+        positions,
+        normals: Some(normals),
+        uvs: Some(uvs),
+        triangles,
+    }
+}
+
+/// A subsurface albedo map is read at the vertex the walk *entered*
+/// through, and it is read there rather than anywhere else. A box carries
+/// a map split down the middle — red on the left half, blue on the right —
+/// and each half must render as the constant of its own colour would.
+///
+/// The weak version of this test is a flat map against its constant. That
+/// would pass with the UV read from the exit hit instead of the entry, with
+/// u mirrored, or with the map sampled at a fixed texel — every way this
+/// can be wrong except the one it cannot see. The split is what makes the
+/// halves distinguishable, and the assertions below refuse to be satisfied
+/// by the *other* half: a mirrored u fails them by the same margin it would
+/// have passed by.
+///
+/// The mean free path is 1/200th of the box, so the walk stays within a few
+/// percent of where it entered and the probes sit a quarter of a face from
+/// the seam — many diffusion lengths clear of the blend the map's own
+/// bilinear filtering and the transport both put there.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "three renders of one scene, and the point is that they differ in exactly \
+              one patch field — splitting them apart would hide that"
+)]
+fn a_subsurface_map_is_read_where_the_walk_entered() {
+    use crate::scene::changeset::{
+        CameraPatch, ChangeSet, EnvironmentPatch, InstancePatch, MaterialPatch, MeshPatch, Op,
+        SettingsPatch,
+    };
+    use crate::scene::description::{SceneDescription, TextureRef, Texturable};
+
+    // Two colours far enough apart that the halves cannot be confused, as
+    // 8-bit sRGB — the same bytes the constants below linearize by hand, so
+    // the two routes describe one colour and the hardware decode is the
+    // only thing between them.
+    const LEFT: [u8; 3] = [230, 51, 51];
+    const RIGHT: [u8; 3] = [51, 51, 230];
+    const SIDE: u32 = 64;
+    // Enough that the window means settle well inside the margin below —
+    // the walk is the only technique here, so its variance is all there is.
+    const SAMPLES: u32 = 256;
+
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let dir = fixture_dir("sss-map");
+    let sky = 0.5;
+    let sky_path = dir.join("sky.exr");
+    crate::output::write_exr(&sky_path, 2, 2, &[sky; 16]).expect("sky EXR");
+
+    let srgb_to_linear = |byte: u8| {
+        let value = f32::from(byte) / 255.0;
+        if value <= 0.040_45 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let linear = |rgb: [u8; 3]| rgb.map(srgb_to_linear);
+
+    let map = dir.join("split.png");
+    let mut texels = Vec::with_capacity((SIDE * SIDE * 4) as usize);
+    for _ in 0..SIDE {
+        for x in 0..SIDE {
+            let rgb = if x < SIDE / 2 { LEFT } else { RIGHT };
+            texels.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+        }
+    }
+    crate::texture::write_png(&map, SIDE, SIDE, &texels);
+
+    // The lobe alone: a black diffuse base and no specular interface, so
+    // nothing but the walk reaches the film and the colour it carries is
+    // the map's, undiluted.
+    let walk_patch = |color: Option<Texturable<[f32; 3]>>| MaterialPatch {
+        base_color: Some(Texturable::Constant([0.0; 3])),
+        specular_weight: Some(0.0),
+        subsurface_weight: Some(Texturable::Constant(1.0)),
+        subsurface_color: color,
+        subsurface_radius: Some(Texturable::Constant(0.005)),
+        subsurface_radius_scale: Some(Texturable::Constant([1.0; 3])),
+        ..MaterialPatch::new("skin")
+    };
+    let render = |color: Option<Texturable<[f32; 3]>>| -> Vec<f32> {
+        let mut description = SceneDescription::new();
+        description
+            .apply(&ChangeSet {
+                ops: vec![
+                    Op::Settings(SettingsPatch::new("main")),
+                    Op::Camera(CameraPatch {
+                        position: Some([0.0, 0.0, 2.0]),
+                        look_at: Some([0.0; 3]),
+                        // 2·atan(0.5/2): the ±0.5 face fills the frame.
+                        vfov_degrees: Some(28.072_49),
+                        ..CameraPatch::new("main")
+                    }),
+                    Op::Environment(EnvironmentPatch {
+                        path: Some(Some(sky_path.clone())),
+                        ..EnvironmentPatch::new("sky")
+                    }),
+                    Op::Mesh(MeshPatch {
+                        source: Some(uv_box(0.5)),
+                        ..MeshPatch::new("box")
+                    }),
+                    Op::Material(Box::new(walk_patch(color))),
+                    Op::Instance(InstancePatch {
+                        mesh: Some("box".into()),
+                        material: Some("skin".into()),
+                        ..InstancePatch::new("box")
+                    }),
+                ],
+            })
+            .expect("valid scene");
+        let scene = Scene::prep(&gpu, &mut description).expect("prep");
+        let renderer = Renderer::new(&gpu).expect("renderer");
+        accumulate_sum(&gpu, &renderer, &scene, 64, SAMPLES)
+    };
+
+    let textured = render(Some(Texturable::Texture(TextureRef {
+        path: map,
+        color_space: None,
+        channel: None,
+        scale: None,
+        uv: None,
+    })));
+    let left = render(Some(Texturable::Constant(linear(LEFT))));
+    let right = render(Some(Texturable::Constant(linear(RIGHT))));
+
+    // A 16-pixel window centred a quarter of the way across each half.
+    let window = |pixels: &[f32], x0: u32| -> Vec3 {
+        let mut sum = Vec3::ZERO;
+        for y in 24..40 {
+            for x in x0..x0 + 16 {
+                let probe = pixel(pixels, 64, x, y);
+                sum += Vec3::new(probe[0], probe[1], probe[2]);
+            }
+        }
+        sum / (256.0 * SAMPLES as f32)
+    };
+    for (side, x0, want, other) in [
+        ("left", 8, &left, &right),
+        ("right", 40, &right, &left),
+    ] {
+        let got = window(&textured, x0);
+        let near = (got - window(want, x0)).length();
+        let far = (got - window(other, x0)).length();
+        // The margin is the test: `near` alone would be satisfied by any
+        // map that happened to be dim, and `far` is what says the halves
+        // were told apart rather than merely approximated.
+        assert!(
+            near < 0.02 && far > 8.0 * near,
+            "{side} half: {near} from its own constant, {far} from the other's"
+        );
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
