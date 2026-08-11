@@ -142,24 +142,16 @@ void shade_subsurface(uint3 tid: SV_DispatchThreadID) {
     var direction = params.paths.direction[path].xyz;
     var throughput = params.paths.throughput[path].xyz;
     GeometryRecord mesh = params.scene.geometry[instance];
-    // The interior. Where every slot behind it is a constant, prep interned
-    // the record and this is one load — the path all but a textured asset
-    // takes, and the reason those scenes render exactly as they did before
-    // maps existed. Where a map decides the albedo, the mean free path or
-    // its shape, no table can hold the answer: resolve the material at the
-    // entry hit's own UV and invert it here, once, for the whole walk. A
-    // walk's interior is fixed at entry by construction — it is one
-    // bounce, and the point it entered through is the only one that
-    // parameterizes it.
+    // The interior, resolved once at the entry vertex for the whole walk —
+    // a walk is one path bounce, so the point it entered through is the
+    // only thing that parameterizes it. Constant slots read the record prep
+    // interned; a map's do not fit in a table and invert here instead.
     //
-    // The branch pays for itself and then some: this kernel measured 8–11%
-    // faster with it than with the unconditional load it replaced, on all
-    // three tiers and the head. The table read is a two-hop chase — record,
-    // then index, then medium — and unconditional it landed ahead of the
-    // first leg, where every lane waited on it. Under a branch it sinks to
-    // where its value is wanted, behind a ray trace that hides it. So this
-    // is not a cost the textured path imposes on the constant one; do not
-    // flatten it back for tidiness without measuring.
+    // Keep the branch. The interned read is a two-hop chase, and
+    // unconditional it scheduled ahead of the first leg with every lane
+    // waiting on it; under the branch it sinks behind a trace that hides
+    // it, worth 8-11% of this kernel. Flattening it back is a measurable
+    // regression, not a tidy-up (b9-sss-plan, 9e).
     MediumRecord interior;
     if ((mesh.subsurface & SUBSURFACE_TEXTURED) != 0) {
         let uv = interpolateUv(mesh, entry.primitive, entry.barycentrics);

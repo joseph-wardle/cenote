@@ -73,12 +73,10 @@ public float sampleScalar(TextureParams *params, uint index, float2 uv) {
     return sampleTexture(params, index, uv).r * params[index].scale;
 }
 
-// Three channels that are data rather than color — a per-channel mean free
-// path. Baked like a color (`Usage::Vector` in texture.rs, the same BC7 or
-// BC6H) and sampled like a scalar: the working-space matrix is what makes a
-// color a color, and a length has no space to be converted from. Without
-// this the constant and the map would disagree, since prep converts one
-// and not the other.
+// Three channels of data rather than color — a per-channel mean free path.
+// Encoded like a color (`Usage::Vector`, texture.rs) but deliberately NOT
+// converted to the working space: a length has no space to convert from,
+// and prep leaves the matching constants alone for the same reason.
 public float3 sampleVector(TextureParams *params, uint index, float2 uv) {
     return sampleTexture(params, index, uv).rgb * params[index].scale;
 }
@@ -118,19 +116,24 @@ public Material resolveMaterial(TextureParams *params, Material material, float2
     return resolveSubsurface(params, material, uv);
 }
 
-// The subsurface five, split out because they have two readers on two
-// schedules: the surface stage resolves the whole material at the entry
-// vertex, where the weight and the color decide the lobe's share of the
-// closure, and the walk kernel resolves *only* these at that same vertex,
-// to invert into the interior it is about to walk. Splitting keeps the
-// walk from sampling a base-color or emission map it will never look at,
-// and keeps one list of the five rather than two that can drift.
+// The subsurface five, split out because they have two readers: the
+// surface stage resolves the whole material, and the walk kernel resolves
+// only these — at the same entry vertex, to invert into the interior it is
+// about to walk (shade_subsurface.slang). One list, so the two cannot
+// drift, and the walk samples no base-color or emission map it will never
+// read.
+//
+// The weight and the color saturate because prep clamps their constants
+// the same way (`lower_material`): the closure blends by both, and an
+// unclamped texel would drive `1 - blend` negative.
 public Material resolveSubsurface(TextureParams *params, Material material, float2 uv) {
     if (material.subsurfaceWeightTexture != TEXTURE_NONE) {
-        material.subsurfaceWeight = sampleScalar(params, material.subsurfaceWeightTexture, uv);
+        material.subsurfaceWeight =
+            saturate(sampleScalar(params, material.subsurfaceWeightTexture, uv));
     }
     if (material.subsurfaceColorTexture != TEXTURE_NONE) {
-        material.subsurfaceColor = sampleColor(params, material.subsurfaceColorTexture, uv);
+        material.subsurfaceColor =
+            saturate(sampleColor(params, material.subsurfaceColorTexture, uv));
     }
     if (material.subsurfaceRadiusTexture != TEXTURE_NONE) {
         material.subsurfaceRadius = sampleScalar(params, material.subsurfaceRadiusTexture, uv);

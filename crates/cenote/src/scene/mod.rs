@@ -588,11 +588,10 @@ fn subsurface(material: &Material) -> Option<MediumRecord> {
 const SUBSURFACE_TEXTURED: u32 = 1 << 31;
 
 /// Whether the interior behind this material varies across its surface —
-/// the three slots the medium record is computed *from*, plus the
-/// anisotropy the inversion divides by. The weight is deliberately not
-/// among them: it decides whether the lobe is drawn at all, which the
-/// closure settles at the entry vertex from the resolved material, and it
-/// never reaches the record's coefficients.
+/// exactly the slots [`subsurface`] computes the record *from*. The weight
+/// is deliberately absent: it decides whether the lobe is drawn at all,
+/// which the closure settles from the resolved material, and it never
+/// reaches the record's coefficients.
 fn subsurface_textured(material: &Material) -> bool {
     [
         material.subsurface_color_texture,
@@ -2105,13 +2104,10 @@ mod tests {
     }
 
     /// The GPU's copy of the inversion against the host's, on the hardware
-    /// it ships on. These two compute one quantity by two routes and no
-    /// render can compare them — a material is textured or it is not, so
-    /// one path or the other runs, never both. What is checked here is the
-    /// arithmetic itself, over the domain a *texel* can hand it rather than
-    /// the one a scene file can: a map is not clamped on its way in, so
-    /// negative, above-one, and NaN channels all reach the fit, and each
-    /// has a defined answer the host already gives.
+    /// it ships on — no render can compare them, since a material is
+    /// textured or it is not and only one route ever runs. The domain is a
+    /// *texel*'s rather than a scene file's: negative, above-one and NaN
+    /// channels all reach the fit, and each has a defined answer here.
     #[test]
     #[expect(
         clippy::float_cmp,
@@ -2216,12 +2212,9 @@ mod tests {
         let scattering: Vec<f32> =
             bytemuck::pod_collect_to_vec(&gpu.download_buffer(&scattering).expect("download"));
 
-        // A relative bound, not equality: the two evaluate the same
-        // expression, but a GPU may contract a multiply and an add into one
-        // fused operation where the host does not, which moves the last
-        // place or two. That is the whole tolerable difference, and it is
-        // worth stating a number for rather than waving at — anything
-        // larger is a transcription error, and this is what would catch it.
+        // A relative bound rather than equality: the GPU may fuse a
+        // multiply and an add where the host does not, which moves the last
+        // place or two. Anything larger is a transcription error.
         let mut worst = 0.0f32;
         for (index, material) in materials.iter().enumerate() {
             let host = subsurface(material).expect("every case here has a live lobe");
@@ -2251,8 +2244,7 @@ mod tests {
                 worst = worst.max(relative);
             }
         }
-        // Loud on purpose: if the two ever start drifting, the run that
-        // notices should say by how much before the bound catches it.
+        // Loud on purpose: a run that notices drift should say how much.
         println!("worst relative disagreement {worst:e}");
     }
 

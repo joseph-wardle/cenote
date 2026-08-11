@@ -1,31 +1,20 @@
 // B9's textured-interior driver: sss-head-walk.ron with the scan's own
 // albedo map in the subsurface color slot instead of the constant its
 // sibling carries. Everything else — rig, camera, mean free paths, film —
-// is that scene's.
+// is that scene's. It exists because the other four walk drivers all take
+// the constant branch, and a branch nothing measures regresses quietly.
 //
-// It is NOT the difference between the two that measures the branch, and
-// reading it that way gets the sign wrong. This one renders about four
-// percent *faster* than its sibling, because the map's albedo is lower
-// than the constant skin1 inverts to and lower albedo means shorter
-// walks. Holding the albedo fixed and changing only how it arrives — the
-// same value as a flat texture against the constant — the branch costs
-// +1.5% of the walk kernel and +0.5% of the frame. That is the price of
-// resolving an interior per entry point, measured once, here so that it
-// does not have to be guessed later.
+// Do NOT read the pair as the branch's cost: this one renders ~4% *faster*
+// than its sibling, because the map's albedo is lower and lower albedo
+// means shorter walks. Holding the albedo fixed and changing only how it
+// arrives, the branch costs +1.5% of the walk kernel and +0.5% of the
+// frame.
 //
-// It exists because after subsurface textures landed, nothing pinned
-// measured that path. The corpus head renders through it, but the corpus
-// gate is an identity check and says nothing about cost or walk length;
-// the four walk drivers all take the constant branch. A branch nothing
-// measures is a branch that regresses quietly.
-//
-// The map is the pbrt-v4-scenes head's, referenced from the fetched
-// source rather than baked: it needs no derivation, because the texture
-// path decodes sRGB in hardware and converts to the working space once,
-// in the shader. Its albedo spans a wide range — the walk's
-// single-scatter albedo runs 0.72 to 0.96 in red across it — so this
-// driver's walk lengths are a *distribution* where its sibling's are one
-// number, which is the second reason to measure it apart.
+// The map is the pbrt-v4-scenes head's, referenced from the fetched source
+// rather than baked — the texture path decodes sRGB in hardware and
+// converts to the working space once, in the shader. Its single-scatter
+// albedo spans 0.72 to 0.96 in red, so this driver's walk lengths are a
+// distribution where its sibling's are one number.
 //
 // Requires the same derived asset as its sibling: `scenes/corpus/fetch.sh
 // head`, then `python3 scenes/corpus/curate-head.py`.

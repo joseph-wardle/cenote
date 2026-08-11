@@ -493,11 +493,14 @@ fn subsurface_walks_to_the_authored_albedo() {
 }
 
 /// The walk's histogram, split the way the `.probes.ron` sidecar splits it:
-/// exit lengths, then the two deaths that never reach an exit.
+/// exit lengths, then the two deaths that never reach an exit. The upper
+/// bound is load-bearing — the rejection and roulette counters are
+/// *appended above* both stages' halves, so the walk's own deaths are the
+/// last two bins of its half, not of the array.
 #[cfg(feature = "probes")]
 fn walk_probes(gpu: &Context, wavefront: &Wavefront) -> (Vec<u32>, u32, u32) {
     let bins = wavefront.probes(gpu).expect("probes");
-    let walk = &bins[crate::wavefront::PROBE_VOLUME_BINS..];
+    let walk = &bins[crate::wavefront::PROBE_VOLUME_BINS..crate::wavefront::PROBE_ENTRY_REJECT_BIN];
     let (exits, deaths) = walk.split_at(walk.len() - 2);
     (exits.to_vec(), deaths[0], deaths[1])
 }
@@ -3775,9 +3778,8 @@ fn the_noise_threshold_reaches_the_kernel() {
 
 /// A closed box with a unit UV parameterization on every face, flat-shaded
 /// so the shading and geometric normals agree and the walk's sidedness
-/// guard refuses nothing. Closed because a walk needs an interior to be
-/// inside of: the plane the other textured tests use would leak every walk
-/// on its first leg.
+/// guard refuses nothing. Closed because a walk needs an interior: the
+/// plane the other textured tests use leaks every walk on its first leg.
 fn uv_box(half: f32) -> crate::scene::description::MeshSource {
     let h = half;
     // Each face: four corners counter-clockwise seen from outside, and the
@@ -3812,21 +3814,18 @@ fn uv_box(half: f32) -> crate::scene::description::MeshSource {
 }
 
 /// A subsurface albedo map is read at the vertex the walk *entered*
-/// through, and it is read there rather than anywhere else. A box carries
-/// a map split down the middle — red on the left half, blue on the right —
-/// and each half must render as the constant of its own colour would.
+/// through. A box carries a map split down the middle — red on the left
+/// half, blue on the right — and each half must render as the constant of
+/// its own colour would.
 ///
-/// The weak version of this test is a flat map against its constant. That
-/// would pass with the UV read from the exit hit instead of the entry, with
-/// u mirrored, or with the map sampled at a fixed texel — every way this
-/// can be wrong except the one it cannot see. The split is what makes the
-/// halves distinguishable, and the assertions below refuse to be satisfied
-/// by the *other* half: a mirrored u fails them by the same margin it would
-/// have passed by.
+/// The split is the test. A flat map against its constant would pass with
+/// the UV taken from the exit hit, with u mirrored, or with a fixed texel
+/// sampled — every way this can be wrong. Each assertion below also refuses
+/// to be satisfied by the *other* half, so a mirrored u fails by the margin
+/// it would otherwise have passed by.
 ///
-/// The mean free path is 1/200th of the box, so the walk stays within a few
-/// percent of where it entered and the probes sit a quarter of a face from
-/// the seam — many diffusion lengths clear of the blend the map's own
+/// The mean free path is 1/200th of the box and the probes sit a quarter of
+/// a face from the seam, many diffusion lengths clear of the blend that
 /// bilinear filtering and the transport both put there.
 #[test]
 #[expect(

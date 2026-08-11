@@ -420,12 +420,10 @@ fn lower_material(
     material.transmission_scatter =
         acescg_from_rec709(Vec3::from(source.transmission_scatter)).max(Vec3::ZERO);
     material.transmission_scatter_anisotropy = source.transmission_scatter_anisotropy;
-    // The five subsurface stand-ins are the schema defaults, not the
-    // identity: every one of these slots is *replaced* by its texel rather
-    // than multiplied by it, and a textured weight must still read as an
-    // active lobe here — prep interns the interior behind the constant, so
-    // a stand-in of 0 would gate the medium away before any texel could
-    // ask for it.
+    // Stand-ins for the textured five: the schema default everywhere but
+    // the weight, which must stand in as *present*. Prep reads it to decide
+    // whether to intern the interior at all, so a 0 there would gate the
+    // medium away before any texel could ask for it.
     material.subsurface_weight = constant_or(&source.subsurface_weight, 1.0).clamp(0.0, 1.0);
     // An albedo: the inversion's fit is only defined on [0, 1], like the
     // transmittance above.
@@ -509,9 +507,8 @@ fn lower_material(
 
 /// A texturable slot's constant, or `stand_in` when it is textured — the
 /// schema default for slots the kernel replaces per hit, the identity for
-/// slots it multiplies (emission, opacity). `subsurface_weight` is the one
-/// slot whose stand-in is neither: prep reads it to decide whether the
-/// interior exists at all, so a textured weight stands in as present.
+/// slots it multiplies (emission, opacity), and once neither (see
+/// `subsurface_weight` above).
 fn constant_or<T: Copy>(value: &Texturable<T>, stand_in: T) -> T {
     match value {
         Texturable::Constant(constant) => *constant,
@@ -562,7 +559,7 @@ fn texture_key(reference: &TextureRef, usage: texture::Usage) -> texture::Key {
 /// in a fixed order — the one list [`texture_keys`] (collection) and
 /// [`lower_material`] (lowering) share, so a slot can never be collected
 /// under one usage and lowered under another. `description`'s own
-/// `Material::textures` walks the same six slots for validation.
+/// `Material::textures` walks the same eleven slots for validation.
 fn textured_slots(material: &description::Material) -> [(Option<&TextureRef>, texture::Usage); 11] {
     [
         (material.base_color.texture(), texture::Usage::Color),
@@ -1412,13 +1409,11 @@ mod tests {
         assert_eq!(lowered.opacity, 0.5);
     }
 
-    /// All five subsurface slots reach the record as live indices, and the
-    /// interior survives the lowering — the one way this feature can fail
-    /// silently. `subsurface_weight` is read by prep, not only by a kernel,
-    /// so its stand-in cannot be the schema default: a textured mask over a
-    /// zero constant would gate `scene::subsurface` off, the medium would
-    /// never be interned, and the walk would have no interior to enter
-    /// however bright the texel turned out to be.
+    /// All five subsurface slots reach the record as live indices *and* the
+    /// interior survives the lowering — the way this feature fails
+    /// silently. A textured weight standing in at the schema default would
+    /// gate `scene::subsurface` off, and the walk would have no interior to
+    /// enter however bright the texel turned out to be.
     #[test]
     fn every_subsurface_slot_textures_without_gating_its_interior() {
         use crate::material::TEXTURE_NONE;

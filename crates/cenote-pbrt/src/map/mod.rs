@@ -663,9 +663,9 @@ fn matrix_transform(matrix: Mat4) -> Transform {
 }
 
 /// What one of pbrt's interior descriptions yields: the color light walks
-/// to — absent where it was textured, and the schema's default stands —
-/// with the mean free path and its per-channel shape.
-type Interior = (Option<Texturable<[f32; 3]>>, f32, [f32; 3]);
+/// to, constant or mapped, with the mean free path and its per-channel
+/// shape.
+type Interior = (Texturable<[f32; 3]>, f32, [f32; 3]);
 
 /// A per-channel mean free path onto `OpenPBR`'s scalar
 /// `subsurface_radius` and its per-channel scale: the longest channel takes
@@ -1370,7 +1370,7 @@ impl Mapper {
                 let g = params.float("g")?.unwrap_or(0.0);
                 patch.subsurface_scatter_anisotropy = Some(Texturable::Constant(g));
                 if let Some((color, radius, scale)) = self.subsurface_interior(directive, g)? {
-                    patch.subsurface_color = color;
+                    patch.subsurface_color = Some(color);
                     patch.subsurface_radius = Some(Texturable::Constant(radius));
                     patch.subsurface_radius_scale = Some(Texturable::Constant(scale));
                 }
@@ -1460,9 +1460,7 @@ impl Mapper {
 
     /// pbrt's three mutually exclusive descriptions of a subsurface
     /// interior, tried in pbrt's own order, onto `OpenPBR`'s color, radius,
-    /// and radius scale. `None` leaves the schema defaults standing; a
-    /// `None` *color* inside a `Some` keeps the mean free path while
-    /// leaving the color alone.
+    /// and radius scale. `None` leaves the schema defaults standing.
     ///
     /// pbrt names an interior by its coefficients; `OpenPBR` names one by
     /// the color light walks to and the distance it walks between events.
@@ -1471,15 +1469,10 @@ impl Mapper {
     /// the color, 1/`σ_t` for the distance. `reflectance` and `mfp` are
     /// already stated at cenote's end and need no conversion at all.
     ///
-    /// One thing does not convert, and warns by token name:
-    ///
-    /// * **`name`** reads a table of measured media compiled into pbrt.
-    ///   cenote carries no such table, and inventing coefficients for
-    ///   "skin1" would be a different medium wearing the name.
-    /// * ~~**a textured `reflectance`**~~ — this one used to warn, because
-    ///   `OpenPBR`'s subsurface color was a constant slot here. It is a
-    ///   texturable one now, so the map imports like any other and the
-    ///   head scan's albedo arrives whole.
+    /// One token does not convert, and warns by name: **`name`** reads a
+    /// table of measured media compiled into pbrt. cenote carries no such
+    /// table, and inventing coefficients for "skin1" would be a different
+    /// medium wearing the name.
     ///
     /// The divergence worth knowing about is in the `reflectance` path:
     /// pbrt inverts a tabulated photon-beam-diffusion solution to reach the
@@ -1503,11 +1496,10 @@ impl Mapper {
             ));
             return Ok(None);
         }
-        if let Some(reflectance) = self.color_slot(directive, "reflectance")? {
+        if let Some(color) = self.color_slot(directive, "reflectance")? {
             // Constant or map alike: `reflectance` is already the color
             // cenote's slot means, so it needs no conversion in either
             // spelling — only the mean free path below does.
-            let color = Some(reflectance);
             let mfp = match self.color_slot(directive, "mfp")? {
                 Some(Texturable::Constant(mfp)) => mfp,
                 Some(Texturable::Texture(_)) => {
@@ -1549,7 +1541,7 @@ impl Mapper {
             ));
             return Ok(None);
         };
-        Ok(Some((Some(Texturable::Constant(color)), radius, shape)))
+        Ok(Some((Texturable::Constant(color), radius, shape)))
     }
 
     /// A per-channel extinction or scattering coefficient: RGB, a
@@ -2571,10 +2563,8 @@ Translate 1 0 0
             );
         });
 
-        // A textured albedo. This used to warn and drop the map, because
-        // the slot it lands in was a constant one; it is texturable now,
-        // so the reference arrives beside the mean free path and the scan
-        // that motivated the whole thing — the head — imports whole.
+        // A textured albedo: the reference arrives beside the mean free
+        // path, silently — this is the shape the head scan imports in.
         let world = format!(
             "Texture \"albedo\" \"spectrum\" \"imagemap\" \"string filename\" \"albedo.png\"\n\
              MakeNamedMaterial \"head\" \"string type\" \"subsurface\" \
@@ -2598,7 +2588,7 @@ Translate 1 0 0
                     !warnings
                         .iter()
                         .any(|warning| warning.contains("reflectance")),
-                    "the map imports now, so nothing should be said about it: {warnings:?}"
+                    "a map that imports must draw no warning: {warnings:?}"
                 );
             },
         );

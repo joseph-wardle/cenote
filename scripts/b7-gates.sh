@@ -99,9 +99,10 @@ else
   # share geometry and differ only in sigma, so a number that moves on one
   # and not the others is the medium's doing rather than the scene's. Last
   # is that same head with its albedo map, the only driver whose interior
-  # is resolved per entry point instead of read from the table — it and
-  # `head` differ in one patch field, so what separates them is the cost
-  # and the spread of a textured interior and nothing else.
+  # is resolved per entry point instead of read from the table. It is
+  # watched for its own drift, not diffed against `head`: the map's albedo
+  # differs from the constant, so the pair does not isolate the branch
+  # (the scene header says what does).
   scenes=(
     "$root/scenes/sss-teapot-wax-walk.ron:wax"
     "$root/scenes/sss-teapot-marble-walk.ron:marble"

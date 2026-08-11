@@ -2,12 +2,9 @@
 // (`subsurfaceMedium`, medium.slang) over a table of materials, so the test
 // in `scene/mod.rs` can hold it against the host's `subsurface` directly.
 //
-// The two exist because a textured interior has no interned record to read,
-// and two arithmetics for one quantity drift unless something checks. An
-// image test cannot check this: the paths are mutually exclusive by
-// construction — a material is textured or it is not — so no render ever
-// puts them side by side. This does. Compiled at test time through the
-// hot-reload compiler; never embedded, never shipped (`slangc.rs` lists
+// No render can make that comparison: a material is textured or it is not,
+// so one route runs or the other, never both. Compiled at test time through
+// the hot-reload compiler; never embedded, never shipped (`slangc.rs` lists
 // what ships).
 
 import medium;

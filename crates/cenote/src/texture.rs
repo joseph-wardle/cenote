@@ -348,9 +348,9 @@ fn encode(
     let mut prepared = match usage {
         Usage::Color => encode_color(source, srgb),
         Usage::Scalar => encode_scalar(source, srgb, channel),
-        // Data, so the default flips: linear unless the reference says
-        // otherwise, the rule `encode_scalar` follows.
-        Usage::Vector => encode_color(source, Some(srgb == Some(true))),
+        // A color's encode, a scalar's default: linear unless the
+        // reference says sRGB outright.
+        Usage::Vector => encode_color(source, Some(srgb.unwrap_or(false))),
         Usage::Normal => encode_normal(source),
     };
     prepared.hash = hash;

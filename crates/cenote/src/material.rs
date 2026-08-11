@@ -134,11 +134,10 @@ pub struct Material {
     /// table.
     pub subsurface_scatter_anisotropy: f32,
     /// `subsurface_weight` map (scalar), or [`TEXTURE_NONE`]. This one and
-    /// the four below follow the same convention as the surface slots
-    /// above — the constant stands where the map does not — but they are
-    /// read on a different schedule: the weight decides the lobe at the
-    /// entry vertex, and the remaining four define the interior, which is
-    /// the walk kernel's business.
+    /// the four below follow the surface slots' convention — the constant
+    /// stands where the map does not — but read on a different schedule:
+    /// the weight decides the lobe at the entry vertex, the other four
+    /// define the interior, which is the walk kernel's business.
     pub subsurface_weight_texture: u32,
     /// `subsurface_color` map, or [`TEXTURE_NONE`].
     pub subsurface_color_texture: u32,

@@ -70,17 +70,14 @@ public struct GeometryRecord {
 };
 
 // Set in `GeometryRecord::subsurface` where a map, not a constant, decides
-// what the interior is made of — then the interned record below it is a
-// stand-in and the walk must resolve the material at its own entry point
-// and invert (`subsurfaceMedium`, medium.slang). Read the index through
-// `SUBSURFACE_INDEX`, never raw.
+// what the interior is made of: the record below it is then a stand-in and
+// the walk must invert the resolved material itself (`subsurfaceMedium`,
+// medium.slang). Read the index through `SUBSURFACE_INDEX`, never raw.
 //
-// The bit rides the index word because `GeometryRecord` has no spare one
-// and this is the word the fact is about. Its one sharp edge: MEDIUM_NONE
-// is all ones and so carries the bit too, which costs nothing here — the
-// walk only ever reaches a record whose lobe is live, and the closure gate
-// guarantees that — but a reader that tests the bit before the sentinel
-// would find every textureless instance "textured".
+// Sharp edge: MEDIUM_NONE is all ones and so carries the bit too. Harmless
+// here — the walk only reaches records whose lobe is live — but a reader
+// that tests the bit before the sentinel would call every instance
+// textured.
 public static const uint SUBSURFACE_TEXTURED = 1u << 31;
 public static const uint SUBSURFACE_INDEX = ~SUBSURFACE_TEXTURED;
 
