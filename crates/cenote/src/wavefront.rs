@@ -365,12 +365,8 @@ struct AuxQueues {
     /// everywhere, and the branch that would push never runs.
     walks: QueueAddrs,
     /// Measurement builds only: the shared probes histogram, for the one
-    /// bin the surface stage owns — subsurface entries the sidedness guard
-    /// turned away (see [`PROBE_ENTRY_REJECT_BIN`]). It rides here for the
-    /// same reason the queues above do: `ShadeSurfaceParams` already sits
-    /// at Vulkan's guaranteed 128 push-constant bytes, so an address in
-    /// the block costs nothing where an address in the block's *pointer*
-    /// would cost more than the guarantee.
+    /// bin the surface stage owns (see [`PROBE_ENTRY_REJECT_BIN`]). It
+    /// rides here for the same reason the queues above do.
     #[cfg(feature = "probes")]
     probes: vk::DeviceAddress,
 }
@@ -417,38 +413,29 @@ struct VolumeQueues {
 #[cfg(feature = "probes")]
 pub const PROBE_VOLUME_BINS: usize = 256;
 
-/// Where the sidedness-rejection counters sit: appended above both
-/// stages' halves rather than carved out of the walk's exit lengths,
-/// which would move the length every deep walk aggregates at — and skin,
-/// at 6870 cap kills, walks deep enough to notice. Appending leaves every
-/// existing bin's value untouched.
+/// Subsurface draws whose entry direction failed `scatterExitsSurface` in
+/// `shade_surface.slang`. The counters from here up are *appended* above
+/// both stages' halves rather than carved out of the walk's exit lengths,
+/// which would move the length deep walks aggregate at.
 ///
-/// The two are counted apart because a walk that never began and one that
-/// could not leave are the same dark pixel, and telling them apart is the
-/// whole point: `PROBE_ENTRY_REJECT_BIN` counts subsurface draws whose
-/// entry direction failed `scatterExitsSurface` in `shade_surface.slang`,
-/// `PROBE_EXIT_REJECT_BIN` counts walks whose cosine-sampled exit failed
-/// the same test at the boundary in `shade_subsurface.slang`.
-///
-/// These are counts, not energy. The two coincide only where throughput
-/// is 1 — which is exactly the white-furnace diagnostic they were built
-/// for; anywhere else a count bounds the loss without measuring it. A
-/// throughput-weighted version would need float atomics and would stop
-/// being bit-comparable, and bit-comparability is what the gate rests on.
+/// Counts, not energy: the two coincide only where throughput is 1, the
+/// white-furnace diagnostic these were built for. Elsewhere a count bounds
+/// the loss without measuring it — and a throughput-weighted version would
+/// need float atomics, which would cost the bit-comparability the gates
+/// rest on.
 #[cfg(feature = "probes")]
 pub const PROBE_ENTRY_REJECT_BIN: usize = 2 * PROBE_VOLUME_BINS;
 
-/// The walk's other end: exits the boundary's geometric plane refused,
-/// binned by `shade_subsurface.slang`. See [`PROBE_ENTRY_REJECT_BIN`].
+/// Walks whose cosine-sampled exit failed the same test at the boundary in
+/// `shade_subsurface.slang`. Counted apart from
+/// [`PROBE_ENTRY_REJECT_BIN`] because both leave the same dark pixel and
+/// only the split says which end of the walk was at fault.
 #[cfg(feature = "probes")]
 pub const PROBE_EXIT_REJECT_BIN: usize = PROBE_ENTRY_REJECT_BIN + 1;
 
-/// Walks the interior roulette ended, appended for the same reason and by
-/// the same rule as the two above. It closes the walk's last uncounted
-/// death: leaks, cap kills and both rejections each carry a bin, and
-/// roulette — which ends more walks than all of them together — carried
-/// none, so every mean the sidecar reports is conditioned on the walk
-/// having survived to exit, without saying so.
+/// Walks the interior roulette ended — the walk's largest death mode, and
+/// the one that makes every mean drawn from the exit histogram conditional
+/// on having reached an exit.
 #[cfg(feature = "probes")]
 pub const PROBE_ROULETTE_BIN: usize = PROBE_EXIT_REJECT_BIN + 1;
 
@@ -1132,11 +1119,10 @@ impl Wavefront {
         gpu.submit_passes_timed(&passes, timer)
     }
 
-    /// Measurement builds only: the volume stage's scatter-event histogram
-    /// — events binned by the bounce they landed on, accumulated across
-    /// every wave since the first media scene allocated it. All zeros if no
-    /// media scene has run. Safe to read between waves: every submission
-    /// this engine makes blocks on its fence.
+    /// Measurement builds only: the whole [`PROBE_BINS`] histogram, in the
+    /// layout the `PROBE_*` constants name, accumulated across every wave
+    /// since this wavefront was built. Safe to read between waves: every
+    /// submission this engine makes blocks on its fence.
     ///
     /// # Errors
     ///

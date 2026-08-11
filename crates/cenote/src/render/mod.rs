@@ -261,8 +261,8 @@ impl Renderer {
         self.accumulate_timed(gpu, scene, film, None).map(|_| ())
     }
 
-    /// Measurement builds only — the volume stage's scatter-event histogram,
-    /// straight from [`crate::wavefront::Wavefront::probes`].
+    /// Measurement builds only — the probes histogram, straight from
+    /// [`crate::wavefront::Wavefront::probes`].
     ///
     /// # Errors
     ///

@@ -5,24 +5,23 @@
 // interned subsurface medium, Henyey–Greenstein turns — until a flight
 // reaches the boundary, where the path leaves through a Lambertian
 // transmission: one next-event connection from the exit point and a
-// cosine-sampled continuation. The whole walk is one path bounce, so the
-// depth cap never sees its interior events; the walk carries its own cap
-// instead.
+// cosine-sampled continuation.
 //
-// The boundary hit *is* the exit, always: a walk that never scatters
-// (σ_t = 0, or a thin chord) leaves on its first flight as pure diffuse
-// translucency through the same code, and one that escapes an open shell
-// dies as a leak rather than looping. Interior legs trace against the
-// entry instance alone — embedded geometry is passed through, outside the
-// model. The exit lobe is white and Fresnel-free: the walk's throughput
-// already carries the medium's color, and the entry carried the
-// interface's (1 − E) once, in `subsurfaceEntry`.
-//
-// Radiance bookkeeping matches shade_surface's: a path that dies here
-// (leak, cap, spent throughput, a rejected exit) carries its pixel's one
-// terminal alpha; one that continues pushes the ray queue and adds
-// nothing. The guides recorded at the entry vertex, so this stage never
-// touches the AOVs.
+// The invariants the rest of the engine rests on:
+//   - The whole walk is one path bounce, so the depth cap never sees its
+//     interior events; the walk carries its own cap instead.
+//   - The boundary hit *is* the exit, always. A walk that never scatters
+//     (σ_t = 0, or a thin chord) leaves on its first flight as pure
+//     diffuse translucency through this same code.
+//   - Interior legs trace against the entry instance alone: embedded
+//     geometry is passed through, outside the model.
+//   - The exit lobe is white and Fresnel-free. The walk's throughput
+//     already carries the medium's color, and the entry carried the
+//     interface's (1 − E) once, in `subsurfaceEntry`.
+//   - Radiance bookkeeping matches shade_surface's: a path that dies here
+//     carries its pixel's one terminal alpha, one that continues adds
+//     nothing. The guides recorded at the entry vertex, so this stage
+//     never touches the AOVs.
 
 import lights;
 import medium;
@@ -44,26 +43,21 @@ RaytracingAccelerationStructure sceneTlas;
 // connection exactly as it skipped the entry vertex's.
 static const uint FLAG_SET = 1 << 25;
 
-// Interior scatter events one walk may take before it is killed.
-// Production materials self-terminate far below this, so a kill is
-// expected never — the probes histogram is the check — while the
-// α ≥ 0.995 stress regime trades a ~1–2% loss for boundedness.
+// Interior scatter events one walk may take before it is killed. Nothing
+// at a production albedo reaches it — `subsurface_cap_never_fires_at_
+// production_albedo` is the standing proof, and the probes histogram is
+// how it is checked.
 static const uint WALK_CAP = 256;
 
 #ifdef PROBES
-// The walk's histogram bins sit above the volume stage's 256 — walk
-// lengths at exit below, and the two ways a walk ends without one on
-// top: leaks in the second-to-last bin, cap kills in the last. See
-// `PROBE_BINS` in `wavefront.rs`, whose layout these mirror.
+// Bin layout mirrored from `PROBE_*` in wavefront.rs, which owns it: walk
+// lengths at exit sit above the volume stage's 256, the two exitless
+// deaths cap that half, and the rejection and roulette counters are
+// appended above both stages'.
 static const uint PROBE_WALK_BASE = 256;
 static const uint PROBE_WALK_LEAK_BIN = 510;
 static const uint PROBE_WALK_CAP_BIN = 511;
-// Appended above both halves rather than carved out of the exit lengths
-// — `PROBE_ENTRY_REJECT_BIN` and `PROBE_EXIT_REJECT_BIN` in wavefront.rs,
-// whose comment carries the reasoning. This stage owns the second: a walk
-// that reached the boundary and drew an exit the geometric plane refused.
 static const uint PROBE_EXIT_REJECT_BIN = 513;
-// And the walk's last uncounted death, appended by the same rule.
 static const uint PROBE_ROULETTE_BIN = 514;
 #endif
 
@@ -147,11 +141,10 @@ void shade_subsurface(uint3 tid: SV_DispatchThreadID) {
     // only thing that parameterizes it. Constant slots read the record prep
     // interned; a map's do not fit in a table and invert here instead.
     //
-    // Keep the branch. The interned read is a two-hop chase, and
-    // unconditional it scheduled ahead of the first leg with every lane
-    // waiting on it; under the branch it sinks behind a trace that hides
-    // it, worth 8-11% of this kernel. Flattening it back is a measurable
-    // regression, not a tidy-up (b9-sss-plan, 9e).
+    // Keep the branch. The interned read is a two-hop chase; unconditional
+    // it schedules ahead of the first leg with every lane waiting on it,
+    // and under the branch it sinks behind a trace that hides it — worth
+    // 8-11% of this kernel. Flattening it is a measured regression.
     MediumRecord interior;
     if ((mesh.subsurface & SUBSURFACE_TEXTURED) != 0) {
         let uv = interpolateUv(mesh, entry.primitive, entry.barycentrics);
@@ -174,10 +167,7 @@ void shade_subsurface(uint3 tid: SV_DispatchThreadID) {
     for (;;) {
         if (!traceLeg(origin, direction, instance, exit, distance)) {
             // An open shell: the energy leaks — a death, never a loop.
-            // Counted, because a leak says something about the *mesh*
-            // rather than the material — a shell left open, or one whose
-            // thin folds a leg can slip past — and silence alone cannot
-            // tell an airtight shell from one nothing ever tested.
+            // Counted because a leak indicts the *mesh*, not the material.
 #ifdef PROBES
             params.probes[PROBE_WALK_LEAK_BIN].add(1);
 #endif
@@ -207,10 +197,8 @@ void shade_subsurface(uint3 tid: SV_DispatchThreadID) {
             let survival = min(1.0, max(stake.r, max(stake.g, stake.b)));
             if (walkUniform2(pixel, params.sampleIndex, bounce, events, 5).x
                 >= survival) {
-                // Counted like the leaks and the rejections: a death with
-                // no trace in the image but the pixel's terminal alpha,
-                // and the one the exit histogram cannot imply — every
-                // length it records belongs to a walk this branch spared.
+                // Counted, and the one death the exit histogram cannot
+                // imply: every length it records is a walk this spared.
 #ifdef PROBES
                 params.probes[PROBE_ROULETTE_BIN].add(1);
 #endif
@@ -268,12 +256,9 @@ void shade_subsurface(uint3 tid: SV_DispatchThreadID) {
         walkUniform2(pixel, params.sampleIndex, bounce, events, 2)).xyz;
     let wiWorld = frame.toWorld(local);
     if (local.z <= 0.0 || dot(wiWorld, spawn.normal) >= 0.0) {
-        // Counted, for the same reason leaks are: this is a death with no
-        // trace in the image but the pixel's terminal alpha, and the
-        // rate is a property of the *mesh* — how far the interpolated
-        // normal has drifted from the triangle under it — rather than of
-        // the material. Silence cannot tell a mesh that never rejects
-        // from one nothing ever asked.
+        // Counted like the leaks, and for the same reason: the rate says
+        // how far this mesh's interpolated normals have drifted from the
+        // triangles under them.
 #ifdef PROBES
         params.probes[PROBE_EXIT_REJECT_BIN].add(1);
 #endif

@@ -521,12 +521,9 @@ fn walk_probes(gpu: &Context, wavefront: &Wavefront) -> (Vec<u32>, u32, u32) {
 /// `scene::subsurface_inverts_the_multiple_scatter_albedo` pins it beside
 /// the fit it inverts.
 ///
-/// Above the band nothing here claims zero, and the driver captures record
-/// rather than assert: 9-0 measured 69 kills per 1.18M paths at α = 0.98
-/// and 6870 at α = 0.995, worth 0.15% and 2.4% of darkening at depth. The
-/// α = 0.995 arm below is here so the zero above is evidence and not a
+/// The α = 0.995 arm is here so the zero above is evidence and not a
 /// counter that never fires — a stress regime the same geometry *does*
-/// drive into the cap. Should a later rung shorten deep walks enough to
+/// drive into the cap. Should a later change shorten deep walks enough to
 /// empty it (Dwivedi guiding would), that arm failing is the improvement
 /// announcing itself: re-pin the stress albedo, don't delete the arm.
 #[cfg(feature = "probes")]

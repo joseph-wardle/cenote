@@ -49,9 +49,10 @@ thiserror = "2.0.18"
 # library installed — see the README's "Denoising" section.
 denoise = ["dep:oidn"]
 # Measurement kernels: compiles the shaders with -DPROBES, adding the
-# volume stage's scatter-event histogram (events by bounce, read back
-# after a render). Perf numbers come from default builds only — the
-# default build's SPIR-V is identical to a tree without this feature.
+# shared probes histogram (volume scatter events by bounce, subsurface
+# walk lengths, and the walk's death counters), read back after a render.
+# Perf numbers come from default builds only — the default build's SPIR-V
+# is identical to a tree without this feature.
 probes = []
 
 [lints]

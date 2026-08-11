@@ -403,10 +403,10 @@ fn render_frame(
     Ok(())
 }
 
-/// Measurement builds only: the volume stage's scatter-event histogram as
-/// a `.probes.ron` sidecar beside the image, plus a one-line console read.
-/// The mean is per *camera path* — width × height × spp — so runs at
-/// different sizes or sample counts still compare.
+/// Measurement builds only: the probes histogram as a `.probes.ron`
+/// sidecar beside the image, plus a one-line console read. Means are per
+/// *camera path* — width × height × spp — so runs at different sizes or
+/// sample counts still compare.
 #[cfg(feature = "probes")]
 fn write_probes(
     gpu: &cenote::gpu::Context,
@@ -434,22 +434,15 @@ fn write_probes(
         walk_leak_deaths: u32,
         /// Subsurface draws the sidedness guard turned away before the
         /// walk began, and walks whose exit it turned away at the
-        /// boundary. Both are silent deaths in the image, and both are a
-        /// property of the *mesh* — how far its interpolated normals have
-        /// drifted from the triangles beneath them — rather than of the
-        /// material. Counted apart because they leave the same dark pixel
-        /// and only the split says which end was at fault.
-        ///
-        /// Counts, not energy: the two coincide only where throughput is
-        /// 1, which is the white-furnace diagnostic these were built for.
-        /// Elsewhere a count bounds the loss without measuring it.
+        /// boundary — both silent deaths, both a property of the mesh's
+        /// interpolated normals rather than of the material. See
+        /// `PROBE_ENTRY_REJECT_BIN`, which carries the split's reasoning.
         walk_entry_rejects: u32,
         walk_exit_rejects: u32,
         /// Walks the interior roulette ended — the walk's largest death
-        /// mode by far, and the one that makes every figure below
-        /// conditional: a roulette death contributes no exit length, so
-        /// the histogram and the totals drawn from it describe walks that
-        /// reached the boundary, not walks that were started.
+        /// mode by far, and what makes every figure below conditional: a
+        /// roulette death contributes no exit length, so the histogram
+        /// describes walks that reached the boundary, not walks started.
         walk_roulette_deaths: u32,
         /// Summed over [`Self::walk_exits_by_events`], and therefore over
         /// exits alone — see [`Self::walk_roulette_deaths`].
@@ -461,9 +454,8 @@ fn write_probes(
     }
     let bins = renderer.probes(gpu)?;
     let split = cenote::wavefront::PROBE_VOLUME_BINS;
-    // The two rejection counters sit above both stages' halves rather
-    // than inside either, so they come off first and the halves below
-    // keep the bin-for-bin meaning they have always had.
+    // The counters sit above both stages' halves, so they come off first
+    // and the halves below keep their bin-for-bin meaning.
     let walk_entry_rejects = bins[cenote::wavefront::PROBE_ENTRY_REJECT_BIN];
     let walk_exit_rejects = bins[cenote::wavefront::PROBE_EXIT_REJECT_BIN];
     let walk_roulette_deaths = bins[cenote::wavefront::PROBE_ROULETTE_BIN];

@@ -706,6 +706,13 @@ fn smooth_normals(positions: &[Vec3], triangles: &[[u32; 3]]) -> Vec<Vec3> {
 /// usually the scene's subject, so a dragged `subsurface_radius` would
 /// re-read and re-normalise it per frame to produce a log line; a full
 /// build resolves everything, so a scene still hears this when it loads.
+///
+/// The angle is reported, not a share of area above the bar, because only
+/// the angle measures progress. The corpus head reads 61% of its area
+/// coarse; subdividing it twice — which removes the sawtooth and brings
+/// the frame within 0.7% of pbrt in every channel — reads *70%*, because
+/// the flat caps Catmull-Clark rounds cross into the count as fast as the
+/// lean falls. The same two levels take the median lean 5.2° → 1.9°.
 fn warn_if_coarse_for_subsurface(
     name: &str,
     instance: &description::Instance,
@@ -739,20 +746,15 @@ fn warn_if_coarse_for_subsurface(
                 .map(|axis| axis.truncate().length())
         })
         .fold(0.0f32, f32::max);
-    let share = coarse_facet_share(mesh, mfp / scale);
-    // Most of the surface, not a steep feature or two: a lid whose normals
-    // were averaged into the wall beside it stands at a large angle over a
-    // large minority of the area and says nothing about how well the shape
-    // is resolved.
-    if share <= 0.5 {
+    let lean = facet_lean_degrees(mesh, mfp / scale);
+    if lean <= COARSE_FACET_DEGREES {
         return;
     }
     log::warn!(
-        "instance \"{name}\" is coarse for its subsurface medium: {share:.0}% of its area is in \
-         facets wider than its {mfp:.3} mm free path and leaning over {COARSE_FACET_DEGREES}° off \
-         the surface they approximate, so the walk will resolve them as a faceted sawtooth — \
-         subdivide until this is quiet",
-        share = share * 100.0,
+        "instance \"{name}\" is coarse for its subsurface medium: half its area leans {lean:.1}° \
+         off the surface its shading normals describe, over the {COARSE_FACET_DEGREES}° that its \
+         {mfp:.3} mm free path resolves — the walk will read the facets as a sawtooth, so \
+         subdivide until this angle falls under the bar",
         mfp = mfp * 1000.0,
     );
 }
@@ -763,26 +765,40 @@ fn warn_if_coarse_for_subsurface(
 /// to 0.2% over the noise floor, and nothing is visible below it.
 const COARSE_FACET_DEGREES: f32 = 1.25;
 
-/// The share of `mesh`'s area a walk through a medium of shortest free
-/// path `mfp` (object-space) would resolve as polygons: facets both wider
-/// than `mfp` and leaning more than [`COARSE_FACET_DEGREES`].
+/// Lean angles are accumulated into fixed bins of this width, in degrees,
+/// rather than sorted: this runs per instance per build, over meshes with
+/// millions of facets. The reported median is the bin's lower edge, so it
+/// never overstates.
+const LEAN_BIN_DEGREES: f32 = 0.05;
+
+/// The area-weighted median angle a facet of `mesh` leans off the surface
+/// its shading normals describe, counting anything narrower than the
+/// object-space free path `mfp` as flat: the walk steps over such a facet,
+/// so its lean is never resolved. Zeroing them rather than dropping them
+/// is what keeps the median a statement about the whole surface.
 ///
 /// Lean is measured against the corner shading normals rather than across
 /// an edge to the neighbouring face. It is the same angle wherever a
 /// mesh's normals describe its shape, it needs no adjacency, and it reads
 /// zero on geometry that means to be flat — which a dihedral does not.
 ///
-/// A facet narrower than `mfp` counts as flat rather than dropping out of
-/// the total: the walk steps over it, so its lean cannot be resolved.
-/// Dropping it instead leaves the share measuring whichever few large
-/// facets remain, which inverts the answer on a mesh mostly finer than its
-/// free path.
-fn coarse_facet_share(mesh: &Mesh, mfp: f32) -> f32 {
-    // Compared squared throughout: |face·n| < cos(T)·|face|·|n| holds
-    // exactly when the squares do, so a facet costs one square root (its
-    // area) rather than seven.
-    let upright = COARSE_FACET_DEGREES.to_radians().cos().powi(2);
-    let (mut coarse, mut total) = (0.0, 0.0);
+/// A median, so a steep minority cannot carry it: the teapot's lid, whose
+/// normals were averaged into the wall beside it, stands at 77° over 30.8%
+/// of its area and says nothing about how well the shape is resolved.
+fn facet_lean_degrees(mesh: &Mesh, mfp: f32) -> f32 {
+    const LEAN_BINS: usize = (90.0 / LEAN_BIN_DEGREES) as usize;
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the quotient is clamped into the bin range before it is cast"
+    )]
+    fn bin(degrees: f32) -> usize {
+        (degrees / LEAN_BIN_DEGREES).clamp(0.0, (LEAN_BINS - 1) as f32) as usize
+    }
+
+    let mut area_by_lean = [0.0f32; LEAN_BINS];
+    let mut total = 0.0;
     for &[a, b, c] in &mesh.triangles {
         let (pa, pb, pc) = (
             mesh.positions[a as usize],
@@ -795,22 +811,42 @@ fn coarse_facet_share(mesh: &Mesh, mfp: f32) -> f32 {
         let normals = [a, b, c].map(|corner| mesh.normals[corner as usize]);
         // A shading normal with no direction is no evidence either way —
         // the head carries three. A degenerate triangle needs no such
-        // guard: its area is zero, so it weighs nothing in either sum.
+        // guard: its area is zero, so it weighs nothing.
         if normals.iter().any(|n| !n.is_finite() || n.length_squared() <= 0.0) {
             continue;
         }
-        let leaning = normals.iter().any(|normal| {
-            let aligned = cross.dot(*normal);
-            aligned * aligned < upright * plane * normal.length_squared()
-        });
-        let area = 0.5 * plane.sqrt();
         let widest = ab.length_squared().max(bc.length_squared()).max(ca.length_squared());
-        if leaning && widest > mfp * mfp {
-            coarse += area;
-        }
+        let lean = if widest > mfp * mfp {
+            // The steepest corner, as cos² — one arc cosine per facet
+            // rather than three, and the sign the square drops would only
+            // matter for a normal pointing into its own face.
+            let steepest = normals.iter().fold(1.0f32, |steepest, normal| {
+                let aligned = cross.dot(*normal);
+                steepest.min(aligned * aligned / (plane * normal.length_squared()))
+            });
+            steepest.clamp(0.0, 1.0).sqrt().acos().to_degrees()
+        } else {
+            0.0
+        };
+        let area = 0.5 * plane.sqrt();
+        area_by_lean[bin(lean)] += area;
         total += area;
     }
-    if total > 0.0 { coarse / total } else { 0.0 }
+    if total <= 0.0 {
+        return 0.0;
+    }
+    let mut below = 0.0;
+    for (index, area) in area_by_lean.iter().enumerate() {
+        below += area;
+        if below >= 0.5 * total {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "the bin index is far below f32's integer range"
+            )]
+            return index as f32 * LEAN_BIN_DEGREES;
+        }
+    }
+    90.0
 }
 
 /// A mesh's positions and triangles for the light table. The resolved
@@ -1794,17 +1830,17 @@ mod tests {
         mesh
     }
 
-    /// The share in the percent the warning reports it in.
-    fn percent(share: f32) -> u32 {
-        (share * 100.0).round() as u32
-    }
-
     /// Two ways a mesh can be no business of the walk's: geometry that
     /// means to be flat carries its face normal at every corner, and
     /// facets narrower than the free path are stepped over whatever their
     /// lean. The prism is coarse at a free path that resolves it and
     /// clean at one that does not, from the same geometry.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "a mesh with nothing to resolve lands in bin 0, whose lower edge is an \
+                  exact zero"
+    )]
     fn flat_and_sub_free_path_geometry_is_never_coarse() {
         let quad = Mesh {
             positions: vec![
@@ -1818,38 +1854,49 @@ mod tests {
             triangles: vec![[0, 1, 2], [0, 2, 3]],
         };
         for mfp in [1e-6, 1.0, 1e3] {
-            assert_eq!(percent(coarse_facet_share(&quad, mfp)), 0);
+            assert_eq!(facet_lean_degrees(&quad, mfp), 0.0);
         }
-        assert_eq!(percent(coarse_facet_share(&prism_wall(8), 1e-6)), 100);
+        // Every facet of an octagonal prism leans half its 45° turn.
+        assert!((facet_lean_degrees(&prism_wall(8), 1e-6) - 22.5).abs() <= LEAN_BIN_DEGREES);
         // The widest thing in an octagonal facet is its diagonal, 1.26
         // across; a two-metre free path steps over the whole shape.
-        assert_eq!(percent(coarse_facet_share(&prism_wall(8), 2.0)), 0);
+        assert_eq!(facet_lean_degrees(&prism_wall(8), 2.0), 0.0);
     }
 
-    /// The bar is the geometry's own angle, and subdividing halves it: a
-    /// prism is wholly coarse until its facets lean under
-    /// [`COARSE_FACET_DEGREES`], which 180/segments crosses between 128
-    /// and 256 sides.
+    /// The reported angle *is* the geometry's own, so subdividing halves
+    /// it — the property the share of area above a fixed bar does not
+    /// have, and the reason a user can tell whether refining helped. The
+    /// warning fires where 180/segments crosses [`COARSE_FACET_DEGREES`],
+    /// between 128 and 256 sides.
     #[test]
-    fn the_bar_falls_where_facet_lean_crosses_it() {
+    fn the_reported_lean_is_the_geometry_s_own_angle() {
         for segments in [8, 16, 32, 64, 128, 256, 512] {
-            let lean = 180.0 / segments as f32;
+            let expected = 180.0 / segments as f32;
+            let lean = facet_lean_degrees(&prism_wall(segments), 1e-6);
+            assert!(
+                (lean - expected).abs() <= LEAN_BIN_DEGREES,
+                "{segments} segments lean {expected:.3}°, reported {lean:.3}°"
+            );
             assert_eq!(
-                percent(coarse_facet_share(&prism_wall(segments), 1e-6)),
-                if lean > COARSE_FACET_DEGREES { 100 } else { 0 },
-                "{segments} segments lean {lean:.3}°"
+                lean > COARSE_FACET_DEGREES,
+                expected > COARSE_FACET_DEGREES,
+                "{segments} segments warned against its own {expected:.3}° lean"
             );
         }
     }
 
-    /// A steep feature over a large *minority* is not coarseness — a lid
-    /// whose normals were averaged into the wall beside it says nothing
-    /// about how well the shape is resolved, and the teapot does exactly
-    /// this with 30.8% of its area at 77°. Degenerate data is skipped
-    /// rather than counted either way: the head carries three zero-length
-    /// shading normals.
+    /// A steep feature over a large *minority* cannot carry the median —
+    /// a lid whose normals were averaged into the wall beside it says
+    /// nothing about how well the shape is resolved, and the teapot does
+    /// exactly this with 30.8% of its area at 77°. Degenerate data is
+    /// skipped rather than counted either way: the head carries three
+    /// zero-length shading normals.
     #[test]
-    fn steep_minorities_and_degenerate_data_do_not_move_the_share() {
+    #[expect(
+        clippy::float_cmp,
+        reason = "degenerate facets must not move the median by so much as a bin edge"
+    )]
+    fn steep_minorities_and_degenerate_data_do_not_move_the_median() {
         let mut mesh = prism_wall(512); // fine enough to read zero alone
         let base = mesh.positions.len() as u32;
         for corner in [
@@ -1864,10 +1911,10 @@ mod tests {
         }
         mesh.triangles.push([base, base + 1, base + 2]);
         mesh.triangles.push([base, base + 2, base + 3]);
-        let lidded = percent(coarse_facet_share(&mesh, 1e-6));
+        let lidded = facet_lean_degrees(&mesh, 1e-6);
         assert!(
-            lidded <= 50,
-            "a mis-normalled lid must stay a minority, read {lidded}%"
+            lidded <= COARSE_FACET_DEGREES,
+            "a mis-normalled lid must not carry the median, read {lidded}°"
         );
 
         let base = mesh.positions.len() as u32;
@@ -1876,6 +1923,6 @@ mod tests {
         mesh.uvs.extend([Vec2::ZERO; 3]);
         mesh.triangles.push([base, base + 1, base + 2]); // zero area
         mesh.triangles.push([0, 1, base + 1]); // zero-length normal
-        assert_eq!(percent(coarse_facet_share(&mesh, 1e-6)), lidded);
+        assert_eq!(facet_lean_degrees(&mesh, 1e-6), lidded);
     }
 }
