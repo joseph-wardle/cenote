@@ -17,6 +17,7 @@
 #include <variant>
 #include <vector>
 
+#include "pxr/base/tf/staticTokens.h"
 #include "pxr/base/vt/value.h"
 #include "pxr/imaging/hd/retainedDataSource.h"
 #include "pxr/imaging/hd/tokens.h"
@@ -40,21 +41,15 @@ void check(bool condition, std::string_view label) {
     }
 }
 
-// The keys as a host authors them, behind accessors for the same reason
-// the resolver's are: a TfToken built before Tf's own static registry
-// throws where nothing catches.
-const TfToken& kSamples() {
-    static const TfToken token("cenote:samplesPerPixel");
-    return token;
-}
-const TfToken& kThreshold() {
-    static const TfToken token("cenote:noiseThreshold");
-    return token;
-}
-const TfToken& kBounces() {
-    static const TfToken token("cenote:maxBounces");
-    return token;
-}
+// The keys as a host authors them — spelled out again rather than shared
+// with the resolver, because the strings are the contract under test.
+// clang-format off
+TF_DEFINE_PRIVATE_TOKENS(_tokens,
+    ((samplesPerPixel, "cenote:samplesPerPixel"))
+    ((noiseThreshold, "cenote:noiseThreshold"))
+    ((maxBounces, "cenote:maxBounces"))
+);
+// clang-format on
 
 /// The map every host actually has: whatever it authored, over the
 /// advertised defaults the delegate populates.
@@ -117,7 +112,7 @@ void absent_keys_leave_the_field_alone() {
 /// went out of its way to.
 void the_cenote_budget_beats_the_standard_one() {
     const HdCenoteResolvedSettings ours =
-        HdCenoteResolveSettings(populated({{kSamples(), VtValue(7)}}));
+        HdCenoteResolveSettings(populated({{_tokens->samplesPerPixel, VtValue(7)}}));
     check(ours.patch.spp == 7U, "cenote:samplesPerPixel is read");
     check(ours.warnings.empty(), "and reading it is silent");
 
@@ -126,7 +121,7 @@ void the_cenote_budget_beats_the_standard_one() {
     check(standard.patch.spp == 9U, "convergedSamplesPerPixel is read when ours is absent");
 
     const HdCenoteResolvedSettings both = HdCenoteResolveSettings(
-        populated({{kSamples(), VtValue(7)},
+        populated({{_tokens->samplesPerPixel, VtValue(7)},
                    {HdRenderSettingsTokens->convergedSamplesPerPixel, VtValue(9)}}));
     check(both.patch.spp == 7U, "ours wins when a host authored both");
 }
@@ -136,14 +131,14 @@ void the_cenote_budget_beats_the_standard_one() {
 void the_threshold_keeps_its_three_states() {
     const auto of = [](float value) {
         return threshold(
-            HdCenoteResolveSettings(populated({{kThreshold(), VtValue(value)}})).patch);
+            HdCenoteResolveSettings(populated({{_tokens->noiseThreshold, VtValue(value)}})).patch);
     };
     check(of(0.02f) == on(0.02f), "a threshold is set");
     check(of(0.0f) == kOff, "zero is the spelling for off");
     check(of(1.0f) == on(1.0f), "1 is in range");
 
     const HdCenoteResolvedSettings zero =
-        HdCenoteResolveSettings(populated({{kThreshold(), VtValue(0.0f)}}));
+        HdCenoteResolveSettings(populated({{_tokens->noiseThreshold, VtValue(0.0f)}}));
     check(zero.warnings.empty(), "and switching it off that way is silent");
 }
 
@@ -155,23 +150,23 @@ void out_of_range_values_are_clamped_not_refused() {
         return HdCenoteResolveSettings(populated({{key, value}}));
     };
 
-    const HdCenoteResolvedSettings noSamples = one(kSamples(), VtValue(0));
+    const HdCenoteResolvedSettings noSamples = one(_tokens->samplesPerPixel, VtValue(0));
     check(noSamples.patch.spp == 1U, "a budget of zero becomes one sample");
     check(noSamples.warnings.size() == 1, "and says so");
 
-    const HdCenoteResolvedSettings deep = one(kBounces(), VtValue(512));
+    const HdCenoteResolvedSettings deep = one(_tokens->maxBounces, VtValue(512));
     check(deep.patch.max_bounces == 255U, "512 bounces becomes the renderer's 255");
     check(deep.warnings.size() == 1, "and says so");
 
-    const HdCenoteResolvedSettings flat = one(kBounces(), VtValue(0));
+    const HdCenoteResolvedSettings flat = one(_tokens->maxBounces, VtValue(0));
     check(flat.patch.max_bounces == 1U, "zero bounces becomes one");
     check(flat.warnings.size() == 1, "and says so");
 
-    const HdCenoteResolvedSettings loose = one(kThreshold(), VtValue(2.0f));
+    const HdCenoteResolvedSettings loose = one(_tokens->noiseThreshold, VtValue(2.0f));
     check(threshold(loose.patch) == on(1.0f), "a threshold above 1 becomes 1");
     check(loose.warnings.size() == 1, "and says so");
 
-    const HdCenoteResolvedSettings negative = one(kThreshold(), VtValue(-1.0f));
+    const HdCenoteResolvedSettings negative = one(_tokens->noiseThreshold, VtValue(-1.0f));
     check(threshold(negative.patch) == kOff,
           "a negative threshold is not a relative error, so the stop is off");
     check(negative.warnings.size() == 1, "and says so");
@@ -181,7 +176,7 @@ void out_of_range_values_are_clamped_not_refused() {
 /// would overwrite what the scene said with a number nobody authored.
 void an_unreadable_value_is_ignored() {
     const HdCenoteResolvedSettings resolved =
-        HdCenoteResolveSettings(populated({{kBounces(), VtValue(std::string("deep"))}}));
+        HdCenoteResolveSettings(populated({{_tokens->maxBounces, VtValue(std::string("deep"))}}));
     check(!resolved.patch.max_bounces, "an unreadable depth stays unset");
     check(resolved.warnings.size() == 1, "and says so");
 }
@@ -217,7 +212,7 @@ HdContainerDataSourceHandle authored(std::initializer_list<std::pair<TfToken, Vt
 /// literally the same function, and this is the line that says so.
 void a_settings_prim_resolves_like_a_map() {
     const HdCenoteResolvedSettings resolved = HdCenoteResolveNamespacedSettings(
-        authored({{kSamples(), VtValue(12)}, {kBounces(), VtValue(999)}}));
+        authored({{_tokens->samplesPerPixel, VtValue(12)}, {_tokens->maxBounces, VtValue(999)}}));
     check(resolved.patch.spp == 12U, "a prim's budget is read");
     check(resolved.patch.max_bounces == 255U, "and its depth is clamped like anyone else's");
     check(resolved.warnings.size() == 1, "under one complaint");
@@ -232,9 +227,9 @@ void a_settings_prim_resolves_like_a_map() {
 /// shot has one, and leaves the session's standing where it does not.
 void the_prim_wins_the_keys_it_authors() {
     const HdCenoteResolvedSettings map =
-        HdCenoteResolveSettings(populated({{kSamples(), VtValue(64)}}));
+        HdCenoteResolveSettings(populated({{_tokens->samplesPerPixel, VtValue(64)}}));
     const HdCenoteResolvedSettings prim =
-        HdCenoteResolveNamespacedSettings(authored({{kSamples(), VtValue(512)}}));
+        HdCenoteResolveNamespacedSettings(authored({{_tokens->samplesPerPixel, VtValue(512)}}));
 
     const HdCenoteResolvedSettings merged = HdCenoteOverlaySettings(map, prim);
     check(merged.patch.spp == 512U, "the prim's budget wins");
@@ -270,7 +265,7 @@ void the_description_names_what_was_resolved() {
           "the defaults describe themselves in full");
 
     const std::string stopping = HdCenoteDescribeSettings(
-        HdCenoteResolveSettings(populated({{kThreshold(), VtValue(0.05f)}})).patch);
+        HdCenoteResolveSettings(populated({{_tokens->noiseThreshold, VtValue(0.05f)}})).patch);
     check(stopping.find("stopping early at 0.05 relative error") != std::string::npos,
           "a threshold is named as the relative error it is");
 

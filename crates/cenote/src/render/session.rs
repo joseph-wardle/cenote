@@ -1380,8 +1380,7 @@ mod tests {
     /// budget the early stop is the *only* thing that can finish this render,
     /// so a consumer re-deriving the flag from the sample count — comparing
     /// it against a budget the render already decided not to reach — would
-    /// wait forever. That was the shape of the bug: settle the render, then
-    /// ask the frame.
+    /// wait forever.
     #[test]
     fn a_frame_reports_the_early_stop_the_sample_count_cannot() {
         let Some(gpu) = crate::gpu::test_context() else {

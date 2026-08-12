@@ -50,11 +50,9 @@ HdRenderSettingDescriptorList HdCenoteSettingDescriptors();
 
 /// A settings map read as one patch, plus whatever reading it had to
 /// complain about — one human-readable sentence per complaint, in the
-/// order they should be posted. Built with `TfStringPrintf`, not
-/// `std::format`: this compiles into the plugin `.so`, where the
-/// portability rule (../README.md) forbids library facilities that need
-/// libstdc++ runtime symbols newer than the host's — and `std::format`'s
-/// float path wants `std::to_chars` at `GLIBCXX_3.4.31`.
+/// order they should be posted. Formatted with `TfStringPrintf`, never
+/// `std::format`, whose float path wants `std::to_chars` at
+/// `GLIBCXX_3.4.31` — the plugin portability rule (../README.md).
 struct HdCenoteResolvedSettings {
     cenote::wire::SettingsPatch patch;
     std::vector<std::string> warnings;
@@ -74,13 +72,13 @@ HdCenoteResolvedSettings HdCenoteResolveSettings(const HdRenderSettingsMap& sett
 HdCenoteResolvedSettings
 HdCenoteResolveNamespacedSettings(const HdContainerDataSourceHandle& namespacedSettings);
 
-/// The resolved patch as the one line a renderer owes the person waiting
-/// on it: what budget, what early stop, what depth this render is actually
-/// obeying, after every source and clamp has had its say. Every production
-/// renderer prints its resolved settings — it is the first thing anyone
-/// asks when a render takes an hour — and it is also the only way a batch
-/// host with no settings UI can be *observed* to have delivered them
-/// (tests/render_settings_test.py reads exactly this line).
+/// The resolved patch as one line: what budget, what early stop, what
+/// depth this render is actually obeying, after every source and clamp has
+/// had its say. Besides being the line every production renderer owes the
+/// person waiting on it, it is the only way a batch host with no settings
+/// UI can be *observed* to have delivered the settings —
+/// tests/render_settings_test.py reads exactly this line, so its wording
+/// is a contract.
 ///
 /// A field the patch leaves unset says so rather than inventing a number:
 /// unset means "leave the renderer's own answer alone", which is not the

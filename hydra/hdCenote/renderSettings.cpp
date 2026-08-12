@@ -8,6 +8,7 @@
 #include <string_view>
 #include <variant>
 
+#include "pxr/base/tf/staticTokens.h"
 #include "pxr/base/tf/stringUtils.h"
 #include "pxr/base/tf/token.h"
 #include "pxr/imaging/hd/tokens.h"
@@ -16,20 +17,14 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 namespace {
 
-/// The keys as a host authors them. Behind an accessor rather than at
-/// namespace scope: a TfToken registers itself in Tf's own static
-/// registry, and a plugin has no say in which of the two is constructed
-/// first.
-struct _Keys {
-    TfToken samplesPerPixel{"cenote:samplesPerPixel"};
-    TfToken noiseThreshold{"cenote:noiseThreshold"};
-    TfToken maxBounces{"cenote:maxBounces"};
-};
-
-const _Keys& _keys() {
-    static const _Keys keys;
-    return keys;
-}
+// The keys as a host authors them.
+// clang-format off
+TF_DEFINE_PRIVATE_TOKENS(_tokens,
+    ((samplesPerPixel, "cenote:samplesPerPixel"))
+    ((noiseThreshold, "cenote:noiseThreshold"))
+    ((maxBounces, "cenote:maxBounces"))
+);
+// clang-format on
 
 /// The scene's one settings object, under the name the server's own
 /// fallback gives it (`ensure_singletons`, cenote-server/src/main.rs).
@@ -103,7 +98,7 @@ void _Threshold(float value, cenote::wire::SettingsPatch* patch,
     if (std::isnan(value) || value < 0.0f) {
         warnings->push_back(TfStringPrintf("%s is %g, which is not a relative error; "
                                            "the early stop is off",
-                                           _keys().noiseThreshold.GetText(), value));
+                                           _tokens->noiseThreshold.GetText(), value));
         patch->noise_threshold = cenote::wire::Clear{};
         return;
     }
@@ -114,7 +109,7 @@ void _Threshold(float value, cenote::wire::SettingsPatch* patch,
     if (value > 1.0f) {
         warnings->push_back(TfStringPrintf("%s is %g; a relative error above 1 stops on the "
                                            "first sample, using 1",
-                                           _keys().noiseThreshold.GetText(), value));
+                                           _tokens->noiseThreshold.GetText(), value));
         patch->noise_threshold = cenote::wire::Set{1.0f};
         return;
     }
@@ -131,8 +126,8 @@ void _Unknown(const HdRenderSettingsMap& settings, std::vector<std::string>* war
         if (!std::string_view(name).starts_with(kNamespace)) {
             continue;
         }
-        if (key == _keys().samplesPerPixel || key == _keys().noiseThreshold ||
-            key == _keys().maxBounces) {
+        if (key == _tokens->samplesPerPixel || key == _tokens->noiseThreshold ||
+            key == _tokens->maxBounces) {
             continue;
         }
         unknown.push_back(name);
@@ -153,8 +148,8 @@ HdRenderSettingDescriptorList HdCenoteSettingDescriptors() {
     return {
         {"Samples Per Pixel", HdRenderSettingsTokens->convergedSamplesPerPixel,
          VtValue(kDefaultSamplesPerPixel)},
-        {"Noise Threshold", _keys().noiseThreshold, VtValue(kDefaultNoiseThreshold)},
-        {"Max Bounces", _keys().maxBounces, VtValue(kDefaultMaxBounces)},
+        {"Noise Threshold", _tokens->noiseThreshold, VtValue(kDefaultNoiseThreshold)},
+        {"Max Bounces", _tokens->maxBounces, VtValue(kDefaultMaxBounces)},
     };
 }
 
@@ -167,7 +162,7 @@ HdCenoteResolvedSettings HdCenoteResolveSettings(const HdRenderSettingsMap& sett
     // `convergedSamplesPerPixel`, so populating the defaults puts it in
     // every map — a host that *also* spelled the budget our way meant the
     // one it went out of its way to author.
-    TfToken budgetKey = _keys().samplesPerPixel;
+    TfToken budgetKey = _tokens->samplesPerPixel;
     std::optional<int> budget = _Value<int>(settings, budgetKey, warnings);
     if (!budget) {
         budgetKey = HdRenderSettingsTokens->convergedSamplesPerPixel;
@@ -182,13 +177,13 @@ HdCenoteResolvedSettings HdCenoteResolveSettings(const HdRenderSettingsMap& sett
     }
 
     if (const std::optional<float> threshold =
-            _Value<float>(settings, _keys().noiseThreshold, warnings)) {
+            _Value<float>(settings, _tokens->noiseThreshold, warnings)) {
         _Threshold(*threshold, &resolved.patch, warnings);
     }
 
-    if (const std::optional<int> bounces = _Value<int>(settings, _keys().maxBounces, warnings)) {
+    if (const std::optional<int> bounces = _Value<int>(settings, _tokens->maxBounces, warnings)) {
         resolved.patch.max_bounces = static_cast<std::uint32_t>(
-            _Clamped(*bounces, 1, kMaxBounces, _keys().maxBounces, warnings));
+            _Clamped(*bounces, 1, kMaxBounces, _tokens->maxBounces, warnings));
     }
 
     _Unknown(settings, warnings);

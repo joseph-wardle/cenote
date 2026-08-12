@@ -29,9 +29,8 @@ watermark would poison any image check.
 The two hosts prove different halves with the same stage. usdrecord's
 `--renderSettingsPrimPath` names the prim to Hydra's scene globals, so the
 prim path carries it; husk resolves the stage's settings itself and hands
-the delegate a settings map, so the map path carries it — and husk really
-does populate that map, with the `cenote:` namespace intact, which is what
-this file was written to find out.
+the delegate a settings map — `cenote:` namespace intact — so the map path
+carries it.
 
 Husk answers in a narrower voice. Houdini installs a TfDiagnosticMgr
 delegate, which routes TF_STATUS and TF_WARN into its own error manager and
@@ -115,9 +114,12 @@ class Host:
         env["PXR_PLUGINPATH_NAME"] = str(RESOURCES)
         env["CENOTE_SERVER"] = locate_server()
         # husk finds its renderer list through HOUDINI_PATH, not the pxr
-        # registry (hydra/README.md).
+        # registry (hydra/README.md). It also carries its own USD: the
+        # stock prefix's python modules — which usdrecord needs on
+        # PYTHONPATH — crash husk's older Sdf when they leak in.
         if self.name == "husk":
             env["HOUDINI_PATH"] = f"{RESOURCES.parents[1]}:&"
+            env.pop("PYTHONPATH", None)
         # Deliberately *not* set: this test is about what the scene asks
         # for, and the override sits above everything the scene can say.
         # Leg 6 is the one that sets it, on purpose.
@@ -302,7 +304,7 @@ def legs(host, directory):
     #    every mesh in the same flush down with it.
     loud = run("complaints", settings_prim="/Render/Complaints")
     loud.succeeded()
-    resolved(loud, f"{DEFAULTS.split(',')[0]}, no early stop, 255 bounces")
+    resolved(loud, "64 samples per pixel, no early stop, 255 bounces")
     if host.speaks:
         for phrase in ("cenote:maxBounces is 512",
                        "cenote:samplesPerPixel is a",

@@ -386,8 +386,8 @@ mod tests {
     /// The stopping rule survives translation: a client that asks to
     /// stop early gets to, one that clears the threshold spends its whole
     /// budget, and one that says nothing leaves the scene's own answer
-    /// standing. The field spent a release pinned to `None` here, which
-    /// looks exactly like the third case from the renderer's side.
+    /// standing — a translation that drops the field is indistinguishable
+    /// from that third case, which is why all three are pinned.
     #[test]
     fn the_noise_threshold_reaches_the_renderer() {
         let with = |threshold| {

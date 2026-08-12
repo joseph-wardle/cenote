@@ -119,13 +119,12 @@ cmake --install build/hydra-hdk
 PATH=$HFS/bin:$PATH python3 hydra/tests/render_settings_test.py --host husk
 ```
 
-Two things that check settles, neither of them guessable from the docs. husk
-**does** populate the delegate's settings map, with the `cenote:` namespace
-intact — `husk -s /Render/Foo -V 9` prints the map it built, and an authored
-`cenote:samplesPerPixel` governs the render through it. And Houdini installs a
-`TfDiagnosticMgr` delegate, so `TF_STATUS`/`TF_WARN` go to its error manager
-rather than the stream: under husk nothing the delegate *says* is readable, and
-only what the render does can be asserted.
+Two husk behaviours matter here. husk populates the delegate's settings map,
+with the `cenote:` namespace intact — `husk -s /Render/Foo -V 9` prints the map
+it built, and an authored `cenote:samplesPerPixel` governs the render through
+it. And Houdini installs a `TfDiagnosticMgr` delegate, so `TF_STATUS`/`TF_WARN`
+go to its error manager rather than the stream: under husk nothing the delegate
+*says* is readable, and only what the render does can be asserted.
 
 ## USD 26.05 — the pinned build
 
