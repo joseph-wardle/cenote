@@ -101,6 +101,13 @@ pub struct LatencyArgs {
     #[arg(long)]
     preview: bool,
 
+    /// Denoise the published frames, as the viewer does by default. Applied
+    /// to both measurements, and it is not free: the filter runs over every
+    /// frame the drag publishes, so `--preview` divides a bigger number and
+    /// may pick a smaller rectangle than it does without this.
+    #[arg(long)]
+    denoise: bool,
+
     /// Walk only these edits, comma separated (`--only material,transform`).
     /// Note that later edits in the walk target what earlier ones left
     /// behind: `removal` takes away `topology`'s mesh.
@@ -630,6 +637,11 @@ struct DragReport {
     /// Whether the render was allowed to drop resolution during the motion —
     /// a condition of the measurement, like the texture-cache state.
     preview: bool,
+    /// Median cost of the filter over the drag's frames, milliseconds, or
+    /// `None` if nothing was denoised. Part of `frame_millis` rather than
+    /// beside it: with denoising on the filter runs inside every frame the
+    /// drag publishes, and this says how much of the cadence it is.
+    denoise_millis: Option<f64>,
     /// Median interval between published frames, milliseconds. The cadence,
     /// and the one number a resolution change has to move.
     frame_millis: f64,
@@ -653,6 +665,9 @@ struct LatencyReport {
     /// Samples accumulated before each edit — every measurement here is an
     /// edit to a settled image.
     settle: u32,
+    /// Whether the session denoised what it published — a condition of every
+    /// number below, since the filter runs inside the frames they time.
+    denoise: bool,
     texture_cache: TextureCache,
     /// Process start to the first ray, milliseconds, and where it went.
     load_millis: f64,
@@ -691,12 +706,16 @@ pub fn run(args: &LatencyArgs) -> anyhow::Result<()> {
     // walk waits for an exact sample count, and a scene that asked to stop
     // at some noise level would settle below it and hang the harness.
     //
+    // Denoising rides along for the same reason: it is a condition of the
+    // measurement, and the file's own answer would otherwise decide it.
+    //
     // The name is the scene's own, since prep allows exactly one settings
     // object and a second would be rejected.
     let settle = ChangeSet {
         ops: vec![Op::Settings(SettingsPatch {
             spp: Some(args.settle),
             noise_threshold: Some(None),
+            denoise: Some(args.denoise),
             ..SettingsPatch::new(
                 description
                     .settings()
@@ -743,12 +762,13 @@ pub fn run(args: &LatencyArgs) -> anyhow::Result<()> {
     }
 
     println!(
-        "\n  {} — {}×{}, settling at {} spp, textures {}",
+        "\n  {} — {}×{}, settling at {} spp, textures {}, denoise {}",
         args.scene.display(),
         width,
         height,
         args.settle,
         texture_cache.label(),
+        if args.denoise { "on" } else { "off" },
     );
     // Wait out the first accumulation: the render parks at its cap, so the
     // first edit below lands on a settled image like every one after it.
@@ -780,6 +800,7 @@ pub fn run(args: &LatencyArgs) -> anyhow::Result<()> {
         scene: args.scene.display().to_string(),
         size: (width, height),
         settle: args.settle,
+        denoise: args.denoise,
         texture_cache,
         load_millis: millis(first_ray),
         load,
@@ -877,6 +898,7 @@ fn drag(
     let mut intervals = Vec::new();
     let mut first_pixels = Vec::new();
     let mut sizes = BTreeSet::new();
+    let mut filters = Vec::new();
     let mut last_frame = Instant::now();
     for _ in 0..moves {
         camera.position.x = stepped(camera.position.x);
@@ -894,6 +916,7 @@ fn drag(
                 intervals.push(last_frame.elapsed());
                 last_frame = Instant::now();
                 sizes.insert((frame.width(), frame.height()));
+                filters.extend(frame.stats().denoise);
                 if frame.epoch() >= target {
                     first_pixels.extend(frame.stats().interactivity.to_first_pixel);
                     break;
@@ -911,6 +934,7 @@ fn drag(
     Ok(DragReport {
         moves,
         preview,
+        denoise_millis: (!filters.is_empty()).then(|| median(&mut filters)),
         frame_millis: median(&mut intervals),
         first_pixel_millis: median(&mut first_pixels),
         first_pixels: marks,
@@ -1067,6 +1091,9 @@ fn print_drag(report: &DragReport) {
         "  {:<LABEL_WIDTH$}{:>9.2}",
         "to first pixel", report.first_pixel_millis
     );
+    if let Some(denoise) = report.denoise_millis {
+        println!("  {:<LABEL_WIDTH$}{denoise:>9.2}", "of which denoise");
+    }
     println!("  {:<LABEL_WIDTH$}{:>9}", "frame size", sizes.join(", "));
 }
 

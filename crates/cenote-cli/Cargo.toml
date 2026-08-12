@@ -29,9 +29,6 @@ ron = "=0.12.2"
 serde = { version = "1.0.228", features = ["derive"] }
 
 [features]
-# Builds `render --denoise` (the flag itself always parses, and names
-# this feature when the build lacks it).
-denoise = ["cenote/denoise"]
 # Measurement kernels: `render` also writes a `.probes.ron` sidecar with
 # the probes histogram. Never a perf build — see the feature's note in
 # crates/cenote/Cargo.toml.

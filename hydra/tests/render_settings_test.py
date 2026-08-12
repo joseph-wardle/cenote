@@ -3,7 +3,7 @@
 batch host, once per settings prim on it, asserting what a shot's authored
 settings are supposed to do to the render.
 
-Six legs, each naming a different RenderSettings prim (or none):
+Seven legs, each naming a different RenderSettings prim (or none):
 
   1. Defaults — no prim named. The delegate's own 64/off/8 is what gets
      rendered, silently, and the unnamed prims on the stage stay inert.
@@ -22,9 +22,16 @@ Six legs, each naming a different RenderSettings prim (or none):
      that renderer's own keys pass without comment.
   6. The environment override — CENOTE_SERVER_MAX_SAMPLES beats the shot,
      which is the documented top of the precedence chain.
+  7. Denoising — the one setting whose effect is the picture. Two prims
+     alike but for the switch, and the filtered render has to differ from
+     the raw one by far more than a repeat of the raw one differs from
+     itself.
 
-Behaviour, never pixels: the same file runs under husk, whose Education
-watermark would poison any image check.
+Behaviour, never pixels — with leg 7's one exception, which compares two
+of this run's own renders rather than a checked-in image. The Education
+watermark husk stamps would poison a golden, but it lands identically in
+both halves of a pair, so a difference between them is still the
+renderer's.
 
 The two hosts prove different halves with the same stage. usdrecord's
 `--renderSettingsPrimPath` names the prim to Hydra's scene globals, so the
@@ -49,6 +56,7 @@ that install to be the *hdk*-flavour one and $HFS on PATH.
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -64,7 +72,7 @@ RESOURCES = REPO / "hydra" / "dist" / "hdCenote" / "resources"
 # A batch host has no settings UI, so what the renderer says it resolved is
 # the only account of the settings anyone can read back.
 STATUS = "cenote: rendering at "
-DEFAULTS = "64 samples per pixel, no early stop, 8 bounces"
+DEFAULTS = "64 samples per pixel, no early stop, 8 bounces, not denoised"
 
 # The smallest frame that still exercises the whole path: nothing here
 # looks at a pixel, and every leg pays for the width in seconds.
@@ -81,14 +89,34 @@ def fail(message):
     sys.exit(1)
 
 
-def locate_server():
-    if os.environ.get("CENOTE_SERVER"):
-        return os.environ["CENOTE_SERVER"]
+def locate(variable, name, hint):
+    """A built binary from $variable, else target/{release,debug}/name."""
+    if os.environ.get(variable):
+        return os.environ[variable]
     for profile in ("release", "debug"):
-        candidate = REPO / "target" / profile / "cenote-server"
+        candidate = REPO / "target" / profile / name
         if os.access(candidate, os.X_OK):
             return str(candidate)
-    fail("no cenote-server: set $CENOTE_SERVER or `cargo build -p cenote-server`")
+    fail(f"no {name}: set ${variable} or `{hint}`")
+
+
+def locate_server():
+    return locate("CENOTE_SERVER", "cenote-server", "cargo build -p cenote-server")
+
+
+def mean_flip(first, second):
+    """How far apart two renders are, as mean FLIP. The threshold is set
+    to zero so the comparison always reports rather than judging: what
+    counts as far apart is leg 7's business, and it decides by comparing
+    one distance against another."""
+    binary = locate("CENOTE_FLIP", "cenote-flip", "cargo build -p cenote-cli --bin cenote-flip")
+    result = subprocess.run([binary, str(first), str(second), "--threshold", "0"],
+                            capture_output=True, text=True)
+    found = re.search(r"mean ([0-9.]+)", result.stdout + result.stderr)
+    if not found:
+        sys.stderr.write(result.stdout + result.stderr)
+        fail(f"cenote-flip said nothing about {first.name} and {second.name}")
+    return float(found.group(1))
 
 
 class Host:
@@ -286,7 +314,7 @@ def legs(host, directory):
     check(not slow.finished,
           f"slow: converged in {slow.seconds:.1f}s — a million samples cannot have "
           f"been rendered, so the budget never reached the server")
-    resolved(slow, "1000000 samples per pixel, no early stop, 8 bounces")
+    resolved(slow, "1000000 samples per pixel, no early stop, 8 bounces, not denoised")
 
     # 3. The early stop, which is also the regression: convergence has to
     #    come from the session's own verdict, because the sample count will
@@ -295,7 +323,7 @@ def legs(host, directory):
     early = run("early-stop", settings_prim="/Render/EarlyStop")
     early.succeeded()
     resolved(early, "1000000 samples per pixel, stopping early at 0.05 relative error, "
-                    "8 bounces")
+                    "8 bounces, not denoised")
     check(early.seconds < window,
           f"early-stop: took {early.seconds:.1f}s, which is not an early stop")
 
@@ -304,7 +332,7 @@ def legs(host, directory):
     #    every mesh in the same flush down with it.
     loud = run("complaints", settings_prim="/Render/Complaints")
     loud.succeeded()
-    resolved(loud, "64 samples per pixel, no early stop, 255 bounces")
+    resolved(loud, "64 samples per pixel, no early stop, 255 bounces, not denoised")
     if host.speaks:
         for phrase in ("cenote:maxBounces is 512",
                        "cenote:samplesPerPixel is a",
@@ -334,13 +362,47 @@ def legs(host, directory):
     # The delegate still resolves and sends the shot's budget: the override
     # is the server's, applied to whatever the scene said, so the line
     # underneath it is unchanged and only the render is shorter.
-    resolved(forced, "1000000 samples per pixel, no early stop, 8 bounces")
+    resolved(forced, "1000000 samples per pixel, no early stop, 8 bounces, not denoised")
+
+    # 7. The switch whose effect is the picture, and so the one leg both
+    #    hosts can read the same way. Three renders: the raw pair fixes
+    #    how far apart two runs of the *same* settings land, and the
+    #    filtered one has to be much further away than that. Without the
+    #    repeat a green here would prove only that renders differ.
+    raw = run("raw", settings_prim="/Render/Raw")
+    raw.succeeded()
+    resolved(raw, "2 samples per pixel, no early stop, 8 bounces, not denoised")
+
+    again = run("raw-again", settings_prim="/Render/Raw")
+    again.succeeded()
+
+    denoised = run("denoised", settings_prim="/Render/Denoised")
+    denoised.succeeded()
+    resolved(denoised, "2 samples per pixel, no early stop, 8 bounces, denoised")
+
+    floor = mean_flip(raw.out_path, again.out_path)
+    filtered = mean_flip(raw.out_path, denoised.out_path)
+    # Two bounds, each covering the other's blind spot. The absolute one
+    # is what actually bites: two renders of the same prim measure exactly
+    # 0.000000 apart, so if the switch never reached the server the
+    # filtered render would too, and anything above zero here is the
+    # filter. 0.002 sits well under what this pair measures — 0.0077 under
+    # usdrecord, 0.0057 under husk, whose watermark dilutes the mean —
+    # small because the geometry is simple, not because the filter is
+    # shy. The
+    # ratio is the guard on the guard: a machine whose renders were not
+    # bit-repeatable would lift the floor, and the absolute bound alone
+    # would not notice.
+    check(filtered > 0.002 and filtered > 10 * floor,
+          f"denoise: the filtered render is FLIP {filtered:.6f} from the raw one, against "
+          f"{floor:.6f} between two raw runs — the filter did not reach the server")
 
     said = ("clamp and complaints posted, foreign stage named once"
             if host.speaks else "diagnostics unread (Houdini keeps them)")
     print(f"render settings: OK ({host.name}) — defaults {defaults.seconds:.1f}s, the shot's "
           f"budget still running at {window:.1f}s, early stop {early.seconds:.1f}s, "
-          f"{said}, environment override {forced.seconds:.1f}s")
+          f"{said}, environment override {forced.seconds:.1f}s, denoise FLIP {filtered:.4f} "
+          f"over a {floor:.4f} floor")
 
 
 if __name__ == "__main__":

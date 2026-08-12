@@ -31,13 +31,18 @@ pub struct FrameStats {
     pub display: Duration,
 }
 
+/// Whether the denoise toggle starts on. The viewer's answer, not the
+/// format's: a batch render defaults it off so a host gets the estimator's
+/// own pixels, while an interactive frame is a few samples old and reads
+/// far better filtered.
+pub const DENOISE_BY_DEFAULT: bool = true;
+
 /// The egui context/winit bridge and the panel's widget state.
 pub struct Gui {
     state: egui_winit::State,
     /// Exposure in stops, applied by the tonemap kernel.
     exposure: f32,
-    /// Show the OIDN-denoised view instead of the raw average.
-    #[cfg(feature = "denoise")]
+    /// Ask the session to denoise what it publishes.
     denoise: bool,
     /// Render at reduced resolution while the picture is changing — through
     /// a camera move, and for the first frame after an edit.
@@ -61,8 +66,7 @@ impl Gui {
         Self {
             state,
             exposure: 0.0,
-            #[cfg(feature = "denoise")]
-            denoise: false,
+            denoise: DENOISE_BY_DEFAULT,
             preview: false,
             lookdev: Lookdev::default(),
         }
@@ -74,7 +78,6 @@ impl Gui {
     }
 
     /// Whether the panel's denoise toggle is on.
-    #[cfg(feature = "denoise")]
     pub fn denoise(&self) -> bool {
         self.denoise
     }
@@ -140,7 +143,6 @@ impl Gui {
 
                 ui.separator();
                 ui.add(egui::Slider::new(&mut self.exposure, -4.0..=4.0).text("exposure"));
-                #[cfg(feature = "denoise")]
                 ui.checkbox(&mut self.denoise, "denoise");
                 ui.checkbox(&mut self.preview, "lower res while changing");
             });
@@ -197,7 +199,16 @@ fn stats_lines(ui: &mut egui::Ui, stats: &FrameStats) {
         Bound::Unknown => ui.monospace("  gpu        —  (no timestamps)"),
         bound => ui.monospace(format!("  gpu   {:>6.2} ms   {bound}", millis(frame.gpu()))),
     };
-    ui.monospace(format!("spp     {:>6}", frame.samples));
+    // The filter is a per-publish cost the per-sample lines above cannot
+    // show, and it is the whole of what the toggle buys or spends.
+    match stats.render.denoise {
+        Some(denoise) => ui.monospace(format!(
+            "spp     {:>6}      denoise {:>5.1} ms",
+            frame.samples,
+            millis(denoise),
+        )),
+        None => ui.monospace(format!("spp     {:>6}", frame.samples)),
+    };
 
     if frame.passes.has_breakdown() {
         egui::CollapsingHeader::new("kernels")

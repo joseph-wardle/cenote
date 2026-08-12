@@ -3,9 +3,9 @@
 //! samples and writes the linear averages as one multi-layer EXR —
 //! beauty, the denoiser's albedo and normal guides, and first-hit depth.
 //! The film and the per-sample estimator are exactly the viewer's, so the
-//! beauty layer is the image the viewer converges to. In builds with the
-//! `denoise` feature, `--denoise` writes a second EXR of the OIDN-denoised
-//! beauty beside it — the raw output is never replaced. `import` converts a
+//! beauty layer is the image the viewer converges to. `--denoise` writes a
+//! second EXR of the OIDN-denoised beauty beside it — the raw output is
+//! never replaced. `import` converts a
 //! pbrt-v4 scene to a `.ron` scene file, printing every fidelity warning
 //! the importer raises. `render --watch` stays alive and re-renders on
 //! every shader edit: recompile via `slangc`, swap the pipeline on
@@ -74,8 +74,7 @@ struct RenderArgs {
     out: PathBuf,
 
     /// Also write an OIDN-denoised beauty as a second EXR beside --out
-    /// (`shot.exr` → `shot.denoised.exr`). Needs a build with the
-    /// `denoise` feature.
+    /// (`shot.exr` → `shot.denoised.exr`).
     #[arg(long)]
     denoise: bool,
 
@@ -154,14 +153,6 @@ fn load_scene(path: &Path) -> anyhow::Result<cenote::scene::changeset::ChangeSet
 }
 
 fn render(args: &RenderArgs) -> anyhow::Result<()> {
-    // Fail the flag before the render, not after it.
-    #[cfg(not(feature = "denoise"))]
-    if args.denoise {
-        anyhow::bail!(
-            "--denoise needs a build with the denoise feature: \
-             cargo run -p cenote-cli --features denoise"
-        );
-    }
     let gpu = cenote::gpu::Context::new()?;
     // The scene and the settings that fill in unspecified flags: the
     // named file's, or the demo with its schema defaults (which match
@@ -201,9 +192,8 @@ fn render(args: &RenderArgs) -> anyhow::Result<()> {
     let mut film = cenote::render::Film::new(&gpu, width, height)?;
     // One OIDN device for the process — built here, reused every reload,
     // rather than opened and dropped inside each frame.
-    #[cfg(feature = "denoise")]
     let mut denoiser = if args.denoise {
-        Some(cenote::denoise::Denoiser::new()?)
+        Some(cenote::denoise::Denoiser::new(gpu.device_uuid())?)
     } else {
         None
     };
@@ -215,7 +205,6 @@ fn render(args: &RenderArgs) -> anyhow::Result<()> {
         spp,
         noise_threshold,
         args,
-        #[cfg(feature = "denoise")]
         denoiser.as_mut(),
         None,
         load,
@@ -249,7 +238,6 @@ fn render(args: &RenderArgs) -> anyhow::Result<()> {
             spp,
             noise_threshold,
             args,
-            #[cfg(feature = "denoise")]
             denoiser.as_mut(),
             Some(start),
             // A reload re-preps nothing: the scene is already resident, and
@@ -285,7 +273,7 @@ fn render_frame(
     spp: u32,
     noise_threshold: Option<f32>,
     args: &RenderArgs,
-    #[cfg(feature = "denoise")] denoiser: Option<&mut cenote::denoise::Denoiser>,
+    denoiser: Option<&mut cenote::denoise::Denoiser>,
     origin: Option<Instant>,
     load: cenote::stats::Phases,
 ) -> anyhow::Result<()> {
@@ -353,7 +341,7 @@ fn render_frame(
     // the first sample, so a sampled reading would be the same number many
     // times over.
     recorder.memory(gpu.memory());
-    let averages = film.averages(gpu)?;
+    let mut averages = film.averages(gpu)?;
     cenote::output::write_aov_exr(
         &args.out,
         film.width(),
@@ -370,23 +358,28 @@ fn render_frame(
         film.height(),
         film.samples()
     );
-    #[cfg(feature = "denoise")]
     if let Some(denoiser) = denoiser {
+        // In place over the beauty averages, which the raw EXR above has
+        // already taken — the estimator's output is on disk before the
+        // filter touches anything.
         let started = Instant::now();
-        let filtered = denoiser.denoise(
+        denoiser.denoise(
             film.width(),
             film.height(),
             cenote::denoise::Quality::High,
-            &averages.beauty,
+            &mut averages.beauty,
             &averages.albedo,
             &averages.normal,
         )?;
+        // The filter alone, not the EXR write after it: this number is the
+        // one the interactive path is budgeted against.
+        let filter = started.elapsed();
         let out = args.out.with_extension("denoised.exr");
-        cenote::output::write_exr(&out, film.width(), film.height(), &filtered)?;
+        cenote::output::write_exr(&out, film.width(), film.height(), &averages.beauty)?;
         println!(
-            "wrote {} (OIDN high quality, {} ms)",
+            "wrote {} (OIDN high quality, filtered in {} ms)",
             out.display(),
-            started.elapsed().as_millis()
+            filter.as_millis()
         );
     }
     #[cfg(feature = "probes")]

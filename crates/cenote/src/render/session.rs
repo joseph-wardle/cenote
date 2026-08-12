@@ -20,7 +20,10 @@
 //!   second mutex. The render thread resolves into whichever of its two
 //!   frame buffers is free and hands over an [`Arc`] to it; the viewer takes
 //!   the latest and tonemaps it. The lock spans only the pointer hand-off,
-//!   never a GPU submit — the heavy accumulate runs lock-free.
+//!   never a GPU submit — the heavy accumulate runs lock-free. With the
+//!   `denoise` setting on, the resolved beauty is filtered in place before
+//!   it is posted (see [`super::denoise`]) and the publish rate becomes the
+//!   filter's own — see [`PublishGate`].
 //! - **Faults out** — a rejected edit (invalid change-set, or a description
 //!   this build can't render) is *not* a render-thread failure: the thread
 //!   posts it for [`Session::take_edit_error`], keeps rendering its last
@@ -68,7 +71,9 @@ use std::time::{Duration, Instant};
 
 use ash::vk;
 
+use super::denoise::DenoisePass;
 use super::{Film, Renderer, ResolveTargets};
+use crate::denoise::Quality;
 use crate::error::{Error, Result};
 use crate::gpu::{Buffer, Context, MemoryLocation, PassTimer};
 use crate::scene::changeset::{ChangeSet, Dirty, Kind};
@@ -125,6 +130,48 @@ const MEMORY_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 /// [`PUBLISH_INTERVAL_STEP`] samples — clamped at both ends.
 fn publish_interval(samples: u32) -> Duration {
     (PUBLISH_INTERVAL_MIN * (samples / PUBLISH_INTERVAL_STEP).max(1)).min(PUBLISH_INTERVAL_MAX)
+}
+
+/// When the next frame goes out. Rewound by every reset, since a rewound
+/// film's first sample is the one someone is waiting for.
+///
+/// Two rules, because denoising changes what a publish costs. Raw, it is a
+/// clock: [`publish_interval`], widening as the image converges. Denoised,
+/// it is the sample count doubling — 1, 2, 4, 8 — which fires immediately
+/// after every reset and then backs off exactly as fast as the image stops
+/// changing, for about 15% overhead to 64 spp against 140% for filtering
+/// every sample. The clock cannot be kept beside it: an intervening raw
+/// publish would put unfiltered pixels on screen between filtered ones, and
+/// the display would strobe.
+#[derive(Default)]
+struct PublishGate {
+    /// When the last frame went out, under the clock rule.
+    at: Option<Instant>,
+    /// Samples in the last frame that went out, under the doubling rule.
+    samples: u32,
+}
+
+impl PublishGate {
+    /// Back to "the next sample goes out": a reset happened.
+    fn rewind(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Whether a film at `samples` should go out now.
+    fn due(&self, samples: u32, denoising: bool) -> bool {
+        if denoising {
+            samples >= self.samples.saturating_mul(2).max(1)
+        } else {
+            self.at
+                .is_none_or(|at| at.elapsed() >= publish_interval(samples))
+        }
+    }
+
+    /// A frame went out.
+    fn published(&mut self, samples: u32) {
+        self.at = Some(Instant::now());
+        self.samples = samples;
+    }
 }
 
 /// What the viewer feeds the render thread, latest-wins, snapshotted once per
@@ -229,8 +276,9 @@ struct Lanes {
 
 /// One publish slot's buffers: the film's four resolved linear averages,
 /// rotated as a unit so a frame's beauty and its guides always come from
-/// the same resolve. `TRANSFER_SRC` on each: the denoise pass is a host
-/// copy (OIDN has no Vulkan device), and the tests read them back.
+/// the same resolve. The denoiser filters the first three in place —
+/// through shared memory where the driver allows, staging copies where
+/// not — so they are exportable and transferable; see [`super::denoise`].
 struct FrameBuffers {
     beauty: Buffer,
     albedo: Buffer,
@@ -264,7 +312,8 @@ pub struct Frame {
 
 impl Frame {
     /// The linear `ACEScg` beauty average, ready for a [`super::Tonemap`]
-    /// to read.
+    /// to read — denoised, if the settings asked for that. Either way it is
+    /// a view of the same accumulation, at [`Frame::samples`].
     #[must_use]
     pub fn beauty(&self) -> &Buffer {
         &self.buffers.beauty
@@ -637,14 +686,22 @@ fn render_loop(
     // is a comparison: the budget and the threshold both wake a parked
     // render, and the threshold is also pushed into the renderer.
     let mut applied_controls = Controls::default();
-    let mut last_publish: Option<Instant> = None;
+    let mut gate = PublishGate::default();
+    // The denoiser, opened on the first frame that asks for it (the device
+    // costs ~40 ms to bring up) and kept afterwards. `Err` here is a broken
+    // OIDN install rather than a render fault: it is logged once and the
+    // raw frames go out, which is the same picture with more noise.
+    let mut denoise: Option<DenoisePass> = None;
+    let mut denoise_failed = false;
     // The whole of the preview state: the picture is still changing if this
     // is inside `CHANGE_HOLD`. Stamped by the one re-arm below, so every
     // rewind arms it — a camera move, an edit, a resize alike.
     let mut last_change: Option<Instant> = None;
-    // What a sample costs at full resolution — the reference the preview
-    // divisor is measured against.
-    let mut full_sample: Option<Duration> = None;
+    // What a frame costs at full resolution — the reference the preview
+    // divisor is measured against. A frame and not a sample: with denoising
+    // on the filter runs over every preview frame too, so leaving it out
+    // would break B2's cadence contract the moment the setting was on.
+    let mut full_frame: Option<Duration> = None;
     // The epoch stamped on the most recent successful publish, so a parked
     // thread can see the counter move past its settled frame and republish.
     let mut published_epoch = 0;
@@ -700,12 +757,17 @@ fn render_loop(
                 Film::new(gpu, width, height)?,
                 publish_buffers(gpu, width, height)?,
             ));
+            // The old slots' memory is going away; the denoiser must not
+            // keep filtering into it.
+            if let Some(pass) = denoise.as_mut() {
+                pass.retarget();
+            }
             *scene.camera_mut() = input.camera;
             applied_size = input.size;
             applied_generation = input.generation;
-            last_publish = None;
-            // A sample's cost is a cost per this many pixels.
-            full_sample = None;
+            gate.rewind();
+            // A frame's cost is a cost per this many pixels.
+            full_frame = None;
             restart = Some(Restart::waited(input.stamped));
         }
         let (film, frames) = target.as_mut().expect("sized by the resize branch above");
@@ -713,7 +775,7 @@ fn render_loop(
         // re-prep, restart accumulation from sample 0.
         if let Some(edits) = apply_edits(gpu, lanes, &mut description, &mut scene, &mut stale)? {
             film.reset();
-            last_publish = None;
+            gate.rewind();
             // An edit that arrived in the same wave as a resize supersedes
             // it: the resize did no prep, so the edit's breakdown is the one
             // with something to say about where the time went.
@@ -724,7 +786,7 @@ fn render_loop(
             log::debug!("camera adopted; accumulation restarts");
             *scene.camera_mut() = input.camera;
             film.reset();
-            last_publish = None;
+            gate.rewind();
             applied_generation = input.generation;
             restart.get_or_insert_with(|| Restart::waited(input.stamped));
         }
@@ -763,7 +825,7 @@ fn render_loop(
             if controls.max_bounces != renderer.max_bounces() {
                 renderer.set_max_bounces(controls.max_bounces);
                 film.reset();
-                last_publish = None;
+                gate.rewind();
             }
             // The threshold moves what the accumulate kernel counts as
             // converged, not the beauty, so it is adopted into the running
@@ -790,13 +852,37 @@ fn render_loop(
         // for and overwrite the mark of the change still being answered.
         let unsettled = last_change.is_some_and(|at| at.elapsed() < CHANGE_HOLD);
         let rectangle = match input.preview_target {
-            Some(target) if unsettled => divided(input.size, preview_divisor(full_sample, target)),
+            Some(target) if unsettled => divided(input.size, preview_divisor(full_frame, target)),
             _ => input.size,
+        };
+        // The filter for this wave's publish, if the settings ask for one:
+        // opened on first use, and after a failure — a broken OIDN install,
+        // which is the same failure every time — never again. `Fast` while
+        // the picture is still moving, since that frame is replaced within
+        // the sample; `High` once it stands still and someone is looking at
+        // it.
+        if applied_controls.denoise && denoise.is_none() && !denoise_failed {
+            match DenoisePass::new(gpu) {
+                Ok(pass) => denoise = Some(pass),
+                Err(error) => {
+                    log::error!("denoising unavailable — publishing raw frames: {error}");
+                    denoise_failed = true;
+                }
+            }
+        }
+        let mut filter = applied_controls
+            .denoise
+            .then_some(denoise.as_mut())
+            .flatten();
+        let quality = if unsettled {
+            Quality::Fast
+        } else {
+            Quality::High
         };
         if (film.width(), film.height()) != rectangle {
             log::debug!("rendering at {}×{}", rectangle.0, rectangle.1);
             film.rescale(rectangle.0, rectangle.1);
-            last_publish = None;
+            gate.rewind();
         }
         // Any reset above zeroed the film, which wakes a parked render.
         if film.samples() == 0 {
@@ -811,7 +897,18 @@ fn render_loop(
         // retries on the next nap.
         if parked {
             if epoch > published_epoch
-                && publish(gpu, &renderer, film, frames, lanes, &recorder, epoch, true)?
+                && publish(
+                    gpu,
+                    &renderer,
+                    film,
+                    frames,
+                    lanes,
+                    &mut recorder,
+                    epoch,
+                    true,
+                    filter.as_deref_mut(),
+                    quality,
+                )?
             {
                 published_epoch = epoch;
             }
@@ -829,7 +926,18 @@ fn render_loop(
             // Force the settled image out once (past the throttle) so the
             // converged frame is definitely the latest, then park. If both slots
             // are busy the publish is retried on the next tick.
-            if publish(gpu, &renderer, film, frames, lanes, &recorder, epoch, true)? {
+            if publish(
+                gpu,
+                &renderer,
+                film,
+                frames,
+                lanes,
+                &mut recorder,
+                epoch,
+                true,
+                filter.as_deref_mut(),
+                quality,
+            )? {
                 parked = true;
                 published_epoch = epoch;
             }
@@ -856,47 +964,73 @@ fn render_loop(
             samples: film.samples(),
             preview: !full_size,
         });
-        // Only full-resolution samples set the reference, so the divisor
-        // divides the still image measured before the drag and cannot chase
-        // its own output.
-        if full_size {
-            full_sample = Some(cpu);
-        }
         if last_memory_sample.is_none_or(|at| at.elapsed() >= MEMORY_SAMPLE_INTERVAL) {
             recorder.memory(gpu.memory());
             last_memory_sample = Some(Instant::now());
         }
 
-        // Publish on the throttle — which widens as the image converges (see
-        // `publish_interval`) — but only into a buffer no consumer still holds.
-        // If both are busy, skip: the next tick catches up, and the renderer
-        // never waits on the consumer.
-        if last_publish.is_none_or(|at| at.elapsed() >= publish_interval(film.samples()))
-            && publish(gpu, &renderer, film, frames, lanes, &recorder, epoch, false)?
+        // Publish on the gate — a widening clock, or the sample count
+        // doubling when the frames are being filtered — but only into a
+        // buffer no consumer still holds. If both are busy, skip: the next
+        // tick catches up, and the renderer never waits on the consumer.
+        if gate.due(film.samples(), filter.is_some())
+            && publish(
+                gpu,
+                &renderer,
+                film,
+                frames,
+                lanes,
+                &mut recorder,
+                epoch,
+                false,
+                filter,
+                quality,
+            )?
         {
-            last_publish = Some(Instant::now());
+            gate.published(film.samples());
             published_epoch = epoch;
+        }
+
+        // What the wave cost as a frame: the sample, and the filter the
+        // publish runs over it. Below the publish so a first full-resolution
+        // wave already carries its own filter, and only full-resolution
+        // waves set the reference — so the divisor divides the still image
+        // measured before the drag and cannot chase its own output.
+        if full_size {
+            let filtered = match denoise.as_ref() {
+                Some(pass) if applied_controls.denoise => {
+                    pass.cost(input.size).unwrap_or_default()
+                }
+                _ => Duration::ZERO,
+            };
+            full_frame = Some(cpu + filtered);
         }
     }
 }
 
-/// The smallest divisor that brings a sample costing `full_sample` inside
+/// The smallest divisor that brings a frame costing `full_frame` inside
 /// `target`, capped at [`PREVIEW_DIVISOR_MAX`]. Divides by 1 when the scene
 /// is already fast enough, or when nothing has been measured yet.
 ///
-/// Powers of two only: cost is near-linear in pixel count, so the
-/// arithmetic would support any real number, but a divisor drifting with
-/// every measurement changes the softness of the image mid-drag and reads
-/// as the render malfunctioning.
-fn preview_divisor(full_sample: Option<Duration>, target: Duration) -> u32 {
-    let Some(full_sample) = full_sample else {
+/// Powers of two only: the arithmetic would support any real number, but a
+/// divisor drifting with every measurement changes the softness of the image
+/// mid-drag and reads as the render malfunctioning.
+///
+/// Both halves of a frame's cost fall with the pixel count, but only the
+/// sample's does so cleanly. The filter carries a fixed overhead — measured
+/// 11.3 ms over 2560×1440 against 3.6 over 1280×720, a factor of 3.1 where
+/// the area says 4 — so a divisor picked this way is a little optimistic
+/// about what the next halving buys back. Measured across the same span
+/// B2's gate walks, the margin absorbs it.
+fn preview_divisor(full_frame: Option<Duration>, target: Duration) -> u32 {
+    let Some(full_frame) = full_frame else {
         return 1;
     };
     let mut divisor = 1;
     // By area: dividing each axis by `d` leaves 1/d² of the pixels.
-    // Multiplying the target rather than dividing the sample keeps this in
+    // Multiplying the target rather than dividing the frame keeps this in
     // integers and cannot round a duration to zero.
-    while divisor < PREVIEW_DIVISOR_MAX && full_sample > target * (divisor * divisor) {
+    while divisor < PREVIEW_DIVISOR_MAX && full_frame > target * (divisor * divisor) {
         divisor *= 2;
     }
     divisor
@@ -915,6 +1049,10 @@ fn divided((width, height): (u32, u32), divisor: u32) -> (u32, u32) {
 /// returning whether a slot was free. Both slots busy
 /// means the consumer still holds the last two frames — the caller retries
 /// next tick and the renderer never blocks.
+///
+/// With a `filter`, the frame's beauty is denoised in place before it is
+/// posted — a view of the same average, so nothing about the accumulation
+/// changes and turning it off republishes the raw pixels.
 #[expect(
     clippy::too_many_arguments,
     reason = "the resolve's inputs and the two stamps the frame carries; a struct \
@@ -926,23 +1064,27 @@ fn publish(
     film: &Film,
     frames: &[Arc<FrameBuffers>; 2],
     lanes: &Lanes,
-    recorder: &Recorder,
+    recorder: &mut Recorder,
     epoch: u64,
     converged: bool,
+    filter: Option<&mut DenoisePass>,
+    quality: Quality,
 ) -> Result<bool> {
-    let Some(free) = frames.iter().find(|frame| Arc::strong_count(frame) == 1) else {
+    let Some(slot) = frames.iter().position(|frame| Arc::strong_count(frame) == 1) else {
         return Ok(false);
     };
-    renderer.resolve(
-        gpu,
-        film,
-        &ResolveTargets {
-            beauty: &free.beauty,
-            albedo: &free.albedo,
-            normal: &free.normal,
-            depth: &free.depth,
-        },
-    )?;
+    let free = &frames[slot];
+    let targets = ResolveTargets {
+        beauty: &free.beauty,
+        albedo: &free.albedo,
+        normal: &free.normal,
+        depth: &free.depth,
+    };
+    renderer.resolve(gpu, film, &targets)?;
+    if let Some(filter) = filter {
+        let cost = filter.run(gpu, &targets, slot, film.width(), film.height(), quality)?;
+        recorder.denoise(cost);
+    }
     let frame = Frame {
         buffers: Arc::clone(free),
         width: film.width(),
@@ -971,6 +1113,9 @@ struct Controls {
     /// estimator rather than the finish line, so a change to it restarts
     /// accumulation — see [`apply_edits`].
     max_bounces: u32,
+    /// Whether published frames are denoised. Touches neither the estimator
+    /// nor the finish line — only what the consumer is handed.
+    denoise: bool,
 }
 
 impl Default for Controls {
@@ -987,6 +1132,7 @@ impl From<&Settings> for Controls {
             max_samples: settings.spp,
             noise_threshold: settings.noise_threshold,
             max_bounces: settings.max_bounces,
+            denoise: settings.denoise,
         }
     }
 }
@@ -1112,16 +1258,31 @@ fn publish_buffers(gpu: &Context, width: u32, height: u32) -> Result<[Arc<FrameB
     let texels = u64::from(width) * u64::from(height);
     let usage = vk::BufferUsageFlags::STORAGE_BUFFER
         | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-        | vk::BufferUsageFlags::TRANSFER_SRC;
-    let buffer = |name: &str, bytes: u64| -> Result<Buffer> {
+        | vk::BufferUsageFlags::TRANSFER_SRC
+        | vk::BufferUsageFlags::TRANSFER_DST;
+    // The three planes the denoiser reads are exportable where the driver
+    // allows, so OIDN can filter them in place with no copies — see
+    // [`super::denoise`]. A refusal is only the loss of that shortcut.
+    let plane = |name: &str, bytes: u64| -> Result<Buffer> {
+        if gpu.external_memory_fd() {
+            if let Ok(buffer) = gpu.create_exported_buffer(name, bytes, usage) {
+                return Ok(buffer);
+            }
+            log::debug!("exportable allocation refused for {name}");
+        }
         gpu.create_buffer(name, bytes, usage, MemoryLocation::GpuOnly)
     };
     let slot = || -> Result<Arc<FrameBuffers>> {
         Ok(Arc::new(FrameBuffers {
-            beauty: buffer("session.frame", texels * 16)?,
-            albedo: buffer("session.frame.albedo", texels * 16)?,
-            normal: buffer("session.frame.normal", texels * 16)?,
-            depth: buffer("session.frame.depth", texels * 4)?,
+            beauty: plane("session.frame", texels * 16)?,
+            albedo: plane("session.frame.albedo", texels * 16)?,
+            normal: plane("session.frame.normal", texels * 16)?,
+            depth: gpu.create_buffer(
+                "session.frame.depth",
+                texels * 4,
+                usage,
+                MemoryLocation::GpuOnly,
+            )?,
         }))
     };
     Ok([slot()?, slot()?])
@@ -1303,6 +1464,49 @@ mod tests {
         assert!(
             phases.tables > Duration::ZERO,
             "a material edit rebuilds the instance tables it did not touch"
+        );
+        assert!(session.take_edit_error().is_none());
+    }
+
+    /// Turning denoising on is a view change, not a render change — the A/B
+    /// the whole design rests on. Toggled against a *settled* render, so
+    /// the two frames are the same accumulation to the sample: the count
+    /// must not move and the pixels must, which is only possible if the
+    /// filter ran over the average already in the slot.
+    #[test]
+    fn denoising_republishes_the_same_accumulation_filtered() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let gpu = Arc::new(gpu);
+        let session = demo_session_with(&gpu, 64, 8);
+        let raw = wait_for(&session, "the settled frame", Frame::converged);
+        let (samples, before) = (raw.samples(), gpu.download_buffer(raw.beauty()).unwrap());
+        drop(raw); // the slot goes back to the pool
+
+        session.apply(ChangeSet {
+            ops: vec![Op::Settings(SettingsPatch {
+                denoise: Some(true),
+                ..SettingsPatch::new("main")
+            })],
+        });
+        let epoch = session.epoch();
+        let filtered = wait_for(&session, "the denoised republish", |frame| {
+            frame.epoch() >= epoch
+        });
+        assert_eq!(
+            filtered.samples(),
+            samples,
+            "the toggle disturbed the accumulation"
+        );
+        assert_ne!(
+            gpu.download_buffer(filtered.beauty()).unwrap(),
+            before,
+            "the republished beauty was not filtered"
+        );
+        assert!(
+            filtered.stats().denoise.is_some(),
+            "the filter went unmeasured"
         );
         assert!(session.take_edit_error().is_none());
     }
@@ -1599,7 +1803,7 @@ mod tests {
     /// [`PREVIEW_DIVISOR_MAX`] on any machine. The verbs come in a loop
     /// because the hold is wall-clock: one of them on a slow machine could
     /// expire before a frame answering it is published. Waiting out a
-    /// full-resolution sample first is what gives the divisor a cost to
+    /// full-resolution frame first is what gives the divisor a cost to
     /// divide — until then it is 1, which is why startup needs no special
     /// case.
     fn preview_follows(gpu: Context, mut nudge: impl FnMut(&Session)) {
@@ -1702,26 +1906,40 @@ mod tests {
         assert_eq!(divided((1, 1), 2), (1, 1));
     }
 
-    /// How many halvings the sample needs to fit the target, by area: each
+    /// How many halvings the frame needs to fit the target, by area: each
     /// one buys a factor of four.
     #[test]
     fn the_preview_divisor_is_the_halving_that_fits_the_target() {
         let target = Duration::from_millis(16);
-        let sample = |ms| Some(Duration::from_millis(ms));
+        let frame = |ms| Some(Duration::from_millis(ms));
         // Inside the target, and exactly on it: no reduction.
-        assert_eq!(preview_divisor(sample(8), target), 1);
-        assert_eq!(preview_divisor(sample(16), target), 1);
+        assert_eq!(preview_divisor(frame(8), target), 1);
+        assert_eq!(preview_divisor(frame(16), target), 1);
         // One halving covers up to 4× the target — sanmiguel's measured
         // 29 ms sits here — and each boundary belongs to the cheaper
         // divisor.
-        assert_eq!(preview_divisor(sample(17), target), 2);
-        assert_eq!(preview_divisor(sample(29), target), 2);
-        assert_eq!(preview_divisor(sample(64), target), 2);
-        assert_eq!(preview_divisor(sample(65), target), 4);
+        assert_eq!(preview_divisor(frame(17), target), 2);
+        assert_eq!(preview_divisor(frame(29), target), 2);
+        assert_eq!(preview_divisor(frame(64), target), 2);
+        assert_eq!(preview_divisor(frame(65), target), 4);
         // The cap holds however heavy the scene.
-        assert_eq!(preview_divisor(sample(1_000), target), 4);
+        assert_eq!(preview_divisor(frame(1_000), target), 4);
         // Nothing measured yet: full resolution rather than a guess.
         assert_eq!(preview_divisor(None, target), 1);
+    }
+
+    /// And the frame is the sample *plus* the filter over it, which is the
+    /// whole of what denoising does to the divisor: sanmiguel's 29 ms sample
+    /// at 1440p sits in the divisor-2 band on its own, and the 38 ms filter
+    /// that follows it pushes the same scene a notch softer. Measured
+    /// numbers, so the arithmetic is pinned to the case it was written for.
+    #[test]
+    fn the_filter_counts_toward_the_divisor() {
+        let target = Duration::from_millis(16);
+        let sample = Duration::from_millis(29);
+        let filter = Duration::from_millis(38);
+        assert_eq!(preview_divisor(Some(sample), target), 2);
+        assert_eq!(preview_divisor(Some(sample + filter), target), 4);
     }
 
     /// The publish gap widens with the sample count and clamps at both ends
@@ -1741,6 +1959,25 @@ mod tests {
             last = interval;
         }
         assert_eq!(publish_interval(u32::MAX), PUBLISH_INTERVAL_MAX);
+    }
+
+    /// Denoised, the gate is the sample count doubling: the first sample
+    /// after every reset goes out, then 2, 4, 8 — so an edit is filtered
+    /// immediately and a converging image is filtered ever more rarely.
+    #[test]
+    fn the_denoised_gate_fires_on_doubling_samples() {
+        let mut gate = PublishGate::default();
+        let mut fired = Vec::new();
+        for samples in 1..=64 {
+            if gate.due(samples, true) {
+                fired.push(samples);
+                gate.published(samples);
+            }
+        }
+        assert_eq!(fired, [1, 2, 4, 8, 16, 32, 64]);
+        // And a reset puts the very next sample back on screen.
+        gate.rewind();
+        assert!(gate.due(1, true));
     }
 
     /// Poll `take_frame` until one appears, with a generous timeout so a slow

@@ -311,6 +311,9 @@ pub struct SettingsPatch {
     pub noise_threshold: Option<Option<f32>>,
     /// Maximum path length in bounces.
     pub max_bounces: Option<u32>,
+    /// Denoise the published image — a view of the film, so it never
+    /// disturbs the accumulation.
+    pub denoise: Option<bool>,
     /// Sampler seed.
     pub seed: Option<u32>,
     /// The medium filling open space, by name. Doubly optional: `None`
@@ -532,7 +535,7 @@ fn apply_op(objects: &mut Objects, dirty: &mut Dirty, op: &Op) -> Result<()> {
         }),
         Op::Settings(patch) => upsert(&mut objects.settings, &name, |settings| {
             merge!(settings, patch;
-                resolution, spp, noise_threshold, max_bounces, seed, global_medium,
+                resolution, spp, noise_threshold, max_bounces, denoise, seed, global_medium,
             );
         }),
         Op::Remove(..) => unreachable!("handled above"),

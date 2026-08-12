@@ -59,6 +59,27 @@ def Scope "Render"
         custom int ri:hider:minsamples = 3
     }
 
+    # The denoise pair, identical but for the switch. Two prims and not
+    # one because the observable is a *difference* between images, and a
+    # difference needs something to be measured against that differs in
+    # nothing else: same budget, same seed, same everything, so whatever
+    # separates the two renders is the filter. The budget is deliberately
+    # tiny, because the noise the filter removes is what makes it visible:
+    # at eight samples this geometry is already clean enough that
+    # filtering moves mean FLIP by only 0.006, and at the delegate's
+    # default 64 by less again.
+    def RenderSettings "Raw"
+    {
+        custom int cenote:samplesPerPixel = 2
+        custom bool cenote:denoise = false
+    }
+
+    def RenderSettings "Denoised"
+    {
+        custom int cenote:samplesPerPixel = 2
+        custom bool cenote:denoise = true
+    }
+
     # Never named by any leg. It authors a budget small enough to see and a
     # typo loud enough to hear, so the run that activates nothing proves
     # both stay silent.

@@ -58,7 +58,8 @@ void HdCenoteSettingsPrim::_Refresh(const HdSceneIndexPrim& prim) {
     }
     HdCenoteResolvedSettings resolved =
         HdCenoteResolveNamespacedSettings(cenote::NamespacedSettings(settings));
-    if (!resolved.patch.spp && !resolved.patch.noise_threshold && !resolved.patch.max_bounces) {
+    if (!resolved.patch.spp && !resolved.patch.noise_threshold && !resolved.patch.max_bounces &&
+        !resolved.patch.denoise) {
         // The Karma-or-RenderMan-authored stage: a settings prim is
         // active, it is full of somebody's settings, and none of them are
         // ours. Silence there reads as "cenote ignored my render

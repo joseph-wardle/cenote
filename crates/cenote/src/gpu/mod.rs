@@ -72,6 +72,9 @@ pub struct Context {
     queue_family_index: u32,
     physical_device: vk::PhysicalDevice,
     device_type: vk::PhysicalDeviceType,
+    /// `VkPhysicalDeviceIDProperties::deviceUUID` — read once here so the
+    /// denoiser can open the same physical GPU. See [`Context::device_uuid`].
+    device_uuid: [u8; 16],
     /// The device's minimum alignment for acceleration-structure build
     /// scratch — a constant, read once at bring-up rather than once per
     /// build. See [`accel::scratch_alignment`].
@@ -88,6 +91,9 @@ pub struct Context {
     /// Created via [`Context::presentable`], i.e. the surface and swapchain
     /// extensions are enabled and [`Context::create_presenter`] may be called.
     presentable: bool,
+    /// `VK_KHR_external_memory_fd` is enabled, so
+    /// [`Context::create_exported_buffer`] and [`Context::export_fd`] work.
+    external_memory_fd: bool,
     /// `CENOTE_PIPELINE_STATS` was set *and* the device supports
     /// `VK_KHR_pipeline_executable_properties`, so pipelines are created
     /// with statistics capture and log what the driver reports. The single
@@ -174,7 +180,7 @@ impl Context {
         let summary = init::describe_device(instance, physical_device, &properties);
         log::info!("selected {summary}");
 
-        let (device, pipeline_stats) =
+        let (device, pipeline_stats, external_memory_fd) =
             init::create_device(instance, physical_device, queue_family_index, presentable)?;
         let accel_loader = ash::khr::acceleration_structure::Device::new(instance, &device);
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
@@ -204,11 +210,13 @@ impl Context {
             queue_family_index,
             physical_device,
             device_type: properties.device_type,
+            device_uuid: init::device_uuid(instance, physical_device),
             scratch_alignment: accel::scratch_alignment(instance, physical_device),
             timestamp_period: properties.limits.timestamp_period,
             timestamp_valid_bits,
             device_local_heap,
             presentable,
+            external_memory_fd,
             pipeline_stats,
             summary,
             debug,
@@ -228,6 +236,23 @@ impl Context {
     #[must_use]
     pub fn device_type(&self) -> vk::PhysicalDeviceType {
         self.device_type
+    }
+
+    /// The selected device's UUID, as every API on the machine spells it —
+    /// what [`crate::denoise::Denoiser::new`] hands OIDN so both land on
+    /// one GPU. Not a raw handle, so it crosses the `gpu` boundary.
+    #[must_use]
+    pub fn device_uuid(&self) -> [u8; 16] {
+        self.device_uuid
+    }
+
+    /// Whether this device can share buffer memory with another API through
+    /// a POSIX fd (`VK_KHR_external_memory_fd`) — the denoiser's zero-copy
+    /// path. False on drivers without it, and everywhere fds are not how
+    /// memory is shared.
+    #[must_use]
+    pub fn external_memory_fd(&self) -> bool {
+        self.external_memory_fd
     }
 
     // The raw-handle accessors below are `pub(super)`: the quarantine —
@@ -250,6 +275,12 @@ impl Context {
     #[must_use]
     pub(super) fn physical_device(&self) -> vk::PhysicalDevice {
         self.physical_device
+    }
+
+    /// The instance, for extension loaders and physical-device queries.
+    #[must_use]
+    pub(super) fn instance(&self) -> &ash::Instance {
+        &self.instance
     }
 
     /// A clone of the shared allocator handle, for resources that free

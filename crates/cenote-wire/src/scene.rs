@@ -319,6 +319,10 @@ pub struct SettingsPatch {
     pub noise_threshold: Option<Reset<f32>>,
     /// Maximum path length in bounces.
     pub max_bounces: Option<u32>,
+    /// Denoise the published image. A view of the film and not an edit to
+    /// it: the samples are the estimator's either way, so this changes
+    /// what a host is shown and never what the render converges to.
+    pub denoise: Option<bool>,
     /// Sampler seed.
     pub seed: Option<u32>,
 }

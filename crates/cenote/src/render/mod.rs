@@ -23,6 +23,7 @@
 //! [`Session`] wraps the progressive path in a render thread, so consumers read
 //! published frames without pacing the renderer to their own refresh.
 
+mod denoise;
 mod film;
 mod session;
 mod tonemap;

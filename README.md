@@ -86,8 +86,10 @@ in [scenes/corpus/README.md](scenes/corpus/README.md).
 ## Quickstart
 
 Requires: stable Rust, [`slangc`](https://github.com/shader-slang/slang) on PATH
-(CI pins 2026.9.1; any recent release should work), and a Vulkan GPU with
-`VK_KHR_ray_query` support (any recent RT-capable card).
+(CI pins 2026.9.1; any recent release should work),
+[OpenImageDenoise](https://github.com/RenderKit/oidn/releases) (CI pins 2.4.1 —
+see [Denoising](#denoising)), and a Vulkan GPU with `VK_KHR_ray_query` support
+(any recent RT-capable card).
 
 ```sh
 cargo run --release -p cenote-viewer   # orbit (drag), dolly (scroll), live exposure
@@ -120,30 +122,60 @@ measurements behind the sampling rate.
 
 ### Denoising
 
-Builds with the `denoise` feature add [Open Image
-Denoise](https://www.openimagedenoise.org/), fed by the film's albedo and
-normal AOV guides:
+[Open Image Denoise](https://www.openimagedenoise.org/) is fed by the film's
+albedo and normal AOV guides:
 
 ```sh
-cargo run --release -p cenote-cli --features denoise -- render --spp 64 --denoise --out shot.exr
-cargo run --release -p cenote-viewer --features denoise    # panel gains a denoise toggle
+cargo run --release -p cenote-cli -- render --spp 64 --denoise --out shot.exr
+cargo run --release -p cenote-viewer    # the panel's denoise toggle
 ```
 
 `--denoise` writes a second EXR (`shot.denoised.exr`) beside the raw one —
-the estimator's output is never replaced. The viewer's toggle re-denoises
-the accumulating frame about once a second.
+the estimator's output is never replaced.
 
-The feature links the system OpenImageDenoise library. If your install has a
-pkg-config file the build finds it alone; otherwise point `OIDN_DIR` at a
-directory whose `lib/` contains `libOpenImageDenoise.so` — an extracted
-[official release](https://github.com/RenderKit/oidn/releases), or a symlink to
-your distro's versioned library. Setting it once in `~/.cargo/config.toml`
-covers every build:
+The viewer's toggle is a scene setting (`denoise`, on by default there and
+off everywhere else), and the render session filters the frames it
+publishes — in the frames' own GPU memory where the driver allows
+(`VK_KHR_external_memory_fd`; OIDN imports the buffers once and filters
+them in place, nothing crosses the bus), through staging copies where it
+does not. Denoising is a *view* of the film, so the switch never disturbs
+the accumulation: flipping it republishes the same samples, filtered or
+raw. Filtered frames go out on the sample count doubling — 1, 2, 4, 8 —
+which puts a clean image up immediately after every edit and then costs
+about 15% out to 64 spp. Moving frames filter at OIDN's `fast` quality and
+settled ones at `high`, and the filter counts toward the interactive
+resolution target the same way a sample does — so a drag with denoising on
+holds its cadence at a smaller rectangle, soft and clean rather than sharp
+and noisy.
+
+Through Hydra the same switch is the render setting `cenote:denoise`, read
+from the host's settings map or from the shot's own `UsdRenderSettings`
+prim, and **off** unless one of them asks for it: a host that renders to
+disk is handed the estimator's own pixels until it says otherwise. The
+delegate's resolved-settings line names which it delivered.
+
+**Install an official release, not your distro's package.** OIDN's speed is
+entirely its device: on an RTX 4070 Ti SUPER the CPU device filters 1080p in
+458 ms and the GPU device in 11 — 15 ms for the whole round trip, upload
+through read-back. Each GPU backend ships as a separate
+`libOpenImageDenoise_device_*.so` that distro packages routinely omit
+(Fedora's carries CPU and HIP only), and OIDN falls back to the CPU without
+complaint — so cenote opens the device by the *Vulkan device UUID* it is
+rendering on, which both pins the filter to the right GPU on a multi-GPU
+machine and picks the backend by hardware rather than by name. Landing on
+the CPU logs a warning.
+
+Point `OIDN_DIR` at a directory whose `lib/` holds the release's libraries,
+and put that `lib/` on the loader's path. Setting them once in
+`~/.cargo/config.toml` covers every build:
 
 ```toml
 [env]
-OIDN_DIR = "/home/you/.local/opt/oidn"
+OIDN_DIR = "/home/you/.local/opt/oidn-2.4.1.x86_64.linux"
 ```
+
+(A pkg-config install is found without `OIDN_DIR` — but check what devices it
+ships before trusting it.)
 
 ## Tests and goldens
 

@@ -31,11 +31,13 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 intel_tex_2 = "0.5.0"
 log = "0.4.33"
 notify = "8.2.0"
-# Intel's Open Image Denoise, behind the `denoise` feature: a trained
-# production denoiser is the one piece of this renderer no line count of
-# hand-rolling replaces. Safe wrapper over the system library (found via
-# OIDN_DIR or pkg-config at build time).
-oidn = { version = "2.4.1", optional = true }
+# Intel's Open Image Denoise: a trained production denoiser is the one
+# piece of this renderer no line count of hand-rolling replaces. A hard
+# build requirement like slangc, not a feature, so a render setting can
+# never name a filter the build cannot run. Taken for its build script
+# (OIDN_DIR / pkg-config discovery) and its `sys` bindings; the safe
+# wrapper cannot express the strided binding `denoise.rs` needs.
+oidn = "2.4.1"
 raw-window-handle = "0.6.2"
 # Pinned exactly: ron routinely ships breaking changes in semver-minor
 # releases, and the scene format's stability rides on it.
@@ -44,10 +46,6 @@ serde = { version = "1.0.228", features = ["derive"] }
 thiserror = "2.0.18"
 
 [features]
-# OIDN denoising: the `denoise` module, the CLI's `--denoise`, the viewer's
-# toggle. Off by default because building it needs the OpenImageDenoise
-# library installed — see the README's "Denoising" section.
-denoise = ["dep:oidn"]
 # Measurement kernels: compiles the shaders with -DPROBES, adding the
 # shared probes histogram (volume scatter events by bounce, subsurface
 # walk lengths, and the walk's death counters), read back after a render.

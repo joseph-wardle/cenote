@@ -7,6 +7,7 @@
             spp: None,
             noise_threshold: None,
             max_bounces: None,
+            denoise: None,
             seed: None,
             global_medium: None,
         )),

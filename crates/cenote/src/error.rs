@@ -73,7 +73,6 @@ pub enum Error {
 
     /// `OpenImageDenoise` refused the filter setup or failed mid-run. The
     /// payload is OIDN's own diagnostic.
-    #[cfg(feature = "denoise")]
     #[error("denoise failed: {0}")]
     Denoise(String),
 }

@@ -20,13 +20,11 @@
 //! presents. Each redraw requests the next, so vsync paces the *display*
 //! while the renderer runs free behind it. Camera motion, resizes, and
 //! scene edits are just inputs the session picks up; it restarts or
-//! rebuilds accordingly. In builds with the `denoise` feature, a panel
-//! toggle swaps the tonemap's input for an OIDN-denoised view refreshed
-//! about once a second (see the `denoise` module).
+//! rebuilds accordingly. The panel's denoise toggle is one of those inputs:
+//! it is a settings edit like any other, and the session filters what it
+//! publishes.
 
 mod camera;
-#[cfg(feature = "denoise")]
-mod denoise;
 mod lookdev;
 mod ui;
 
@@ -45,7 +43,7 @@ use winit::raw_window_handle::{HasDisplayHandle as _, HasWindowHandle as _};
 use winit::window::{Window, WindowId};
 
 use crate::camera::OrbitCamera;
-use crate::ui::{FrameStats, Gui};
+use crate::ui::{DENOISE_BY_DEFAULT, FrameStats, Gui};
 
 fn main() -> anyhow::Result<()> {
     // First statement in the process, so time-to-first-ray covers window
@@ -71,31 +69,35 @@ fn main() -> anyhow::Result<()> {
 /// Load a scene file as a change-set, logging any import fidelity warnings.
 /// Reloads-on-save take this same path, so editing a watched `.pbrt`
 /// re-imports it live.
-fn load_scene(path: &Path) -> anyhow::Result<ChangeSet> {
+fn load_scene(path: &Path, denoise: bool) -> anyhow::Result<ChangeSet> {
     let imported =
         cenote_pbrt::load(path).with_context(|| format!("loading scene {}", path.display()))?;
     for warning in &imported.warnings {
         log::warn!("{warning}");
     }
-    Ok(with_viewer_budget(imported.set))
+    Ok(with_viewer_settings(imported.set, denoise))
 }
 
-/// Stamp the viewer's own sample budget onto a scene's settings.
+/// Stamp the two settings the viewer owns onto a scene's.
 ///
 /// The session accumulates until the description's `spp` says stop, and a
 /// scene file's `spp` is a batch quality target — honoring it here would
 /// freeze a held view mid-refinement at whatever count the file wanted from
 /// an offline render. So the viewer overrides it, with a cap high enough to
-/// be a backstop rather than a quality limit.
+/// be a backstop rather than a quality limit. Denoising is the panel's
+/// toggle, on by default here where a batch render defaults it off: an
+/// interactive frame is a few samples old and a filtered one reads as the
+/// render being further along than it is.
 ///
 /// Carried in the change-set rather than set once beside it because a
 /// reload is a whole-scene *replace*: settings the file re-authors would
-/// otherwise silently take the render back to the file's number.
-fn with_viewer_budget(mut set: ChangeSet) -> ChangeSet {
+/// otherwise silently take the render back to the file's numbers.
+fn with_viewer_settings(mut set: ChangeSet, denoise: bool) -> ChangeSet {
     let mut stamped = false;
     for op in &mut set.ops {
         if let Op::Settings(patch) = op {
             patch.spp = Some(VIEWER_MAX_SAMPLES);
+            patch.denoise = Some(denoise);
             stamped = true;
         }
     }
@@ -105,10 +107,44 @@ fn with_viewer_budget(mut set: ChangeSet) -> ChangeSet {
     if !stamped {
         set.ops.push(Op::Settings(SettingsPatch {
             spp: Some(VIEWER_MAX_SAMPLES),
+            denoise: Some(denoise),
             ..SettingsPatch::new("settings")
         }));
     }
     set
+}
+
+/// Push the panel's denoise toggle into the scene when it has moved.
+///
+/// The switch travels the one channel every other setting does, because the
+/// session reads it from the description. A settings edit is non-visual, so
+/// nothing restarts: the accumulation stands and the image is simply
+/// republished — filtered or raw — which is also what makes the toggle an
+/// A/B of the same samples.
+fn sync_denoise(replica: &mut SceneDescription, session: &cenote::render::Session, wanted: bool) {
+    // Prep guarantees exactly one settings object, and the replica is the
+    // same scene the render thread holds.
+    let Some((name, current)) = replica
+        .settings()
+        .iter()
+        .next()
+        .map(|(name, settings)| (name.clone(), settings.denoise))
+    else {
+        return;
+    };
+    if current == wanted {
+        return;
+    }
+    let set = ChangeSet {
+        ops: vec![Op::Settings(SettingsPatch {
+            denoise: Some(wanted),
+            ..SettingsPatch::new(name)
+        })],
+    };
+    match replica.apply(&set) {
+        Ok(()) => session.apply(set),
+        Err(err) => log::error!("denoise toggle rejected: {err}"),
+    }
 }
 
 /// The winit application shell: the [`Viewer`] is absent until `resumed`
@@ -176,10 +212,6 @@ struct Viewer {
     /// Its `Arc` also keeps that publish buffer out of the render thread's
     /// reuse pool while we display it.
     frame: Option<cenote::render::Frame>,
-    /// The denoised view of the published frame — a worker thread at its
-    /// own cadence, consulted by the redraw when the panel's toggle is on.
-    #[cfg(feature = "denoise")]
-    denoise: denoise::DenoiseView,
     gpu: Arc<cenote::gpu::Context>,
     gui: Gui,
     /// The viewer's own copy of the scene as data — the lookdev panel's
@@ -220,8 +252,14 @@ impl Viewer {
         // The scene: the named file, or the bundled demo — either way a
         // change-set applied to an empty description, then prepped.
         let (set, scene_watch) = match scene_path {
-            Some(path) => (load_scene(path)?, Some(SceneWatch::new(path)?)),
-            None => (with_viewer_budget(ChangeSet::demo()), None),
+            Some(path) => (
+                load_scene(path, DENOISE_BY_DEFAULT)?,
+                Some(SceneWatch::new(path)?),
+            ),
+            None => (
+                with_viewer_settings(ChangeSet::demo(), DENOISE_BY_DEFAULT),
+                None,
+            ),
         };
         let mut description = SceneDescription::new();
         description.apply(&set).context("scene rejected")?;
@@ -273,8 +311,6 @@ impl Viewer {
             presenter,
             tonemap,
             frame: None,
-            #[cfg(feature = "denoise")]
-            denoise: denoise::DenoiseView::new(),
             gpu,
             gui,
             ui_desc,
@@ -373,7 +409,7 @@ impl Viewer {
             // asset), leaving the replica ahead of what actually renders
             // until the next good reload. It is logged below, not yet
             // reconciled.
-            let reloaded = load_scene(&watch.path).and_then(|set| {
+            let reloaded = load_scene(&watch.path, self.gui.denoise()).and_then(|set| {
                 let mut fresh = SceneDescription::new();
                 fresh.apply(&set)?;
                 Ok((fresh, set))
@@ -437,30 +473,12 @@ impl Viewer {
                 Err(err) => log::error!("lookdev edit to \"{name}\" rejected: {err}"),
             }
         }
+        sync_denoise(&mut self.ui_desc, &self.session, self.gui.denoise());
 
-        // The denoise toggle swaps which buffer the tonemap reads —
-        // raw average or the denoised view — and nothing upstream notices.
-        // Until the first filtered result lands (or right after a resize), the
-        // raw frame stands in.
-        #[cfg(feature = "denoise")]
-        let beauty = {
-            let denoising = self.gui.denoise();
-            if denoising {
-                self.denoise
-                    .update(&self.gpu, frame)
-                    .context("updating the denoised view")?;
-            }
-            denoising
-                .then(|| self.denoise.display(frame))
-                .flatten()
-                .unwrap_or_else(|| frame.beauty())
-        };
-        #[cfg(not(feature = "denoise"))]
-        let beauty = frame.beauty();
         self.tonemap
             .apply(
                 &self.gpu,
-                beauty,
+                frame.beauty(),
                 frame.width(),
                 frame.height(),
                 self.gui.exposure(),

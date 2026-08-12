@@ -230,13 +230,16 @@ struct EnvironmentPatch {
 /// Mirror of `SettingsPatch`. `spp` is the hard sample budget;
 /// `noise_threshold` only ever stops the render earlier, and is doubly
 /// optional like the camera's focus — absent leaves it alone, `Clear`
-/// turns the early-out off and spends the whole budget.
+/// turns the early-out off and spends the whole budget. `denoise` is a
+/// view of the film rather than an edit to it: it changes what the host is
+/// shown, never what the render converges to.
 struct SettingsPatch {
     std::string name;
     std::optional<std::array<std::uint32_t, 2>> resolution{};
     std::optional<std::uint32_t> spp{};
     std::optional<Reset<float>> noise_threshold{};
     std::optional<std::uint32_t> max_bounces{};
+    std::optional<bool> denoise{};
     std::optional<std::uint32_t> seed{};
 };
 

@@ -35,18 +35,11 @@ jobs:
           mkdir -p "$HOME/.slang"
           tar -xzf /tmp/slang.tar.gz -C "$HOME/.slang"
           echo "$HOME/.slang/bin" >> "$GITHUB_PATH"
-      - name: Format
-        run: cargo fmt --all --check
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Build
-        run: cargo build --workspace
-      - name: Test
-        run: cargo test --workspace
-      # The denoise feature links OpenImageDenoise, whose CPU device needs
-      # no GPU — so CI can lint every crate with the feature on and push a
-      # real image through the real filter. Ubuntu doesn't package OIDN;
-      # the official release is pinned here the same way slangc is above.
+      # Every build links OpenImageDenoise, so this comes before the build,
+      # not after it. Ubuntu doesn't package OIDN; the official release is
+      # pinned here the same way slangc is above — and it is the only source
+      # that carries the CUDA device the interactive path needs. CI's runner
+      # has no GPU, so its filter test runs the CPU fallback.
       - name: Install OpenImageDenoise (pinned)
         run: |
           curl -fsSL -o /tmp/oidn.tar.gz \
@@ -55,10 +48,14 @@ jobs:
           tar -xzf /tmp/oidn.tar.gz -C "$HOME/.oidn" --strip-components=1
           echo "OIDN_DIR=$HOME/.oidn" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$HOME/.oidn/lib" >> "$GITHUB_ENV"
-      - name: Clippy (denoise feature)
-        run: cargo clippy --workspace --all-targets --features cenote/denoise,cenote-cli/denoise,cenote-viewer/denoise -- -D warnings
-      - name: Test (denoise feature, CPU device)
-        run: cargo test -p cenote --features denoise denoise
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build
+        run: cargo build --workspace
+      - name: Test
+        run: cargo test --workspace
       # The C++ half of the wire drift guard: hydra/wire builds standalone —
       # no USD, no GPU — and its corpus test byte-compares the mirror against
       # the Rust goldens checked in under crates/cenote-wire. std::println

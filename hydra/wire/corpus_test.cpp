@@ -255,6 +255,7 @@ ChangeSet genesis() {
             .spp = 256U,
             .noise_threshold = Set{0.02f},
             .max_bounces = 8U,
+            .denoise = true,
             .seed = 7U,
         },
         SettingsPatch{

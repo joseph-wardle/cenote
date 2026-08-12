@@ -501,6 +501,11 @@ pub struct Stats {
     pub interactivity: Interactivity,
     /// Where the memory went.
     pub memory: Memory,
+    /// What the last denoise cost, end to end — everything between the
+    /// resolve and the post, copies and ownership transfers included, since
+    /// the frame waits for all of it. `None` when nothing has been denoised.
+    #[serde(with = "millis::option")]
+    pub denoise: Option<Duration>,
 }
 
 /// The end-of-render summary: what the whole run cost, not what one frame
@@ -597,6 +602,10 @@ pub struct Recorder {
     pending_load: Option<Phases>,
     memory: Memory,
     peak_memory: Memory,
+    /// What the last published frame's denoise cost, or `None` if none has
+    /// been denoised. Latest rather than smoothed: it is one filter per
+    /// publish, not a per-sample population.
+    denoise: Option<Duration>,
     // The two populations are kept apart deliberately. A breakdown costs a
     // few percent of the frame it is taken on (see [`crate::gpu::PassTimer`]),
     // so a window that mixed those frames in would report a cost the
@@ -645,6 +654,7 @@ impl Recorder {
             pending_load: None,
             memory: Memory::default(),
             peak_memory: Memory::default(),
+            denoise: None,
             window: VecDeque::with_capacity(WINDOW),
             plain_frames: 0,
             plain_cpu: Duration::ZERO,
@@ -765,6 +775,11 @@ impl Recorder {
         };
     }
 
+    /// What the last denoise of a published frame cost.
+    pub fn denoise(&mut self, elapsed: Duration) {
+        self.denoise = Some(elapsed);
+    }
+
     /// A snapshot for a consumer — the overlay, the wire, the delegate.
     #[must_use]
     pub fn stats(&self) -> Stats {
@@ -773,6 +788,7 @@ impl Recorder {
             smoothed: self.smoothed(),
             interactivity: self.interactivity,
             memory: self.memory,
+            denoise: self.denoise,
         }
     }
 

@@ -6,6 +6,7 @@
 #include <limits>
 #include <optional>
 #include <string_view>
+#include <type_traits>
 #include <variant>
 
 #include "pxr/base/tf/staticTokens.h"
@@ -23,6 +24,7 @@ TF_DEFINE_PRIVATE_TOKENS(_tokens,
     ((samplesPerPixel, "cenote:samplesPerPixel"))
     ((noiseThreshold, "cenote:noiseThreshold"))
     ((maxBounces, "cenote:maxBounces"))
+    ((denoise, "cenote:denoise"))
 );
 // clang-format on
 
@@ -42,9 +44,14 @@ constexpr std::string_view kNamespace = "cenote:";
 // lookdev budget, not a beauty one: hosts that want to accumulate past it
 // say so. 8 bounces is what every corpus baseline is pinned at. A zero
 // threshold is the early stop switched off — spend the whole budget.
+// Denoising is off, unlike the viewer's own default: a host asks this
+// delegate for an image it will write to disk or composite, and the
+// estimator's own pixels are the honest answer to that until somebody
+// says otherwise.
 constexpr int kDefaultSamplesPerPixel = 64;
 constexpr float kDefaultNoiseThreshold = 0.0f;
 constexpr int kDefaultMaxBounces = 8;
+constexpr bool kDefaultDenoise = false;
 
 /// The renderer's hard ceiling on path depth
 /// (`Wavefront::MAX_BOUNCES_LIMIT`): server-side the field is eight bits
@@ -57,7 +64,8 @@ constexpr int kMaxBounces = 255;
 /// A value of an uncastable type warns and yields nothing rather than a
 /// guess: leaving the field unset leaves the renderer's own answer
 /// standing, which is the least destructive reading of a setting no one
-/// can parse.
+/// can parse. The complaint names what the key wanted to be — the type
+/// says it, so no call site has to.
 template <typename T>
 std::optional<T> _Value(const HdRenderSettingsMap& settings, const TfToken& key,
                         std::vector<std::string>* warnings) {
@@ -67,9 +75,11 @@ std::optional<T> _Value(const HdRenderSettingsMap& settings, const TfToken& key,
     }
     const VtValue value = VtValue::Cast<T>(entry->second);
     if (value.IsEmpty()) {
-        warnings->push_back(TfStringPrintf("%s is a %s, which cenote cannot read as a number; "
+        constexpr const char* wanted = std::is_same_v<T, bool> ? "switch" : "number";
+        warnings->push_back(TfStringPrintf("%s is a %s, which cenote cannot read as a %s; "
                                            "the setting is ignored",
-                                           key.GetText(), entry->second.GetTypeName().c_str()));
+                                           key.GetText(), entry->second.GetTypeName().c_str(),
+                                           wanted));
         return std::nullopt;
     }
     return value.UncheckedGet<T>();
@@ -127,7 +137,7 @@ void _Unknown(const HdRenderSettingsMap& settings, std::vector<std::string>* war
             continue;
         }
         if (key == _tokens->samplesPerPixel || key == _tokens->noiseThreshold ||
-            key == _tokens->maxBounces) {
+            key == _tokens->maxBounces || key == _tokens->denoise) {
             continue;
         }
         unknown.push_back(name);
@@ -150,6 +160,7 @@ HdRenderSettingDescriptorList HdCenoteSettingDescriptors() {
          VtValue(kDefaultSamplesPerPixel)},
         {"Noise Threshold", _tokens->noiseThreshold, VtValue(kDefaultNoiseThreshold)},
         {"Max Bounces", _tokens->maxBounces, VtValue(kDefaultMaxBounces)},
+        {"Denoise", _tokens->denoise, VtValue(kDefaultDenoise)},
     };
 }
 
@@ -186,6 +197,13 @@ HdCenoteResolvedSettings HdCenoteResolveSettings(const HdRenderSettingsMap& sett
             _Clamped(*bounces, 1, kMaxBounces, _tokens->maxBounces, warnings));
     }
 
+    // Nothing to clamp: every bool is in range, and the only reading that
+    // can go wrong is a value that is not one — which `_Value` already
+    // complains about and ignores.
+    if (const std::optional<bool> denoise = _Value<bool>(settings, _tokens->denoise, warnings)) {
+        resolved.patch.denoise = denoise;
+    }
+
     _Unknown(settings, warnings);
     return resolved;
 }
@@ -219,6 +237,11 @@ std::string HdCenoteDescribeSettings(const cenote::wire::SettingsPatch& patch) {
     }
     description += patch.max_bounces ? TfStringPrintf(", %u bounces", *patch.max_bounces)
                                      : std::string(", the depth already in force");
+    if (!patch.denoise) {
+        description += ", the denoising already in force";
+    } else {
+        description += *patch.denoise ? ", denoised" : ", not denoised";
+    }
     return description;
 }
 
@@ -235,6 +258,9 @@ HdCenoteResolvedSettings HdCenoteOverlaySettings(HdCenoteResolvedSettings under,
     }
     if (over.patch.max_bounces) {
         under.patch.max_bounces = over.patch.max_bounces;
+    }
+    if (over.patch.denoise) {
+        under.patch.denoise = over.patch.denoise;
     }
     if (over.patch.seed) {
         under.patch.seed = over.patch.seed;

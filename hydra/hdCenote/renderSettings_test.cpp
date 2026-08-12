@@ -48,6 +48,7 @@ TF_DEFINE_PRIVATE_TOKENS(_tokens,
     ((samplesPerPixel, "cenote:samplesPerPixel"))
     ((noiseThreshold, "cenote:noiseThreshold"))
     ((maxBounces, "cenote:maxBounces"))
+    ((denoise, "cenote:denoise"))
 );
 // clang-format on
 
@@ -93,6 +94,8 @@ void defaults() {
     check(resolved.patch.spp == 64U, "the default budget is 64 samples");
     check(threshold(resolved.patch) == kOff, "the default threshold clears the early stop");
     check(resolved.patch.max_bounces == 8U, "the default depth is 8 bounces");
+    check(resolved.patch.denoise && !*resolved.patch.denoise,
+          "and a batch host is handed the estimator's own pixels");
     check(!resolved.patch.resolution, "resolution is not a setting");
     check(!resolved.patch.seed, "seed is not a setting");
 }
@@ -105,6 +108,7 @@ void absent_keys_leave_the_field_alone() {
     check(!resolved.patch.spp, "an unread budget stays unset");
     check(!resolved.patch.noise_threshold, "an unread threshold stays unset");
     check(!resolved.patch.max_bounces, "an unread depth stays unset");
+    check(!resolved.patch.denoise, "and an unread denoise switch stays unset");
 }
 
 /// The budget has two spellings and the cenote one wins: the standard key
@@ -140,6 +144,27 @@ void the_threshold_keeps_its_three_states() {
     const HdCenoteResolvedSettings zero =
         HdCenoteResolveSettings(populated({{_tokens->noiseThreshold, VtValue(0.0f)}}));
     check(zero.warnings.empty(), "and switching it off that way is silent");
+}
+
+/// The one key with nothing to clamp: a switch is in range by being one.
+/// What it still owes is the difference between "off" and "unsaid" —
+/// authored false is a decision the shot made and has to reach the server
+/// as one, because the session it lands in may have denoising on.
+void the_denoise_switch_says_off_out_loud() {
+    const auto of = [](const VtValue& value) {
+        return HdCenoteResolveSettings(populated({{_tokens->denoise, value}})).patch.denoise;
+    };
+    const std::optional<bool> on = of(VtValue(true));
+    const std::optional<bool> off = of(VtValue(false));
+    check(on.value_or(false), "an authored true is read");
+    check(off && !*off, "and an authored false is read as false");
+
+    const HdCenoteResolvedSettings unreadable =
+        HdCenoteResolveSettings(populated({{_tokens->denoise, VtValue(std::string("yes"))}}));
+    check(!unreadable.patch.denoise, "a switch nobody can read stays unset");
+    check(unreadable.warnings.size() == 1, "and says so");
+    check(unreadable.warnings.front().find("as a switch") != std::string::npos,
+          "naming what it wanted to be, not a number");
 }
 
 /// Every out-of-range value is pulled into range under a warning, because
@@ -261,8 +286,13 @@ void complaints_from_both_sources_survive_the_merge() {
 void the_description_names_what_was_resolved() {
     const std::string defaults =
         HdCenoteDescribeSettings(HdCenoteResolveSettings(populated()).patch);
-    check(defaults == "cenote: rendering at 64 samples per pixel, no early stop, 8 bounces",
+    check(defaults ==
+              "cenote: rendering at 64 samples per pixel, no early stop, 8 bounces, not denoised",
           "the defaults describe themselves in full");
+
+    const std::string filtered = HdCenoteDescribeSettings(
+        HdCenoteResolveSettings(populated({{_tokens->denoise, VtValue(true)}})).patch);
+    check(filtered.ends_with(", denoised"), "and a filtered render says which it is");
 
     const std::string stopping = HdCenoteDescribeSettings(
         HdCenoteResolveSettings(populated({{_tokens->noiseThreshold, VtValue(0.05f)}})).patch);
@@ -273,7 +303,8 @@ void the_description_names_what_was_resolved() {
     // map never produces: nothing was decided, so nothing is claimed.
     const std::string nothing = HdCenoteDescribeSettings({});
     check(nothing == "cenote: rendering at the sample budget already in force, the early stop "
-                     "already in force, the depth already in force",
+                     "already in force, the depth already in force, the denoising already in "
+                     "force",
           "an empty patch claims no numbers");
 }
 
@@ -287,6 +318,7 @@ int main() {
     absent_keys_leave_the_field_alone();
     the_cenote_budget_beats_the_standard_one();
     the_threshold_keeps_its_three_states();
+    the_denoise_switch_says_off_out_loud();
     out_of_range_values_are_clamped_not_refused();
     an_unreadable_value_is_ignored();
     unknown_cenote_keys_warn();

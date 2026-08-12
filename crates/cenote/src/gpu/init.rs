@@ -304,15 +304,16 @@ fn device_type_rank(device_type: vk::PhysicalDeviceType) -> u32 {
     }
 }
 
-/// Create the logical device with one compute queue. The second return
-/// says whether pipeline-statistics capture (`CENOTE_PIPELINE_STATS`) was
-/// actually enabled — requested-but-unsupported degrades to a warning.
+/// Create the logical device with one compute queue. The bools say whether
+/// pipeline-statistics capture (`CENOTE_PIPELINE_STATS`) and
+/// `VK_KHR_external_memory_fd` were actually enabled — both optional, so
+/// requested-but-unsupported degrades rather than failing bring-up.
 pub(super) fn create_device(
     instance: &ash::Instance,
     physical_device: vk::PhysicalDevice,
     queue_family_index: u32,
     presentable: bool,
-) -> Result<(ash::Device, bool)> {
+) -> Result<(ash::Device, bool, bool)> {
     let priorities = [1.0_f32];
     let queue_info = vk::DeviceQueueCreateInfo::default()
         .queue_family_index(queue_family_index)
@@ -372,13 +373,34 @@ pub(super) fn create_device(
             );
         }
     }
+    // Exportable memory, for handing the publish planes to OIDN without a
+    // host round trip. Optional: a driver without it (or a non-POSIX
+    // platform, whose drivers advertise the win32 flavour instead) falls
+    // back to denoising through staging copies.
+    let external_memory_fd =
+        has_device_extension(instance, physical_device, ash::khr::external_memory_fd::NAME);
+    if external_memory_fd {
+        extensions.push(ash::khr::external_memory_fd::NAME.as_ptr());
+    }
     let create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(std::slice::from_ref(&queue_info))
         .enabled_extension_names(&extensions)
         .push_next(&mut features);
 
     let device = unsafe { instance.create_device(physical_device, &create_info, None)? };
-    Ok((device, pipeline_stats))
+    Ok((device, pipeline_stats, external_memory_fd))
+}
+
+/// Whether the device offers `name`.
+fn has_device_extension(
+    instance: &ash::Instance,
+    device: vk::PhysicalDevice,
+    name: &CStr,
+) -> bool {
+    unsafe { instance.enumerate_device_extension_properties(device) }
+        .unwrap_or_default()
+        .iter()
+        .any(|e| e.extension_name_as_c_str() == Ok(name))
 }
 
 /// Whether the device offers `VK_KHR_pipeline_executable_properties` and
@@ -400,6 +422,16 @@ fn supports_pipeline_executable_info(
     let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut exec_stats);
     unsafe { instance.get_physical_device_features2(device, &mut features) };
     exec_stats.pipeline_executable_info == vk::TRUE
+}
+
+/// The device's `deviceUUID` — the vendor-neutral identity other APIs on
+/// the same machine know it by, which is how the denoiser opens *this*
+/// GPU rather than whichever one its own enumeration prefers.
+pub(super) fn device_uuid(instance: &ash::Instance, device: vk::PhysicalDevice) -> [u8; 16] {
+    let mut id = vk::PhysicalDeviceIDProperties::default();
+    let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut id);
+    unsafe { instance.get_physical_device_properties2(device, &mut properties) };
+    id.device_uuid
 }
 
 /// One-line human-readable description of a device (name, type, driver,

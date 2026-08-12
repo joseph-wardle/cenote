@@ -651,6 +651,12 @@ pub struct Settings {
     pub noise_threshold: Option<f32>,
     /// Maximum path length in bounces.
     pub max_bounces: u32,
+    /// Run the published image through the denoiser. A view of the film,
+    /// never part of the estimator: it changes what a consumer is handed,
+    /// not what is accumulated, so turning it on or off mid-render keeps
+    /// every sample already taken. Off by default — a host that wants the
+    /// estimator's own pixels gets them by saying nothing.
+    pub denoise: bool,
     /// Sampler seed, decorrelating repeat renders. Carried by the format
     /// but not yet wired into the sampler — honest decorrelation needs a
     /// seed input in the RNG, not a sample-index offset.
@@ -672,6 +678,7 @@ impl Default for Settings {
             spp: 64,
             noise_threshold: None,
             max_bounces: crate::wavefront::Wavefront::DEFAULT_MAX_BOUNCES,
+            denoise: false,
             seed: 0,
             global_medium: None,
         }

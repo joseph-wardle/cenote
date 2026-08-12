@@ -399,6 +399,7 @@ fn genesis() -> ChangeSet {
                 spp: Some(256),
                 noise_threshold: Some(Reset::Set(0.02)),
                 max_bounces: Some(8),
+                denoise: Some(true),
                 seed: Some(7),
             }),
             Op::Settings(SettingsPatch {

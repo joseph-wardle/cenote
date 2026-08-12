@@ -206,6 +206,7 @@ fn op(op: wire::Op) -> core::Op {
                 spp,
                 noise_threshold,
                 max_bounces,
+                denoise,
                 seed,
             } = patch;
             core::Op::Settings(core::SettingsPatch {
@@ -214,6 +215,7 @@ fn op(op: wire::Op) -> core::Op {
                 spp,
                 noise_threshold: noise_threshold.map(|value| reset(value, convert::identity)),
                 max_bounces,
+                denoise,
                 seed,
                 // The wire schema has no medium kind to reference yet, so
                 // a client cannot name one: leave whatever the scene file

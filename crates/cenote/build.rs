@@ -21,9 +21,7 @@ fn main() {
     // crate's own test binaries put root-crate libs first — discarded —
     // so they also get it appended as a trailing linker arg. Linux only;
     // elsewhere the toolchain's default C++ runtime already links.
-    if env::var_os("CARGO_FEATURE_DENOISE").is_some()
-        && env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux")
-    {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
         println!("cargo::rustc-link-lib=stdc++");
         println!("cargo::rustc-link-arg=-lstdc++");
     }

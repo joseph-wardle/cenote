@@ -2,11 +2,13 @@
 // the resolution that turns a host's settings map into the one wire
 // SettingsPatch the server obeys.
 //
-// Three keys, flat `cenote:` namespace, camelCase — the smallest surface
+// Four keys, flat `cenote:` namespace, camelCase — the smallest surface
 // that describes render *intent* rather than implementation: the sample
 // budget (advertised under Hydra's own `convergedSamplesPerPixel`, and
 // also read as `cenote:samplesPerPixel` for hosts that spell it our way),
-// `cenote:noiseThreshold`, and `cenote:maxBounces`. Resolution is
+// `cenote:noiseThreshold`, `cenote:maxBounces`, and `cenote:denoise` —
+// which is intent too, being a statement about the image the host wants
+// back rather than about how the filter is run. Resolution is
 // deliberately not among them — it already arrives as the render buffer's
 // allocation (renderBuffer.cpp), and a second authority for the same number
 // could only disagree with the first.
