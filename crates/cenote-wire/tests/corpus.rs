@@ -24,7 +24,8 @@
 //! transforms array empty, single, and multi-element; both `Light`
 //! and both `Texturable` variants; the texture channel absent and in all
 //! four spellings; the doubly-optional fields in all three states (the
-//! material's normal map, the camera's focus, the environment's image);
+//! material's normal map, the camera's focus, the environment's image,
+//! the settings' noise threshold);
 //! a `Remove` of every `Kind`; an empty set; unicode in names, paths, and
 //! messages; and every `Request`/`Response` variant.
 
@@ -389,12 +390,26 @@ fn genesis() -> ChangeSet {
                 tint: Some([0.5, 0.5, 0.5]),
                 ..EnvironmentPatch::default()
             }),
+            // The settings patch three times over: the threshold set,
+            // cleared (spend the whole budget), and left alone — the
+            // fourth doubly-optional's three states.
             Op::Settings(SettingsPatch {
                 name: "main".into(),
                 resolution: Some([1920, 1080]),
                 spp: Some(256),
+                noise_threshold: Some(Reset::Set(0.02)),
                 max_bounces: Some(8),
                 seed: Some(7),
+            }),
+            Op::Settings(SettingsPatch {
+                name: "settings-clear".into(),
+                noise_threshold: Some(Reset::Clear),
+                ..SettingsPatch::default()
+            }),
+            Op::Settings(SettingsPatch {
+                name: "settings-leave".into(),
+                spp: Some(64),
+                ..SettingsPatch::default()
             }),
             Op::Remove(Kind::Mesh, "outgrown".into()),
         ],

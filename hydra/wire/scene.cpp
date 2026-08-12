@@ -197,10 +197,11 @@ void encode(Writer& writer, const EnvironmentPatch& value) {
 }
 
 void encode(Writer& writer, const SettingsPatch& value) {
-    writer.array_header(5);
+    writer.array_header(6);
     encode(writer, value.name);
     encode(writer, value.resolution);
     encode(writer, value.spp);
+    encode(writer, value.noise_threshold);
     encode(writer, value.max_bounces);
     encode(writer, value.seed);
 }

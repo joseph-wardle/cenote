@@ -253,8 +253,17 @@ ChangeSet genesis() {
             .name = "main",
             .resolution = std::array<std::uint32_t, 2>{1920, 1080},
             .spp = 256U,
+            .noise_threshold = Set{0.02f},
             .max_bounces = 8U,
             .seed = 7U,
+        },
+        SettingsPatch{
+            .name = "settings-clear",
+            .noise_threshold = Clear{},
+        },
+        SettingsPatch{
+            .name = "settings-leave",
+            .spp = 64U,
         },
         Remove{.kind = Kind::Mesh, .name = "outgrown"},
     };

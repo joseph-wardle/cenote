@@ -10,6 +10,7 @@
 //! the renderer's doubly-optional `Option<Option<T>>` (the wire can't
 //! spell `Some(None)` — see `cenote_wire::scene`).
 
+use std::convert;
 use std::path::PathBuf;
 
 use cenote::scene::changeset as core;
@@ -203,6 +204,7 @@ fn op(op: wire::Op) -> core::Op {
                 name,
                 resolution,
                 spp,
+                noise_threshold,
                 max_bounces,
                 seed,
             } = patch;
@@ -210,9 +212,7 @@ fn op(op: wire::Op) -> core::Op {
                 name,
                 resolution,
                 spp,
-                // The wire carries no threshold yet, so a client cannot ask
-                // to stop early: leave whatever the scene set alone.
-                noise_threshold: None,
+                noise_threshold: noise_threshold.map(|value| reset(value, convert::identity)),
                 max_bounces,
                 seed,
                 // The wire schema has no medium kind to reference yet, so
@@ -381,6 +381,31 @@ mod tests {
                 uv: None,
             }))
         );
+    }
+
+    /// The stopping rule survives translation: a client that asks to
+    /// stop early gets to, one that clears the threshold spends its whole
+    /// budget, and one that says nothing leaves the scene's own answer
+    /// standing. The field spent a release pinned to `None` here, which
+    /// looks exactly like the third case from the renderer's side.
+    #[test]
+    fn the_noise_threshold_reaches_the_renderer() {
+        let with = |threshold| {
+            let set = change_set(wire::ChangeSet {
+                ops: vec![wire::Op::Settings(wire::SettingsPatch {
+                    name: "settings".into(),
+                    noise_threshold: threshold,
+                    ..wire::SettingsPatch::default()
+                })],
+            });
+            let core::Op::Settings(patch) = &set.ops[0] else {
+                panic!("op kind changed in translation");
+            };
+            patch.noise_threshold
+        };
+        assert_eq!(with(None), None);
+        assert_eq!(with(Some(wire::Reset::Clear)), Some(None));
+        assert_eq!(with(Some(wire::Reset::Set(0.02))), Some(Some(0.02)));
     }
 
     /// A translated set survives the renderer's own apply — names,

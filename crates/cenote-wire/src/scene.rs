@@ -309,8 +309,14 @@ pub struct SettingsPatch {
     pub name: String,
     /// Output width × height, pixels.
     pub resolution: Option<[u32; 2]>,
-    /// Samples per pixel for batch renders.
+    /// The sample budget: samples per pixel before the render is done. A
+    /// hard cap — `noise_threshold` only ever stops it earlier.
     pub spp: Option<u32>,
+    /// Relative estimator standard error to stop early at, in (0, 1].
+    /// Doubly optional like the camera's focus: absent leaves it alone,
+    /// [`Reset::Clear`] turns the early-out off and spends the whole
+    /// budget.
+    pub noise_threshold: Option<Reset<f32>>,
     /// Maximum path length in bounces.
     pub max_bounces: Option<u32>,
     /// Sampler seed.

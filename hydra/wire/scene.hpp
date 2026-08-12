@@ -227,11 +227,15 @@ struct EnvironmentPatch {
     std::optional<Transform> transform{};
 };
 
-/// Mirror of `SettingsPatch`.
+/// Mirror of `SettingsPatch`. `spp` is the hard sample budget;
+/// `noise_threshold` only ever stops the render earlier, and is doubly
+/// optional like the camera's focus — absent leaves it alone, `Clear`
+/// turns the early-out off and spends the whole budget.
 struct SettingsPatch {
     std::string name;
     std::optional<std::array<std::uint32_t, 2>> resolution{};
     std::optional<std::uint32_t> spp{};
+    std::optional<Reset<float>> noise_threshold{};
     std::optional<std::uint32_t> max_bounces{};
     std::optional<std::uint32_t> seed{};
 };
