@@ -260,6 +260,28 @@ void complaints_from_both_sources_survive_the_merge() {
     check(merged.warnings.front() == map.warnings.front(), "the map's complaint comes first");
 }
 
+/// The status line the delegate posts — and the string a batch host with
+/// no settings UI is observed through (tests/render_settings_test.py greps
+/// exactly these phrases), so its wording is a contract, not a log.
+void the_description_names_what_was_resolved() {
+    const std::string defaults =
+        HdCenoteDescribeSettings(HdCenoteResolveSettings(populated()).patch);
+    check(defaults == "cenote: rendering at 64 samples per pixel, no early stop, 8 bounces",
+          "the defaults describe themselves in full");
+
+    const std::string stopping = HdCenoteDescribeSettings(
+        HdCenoteResolveSettings(populated({{kThreshold(), VtValue(0.05f)}})).patch);
+    check(stopping.find("stopping early at 0.05 relative error") != std::string::npos,
+          "a threshold is named as the relative error it is");
+
+    // Every field unset is the honest case the delegate's own populated
+    // map never produces: nothing was decided, so nothing is claimed.
+    const std::string nothing = HdCenoteDescribeSettings({});
+    check(nothing == "cenote: rendering at the sample budget already in force, the early stop "
+                     "already in force, the depth already in force",
+          "an empty patch claims no numbers");
+}
+
 } // namespace
 
 // A failed check reports by escaping: terminate prints the what() and the
@@ -276,6 +298,7 @@ int main() {
     a_settings_prim_resolves_like_a_map();
     the_prim_wins_the_keys_it_authors();
     complaints_from_both_sources_survive_the_merge();
+    the_description_names_what_was_resolved();
 
     if (failures > 0) {
         std::println(stderr, "{} failure(s)", failures);

@@ -1,0 +1,70 @@
+#usda 1.0
+(
+    """first-light's two cubes with a shelf of render settings prims over
+    them — the stage tests/render_settings_test.py drives. The geometry is
+    sublayered rather than copied: the shot is the settings, and a render
+    whose picture nobody looks at should still be the one whose speed is
+    already known.
+
+    One prim per behaviour the delegate owes a host, each named for what
+    it asks for. None is active by default (no renderSettingsPrimPath
+    metadatum): the host names one per run, so a single stage covers every
+    leg, and the run that names none proves the rest are inert."""
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+    subLayers = [
+        @./first-light.usda@
+    ]
+)
+
+def Scope "Render"
+{
+    # A budget no machine will finish: whether it arrived is visible as the
+    # render still running long after the delegate's own 64 would have
+    # settled.
+    def RenderSettings "Slow"
+    {
+        custom int cenote:samplesPerPixel = 1000000
+    }
+
+    # The same impossible budget with an early stop over it. Convergence
+    # then comes from the threshold alone — which is the one path where a
+    # renderer that reports `converged` by counting samples against the
+    # budget never reports it at all, and a batch host loops forever.
+    def RenderSettings "EarlyStop"
+    {
+        custom int cenote:samplesPerPixel = 1000000
+        custom float cenote:noiseThreshold = 0.05
+    }
+
+    # Every complaint at once, on a prim that must still render: a depth
+    # past the renderer's ceiling (server-side the change-set would be
+    # rejected whole, geometry and all), a budget of a type no one can read
+    # as a number, and a key that is one letter from a real one.
+    def RenderSettings "Complaints"
+    {
+        custom int cenote:maxBounces = 512
+        custom string cenote:samplesPerPixel = "many"
+        custom int cenote:maxBouncez = 4
+    }
+
+    # The stage authored for somebody else's renderer. Nothing here is
+    # addressed to cenote, so nothing here changes the render — and saying
+    # so once is the difference between that and cenote having silently
+    # dropped the shot's settings.
+    def RenderSettings "Foreign"
+    {
+        custom int karma:global:samplesperpixel = 3
+        custom int ri:hider:minsamples = 3
+    }
+
+    # Never named by any leg. It authors a budget small enough to see and a
+    # typo loud enough to hear, so the run that activates nothing proves
+    # both stay silent.
+    def RenderSettings "Ignored"
+    {
+        custom int cenote:samplesPerPixel = 2
+        custom int cenote:maxBouncez = 4
+    }
+}

@@ -57,7 +57,7 @@ one release-cycle of 26.05↔25.05 API drift is absorbed in the single
 ## The pre-push gate
 
 ```sh
-scripts/hydra-check.sh   # build, ctest, clang-format, clang-tidy, the three Python tests
+scripts/hydra-check.sh   # build, ctest, clang-format, clang-tidy, the four Python tests
 ```
 
 Formatting and linting are pinned to the clang 22.1.8 PyPI wheels
@@ -66,6 +66,13 @@ clang-format; clang-tidy stays local because it reads the USD build's compile
 database. The Python tests need the USD prefix on `PATH`/`PYTHONPATH` (below), a
 built `cenote-server` (`target/{release,debug}`, or `$CENOTE_SERVER`), and — for
 `interactive_test.py` — a display.
+
+`render_settings_test.py` is the one that reads no pixels at all: it names each
+`RenderSettings` prim on its stage in turn and asserts what the render *does* —
+a budget nothing can finish keeps running, a threshold over it finishes anyway,
+a depth past the ceiling is clamped rather than rejected — plus, where the host
+lets the delegate speak, the line the delegate posts saying what it resolved.
+That is what lets `--host husk` run the same file (see below).
 
 `usdrecord_smoke.py` buckets by colour and left/centre/right only, so a flipped
 render still passes; pixel equality is `flip_golden.py`'s job. That golden's
@@ -103,7 +110,22 @@ husk --renderer HdCenoteRendererPlugin --camera /World/Camera --res 512 512 \
 
 husk here is a **load-and-run proof** against Houdini's own 25.05, not a second
 pixel oracle: the server is byte-identical across hosts, so pixel truth stays the
-usdrecord FLIP golden above.
+usdrecord FLIP golden above. The one behavioural check that does run under it is
+the settings one, against a `dist/` installed from the **hdk** build (which
+replaces the stock `.so` there, so reinstall the stock one afterwards):
+
+```sh
+cmake --install build/hydra-hdk
+PATH=$HFS/bin:$PATH python3 hydra/tests/render_settings_test.py --host husk
+```
+
+Two things that check settles, neither of them guessable from the docs. husk
+**does** populate the delegate's settings map, with the `cenote:` namespace
+intact — `husk -s /Render/Foo -V 9` prints the map it built, and an authored
+`cenote:samplesPerPixel` governs the render through it. And Houdini installs a
+`TfDiagnosticMgr` delegate, so `TF_STATUS`/`TF_WARN` go to its error manager
+rather than the stream: under husk nothing the delegate *says* is readable, and
+only what the render does can be asserted.
 
 ## USD 26.05 — the pinned build
 

@@ -74,6 +74,19 @@ HdCenoteResolvedSettings HdCenoteResolveSettings(const HdRenderSettingsMap& sett
 HdCenoteResolvedSettings
 HdCenoteResolveNamespacedSettings(const HdContainerDataSourceHandle& namespacedSettings);
 
+/// The resolved patch as the one line a renderer owes the person waiting
+/// on it: what budget, what early stop, what depth this render is actually
+/// obeying, after every source and clamp has had its say. Every production
+/// renderer prints its resolved settings — it is the first thing anyone
+/// asks when a render takes an hour — and it is also the only way a batch
+/// host with no settings UI can be *observed* to have delivered them
+/// (tests/render_settings_test.py reads exactly this line).
+///
+/// A field the patch leaves unset says so rather than inventing a number:
+/// unset means "leave the renderer's own answer alone", which is not the
+/// same claim as any particular value.
+std::string HdCenoteDescribeSettings(const cenote::wire::SettingsPatch& patch);
+
 /// `over` laid onto `under`, field by field: a field `over` left unset
 /// keeps `under`'s answer, and the complaints concatenate with `under`'s
 /// first. This one function is the whole precedence rule between the two

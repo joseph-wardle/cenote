@@ -6,6 +6,7 @@
 #include <limits>
 #include <optional>
 #include <string_view>
+#include <variant>
 
 #include "pxr/base/tf/stringUtils.h"
 #include "pxr/base/tf/token.h"
@@ -208,6 +209,22 @@ HdCenoteResolveNamespacedSettings(const HdContainerDataSourceHandle& namespacedS
         }
     }
     return HdCenoteResolveSettings(settings);
+}
+
+std::string HdCenoteDescribeSettings(const cenote::wire::SettingsPatch& patch) {
+    std::string description = "cenote: rendering at ";
+    description += patch.spp ? TfStringPrintf("%u samples per pixel", *patch.spp)
+                             : std::string("the sample budget already in force");
+    if (!patch.noise_threshold) {
+        description += ", the early stop already in force";
+    } else if (const auto* stop = std::get_if<cenote::wire::Set<float>>(&*patch.noise_threshold)) {
+        description += TfStringPrintf(", stopping early at %g relative error", stop->value);
+    } else {
+        description += ", no early stop";
+    }
+    description += patch.max_bounces ? TfStringPrintf(", %u bounces", *patch.max_bounces)
+                                     : std::string(", the depth already in force");
+    return description;
 }
 
 HdCenoteResolvedSettings HdCenoteOverlaySettings(HdCenoteResolvedSettings under,

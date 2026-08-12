@@ -233,6 +233,11 @@ void HdCenoteRenderDelegate::_UpdateSettings() {
         }
     }
     _settingsWarnings = std::move(resolved.warnings);
+    // Then what it all came to, once per change, as a status rather than a
+    // warning: nothing is wrong, and a host that resolved its settings in
+    // silence leaves "did my render settings arrive?" with no answer short
+    // of a stopwatch.
+    TF_STATUS("%s", HdCenoteDescribeSettings(resolved.patch).c_str());
     _pending.ops.emplace_back(std::move(resolved.patch));
 }
 
