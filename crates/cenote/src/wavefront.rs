@@ -928,6 +928,17 @@ pub struct Wavefront {
     light_sampling: LightSampling,
 }
 
+/// The one gate on a path-length cap, shared by the constructor and the
+/// setter so both refuse the same values.
+fn check_max_bounces(max_bounces: u32) {
+    assert!(max_bounces > 0, "zero-bounce wavefront");
+    assert!(
+        max_bounces <= Wavefront::MAX_BOUNCES_LIMIT,
+        "a bounce cap above {} doesn't fit its packed push-constant byte",
+        Wavefront::MAX_BOUNCES_LIMIT
+    );
+}
+
 impl Wavefront {
     /// Default path-pool capacity: 2²⁰ paths (≈ 64 MB of state at today's
     /// schema). Bounds VRAM at any resolution — larger targets walk ranges
@@ -939,6 +950,12 @@ impl Wavefront {
     /// cap — and eight covers the deepest transport the demo makes visible
     /// (mirror spheres reflecting each other's reflections) with margin.
     pub const DEFAULT_MAX_BOUNCES: u32 = 8;
+
+    /// The deepest path the engine can be asked for: the cap travels to
+    /// every shading stage in one byte of the packed push constant
+    /// (`bounce | max_bounces << 8 | …`), and 255 bounces is far past
+    /// where roulette has settled anything real.
+    pub const MAX_BOUNCES_LIMIT: u32 = 255;
 
     /// Build the five stage pipelines and allocate the pool and queues.
     /// Each wave shades at most `max_bounces` bounces per path and reaches
@@ -952,11 +969,7 @@ impl Wavefront {
         light_sampling: LightSampling,
     ) -> Result<Self> {
         assert!(capacity > 0, "zero-capacity path pool");
-        assert!(max_bounces > 0, "zero-bounce wavefront");
-        assert!(
-            max_bounces <= 255,
-            "a bounce cap above 255 doesn't fit its packed push-constant byte"
-        );
+        check_max_bounces(max_bounces);
         let pipeline = |kernel: &Kernel, push_constant_size: usize, bindings| {
             gpu.create_compute_pipeline(
                 &kernel.spirv,
@@ -1018,6 +1031,26 @@ impl Wavefront {
             max_bounces,
             light_sampling,
         })
+    }
+
+    /// Re-cap the path length. The cap is only a dispatch-loop bound and a
+    /// byte of every shading stage's push constant, so nothing is rebuilt
+    /// here — but it changes the estimator, and a caller that keeps
+    /// accumulating across it is averaging two different renders.
+    ///
+    /// # Panics
+    ///
+    /// If `max_bounces` is zero or above
+    /// [`Wavefront::MAX_BOUNCES_LIMIT`].
+    pub fn set_max_bounces(&mut self, max_bounces: u32) {
+        check_max_bounces(max_bounces);
+        self.max_bounces = max_bounces;
+    }
+
+    /// The current path-length cap.
+    #[must_use]
+    pub fn max_bounces(&self) -> u32 {
+        self.max_bounces
     }
 
     /// Trace one sample: one full path per pixel of a `width`×`height`

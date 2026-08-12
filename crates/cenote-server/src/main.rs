@@ -40,7 +40,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context as _;
-use cenote::render::{AutoStop, Renderer, Session};
+use cenote::render::{Renderer, Session};
 use cenote::scene::Scene;
 use cenote::scene::changeset::{CameraPatch, ChangeSet, Kind, Op, SettingsPatch};
 use cenote::scene::description::{SceneDescription, Settings};
@@ -53,9 +53,10 @@ use glam::Vec3;
 /// server looks.
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 
-/// The default accumulation cap when `CENOTE_SERVER_MAX_SAMPLES` is
-/// unset: deep enough for a clean lookdev still, finite so a settled
-/// view releases the GPU.
+/// The sample budget a client that authors none renders under: deep
+/// enough for a clean lookdev still, finite so a settled view releases the
+/// GPU. The bottom of the precedence chain — a client's own budget
+/// displaces it, and `CENOTE_SERVER_MAX_SAMPLES` displaces both.
 const DEFAULT_MAX_SAMPLES: u32 = 4096;
 
 /// Everything the socket loop and the frame pump share, one lock.
@@ -74,20 +75,23 @@ struct Shared {
     rejected: Vec<String>,
     /// A pump-side fatal fault, surfaced by main as the exit reason.
     fault: Option<String>,
-    max_samples: u32,
 }
 
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let max_samples = match std::env::var("CENOTE_SERVER_MAX_SAMPLES") {
-        Ok(raw) => raw
-            .parse::<u32>()
-            .ok()
-            .filter(|&cap| cap > 0)
-            .with_context(|| {
-                format!("CENOTE_SERVER_MAX_SAMPLES must be a positive integer, got \"{raw}\"")
-            })?,
-        Err(_) => DEFAULT_MAX_SAMPLES,
+    // The debug override, at the top of the precedence chain: re-asserted
+    // over every settings a client authors, so a run pinned to a sample
+    // count stays pinned whatever the stage says.
+    let forced_samples = match std::env::var("CENOTE_SERVER_MAX_SAMPLES") {
+        Ok(raw) => Some(
+            raw.parse::<u32>()
+                .ok()
+                .filter(|&cap| cap > 0)
+                .with_context(|| {
+                    format!("CENOTE_SERVER_MAX_SAMPLES must be a positive integer, got \"{raw}\"")
+                })?,
+        ),
+        Err(_) => None,
     };
     let (token, generated) = match std::env::var("CENOTE_SERVER_TOKEN") {
         Ok(token) if !token.is_empty() => (token, false),
@@ -106,7 +110,10 @@ fn main() -> anyhow::Result<()> {
         .apply(&ChangeSet {
             ops: vec![
                 Op::Camera(CameraPatch::new("camera")),
-                Op::Settings(SettingsPatch::new("settings")),
+                Op::Settings(SettingsPatch {
+                    spp: Some(forced_samples.unwrap_or(DEFAULT_MAX_SAMPLES)),
+                    ..SettingsPatch::new("settings")
+                }),
             ],
         })
         .expect("the empty scene's singletons are valid");
@@ -125,10 +132,6 @@ fn main() -> anyhow::Result<()> {
         camera,
         width,
         height,
-        AutoStop {
-            max_samples,
-            noise_threshold: None,
-        },
         load,
     );
     let fb = shm::Segment::create(1, width, height).context("allocating the framebuffer")?;
@@ -140,7 +143,6 @@ fn main() -> anyhow::Result<()> {
         generation: 1,
         rejected: Vec::new(),
         fault: None,
-        max_samples,
     }));
 
     // The one stdout line the spawner parses.
@@ -169,7 +171,7 @@ fn main() -> anyhow::Result<()> {
             .context("spawning the frame pump")?
     };
 
-    let served = serve(&mut stream, &state, &token);
+    let served = serve(&mut stream, &state, &token, forced_samples);
     stop.store(true, Ordering::Relaxed);
     pump.join().expect("the frame pump does not panic");
 
@@ -200,7 +202,12 @@ fn generate_token() -> anyhow::Result<String> {
 /// The socket loop: handshake, then strictly one response per request.
 /// Returns `Ok(())` on EOF — the client hanging up is the shutdown
 /// signal — and `Err` on anything that violates the protocol.
-fn serve(stream: &mut TcpStream, state: &Mutex<Shared>, token: &str) -> anyhow::Result<()> {
+fn serve(
+    stream: &mut TcpStream,
+    state: &Mutex<Shared>,
+    token: &str,
+    forced_samples: Option<u32>,
+) -> anyhow::Result<()> {
     let hello: Request = protocol::read_message(stream).context("reading Hello")?;
     let Request::Hello {
         protocol: client,
@@ -236,7 +243,10 @@ fn serve(stream: &mut TcpStream, state: &Mutex<Shared>, token: &str) -> anyhow::
             Request::Hello { .. } => anyhow::bail!("Hello arrived twice"),
             Request::Replace(set) => {
                 let mut set = translate::change_set(set);
+                // The precedence chain, bottom up.
                 ensure_singletons(&mut set);
+                default_budget(&mut set);
+                force_samples(&mut set, forced_samples);
                 let touches_camera = touches(&set, Kind::Camera);
                 shared.session.replace(set);
                 if touches_camera {
@@ -246,7 +256,8 @@ fn serve(stream: &mut TcpStream, state: &Mutex<Shared>, token: &str) -> anyhow::
                 ack(&mut shared)
             }
             Request::Apply(set) => {
-                let set = translate::change_set(set);
+                let mut set = translate::change_set(set);
+                force_samples(&mut set, forced_samples);
                 let touches_camera = touches(&set, Kind::Camera);
                 shared.session.apply(set);
                 if touches_camera {
@@ -298,17 +309,48 @@ fn touches(set: &ChangeSet, kind: Kind) -> bool {
     set.ops.iter().any(|op| op.target().0 == kind)
 }
 
-/// A Hydra genesis carries no camera or settings op — the active camera
-/// travels on the `SetCamera` lane and render settings are host state —
-/// but prep requires the singletons, so a `Replace` lacking them gets the
-/// defaults appended. Sets that do carry their own (a scene file driven
-/// over the wire) pass through untouched.
+/// A Hydra genesis carries no camera op — the active camera travels on the
+/// `SetCamera` lane — but prep requires the singletons, so a `Replace`
+/// lacking them gets the defaults appended. Sets that do carry their own (a
+/// scene file driven over the wire) pass through untouched.
+///
+/// A settings op it appends is bare; [`default_budget`] is what fills it.
 fn ensure_singletons(set: &mut ChangeSet) {
     if !touches(set, Kind::Camera) {
         set.ops.push(Op::Camera(CameraPatch::new("camera")));
     }
     if !touches(set, Kind::Settings) {
         set.ops.push(Op::Settings(SettingsPatch::new("settings")));
+    }
+}
+
+/// Fill the server's fallback budget into a `Replace` that authored none.
+///
+/// A replacement rebuilds the description from empty, so an unset `spp`
+/// lands on the *format's* default — a still-frame number, far short of
+/// what a lookdev host wants to accumulate to. A client that leaves the
+/// budget open is asking to be bounded by whoever is hosting it, and that
+/// is this process. One that states a budget keeps it.
+fn default_budget(set: &mut ChangeSet) {
+    for op in &mut set.ops {
+        if let Op::Settings(patch) = op {
+            patch.spp.get_or_insert(DEFAULT_MAX_SAMPLES);
+        }
+    }
+}
+
+/// Re-assert `CENOTE_SERVER_MAX_SAMPLES` over every settings op in a set —
+/// the top of the chain, so it overwrites rather than fills. A client can
+/// author a budget in any change-set, so the override has to travel with
+/// each one rather than be applied once at startup. Sets that carry no
+/// settings need nothing: the description already holds the forced value
+/// from the last set that did.
+fn force_samples(set: &mut ChangeSet, forced: Option<u32>) {
+    let Some(forced) = forced else { return };
+    for op in &mut set.ops {
+        if let Op::Settings(patch) = op {
+            patch.spp = Some(forced);
+        }
     }
 }
 
@@ -364,10 +406,17 @@ fn pump(state: &Mutex<Shared>, gpu: &cenote::gpu::Context, stop: &AtomicBool, so
         // A frame sized for a segment a resize already replaced is simply
         // skipped; the session is rebuilding its film at the new size.
         if (frame.width(), frame.height()) == (shared.fb.width(), shared.fb.height()) {
-            let converged = frame.samples() >= shared.max_samples;
-            shared
-                .fb
-                .publish(&beauty, &depth, frame.samples(), converged, frame.epoch());
+            // The session's own verdict, never re-derived here: it can stop
+            // early on the noise threshold, at a count no comparison against
+            // the budget would ever reach, and a client polling `converged`
+            // would wait for it forever.
+            shared.fb.publish(
+                &beauty,
+                &depth,
+                frame.samples(),
+                frame.converged(),
+                frame.epoch(),
+            );
         }
     }
 }

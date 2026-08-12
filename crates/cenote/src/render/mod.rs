@@ -28,7 +28,7 @@ mod session;
 mod tonemap;
 
 pub use film::{Film, FilmAverages};
-pub use session::{AutoStop, Frame, Session};
+pub use session::{Frame, Session};
 pub use tonemap::Tonemap;
 
 use ash::vk;
@@ -200,6 +200,28 @@ impl Renderer {
         // A body edit must not silently drop the view's auto-stop threshold.
         self.noise_threshold = noise_threshold;
         Ok(())
+    }
+
+    /// Re-cap the path length. Free of pipeline work — the cap reaches the
+    /// kernels as a push-constant byte, nothing is specialized on it — but
+    /// it changes what the estimator converges to, so a caller mid-render
+    /// must restart accumulation rather than average across it.
+    ///
+    /// # Panics
+    ///
+    /// If `max_bounces` is zero or above
+    /// [`Wavefront::MAX_BOUNCES_LIMIT`].
+    pub fn set_max_bounces(&mut self, max_bounces: u32) {
+        self.wavefront.set_max_bounces(max_bounces);
+        // Kept in step so a `reload` after this rebuilds the engine the
+        // caller asked for, not the one it was constructed with.
+        self.max_bounces = max_bounces;
+    }
+
+    /// The current path-length cap.
+    #[must_use]
+    pub fn max_bounces(&self) -> u32 {
+        self.max_bounces
     }
 
     /// Set the auto-stop noise threshold. Changes what

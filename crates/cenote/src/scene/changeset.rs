@@ -303,8 +303,12 @@ pub struct SettingsPatch {
     pub name: String,
     /// Output width × height, pixels.
     pub resolution: Option<[u32; 2]>,
-    /// Samples per pixel for batch renders.
+    /// The sample budget, in samples per pixel.
     pub spp: Option<u32>,
+    /// The convergence early-out threshold. Doubly optional: `None` leaves
+    /// it alone, `Some(None)` turns the early-out off and spends the whole
+    /// budget.
+    pub noise_threshold: Option<Option<f32>>,
     /// Maximum path length in bounces.
     pub max_bounces: Option<u32>,
     /// Sampler seed.
@@ -527,7 +531,9 @@ fn apply_op(objects: &mut Objects, dirty: &mut Dirty, op: &Op) -> Result<()> {
             merge!(environment, patch; path, tint, transform);
         }),
         Op::Settings(patch) => upsert(&mut objects.settings, &name, |settings| {
-            merge!(settings, patch; resolution, spp, max_bounces, seed, global_medium);
+            merge!(settings, patch;
+                resolution, spp, noise_threshold, max_bounces, seed, global_medium,
+            );
         }),
         Op::Remove(..) => unreachable!("handled above"),
     };
@@ -781,6 +787,25 @@ fn validate_settings(objects: &Objects, name: &str, settings: &Settings) -> Resu
     if settings.spp == 0 || settings.max_bounces == 0 {
         return Err(scene_error(format!(
             "settings \"{name}\": spp and max_bounces must be at least 1"
+        )));
+    }
+    // The wavefront packs the cap into a byte, and the assert that catches
+    // an over-wide one lives in a constructor the session cannot fail into
+    // — so the description is where a too-deep render is refused.
+    if settings.max_bounces > crate::wavefront::Wavefront::MAX_BOUNCES_LIMIT {
+        return Err(scene_error(format!(
+            "settings \"{name}\": max_bounces must be at most {}, got {}",
+            crate::wavefront::Wavefront::MAX_BOUNCES_LIMIT,
+            settings.max_bounces
+        )));
+    }
+    // A relative standard error is a fraction: at 1 the stop fires on the
+    // first sample it is trusted at, and above it the number means nothing.
+    if let Some(threshold) = settings.noise_threshold
+        && !(threshold.is_finite() && threshold > 0.0 && threshold <= 1.0)
+    {
+        return Err(scene_error(format!(
+            "settings \"{name}\": noise_threshold must be in (0, 1], got {threshold}"
         )));
     }
     Ok(())
@@ -1295,6 +1320,66 @@ mod tests {
         };
         let error = description.apply(&set).unwrap_err();
         assert!(error.to_string().contains("at least 1"), "{error}");
+    }
+
+    /// The path-length cap travels to the kernels in one byte, and the
+    /// assert that catches an over-wide one lives in a constructor the
+    /// running session never calls again. So the description is where a
+    /// too-deep render has to be refused: a host that hands 512 straight
+    /// through would take the whole change-set — every mesh in the same
+    /// flush — down with it on a panic instead of a rejection.
+    #[test]
+    fn a_path_depth_past_the_packed_byte_is_rejected() {
+        let mut description = SceneDescription::new();
+        let set = ChangeSet {
+            ops: vec![Op::Settings(SettingsPatch {
+                max_bounces: Some(512),
+                ..SettingsPatch::new("main")
+            })],
+        };
+        let error = description.apply(&set).unwrap_err();
+        assert!(error.to_string().contains("at most 255"), "{error}");
+        // And the boundary itself is legal.
+        description
+            .apply(&ChangeSet {
+                ops: vec![Op::Settings(SettingsPatch {
+                    max_bounces: Some(crate::wavefront::Wavefront::MAX_BOUNCES_LIMIT),
+                    ..SettingsPatch::new("main")
+                })],
+            })
+            .expect("the cap itself renders");
+    }
+
+    /// The convergence threshold is a *relative standard error*, so it is a
+    /// fraction: at 1 the stop fires as soon as the metric is trusted, and
+    /// past that the number describes nothing. Zero and negatives would stop
+    /// the render never and immediately respectively — both silently.
+    #[test]
+    fn a_noise_threshold_outside_the_unit_interval_is_rejected() {
+        let threshold = |value: f32| ChangeSet {
+            ops: vec![Op::Settings(SettingsPatch {
+                noise_threshold: Some(Some(value)),
+                ..SettingsPatch::new("main")
+            })],
+        };
+        for bad in [0.0, -0.01, 1.5, f32::NAN] {
+            let mut description = SceneDescription::new();
+            let error = description.apply(&threshold(bad)).unwrap_err();
+            assert!(error.to_string().contains("in (0, 1]"), "{bad}: {error}");
+        }
+        let mut description = SceneDescription::new();
+        description.apply(&threshold(1.0)).expect("1 is a fraction");
+        assert_eq!(description.settings()["main"].noise_threshold, Some(1.0));
+        // And the early stop is switchable back off without touching the rest.
+        description
+            .apply(&ChangeSet {
+                ops: vec![Op::Settings(SettingsPatch {
+                    noise_threshold: Some(None),
+                    ..SettingsPatch::new("main")
+                })],
+            })
+            .expect("no threshold is valid");
+        assert_eq!(description.settings()["main"].noise_threshold, None);
     }
 
     /// Validation is per element: a valid placement doesn't shield a

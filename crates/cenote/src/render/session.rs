@@ -72,7 +72,7 @@ use super::{Film, Renderer, ResolveTargets};
 use crate::error::{Error, Result};
 use crate::gpu::{Buffer, Context, MemoryLocation, PassTimer};
 use crate::scene::changeset::{ChangeSet, Dirty, Kind};
-use crate::scene::description::SceneDescription;
+use crate::scene::description::{SceneDescription, Settings};
 use crate::scene::{Camera, Scene};
 use crate::stats::{self, Phases, Recorder, Stats};
 
@@ -118,23 +118,6 @@ const PREVIEW_DIVISOR_MAX: u32 = 4;
 /// precision theatre over numbers that did not change.
 const MEMORY_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
-/// When the render thread stops accumulating and parks — a settled render must
-/// not pin the GPU forever.
-/// `max_samples` is the hard cap every render obeys; `noise_threshold`, when
-/// set, is an additional early stop once [`Renderer::CONVERGENCE_TARGET`] of the
-/// pixels have reached that relative estimator standard error. A parked thread
-/// wakes and re-accumulates the moment any input restarts the film.
-#[derive(Clone, Copy)]
-pub struct AutoStop {
-    /// The sample count at which accumulation stops regardless of convergence —
-    /// the backstop the viewer always sets, so an idle view releases the GPU.
-    pub max_samples: u32,
-    /// The convergence early-out threshold, or `None` to stop only at
-    /// `max_samples`. Passed through to [`Renderer::set_noise_threshold`], so it
-    /// is also what [`Film::converged_fraction`] measures against.
-    pub noise_threshold: Option<f32>,
-}
-
 /// Grow the publish gap with the sample count: publish every frame while the
 /// image is changing fast, then back off toward [`PUBLISH_INTERVAL_MAX`] as it
 /// converges (improvement ~1/N, so late publishes carry vanishing new detail).
@@ -157,15 +140,6 @@ struct RenderInputs {
     /// the new camera and restarts accumulation — the threaded equivalent of
     /// the single-threaded viewer's `Film::reset`.
     generation: u64,
-    /// Hard cap on accumulated samples. At this count the render
-    /// thread parks — stops accumulating and idles — until an input restarts the
-    /// film, so a settled view stops pinning the GPU.
-    max_samples: u32,
-    /// Convergence early-out threshold, or `None` to park only at `max_samples`.
-    /// When set, the thread also parks once [`Renderer::CONVERGENCE_TARGET`] of
-    /// pixels reach it; adopted into the renderer, so it is what the accumulate
-    /// kernel counts and [`Film::converged_fraction`] reads.
-    noise_threshold: Option<f32>,
     /// The frame time a changing picture aims at, or `None` — the default —
     /// to always render at full resolution. See
     /// [`Session::set_preview_target`].
@@ -276,6 +250,9 @@ pub struct Frame {
     height: u32,
     /// Samples in the average, for the spp readout.
     samples: u32,
+    /// Whether this frame is the render's final answer — see
+    /// [`Frame::converged`].
+    converged: bool,
     /// Everything [`crate::stats`] knows as of this publish. Metadata
     /// beside the pixels, never mixed into them: a consumer that only wants
     /// the image reads exactly the bytes it always did.
@@ -331,6 +308,18 @@ impl Frame {
         self.samples
     }
 
+    /// Whether the render that produced this frame is done: it spent its
+    /// sample budget, or reached the convergence threshold the settings
+    /// asked for. The session's own verdict, decided by the same test that
+    /// parks the render thread — a consumer waiting for a still frame must
+    /// read this and never re-derive it from [`Frame::samples`], which
+    /// cannot see an early stop and would wait forever for a count the
+    /// render has already decided not to reach.
+    #[must_use]
+    pub fn converged(&self) -> bool {
+        self.converged
+    }
+
     /// Everything measured as of this publish: the sample's per-kernel GPU
     /// time, the interactivity marks, and where the memory went. The one
     /// source every consumer reads — see [`crate::stats`].
@@ -367,9 +356,15 @@ impl Session {
     /// `scene` (its prepped residency), `renderer`, and a [`Context`]
     /// handle, and starts accumulating `camera` at `width`×`height`
     /// immediately; the first [`Session::take_frame`] to return `Some`
-    /// marks the first frame ready. `auto_stop` bounds accumulation: the
-    /// thread parks at its sample cap (and optional convergence threshold)
-    /// so a settled view releases the GPU.
+    /// marks the first frame ready.
+    ///
+    /// What bounds accumulation is the description's own
+    /// [`Settings`](crate::scene::description::Settings) — the sample
+    /// budget, the optional convergence threshold, and the path-length cap
+    /// — re-read at every wave boundary. A host with a policy of its own
+    /// authors it into the scene like any other value; there is no second
+    /// channel for it, so an edit and the settings it carries can never
+    /// disagree about which render is running.
     ///
     /// `load` is where the time before this call went, as
     /// [`Scene::prep_timed`] reports it. The render thread has no way to
@@ -390,7 +385,6 @@ impl Session {
         camera: Camera,
         width: u32,
         height: u32,
-        auto_stop: AutoStop,
         load: Phases,
     ) -> Self {
         let lanes = Arc::new(Lanes {
@@ -398,8 +392,6 @@ impl Session {
                 camera,
                 size: (width, height),
                 generation: 0,
-                max_samples: auto_stop.max_samples,
-                noise_threshold: auto_stop.noise_threshold,
                 preview_target: None,
                 stamped: Instant::now(),
                 running: true,
@@ -640,10 +632,11 @@ fn render_loop(
     let mut target: Option<(Film, [Arc<FrameBuffers>; 2])> = None;
     let mut applied_size = (0, 0);
     let mut applied_generation = 0;
-    // The auto-stop threshold currently in the renderer. `None` =
-    // the renderer's default; a change is adopted without a reset, since it only
-    // moves what counts as converged, not the beauty.
-    let mut applied_noise_threshold: Option<f32> = None;
+    // The stopping rule currently in force, as the last wave resolved it
+    // from the description. Held rather than re-read per use so a change
+    // is a comparison: the budget and the threshold both wake a parked
+    // render, and the threshold is also pushed into the renderer.
+    let mut applied_controls = Controls::default();
     let mut last_publish: Option<Instant> = None;
     // The whole of the preview state: the picture is still changing if this
     // is inside `CHANGE_HOLD`. Stamped by the one re-arm below, so every
@@ -754,14 +747,41 @@ fn render_loop(
             // that need one.
             last_change = Some(Instant::now());
         }
-        // The auto-stop threshold changes only what the accumulate kernel counts
-        // as converged, so it is adopted without a reset — the per-sample count
-        // self-heals on the next sample. `None` restores the renderer default.
-        if input.noise_threshold != applied_noise_threshold {
+        // How long to render, and how far — resolved from the description
+        // at every boundary, because a settings edit lands in it like any
+        // other value and there is no second channel to disagree with.
+        let controls = controls_of(&description);
+        if controls != applied_controls {
+            // Depth is the one setting that changes the estimator rather
+            // than the finish line, so samples traced under the old cap
+            // cannot stay in the average. `apply_edits` already rewound the
+            // film for the ordinary case, and raised the restart with the
+            // edit's own origin; this rewinds it again for the one case that
+            // misses — an edit whose re-prep was rejected leaves the
+            // description ahead of the residency, and the estimator has to
+            // follow the cap the renderer is actually tracing at.
+            if controls.max_bounces != renderer.max_bounces() {
+                renderer.set_max_bounces(controls.max_bounces);
+                film.reset();
+                last_publish = None;
+            }
+            // The threshold moves what the accumulate kernel counts as
+            // converged, not the beauty, so it is adopted into the running
+            // average — the per-sample count self-heals on the next sample.
+            // `None` restores the renderer default, which `auto_stopped`
+            // then never consults.
             renderer.set_noise_threshold(
-                input.noise_threshold.unwrap_or(Renderer::NOISE_THRESHOLD),
+                controls
+                    .noise_threshold
+                    .unwrap_or(Renderer::NOISE_THRESHOLD),
             );
-            applied_noise_threshold = input.noise_threshold;
+            // And any of the three wakes a settled render. The budget and
+            // the threshold cause no reset of their own, and `parked` is
+            // otherwise cleared only by one — so without this a raised
+            // budget would sit unread until something else happened to
+            // rewind the picture.
+            parked = false;
+            applied_controls = controls;
         }
         // Resolution follows the picture: smaller while it is still
         // changing, full size once the hold expires. Deliberately below the
@@ -791,7 +811,7 @@ fn render_loop(
         // retries on the next nap.
         if parked {
             if epoch > published_epoch
-                && publish(gpu, &renderer, film, frames, lanes, &recorder, epoch)?
+                && publish(gpu, &renderer, film, frames, lanes, &recorder, epoch, true)?
             {
                 published_epoch = epoch;
             }
@@ -803,13 +823,13 @@ fn render_loop(
         // threshold set) converged — a settled render must not pin the GPU. The
         // cap is checked first, so the `converged_fraction` readback runs only
         // when a threshold is set and the cap has not already fired.
-        let complete = film.samples() >= input.max_samples
-            || auto_stopped(gpu, film, input.noise_threshold)?;
+        let complete = film.samples() >= applied_controls.max_samples
+            || auto_stopped(gpu, film, applied_controls.noise_threshold)?;
         if complete {
             // Force the settled image out once (past the throttle) so the
             // converged frame is definitely the latest, then park. If both slots
             // are busy the publish is retried on the next tick.
-            if publish(gpu, &renderer, film, frames, lanes, &recorder, epoch)? {
+            if publish(gpu, &renderer, film, frames, lanes, &recorder, epoch, true)? {
                 parked = true;
                 published_epoch = epoch;
             }
@@ -852,7 +872,7 @@ fn render_loop(
         // If both are busy, skip: the next tick catches up, and the renderer
         // never waits on the consumer.
         if last_publish.is_none_or(|at| at.elapsed() >= publish_interval(film.samples()))
-            && publish(gpu, &renderer, film, frames, lanes, &recorder, epoch)?
+            && publish(gpu, &renderer, film, frames, lanes, &recorder, epoch, false)?
         {
             last_publish = Some(Instant::now());
             published_epoch = epoch;
@@ -891,9 +911,15 @@ fn divided((width, height): (u32, u32), divisor: u32) -> (u32, u32) {
 
 /// Resolve the film's current average into a free publish slot and post it for
 /// the consumer — stamped with `epoch`, the wave boundary this accumulation
-/// last crossed — returning whether a slot was free. Both slots busy
+/// last crossed, and with `converged` saying whether the render is done —
+/// returning whether a slot was free. Both slots busy
 /// means the consumer still holds the last two frames — the caller retries
 /// next tick and the renderer never blocks.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the resolve's inputs and the two stamps the frame carries; a struct \
+              would only rename them"
+)]
 fn publish(
     gpu: &Context,
     renderer: &Renderer,
@@ -902,6 +928,7 @@ fn publish(
     lanes: &Lanes,
     recorder: &Recorder,
     epoch: u64,
+    converged: bool,
 ) -> Result<bool> {
     let Some(free) = frames.iter().find(|frame| Arc::strong_count(frame) == 1) else {
         return Ok(false);
@@ -921,11 +948,59 @@ fn publish(
         width: film.width(),
         height: film.height(),
         samples: film.samples(),
+        converged,
         stats: recorder.stats(),
         epoch,
     };
     *lanes.published.lock().expect("published mutex poisoned") = Some(frame);
     Ok(true)
+}
+
+/// The three settings the render loop itself acts on, resolved from the
+/// description at a wave boundary. The rest of
+/// [`Settings`](crate::scene::description::Settings) belongs to other
+/// stages — resolution follows the render target, the global medium is
+/// residency — and never reaches here.
+#[derive(Clone, Copy, PartialEq)]
+struct Controls {
+    /// The sample budget: accumulation parks here whatever the noise says.
+    max_samples: u32,
+    /// The convergence early-out, or `None` to spend the whole budget.
+    noise_threshold: Option<f32>,
+    /// The path-length cap. Unlike the other two this changes the
+    /// estimator rather than the finish line, so a change to it restarts
+    /// accumulation — see [`apply_edits`].
+    max_bounces: u32,
+}
+
+impl Default for Controls {
+    /// What an unauthored scene renders under, so the session's starting
+    /// assumption is the same one every other consumer of the format makes.
+    fn default() -> Self {
+        Self::from(&Settings::default())
+    }
+}
+
+impl From<&Settings> for Controls {
+    fn from(settings: &Settings) -> Self {
+        Self {
+            max_samples: settings.spp,
+            noise_threshold: settings.noise_threshold,
+            max_bounces: settings.max_bounces,
+        }
+    }
+}
+
+/// The description's render controls — from the one settings object prep
+/// guarantees. A description without one falls back to the defaults rather
+/// than panicking: a missing singleton is prep's error to raise, and the
+/// render thread has a previous scene to keep drawing.
+fn controls_of(description: &SceneDescription) -> Controls {
+    description
+        .settings()
+        .values()
+        .next()
+        .map_or_else(Controls::default, Controls::from)
 }
 
 /// Whether an auto-stop threshold is set and the film has reached it — the
@@ -963,6 +1038,9 @@ fn apply_edits(
     let Some(origin) = edits.iter().map(SceneEdit::at).min() else {
         return Ok(None);
     };
+    // Read before the drain, compared after: the one settings field whose
+    // change invalidates the accumulated image.
+    let depth_before = controls_of(description).max_bounces;
     let batched = u32::try_from(edits.len()).unwrap_or(u32::MAX);
     let before = origin.elapsed();
     let applying = Instant::now();
@@ -986,12 +1064,17 @@ fn apply_edits(
         return Ok(None);
     }
     // Settings carry no residency, so a settings-only edit must not throw
-    // away the accumulated image.
+    // away the accumulated image — with one exception. The path-length cap
+    // is part of the estimator: samples traced under two different caps are
+    // estimates of two different integrals, and averaging them together
+    // would converge to neither. The budget and the noise threshold only
+    // move the finish line, and are adopted mid-render.
     let visual = stale
         .changed
         .iter()
         .chain(&stale.removed)
-        .any(|(kind, _)| *kind != Kind::Settings);
+        .any(|(kind, _)| *kind != Kind::Settings)
+        || controls_of(description).max_bounces != depth_before;
     match scene.update(gpu, description, stale) {
         Ok(phases) => {
             log::debug!("scene edits applied; accumulation restarts");
@@ -1051,27 +1134,42 @@ mod tests {
     use glam::Vec3;
 
     use super::*;
-    use crate::scene::changeset::{MaterialPatch, Op};
+    use crate::scene::changeset::{MaterialPatch, Op, SettingsPatch};
     use crate::scene::description::Texturable;
 
-    /// A demo session that never parks — the sample cap is effectively
+    /// A demo session that never parks — the sample budget is effectively
     /// unbounded, so the accumulation-and-edit tests see samples climb freely.
     fn demo_session(gpu: &Arc<Context>, size: u32) -> Session {
-        demo_session_with(
-            gpu,
-            size,
-            AutoStop {
-                max_samples: u32::MAX,
-                noise_threshold: None,
-            },
-        )
+        demo_session_with(gpu, size, u32::MAX)
     }
 
-    /// A demo session with an explicit auto-stop policy: the description, its
-    /// prepped scene, and the thread already accumulating.
-    fn demo_session_with(gpu: &Arc<Context>, size: u32, auto_stop: AutoStop) -> Session {
+    /// A demo session bounded by `max_samples`: the description, its prepped
+    /// scene, and the thread already accumulating. The budget is authored
+    /// into the scene, which is the session's only channel for it — the demo
+    /// names its settings object `main`.
+    fn demo_session_with(gpu: &Arc<Context>, size: u32, max_samples: u32) -> Session {
+        demo_session_with_settings(gpu, size, max_samples, None)
+    }
+
+    /// [`demo_session_with`] with a convergence threshold as well — the early
+    /// stop, which no sample count implies.
+    fn demo_session_with_settings(
+        gpu: &Arc<Context>,
+        size: u32,
+        max_samples: u32,
+        noise_threshold: Option<f32>,
+    ) -> Session {
         let mut description = SceneDescription::new();
         description.apply(&ChangeSet::demo()).expect("demo applies");
+        description
+            .apply(&ChangeSet {
+                ops: vec![Op::Settings(SettingsPatch {
+                    spp: Some(max_samples),
+                    noise_threshold: Some(noise_threshold),
+                    ..SettingsPatch::new("main")
+                })],
+            })
+            .expect("a budget applies");
         let (scene, load) = Scene::prep_timed(gpu, &mut description).expect("demo preps");
         let camera = *scene.camera();
         let renderer = Renderer::new(gpu).expect("renderer");
@@ -1083,7 +1181,6 @@ mod tests {
             camera,
             size,
             size,
-            auto_stop,
             load,
         )
     }
@@ -1251,14 +1348,7 @@ mod tests {
             return;
         };
         let gpu = Arc::new(gpu);
-        let mut session = demo_session_with(
-            &gpu,
-            32,
-            AutoStop {
-                max_samples: CAP,
-                noise_threshold: None,
-            },
-        );
+        let mut session = demo_session_with(&gpu, 32, CAP);
 
         // Accumulation reaches the cap without ever overshooting it.
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -1283,6 +1373,90 @@ mod tests {
         if let Some(frame) = session.take_frame() {
             assert_eq!(frame.samples(), CAP, "resumed past the cap while parked");
         }
+    }
+
+    /// A frame carries the session's own verdict on whether the render is
+    /// done, and the noise threshold is why it has to. With an unbounded
+    /// budget the early stop is the *only* thing that can finish this render,
+    /// so a consumer re-deriving the flag from the sample count — comparing
+    /// it against a budget the render already decided not to reach — would
+    /// wait forever. That was the shape of the bug: settle the render, then
+    /// ask the frame.
+    #[test]
+    fn a_frame_reports_the_early_stop_the_sample_count_cannot() {
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let gpu = Arc::new(gpu);
+        // A threshold of 1 — the loosest the schema allows — so the stop
+        // fires the moment the metric is trusted rather than depending on how
+        // fast the demo scene actually converges.
+        let session = demo_session_with_settings(&gpu, 32, u32::MAX, Some(1.0));
+
+        // Before the metric is trusted nothing is converged, whatever the
+        // threshold says.
+        let early = wait_for(&session, "an unconverged frame", |frame| {
+            frame.samples() < Renderer::CONVERGENCE_MIN_SAMPLES
+        });
+        assert!(!early.converged(), "converged before the metric is trusted");
+
+        let settled = wait_for(&session, "the early stop", Frame::converged);
+        assert!(
+            settled.samples() >= Renderer::CONVERGENCE_MIN_SAMPLES,
+            "stopped on an untrusted metric at {} samples",
+            settled.samples()
+        );
+        assert!(
+            settled.samples() < u32::MAX,
+            "the budget cannot be what stopped this render"
+        );
+    }
+
+    /// The two halves of the per-field rule, in one settled render. Raising
+    /// the budget must wake the parked thread — nothing else rewinds the film
+    /// for it, so without the unpark the new budget would sit unread — and it
+    /// must do so *without* discarding the samples already accumulated, since
+    /// a finish line is not part of the estimator. Deepening the path is the
+    /// other half: that one restarts, because samples traced under two caps
+    /// estimate two different integrals.
+    #[test]
+    fn the_budget_resumes_the_render_and_the_depth_restarts_it() {
+        const CAP: u32 = 8;
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let gpu = Arc::new(gpu);
+        let session = demo_session_with(&gpu, 32, CAP);
+        wait_for(&session, "the settled frame", |frame| {
+            frame.samples() == CAP && frame.converged()
+        });
+
+        // A raised budget: accumulation continues from where it parked.
+        session.apply(ChangeSet {
+            ops: vec![Op::Settings(SettingsPatch {
+                spp: Some(CAP * 2),
+                ..SettingsPatch::new("main")
+            })],
+        });
+        wait_for(&session, "the resumed render", |frame| {
+            frame.samples() > CAP
+        });
+        wait_for(&session, "the higher budget settling", |frame| {
+            frame.samples() == CAP * 2 && frame.converged()
+        });
+
+        // A new depth: the film rewinds, so the count must be seen below the
+        // budget again before it climbs back.
+        session.apply(ChangeSet {
+            ops: vec![Op::Settings(SettingsPatch {
+                max_bounces: Some(3),
+                ..SettingsPatch::new("main")
+            })],
+        });
+        wait_for(&session, "the restarted accumulation", |frame| {
+            frame.samples() < CAP * 2
+        });
+        assert!(session.take_edit_error().is_none());
     }
 
     /// The picture-changing verbs each bump the session epoch once, and the
@@ -1353,14 +1527,7 @@ mod tests {
             return;
         };
         let gpu = Arc::new(gpu);
-        let session = demo_session_with(
-            &gpu,
-            32,
-            AutoStop {
-                max_samples: CAP,
-                noise_threshold: None,
-            },
-        );
+        let session = demo_session_with(&gpu, 32, CAP);
         wait_for(&session, "the settled frame", |frame| frame.samples() == CAP);
 
         // A real edit first: the scene changes, resettles at the cap, and the
@@ -1397,14 +1564,7 @@ mod tests {
             return;
         };
         let gpu = Arc::new(gpu);
-        let session = demo_session_with(
-            &gpu,
-            32,
-            AutoStop {
-                max_samples: CAP,
-                noise_threshold: None,
-            },
-        );
+        let session = demo_session_with(&gpu, 32, CAP);
         wait_for(&session, "the settled frame", |frame| frame.samples() == CAP);
 
         session.apply(ChangeSet {

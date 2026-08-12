@@ -639,9 +639,16 @@ impl Default for Environment {
 pub struct Settings {
     /// Output width × height, pixels.
     pub resolution: [u32; 2],
-    /// Samples per pixel a batch render accumulates (the viewer
-    /// accumulates forever regardless).
+    /// The sample budget: how many samples per pixel a render accumulates
+    /// before it is done. A hard cap — `noise_threshold` can only stop a
+    /// render earlier, never carry it past this.
     pub spp: u32,
+    /// Stop early once
+    /// [`CONVERGENCE_TARGET`](crate::render::Renderer::CONVERGENCE_TARGET)
+    /// of the pixels have reached this relative estimator standard error,
+    /// a fraction in (0, 1]. `None` — the default — spends the whole
+    /// budget.
+    pub noise_threshold: Option<f32>,
     /// Maximum path length in bounces.
     pub max_bounces: u32,
     /// Sampler seed, decorrelating repeat renders. Carried by the format
@@ -663,6 +670,7 @@ impl Default for Settings {
         Self {
             resolution: [1280, 720],
             spp: 64,
+            noise_threshold: None,
             max_bounces: crate::wavefront::Wavefront::DEFAULT_MAX_BOUNCES,
             seed: 0,
             global_medium: None,

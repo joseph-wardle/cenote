@@ -35,7 +35,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 use anyhow::Context as _;
-use cenote::scene::changeset::{ChangeSet, Op};
+use cenote::scene::changeset::{ChangeSet, Op, SettingsPatch};
 use cenote::scene::description::SceneDescription;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
@@ -77,7 +77,38 @@ fn load_scene(path: &Path) -> anyhow::Result<ChangeSet> {
     for warning in &imported.warnings {
         log::warn!("{warning}");
     }
-    Ok(imported.set)
+    Ok(with_viewer_budget(imported.set))
+}
+
+/// Stamp the viewer's own sample budget onto a scene's settings.
+///
+/// The session accumulates until the description's `spp` says stop, and a
+/// scene file's `spp` is a batch quality target — honoring it here would
+/// freeze a held view mid-refinement at whatever count the file wanted from
+/// an offline render. So the viewer overrides it, with a cap high enough to
+/// be a backstop rather than a quality limit.
+///
+/// Carried in the change-set rather than set once beside it because a
+/// reload is a whole-scene *replace*: settings the file re-authors would
+/// otherwise silently take the render back to the file's number.
+fn with_viewer_budget(mut set: ChangeSet) -> ChangeSet {
+    let mut stamped = false;
+    for op in &mut set.ops {
+        if let Op::Settings(patch) = op {
+            patch.spp = Some(VIEWER_MAX_SAMPLES);
+            stamped = true;
+        }
+    }
+    // A set that authors no settings gets the singleton prep requires
+    // anyway; one that does gets its own name kept, since two settings
+    // objects are a scene prep refuses.
+    if !stamped {
+        set.ops.push(Op::Settings(SettingsPatch {
+            spp: Some(VIEWER_MAX_SAMPLES),
+            ..SettingsPatch::new("settings")
+        }));
+    }
+    set
 }
 
 /// The winit application shell: the [`Viewer`] is absent until `resumed`
@@ -190,7 +221,7 @@ impl Viewer {
         // change-set applied to an empty description, then prepped.
         let (set, scene_watch) = match scene_path {
             Some(path) => (load_scene(path)?, Some(SceneWatch::new(path)?)),
-            None => (ChangeSet::demo(), None),
+            None => (with_viewer_budget(ChangeSet::demo()), None),
         };
         let mut description = SceneDescription::new();
         description.apply(&set).context("scene rejected")?;
@@ -233,10 +264,6 @@ impl Viewer {
             camera.camera(),
             size.width,
             size.height,
-            cenote::render::AutoStop {
-                max_samples: VIEWER_MAX_SAMPLES,
-                noise_threshold: None,
-            },
             load,
         );
         // Not every platform sends an initial redraw request unprompted.

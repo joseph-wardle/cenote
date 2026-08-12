@@ -31,10 +31,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
-use cenote::render::{AutoStop, Frame, Session};
+use cenote::render::{Frame, Session};
 use cenote::scene::Camera;
 use cenote::scene::changeset::{
     ChangeSet, EnvironmentPatch, InstancePatch, Kind, LightPatch, MaterialPatch, MeshPatch, Op,
+    SettingsPatch,
 };
 use cenote::scene::description::{
     Channel, Light, SceneDescription, Texturable, TextureRef, Transform,
@@ -679,6 +680,39 @@ pub fn run(args: &LatencyArgs) -> anyhow::Result<()> {
 
     let texture_cache = TextureCache::of(&images(&replica), args.cold_textures)?;
 
+    // The harness owns the stopping rule, so it authors one: the render
+    // parks at the settle count, and every edit below lands on an image that
+    // has stopped moving — including the wait for the parked thread to wake,
+    // which is part of what the edit costs. Authored into the scene rather
+    // than handed to the session beside it, since the description is the
+    // session's only authority on how long to render.
+    //
+    // The early stop is turned off explicitly, not left to the file: the
+    // walk waits for an exact sample count, and a scene that asked to stop
+    // at some noise level would settle below it and hang the harness.
+    //
+    // The name is the scene's own, since prep allows exactly one settings
+    // object and a second would be rejected.
+    let settle = ChangeSet {
+        ops: vec![Op::Settings(SettingsPatch {
+            spp: Some(args.settle),
+            noise_threshold: Some(None),
+            ..SettingsPatch::new(
+                description
+                    .settings()
+                    .keys()
+                    .next()
+                    .map_or("settings", String::as_str),
+            )
+        })],
+    };
+    description
+        .apply(&settle)
+        .context("authoring the settle count")?;
+    replica
+        .apply(&settle)
+        .context("authoring the settle count")?;
+
     let settings = description
         .settings()
         .values()
@@ -700,13 +734,6 @@ pub fn run(args: &LatencyArgs) -> anyhow::Result<()> {
         camera,
         width,
         height,
-        // The render parks at the settle count, so every edit below lands
-        // on an image that has stopped moving — including the wait for the
-        // parked thread to wake, which is part of what the edit costs.
-        AutoStop {
-            max_samples: args.settle,
-            noise_threshold: None,
-        },
         load,
     );
     // Applied here rather than inside `drag`, because the walk needs it too:

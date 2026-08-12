@@ -5,6 +5,7 @@
             name: "main",
             resolution: None,
             spp: None,
+            noise_threshold: None,
             max_bounces: None,
             seed: None,
             global_medium: None,

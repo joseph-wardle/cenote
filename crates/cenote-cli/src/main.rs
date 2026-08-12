@@ -52,7 +52,8 @@ struct RenderArgs {
     /// Stop early once 98% of pixels reach this relative estimator standard
     /// error, instead of always running the full --spp (which stays the hard
     /// cap). A fraction in (0, 1]; 0.01 is a perceptually tight default.
-    /// Omitted renders the whole sample budget.
+    /// Defaults to the scene's settings, which render the whole budget
+    /// unless they say otherwise.
     #[arg(long, value_parser = parse_noise_threshold)]
     noise_threshold: Option<f32>,
 
@@ -191,8 +192,10 @@ fn render(args: &RenderArgs) -> anyhow::Result<()> {
     let spp = args.spp.unwrap_or(settings.spp);
     let depth = args.depth.unwrap_or(settings.max_bounces);
 
+    let noise_threshold = args.noise_threshold.or(settings.noise_threshold);
+
     let mut renderer = cenote::render::Renderer::with_max_bounces(&gpu, depth)?;
-    if let Some(threshold) = args.noise_threshold {
+    if let Some(threshold) = noise_threshold {
         renderer.set_noise_threshold(threshold);
     }
     let mut film = cenote::render::Film::new(&gpu, width, height)?;
@@ -210,6 +213,7 @@ fn render(args: &RenderArgs) -> anyhow::Result<()> {
         &renderer,
         &mut film,
         spp,
+        noise_threshold,
         args,
         #[cfg(feature = "denoise")]
         denoiser.as_mut(),
@@ -243,6 +247,7 @@ fn render(args: &RenderArgs) -> anyhow::Result<()> {
             &renderer,
             &mut film,
             spp,
+            noise_threshold,
             args,
             #[cfg(feature = "denoise")]
             denoiser.as_mut(),
@@ -278,6 +283,7 @@ fn render_frame(
     renderer: &cenote::render::Renderer,
     film: &mut cenote::render::Film,
     spp: u32,
+    noise_threshold: Option<f32>,
     args: &RenderArgs,
     #[cfg(feature = "denoise")] denoiser: Option<&mut cenote::denoise::Denoiser>,
     origin: Option<Instant>,
@@ -327,11 +333,11 @@ fn render_frame(
             writeln!(trace, "{}", frame.to_ron_line()?)?;
         }
         recorder.record(frame);
-        // With --noise-threshold, stop as soon as enough of the image has
-        // converged; --spp is the hard cap the loop bound already enforces.
-        // Below CONVERGENCE_MIN_SAMPLES the metric is untrusted, so the guard
-        // short-circuits the 4-byte readback there.
-        if args.noise_threshold.is_some()
+        // With a threshold set, stop as soon as enough of the image has
+        // converged; the budget is the hard cap the loop bound already
+        // enforces. Below CONVERGENCE_MIN_SAMPLES the metric is untrusted,
+        // so the guard short-circuits the 4-byte readback there.
+        if noise_threshold.is_some()
             && film.samples() >= cenote::render::Renderer::CONVERGENCE_MIN_SAMPLES
             && film.converged_fraction(gpu)? >= cenote::render::Renderer::CONVERGENCE_TARGET
         {

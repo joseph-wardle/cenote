@@ -210,6 +210,9 @@ fn op(op: wire::Op) -> core::Op {
                 name,
                 resolution,
                 spp,
+                // The wire carries no threshold yet, so a client cannot ask
+                // to stop early: leave whatever the scene set alone.
+                noise_threshold: None,
                 max_bounces,
                 seed,
                 // The wire schema has no medium kind to reference yet, so
