@@ -1,8 +1,10 @@
-// Unit tests for settings resolution: the map a host hands us in, one
-// wire SettingsPatch and a list of complaints out. Resolution is a pure
-// function precisely so this can be checked without a stage, a server, or
-// a GPU — every clamp the delegate owes the server (a rejected change-set
-// is rejected whole) is a line here.
+// Unit tests for settings resolution: a source in — the host's settings
+// map, or a render settings prim's namespaced settings — one wire
+// SettingsPatch and a list of complaints out, plus the merge that decides
+// which of the two wins. Resolution is a pure function precisely so this
+// can be checked without a stage, a server, or a GPU — every clamp the
+// delegate owes the server (a rejected change-set is rejected whole) is a
+// line here.
 #include "renderSettings.hpp"
 
 #include <cstdint>
@@ -16,6 +18,7 @@
 #include <vector>
 
 #include "pxr/base/vt/value.h"
+#include "pxr/imaging/hd/retainedDataSource.h"
 #include "pxr/imaging/hd/tokens.h"
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -198,6 +201,65 @@ void unknown_cenote_keys_warn() {
     check(theirs.warnings.empty(), "another renderer's settings pass in silence");
 }
 
+/// A render settings prim's namespacedSettings as usdImaging builds it:
+/// flat, keyed by the whole attribute name, one sampled source per value.
+HdContainerDataSourceHandle authored(std::initializer_list<std::pair<TfToken, VtValue>> settings) {
+    std::vector<TfToken> names;
+    std::vector<HdDataSourceBaseHandle> values;
+    for (const auto& [key, value] : settings) {
+        names.push_back(key);
+        values.push_back(HdRetainedSampledDataSource::New(value));
+    }
+    return HdRetainedContainerDataSource::New(names.size(), names.data(), values.data());
+}
+
+/// The prim path reads the same keys through the same clamps — it is
+/// literally the same function, and this is the line that says so.
+void a_settings_prim_resolves_like_a_map() {
+    const HdCenoteResolvedSettings resolved = HdCenoteResolveNamespacedSettings(
+        authored({{kSamples(), VtValue(12)}, {kBounces(), VtValue(999)}}));
+    check(resolved.patch.spp == 12U, "a prim's budget is read");
+    check(resolved.patch.max_bounces == 255U, "and its depth is clamped like anyone else's");
+    check(resolved.warnings.size() == 1, "under one complaint");
+    check(!resolved.patch.noise_threshold, "a key the prim does not author stays unset");
+
+    const HdCenoteResolvedSettings none = HdCenoteResolveNamespacedSettings(nullptr);
+    check(!none.patch.spp && !none.patch.max_bounces, "a prim with no settings patches nothing");
+    check(none.warnings.empty(), "and complains about nothing");
+}
+
+/// Precedence, per key: the shot's opinion beats the session's where the
+/// shot has one, and leaves the session's standing where it does not.
+void the_prim_wins_the_keys_it_authors() {
+    const HdCenoteResolvedSettings map =
+        HdCenoteResolveSettings(populated({{kSamples(), VtValue(64)}}));
+    const HdCenoteResolvedSettings prim =
+        HdCenoteResolveNamespacedSettings(authored({{kSamples(), VtValue(512)}}));
+
+    const HdCenoteResolvedSettings merged = HdCenoteOverlaySettings(map, prim);
+    check(merged.patch.spp == 512U, "the prim's budget wins");
+    check(merged.patch.max_bounces == 8U, "and the map still answers for what the prim skipped");
+    check(threshold(merged.patch) == kOff, "for every key it skipped");
+
+    // The other direction is what happens when the prim goes away: the
+    // map is re-resolved whole, so nothing of the prim's survives.
+    check(HdCenoteOverlaySettings(map, {}).patch.spp == 64U,
+          "and an empty overlay leaves the map alone");
+}
+
+/// Complaints from both sources reach the delegate in one list, the map's
+/// first — a prim that names a key nobody has does not silence a map that
+/// does the same.
+void complaints_from_both_sources_survive_the_merge() {
+    const HdCenoteResolvedSettings map =
+        HdCenoteResolveSettings(populated({{TfToken("cenote:maxBounce"), VtValue(4)}}));
+    const HdCenoteResolvedSettings prim =
+        HdCenoteResolveNamespacedSettings(authored({{TfToken("cenote:sampels"), VtValue(4)}}));
+    const HdCenoteResolvedSettings merged = HdCenoteOverlaySettings(map, prim);
+    check(merged.warnings.size() == 2, "both typos are reported");
+    check(merged.warnings.front() == map.warnings.front(), "the map's complaint comes first");
+}
+
 } // namespace
 
 // A failed check reports by escaping: terminate prints the what() and the
@@ -211,6 +273,9 @@ int main() {
     out_of_range_values_are_clamped_not_refused();
     an_unreadable_value_is_ignored();
     unknown_cenote_keys_warn();
+    a_settings_prim_resolves_like_a_map();
+    the_prim_wins_the_keys_it_authors();
+    complaints_from_both_sources_survive_the_merge();
 
     if (failures > 0) {
         std::println(stderr, "{} failure(s)", failures);

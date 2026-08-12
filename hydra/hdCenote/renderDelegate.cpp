@@ -198,24 +198,34 @@ void HdCenoteRenderDelegate::CommitResources(HdChangeTracker* /*tracker*/) {}
 void HdCenoteRenderDelegate::SetTerminalSceneIndex(
     const HdSceneIndexBaseRefPtr& terminalSceneIndex) {
     if (terminalSceneIndex && !_observer) {
-        _observer = std::make_unique<HdCenoteObserver>(terminalSceneIndex, &_pending);
+        _observer =
+            std::make_unique<HdCenoteObserver>(terminalSceneIndex, &_pending, _activeSettings);
     }
 }
 
-// A settings op whenever the host has moved the map since the last one —
+// A settings op whenever either source has moved since the last one —
 // which includes the first call, so the settings ride genesis and the
-// server's own fallback budget never fires. Resolution is pure
-// (renderSettings.hpp); posting the complaints is this side's job, and
-// repeating one it already made is not: with the whole map re-read on
-// every bump, an unlatched warning about a typo'd key would fire again on
-// every drag of an unrelated slider.
+// server's own fallback budget never fires. Both are re-resolved and
+// re-merged whichever one moved: the merge is per key, so an answer that
+// came from the map has to be recomputed when the prim that was
+// overriding it goes away, and re-reading a map of three numbers is not
+// worth an incremental scheme.
+//
+// Resolution is pure (renderSettings.hpp); posting the complaints is this
+// side's job, and repeating one it already made is not: with everything
+// re-read on every bump, an unlatched warning about a typo'd key would
+// fire again on every drag of an unrelated slider.
 void HdCenoteRenderDelegate::_UpdateSettings() {
-    const unsigned int version = GetRenderSettingsVersion();
-    if (version == _settingsSent) {
+    const unsigned int mapVersion = GetRenderSettingsVersion();
+    const unsigned int primVersion = _activeSettings->version;
+    if (mapVersion == _settingsSent && primVersion == _primSettingsSent) {
         return;
     }
-    _settingsSent = version;
-    HdCenoteResolvedSettings resolved = HdCenoteResolveSettings(_settingsMap);
+    _settingsSent = mapVersion;
+    _primSettingsSent = primVersion;
+    // The shot's opinion over the session's.
+    HdCenoteResolvedSettings resolved =
+        HdCenoteOverlaySettings(HdCenoteResolveSettings(_settingsMap), _activeSettings->resolved);
     for (const std::string& warning : resolved.warnings) {
         if (std::find(_settingsWarnings.begin(), _settingsWarnings.end(), warning) ==
             _settingsWarnings.end()) {
@@ -244,8 +254,9 @@ void HdCenoteRenderDelegate::Update() {
         _pending.ops.clear();
         return;
     }
-    // After the degraded exit, so a settings version is never marked sent
-    // into a void.
+    // After the flush, which is what fills the settings translator's slot,
+    // and after the degraded exit, so a version is never marked sent into
+    // a void.
     _UpdateSettings();
     if (!_sentGenesis) {
         if (_client.replace(_pending)) {

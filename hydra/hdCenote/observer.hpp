@@ -9,11 +9,14 @@
 // never send.
 #pragma once
 
+#include <memory>
+
 #include "pxr/imaging/hd/sceneIndex.h"
 #include "pxr/imaging/hdsi/primManagingSceneIndexObserver.h"
 #include "pxr/imaging/hdsi/primTypeNoticeBatchingSceneIndex.h"
 #include "pxr/pxr.h"
 
+#include "settingsPrim.hpp"
 #include "wire/scene.hpp"
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -21,9 +24,12 @@ PXR_NAMESPACE_OPEN_SCOPE
 class HdCenoteObserver final {
 public:
     /// Hangs the batching index and the prim-managing observer off the
-    /// terminal scene index. `pending` outlives this observer (it is the
-    /// delegate's member); translators append to it at every Flush().
-    HdCenoteObserver(HdSceneIndexBaseRefPtr const& terminal, cenote::wire::ChangeSet* pending);
+    /// terminal scene index. Both `pending` and `settings` outlive this
+    /// observer (they are the delegate's members); translators append to
+    /// the first at every Flush(), and the settings translator publishes
+    /// into the second, which the delegate reads at drain.
+    HdCenoteObserver(HdSceneIndexBaseRefPtr const& terminal, cenote::wire::ChangeSet* pending,
+                     std::shared_ptr<HdCenoteSettingsPrim::Active> settings);
 
     HdCenoteObserver(const HdCenoteObserver&) = delete;
     HdCenoteObserver& operator=(const HdCenoteObserver&) = delete;

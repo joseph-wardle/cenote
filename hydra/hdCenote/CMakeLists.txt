@@ -14,6 +14,7 @@ add_library(hdCenote MODULE
     renderSettings.cpp
     rendererPlugin.cpp
     sceneIndexPlugins.cpp
+    settingsPrim.cpp
 )
 # Plug resolves the library by the exact LibraryPath in plugInfo.json — no
 # "lib" prefix.

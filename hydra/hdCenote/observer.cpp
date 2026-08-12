@@ -3,11 +3,14 @@
 #include "pxr/imaging/hd/retainedDataSource.h"
 #include "pxr/imaging/hd/tokens.h"
 
+#include <utility>
+
 #include "domePrim.hpp"
 #include "instancerPrim.hpp"
 #include "lightPrim.hpp"
 #include "materialPrim.hpp"
 #include "meshPrim.hpp"
+#include "settingsPrim.hpp"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -45,11 +48,15 @@ public:
 /// light among them), rect, disk, sphere, cylinder — get the
 /// light translator; domes get their own, which arbitrates the one
 /// environment slot among themselves (usdview's dome-toggle dome contends
-/// like any other); materials get the material translator.
+/// like any other); materials get the material translator; render settings
+/// prims get the settings translator, which puts nothing on the wire and
+/// only publishes the active one's resolution for the delegate to merge.
 class _PrimFactory final : public HdsiPrimManagingSceneIndexObserver::PrimFactoryBase {
 public:
-    explicit _PrimFactory(cenote::wire::ChangeSet* pending)
-        : _pending(pending), _meshes(std::make_shared<HdCenoteMeshPrim::Registry>()),
+    _PrimFactory(cenote::wire::ChangeSet* pending,
+                 std::shared_ptr<HdCenoteSettingsPrim::Active> settings)
+        : _pending(pending), _settings(std::move(settings)),
+          _meshes(std::make_shared<HdCenoteMeshPrim::Registry>()),
           _lights(std::make_shared<HdCenoteLightPrim::Registry>()),
           _domes(std::make_shared<HdCenoteDomePrim::Registry>()),
           _materials(std::make_shared<HdCenoteMaterialPrim::Registry>()),
@@ -81,12 +88,17 @@ public:
             return std::make_shared<HdCenoteMaterialPrim>(entry.primPath, observer, _pending,
                                                           _materials, _meshes);
         }
+        if (entry.primType == HdPrimTypeTokens->renderSettings) {
+            return std::make_shared<HdCenoteSettingsPrim>(entry.primPath, observer, _settings);
+        }
         return nullptr;
     }
 
 private:
     /// The delegate's pending ChangeSet, shared with every translator.
     cenote::wire::ChangeSet* _pending;
+    /// The delegate's slot for the active render settings prim.
+    std::shared_ptr<HdCenoteSettingsPrim::Active> _settings;
     /// The translators' resync tie-breakers (see each Registry's doc).
     std::shared_ptr<HdCenoteMeshPrim::Registry> _meshes;
     std::shared_ptr<HdCenoteLightPrim::Registry> _lights;
@@ -98,7 +110,8 @@ private:
 } // namespace
 
 HdCenoteObserver::HdCenoteObserver(HdSceneIndexBaseRefPtr const& terminal,
-                                   cenote::wire::ChangeSet* pending)
+                                   cenote::wire::ChangeSet* pending,
+                                   std::shared_ptr<HdCenoteSettingsPrim::Active> settings)
     : _batching(HdsiPrimTypeNoticeBatchingSceneIndex::New(
           terminal, HdRetainedContainerDataSource::New(
                         HdsiPrimTypeNoticeBatchingSceneIndexTokens->primTypePriorityFunctor,
@@ -110,7 +123,7 @@ HdCenoteObserver::HdCenoteObserver(HdSceneIndexBaseRefPtr const& terminal,
                          HdsiPrimManagingSceneIndexObserverTokens->primFactory,
                          HdRetainedTypedSampledDataSource<
                              HdsiPrimManagingSceneIndexObserver::PrimFactoryBaseHandle>::
-                             New(std::make_shared<_PrimFactory>(pending))))) {}
+                             New(std::make_shared<_PrimFactory>(pending, std::move(settings)))))) {}
 
 void HdCenoteObserver::Flush() { _batching->Flush(); }
 

@@ -194,4 +194,41 @@ HdCenoteResolvedSettings HdCenoteResolveSettings(const HdRenderSettingsMap& sett
     return resolved;
 }
 
+HdCenoteResolvedSettings
+HdCenoteResolveNamespacedSettings(const HdContainerDataSourceHandle& namespacedSettings) {
+    HdRenderSettingsMap settings;
+    if (namespacedSettings) {
+        for (const TfToken& name : namespacedSettings->GetNames()) {
+            // Time zero: a render setting is a uniform, and a scene that
+            // animates one is asking for something the wire has no way to
+            // say.
+            if (const auto source = HdSampledDataSource::Cast(namespacedSettings->Get(name))) {
+                settings[name] = source->GetValue(0.0f);
+            }
+        }
+    }
+    return HdCenoteResolveSettings(settings);
+}
+
+HdCenoteResolvedSettings HdCenoteOverlaySettings(HdCenoteResolvedSettings under,
+                                                 const HdCenoteResolvedSettings& over) {
+    if (over.patch.resolution) {
+        under.patch.resolution = over.patch.resolution;
+    }
+    if (over.patch.spp) {
+        under.patch.spp = over.patch.spp;
+    }
+    if (over.patch.noise_threshold) {
+        under.patch.noise_threshold = over.patch.noise_threshold;
+    }
+    if (over.patch.max_bounces) {
+        under.patch.max_bounces = over.patch.max_bounces;
+    }
+    if (over.patch.seed) {
+        under.patch.seed = over.patch.seed;
+    }
+    under.warnings.insert(under.warnings.end(), over.warnings.begin(), over.warnings.end());
+    return under;
+}
+
 PXR_NAMESPACE_CLOSE_SCOPE

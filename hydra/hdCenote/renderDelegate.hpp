@@ -7,9 +7,12 @@
 //
 // It does export three render settings (renderSettings.hpp) — the sample
 // budget, the noise threshold, the bounce limit. They travel to the server
-// as scene data, not as delegate state: Update() resolves the map into a
-// wire SettingsPatch whenever the host has moved it, and the patch rides
-// out with everything else the same frame.
+// as scene data, not as delegate state: Update() resolves them into one
+// wire SettingsPatch whenever either source has moved, and the patch rides
+// out with everything else the same frame. Two sources, merged here and
+// nowhere else: the host's settings map, and the stage's active
+// UsdRenderSettings prim as the settings translator (settingsPrim.hpp)
+// published it. The prim wins, per key.
 //
 // Scene content travels the Hydra 2.0 lane instead: SetTerminalSceneIndex
 // hangs the observer chain (observer.hpp) off the terminal scene index, and
@@ -78,9 +81,9 @@ public:
     void Update() override;
 
 private:
-    /// Resolves the settings map onto `_pending` when the host has moved
-    /// it since the last drain, and posts whatever the resolution had to
-    /// complain about.
+    /// Resolves both settings sources onto `_pending` when either has
+    /// moved since the last drain, and posts whatever the resolution had
+    /// to complain about.
     void _UpdateSettings();
 
     // First member on purpose: the server is up (or the client is
@@ -91,12 +94,21 @@ private:
     // The edits the translators have appended since the last drain.
     // Declared before the observer that writes into it.
     cenote::wire::ChangeSet _pending;
+    /// What the active render settings prim resolved to, filled by the
+    /// settings translator during the flush and read right after it.
+    /// Declared before the observer whose translators write into it.
+    std::shared_ptr<HdCenoteSettingsPrim::Active> _activeSettings =
+        std::make_shared<HdCenoteSettingsPrim::Active>();
     std::unique_ptr<HdCenoteObserver> _observer;
     bool _sentGenesis = false;
-    /// The settings version whose resolution is already on the wire. The
-    /// base class starts its own counter at 1, so 0 means "nothing sent
-    /// yet" and the settings ride genesis without a special case.
+    /// The settings-map version whose resolution is already on the wire.
+    /// The base class starts its own counter at 1, so 0 means "nothing
+    /// sent yet" and the settings ride genesis without a special case.
     unsigned int _settingsSent = 0;
+    /// The same for the prim source, whose counter this side keeps. It
+    /// starts where the slot starts, so a stage with no active render
+    /// settings prim never sends on its account.
+    unsigned int _primSettingsSent = 0;
     /// What the last resolution complained about, so a standing
     /// complaint stays quiet while an unrelated knob moves.
     std::vector<std::string> _settingsWarnings;

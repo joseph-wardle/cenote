@@ -32,6 +32,12 @@
                         "priority": 0,
                         "loadWithRenderer": "@HD_CENOTE_DISPLAY_NAME@"
                     },
+                    "HdCenoteRenderSettingsFilteringSceneIndexPlugin": {
+                        "bases": ["HdSceneIndexPlugin"],
+                        "displayName": "Render settings resolve their active flag and cenote: settings for Cenote",
+                        "priority": 0,
+                        "loadWithRenderer": "@HD_CENOTE_DISPLAY_NAME@"
+                    },
                     "HdCenoteDependencyForwardingSceneIndexPlugin": {
                         "bases": ["HdSceneIndexPlugin"],
                         "displayName": "Declared dependencies forward dirtiness for Cenote",

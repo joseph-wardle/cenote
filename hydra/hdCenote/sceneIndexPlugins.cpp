@@ -1,12 +1,15 @@
 // The trimmed convenience filter stack, registered for the Cenote
 // renderer via HdSceneIndexPluginRegistry (each class also has a Types
 // entry in plugInfo.json.in — that metadata is what makes the registry
-// load us for the render index it is assembling). Five stock filters,
+// load us for the render index it is assembling). Six stock filters,
 // borrowed from the hdPrman/hdSt convenience stacks: purpose-split
 // material bindings collapse onto the all-purpose slot, implicit
 // surfaces become meshes, computed primvars (skinning) become plain
-// primvars, sourceAsset shaders resolve to node identifiers, and
-// declared dependencies forward dirtiness at the end of the chain.
+// primvars, sourceAsset shaders resolve to node identifiers, render
+// settings prims learn which of them is active and get their settings
+// trimmed to ours, and declared dependencies forward dirtiness at the end
+// of the chain.
+#include "pxr/base/vt/array.h"
 #include "pxr/imaging/hd/dependencyForwardingSceneIndex.h"
 #include "pxr/imaging/hd/materialBindingsSchema.h"
 #include "pxr/imaging/hd/retainedDataSource.h"
@@ -17,6 +20,7 @@
 #include "pxr/imaging/hdsi/implicitSurfaceSceneIndex.h"
 #include "pxr/imaging/hdsi/materialBindingResolvingSceneIndex.h"
 #include "pxr/imaging/hdsi/nodeIdentifierResolvingSceneIndex.h"
+#include "pxr/imaging/hdsi/renderSettingsFilteringSceneIndex.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -78,6 +82,30 @@ protected:
     }
 };
 
+/// Render settings prims get the two things usdImaging leaves to the
+/// renderer: the computed `active` flag — which prim the scene globals
+/// name, and the invalidation that follows it around — and a
+/// `namespacedSettings` container trimmed to the `cenote:` prefix, so the
+/// settings translator can treat anything left in it that it does not
+/// recognize as a typo.
+///
+/// No fallback prim, unlike hdPrman's: the fallback exists so a renderer
+/// whose defaults live in a settings prim always has one to read, and
+/// cenote's live in the delegate. It is also only ever active if something
+/// names it explicitly, so ours would be a prim that never spoke.
+class HdCenoteRenderSettingsFilteringSceneIndexPlugin final : public HdSceneIndexPlugin {
+protected:
+    HdSceneIndexBaseRefPtr
+    _AppendSceneIndex(const HdSceneIndexBaseRefPtr& inputScene,
+                      const HdContainerDataSourceHandle& /*inputArgs*/) override {
+        static const VtArray<TfToken> prefixes = {TfToken("cenote:")};
+        return HdsiRenderSettingsFilteringSceneIndex::New(
+            inputScene, HdRetainedContainerDataSource::New(
+                            HdsiRenderSettingsFilteringSceneIndexTokens->namespacePrefixes,
+                            HdRetainedTypedSampledDataSource<VtArray<TfToken>>::New(prefixes)));
+    }
+};
+
 /// Dependencies declared by earlier filters forward dirtiness to their
 /// dependents; last in the chain so every declaration is honored.
 class HdCenoteDependencyForwardingSceneIndexPlugin final : public HdSceneIndexPlugin {
@@ -94,6 +122,7 @@ TF_REGISTRY_FUNCTION(TfType) {
     HdSceneIndexPluginRegistry::Define<HdCenoteImplicitSurfaceSceneIndexPlugin>();
     HdSceneIndexPluginRegistry::Define<HdCenoteExtComputationPrimvarPruningSceneIndexPlugin>();
     HdSceneIndexPluginRegistry::Define<HdCenoteNodeIdentifierResolvingSceneIndexPlugin>();
+    HdSceneIndexPluginRegistry::Define<HdCenoteRenderSettingsFilteringSceneIndexPlugin>();
     HdSceneIndexPluginRegistry::Define<HdCenoteDependencyForwardingSceneIndexPlugin>();
 }
 
@@ -108,12 +137,16 @@ TF_REGISTRY_FUNCTION(HdSceneIndexPlugin) {
     registry.RegisterSceneIndexForRenderer(
         renderer, TfToken("HdCenoteMaterialBindingResolvingSceneIndexPlugin"), nullptr,
         /*insertionPhase=*/0, HdSceneIndexPluginRegistry::InsertionOrderAtStart);
-    // The three content filters share phase 0 in registration order;
-    // dependency forwarding sits at hdPrman's customary arbitrary-large
-    // phase so it lands after anything else that ever joins the chain.
+    // The four content filters share phase 0 in registration order —
+    // they touch disjoint prim types, so the order among them is
+    // arbitrary; dependency forwarding sits at hdPrman's customary
+    // arbitrary-large phase so it lands after anything else that ever
+    // joins the chain, the render settings prim's own declared
+    // dependencies included.
     for (const char* pluginName : {"HdCenoteImplicitSurfaceSceneIndexPlugin",
                                    "HdCenoteExtComputationPrimvarPruningSceneIndexPlugin",
-                                   "HdCenoteNodeIdentifierResolvingSceneIndexPlugin"}) {
+                                   "HdCenoteNodeIdentifierResolvingSceneIndexPlugin",
+                                   "HdCenoteRenderSettingsFilteringSceneIndexPlugin"}) {
         registry.RegisterSceneIndexForRenderer(renderer, TfToken(pluginName), nullptr,
                                                /*insertionPhase=*/0,
                                                HdSceneIndexPluginRegistry::InsertionOrderAtEnd);

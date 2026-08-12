@@ -11,11 +11,19 @@
 // allocation (renderBuffer.cpp), and a second authority for the same number
 // could only disagree with the first.
 //
+// Two sources author those keys and both land here: the host's settings
+// map (usdview's sliders, husk's `--settings`) and the stage's active
+// UsdRenderSettings prim, which the prim translator (settingsPrim.hpp)
+// reads as a `namespacedSettings` container. Same keys, same clamps, one
+// arithmetic — they differ only in precedence, and that is one function
+// below. The prim wins, because a prim is the shot's own opinion and a
+// map is the session's.
+//
 // Resolution is a pure function so it can be tested without a stage, and
-// so the prim path can feed the same arithmetic later. It never posts
-// diagnostics itself: it hands back the complaints and the delegate posts
-// them, which is also what lets the delegate stay quiet about a complaint
-// it has already made.
+// so both sources feed the same arithmetic. It never posts diagnostics
+// itself: it hands back the complaints and the delegate posts them, which
+// is also what lets the delegate stay quiet about a complaint it has
+// already made.
 //
 // **The delegate clamps, and must.** Server-side a change-set is rejected
 // whole and `max_bounces` is eight bits, so an authored 512 would take
@@ -27,6 +35,7 @@
 #include <string>
 #include <vector>
 
+#include "pxr/imaging/hd/dataSource.h"
 #include "pxr/imaging/hd/renderDelegate.h"
 #include "pxr/pxr.h"
 
@@ -55,5 +64,25 @@ struct HdCenoteResolvedSettings {
 /// map does not carry leaves its field unset, which is the wire's "leave
 /// this alone" — so a partial map patches only what it names.
 HdCenoteResolvedSettings HdCenoteResolveSettings(const HdRenderSettingsMap& settings);
+
+/// The same resolution over a render settings prim's `namespacedSettings`
+/// — a flat container keyed by the whole attribute name
+/// (`cenote:maxBounces`), which is how a settings map is keyed too. So the
+/// two sources meet at the first line and there is no second set of
+/// clamps to drift from this one. A null container is an empty map, which
+/// patches nothing.
+HdCenoteResolvedSettings
+HdCenoteResolveNamespacedSettings(const HdContainerDataSourceHandle& namespacedSettings);
+
+/// `over` laid onto `under`, field by field: a field `over` left unset
+/// keeps `under`'s answer, and the complaints concatenate with `under`'s
+/// first. This one function is the whole precedence rule between the two
+/// sources — per key, never wholesale, so a prim that names only the
+/// bounce limit still leaves the map's budget standing. Every field of the
+/// patch overlays, not only the three the surface currently authors: the
+/// rule belongs to the patch, and a fourth key should not have to
+/// remember to come back here.
+HdCenoteResolvedSettings HdCenoteOverlaySettings(HdCenoteResolvedSettings under,
+                                                 const HdCenoteResolvedSettings& over);
 
 PXR_NAMESPACE_CLOSE_SCOPE

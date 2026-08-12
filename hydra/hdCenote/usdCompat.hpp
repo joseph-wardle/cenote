@@ -11,6 +11,7 @@
 #pragma once
 
 #include "pxr/imaging/hd/meshUtil.h"
+#include "pxr/imaging/hd/renderSettingsSchema.h"
 #include "pxr/imaging/hd/types.h"
 #include "pxr/pxr.h"
 
@@ -60,6 +61,20 @@ inline TriangulateResult ComputeTriangulatedFaceVarying(const PXR_NS::HdMeshUtil
     return util.ComputeTriangulatedFaceVaryingPrimvar(source, numElements, dataType, triangulated)
                ? TriangulateResult::Success
                : TriangulateResult::Error;
+#endif
+}
+
+// --- HdRenderSettingsSchema::GetNamespacedSettings --------------------------
+// 25.05 hands back the container itself; 26.05 wraps it in a schema
+// (HdSampledDataSourceContainerSchema) whose GetContainer() unwraps it again.
+// The container is the same either way — flat, keyed by the whole attribute
+// name — so the caller only ever wants that.
+inline PXR_NS::HdContainerDataSourceHandle
+NamespacedSettings(const PXR_NS::HdRenderSettingsSchema& settings) {
+#if PXR_VERSION > 2505
+    return settings.GetNamespacedSettings().GetContainer();
+#else
+    return settings.GetNamespacedSettings();
 #endif
 }
 
