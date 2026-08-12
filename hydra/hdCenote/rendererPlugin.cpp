@@ -16,13 +16,14 @@ HdRenderDelegate* HdCenoteRendererPlugin::CreateRenderDelegate() {
 // calls the no-arg factory when the settings map is empty (usdview's path)
 // and this one when it is populated (husk resolves a stage's RenderSettings
 // and passes them here); the base default for it returns nullptr, so a
-// delegate that overrides only the no-arg form never appears in husk. Cenote
-// carries resolution, camera, and sampling to the server as scene data over
-// the wire, not as delegate settings, so there is nothing to honour here —
-// forward to the no-arg factory and let the map fall away.
+// delegate that overrides only the no-arg form never appears in husk. The
+// map is settings authored before there was a delegate to set them on, so
+// it goes to the constructor that seeds the base class with it — the
+// delegate resolves it on its first Update() like any later edit
+// (renderSettings.hpp).
 HdRenderDelegate*
-HdCenoteRendererPlugin::CreateRenderDelegate(HdRenderSettingsMap const& /*settingsMap*/) {
-    return CreateRenderDelegate();
+HdCenoteRendererPlugin::CreateRenderDelegate(HdRenderSettingsMap const& settingsMap) {
+    return new HdCenoteRenderDelegate(settingsMap);
 }
 
 void HdCenoteRendererPlugin::DeleteRenderDelegate(HdRenderDelegate* renderDelegate) {

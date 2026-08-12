@@ -11,6 +11,7 @@ add_library(hdCenote MODULE
     renderBuffer.cpp
     renderDelegate.cpp
     renderPass.cpp
+    renderSettings.cpp
     rendererPlugin.cpp
     sceneIndexPlugins.cpp
 )
@@ -38,6 +39,16 @@ configure_file(plugInfo.json.in plugInfo.json @ONLY)
 # filters for this renderer), so the two spellings cannot drift apart.
 target_compile_definitions(hdCenote PRIVATE
     HD_CENOTE_DISPLAY_NAME="${HD_CENOTE_DISPLAY_NAME}")
+
+# Settings resolution is a pure function of a settings map, so it is the
+# one piece of the delegate testable without a stage, a server, or a GPU.
+# The source compiles a second time here rather than being split into its
+# own archive: a MODULE cannot be linked into an executable, and one file
+# is cheaper than a library boundary that exists only for a test.
+add_executable(settings-test renderSettings_test.cpp renderSettings.cpp)
+target_link_libraries(settings-test PRIVATE cenote-transport cenote_usd_exe)
+target_compile_definitions(settings-test PRIVATE _GLIBCXX_PERMIT_BACKWARD_HASH)
+add_test(NAME settings COMMAND settings-test)
 
 install(TARGETS hdCenote DESTINATION hdCenote)
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/plugInfo.json" DESTINATION hdCenote/resources)

@@ -62,6 +62,21 @@ else()
         "CENOTE_USD_FLAVOR must be 'stock' or 'hdk', got '${CENOTE_USD_FLAVOR}'")
 endif()
 
+# The same handle for standalone executables — the unit tests that link
+# delegate sources without being the plugin. A MODULE may leave symbols
+# undefined for the host to resolve at load; an executable may not, so the
+# closure has to be complete here. Only the HDK differs: Houdini builds
+# its USD with Python support compiled in, so VtValue reaches
+# pxr_boost::python and through it libpython — a tail the plugin's curated
+# list above has no reason to name, and nothing in cenote calls.
+# Consumers still name a flavor-neutral handle.
+add_library(cenote_usd_exe INTERFACE)
+target_link_libraries(cenote_usd_exe INTERFACE cenote_usd)
+if(CENOTE_USD_FLAVOR STREQUAL "hdk")
+    target_link_libraries(cenote_usd_exe INTERFACE
+        Houdini::Dep::pxr_python Houdini::Dep::python3.11)
+endif()
+
 # `cmake --install` lands in the gitignored dist/ tree that
 # PXR_PLUGINPATH_NAME points at; -DCMAKE_INSTALL_PREFIX overrides as usual.
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)

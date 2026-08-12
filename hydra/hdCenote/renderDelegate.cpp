@@ -2,6 +2,10 @@
 
 #include "renderBuffer.hpp"
 #include "renderPass.hpp"
+#include "renderSettings.hpp"
+
+#include <algorithm>
+#include <utility>
 
 #include "pxr/base/gf/vec4f.h"
 #include "pxr/base/tf/diagnostic.h"
@@ -75,8 +79,18 @@ public:
 
 } // namespace
 
+// Both births populate the defaults, which is what makes the map total:
+// every advertised key is present from the first Update(), so resolution
+// never has to distinguish "unauthored" from "authored as the default".
 HdCenoteRenderDelegate::HdCenoteRenderDelegate()
-    : _resourceRegistry(std::make_shared<HdResourceRegistry>()) {}
+    : _resourceRegistry(std::make_shared<HdResourceRegistry>()) {
+    _PopulateDefaultSettings(HdCenoteSettingDescriptors());
+}
+
+HdCenoteRenderDelegate::HdCenoteRenderDelegate(HdRenderSettingsMap const& settingsMap)
+    : HdRenderDelegate(settingsMap), _resourceRegistry(std::make_shared<HdResourceRegistry>()) {
+    _PopulateDefaultSettings(HdCenoteSettingDescriptors());
+}
 
 const TfTokenVector& HdCenoteRenderDelegate::GetSupportedRprimTypes() const { return kNoTypes; }
 
@@ -96,6 +110,10 @@ const TfTokenVector& HdCenoteRenderDelegate::GetSupportedBprimTypes() const {
 
 HdResourceRegistrySharedPtr HdCenoteRenderDelegate::GetResourceRegistry() const {
     return _resourceRegistry;
+}
+
+HdRenderSettingDescriptorList HdCenoteRenderDelegate::GetRenderSettingDescriptors() const {
+    return HdCenoteSettingDescriptors();
 }
 
 HdRenderPassSharedPtr
@@ -184,6 +202,30 @@ void HdCenoteRenderDelegate::SetTerminalSceneIndex(
     }
 }
 
+// A settings op whenever the host has moved the map since the last one —
+// which includes the first call, so the settings ride genesis and the
+// server's own fallback budget never fires. Resolution is pure
+// (renderSettings.hpp); posting the complaints is this side's job, and
+// repeating one it already made is not: with the whole map re-read on
+// every bump, an unlatched warning about a typo'd key would fire again on
+// every drag of an unrelated slider.
+void HdCenoteRenderDelegate::_UpdateSettings() {
+    const unsigned int version = GetRenderSettingsVersion();
+    if (version == _settingsSent) {
+        return;
+    }
+    _settingsSent = version;
+    HdCenoteResolvedSettings resolved = HdCenoteResolveSettings(_settingsMap);
+    for (const std::string& warning : resolved.warnings) {
+        if (std::find(_settingsWarnings.begin(), _settingsWarnings.end(), warning) ==
+            _settingsWarnings.end()) {
+            TF_WARN("%s", warning.c_str());
+        }
+    }
+    _settingsWarnings = std::move(resolved.warnings);
+    _pending.ops.emplace_back(std::move(resolved.patch));
+}
+
 // Hydra's serial per-frame hook, ahead of prim sync: flush the batched
 // notices through the translators, then put whatever they appended on
 // the wire. The first flush is genesis — a Replace, sent even when it
@@ -202,6 +244,9 @@ void HdCenoteRenderDelegate::Update() {
         _pending.ops.clear();
         return;
     }
+    // After the degraded exit, so a settings version is never marked sent
+    // into a void.
+    _UpdateSettings();
     if (!_sentGenesis) {
         if (_client.replace(_pending)) {
             _sentGenesis = true;
