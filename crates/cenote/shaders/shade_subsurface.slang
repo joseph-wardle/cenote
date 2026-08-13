@@ -244,7 +244,7 @@ void shade_subsurface(uint3 tid: SV_DispatchThreadID) {
         let nee = sampleNeeExit(params.scene, spawn, outward, throughput,
                                 lightSampling, uLight, uPoint);
         if (any(nee.unshadowed > 0.0)) {
-            params.shadows.push(shadowRay(nee, pixel, path));
+            params.shadows.push(shadowRay(nee, pixel, path, bounce | SHADOW_KEY_WALK));
         }
     }
 

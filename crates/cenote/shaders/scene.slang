@@ -221,13 +221,9 @@ public float3 interiorTransmittance(SceneTable* scene, uint instance,
 }
 
 // The extinction of whatever fills `instance`, or zero where nothing does.
-//
-// DEFERRED (rung 11-c): a heterogeneous medium reads as zero here, so a
-// shadow connection crossing a grid volume is unattenuated by it. Its σ
-// varies point by point, which this signed-sum measure cannot express; the
-// ratio-tracked shadow leg replaces it. Until then grid volumes cast no
-// shadow — too little fog, never a wall that is not there — and the volume
-// stage skips next-event estimation inside one rather than trust it.
+// A heterogeneous medium reads as zero: its σ varies point by point, which
+// no closed-form extent can express, so the shadow pass ratio-tracks it
+// separately (`gridTransmittance`) and this sum must not count it twice.
 public float3 extinctionOf(SceneTable* scene, uint instance) {
     let medium = scene.geometry[instance].medium;
     if (medium == MEDIUM_NONE) {
@@ -237,86 +233,3 @@ public float3 extinctionOf(SceneTable* scene, uint instance) {
     return record.grid == GRID_NONE ? record.sigmaT : float3(0.0);
 }
 
-// Trace one next-event connection and return what reaches the light: 0 when a
-// solid occluder blocks it, otherwise the product of (1 − opacity) over every
-// fractional-opacity crossing — Cycles' deterministic transparency split, so
-// this stays RNG-free — times the transmittance of every volume the
-// connection passes through. `light`/`primitive` name the connection's aimed
-// target (or `LIGHT_NONE`, which no instance carries, for the environment and
-// delta lights): the connection is visible iff the nearest solid thing along
-// the ray is that target or nothing. The identity test needs no distance
-// epsilon — the ray's `tmax` is bounded to the target (see `ShadowRay` in
-// pathstate.slang). Used by `trace_shadow`, for the queued next-event rays.
-//
-// `VOLUMES` is a specialization, not a flag — the reason is in
-// trace_shadow.slang, where the two entry points that instantiate it live.
-//
-// `inside` is the launching vertex's medium set; the volumes in it are what
-// this pass measures, and the interior — whose extent one instance index
-// cannot express — is the approximation the TODO in trace_shadow.slang
-// names. Volume extents are
-// measured, not marched: for one volume the optical depth over [0, tmax] is
-// σ_t times the extent inside it, and that extent is
-//
-//     Σ over crossings of (∓ t)  +  tmax if the far end is still inside,
-//
-// signed − where the ray enters and + where it leaves. Every term is a plain
-// sum, so the candidates may arrive in any order — which is the whole reason
-// overlapping volumes were defined to *add*, since an ordered walk is the one
-// thing `Proceed()` cannot give. Membership at the far end is the same
-// order-free question, answered by parity.
-//
-// The price of unordered is cancellation: a thickness reaches this sum as
-// the difference of two distances measured from the connection's origin, so
-// a shell thin against its own range loses that difference to float32, and
-// at 1e-7 of it there is nothing left. Marching would subtract adjacent
-// crossings instead, which is the one thing this pass cannot do.
-public float3 shadowVisibility<let VOLUMES : int>(
-    RaytracingAccelerationStructure tlas, SceneTable* scene, RayDesc ray,
-    uint light, uint primitive, uint4 inside) {
-    RayQuery<RAY_FLAG_NONE> query;
-    query.TraceRayInline(tlas, RAY_FLAG_NONE, 0xFF, ray);
-    var attenuation = 1.0;
-    var extent = float3(0.0);
-    var atEnd = inside;
-    while (query.Proceed()) {
-        let instance = query.CandidateInstanceID();
-        if (instance == light && query.CandidatePrimitiveIndex() == primitive) {
-            query.CommitNonOpaqueTriangleHit();
-        } else if (VOLUMES != 0 && boundaryOf(scene.geometry[instance]) == BOUNDARY_NULL) {
-            // A volume's boundary is not a surface: it never occludes, and
-            // committing it — which its full coverage would otherwise do —
-            // would read a fog bank as a solid wall.
-            let t = query.CandidateTriangleRayT();
-            extent += extinctionOf(scene, instance)
-                      * (query.CandidateTriangleFrontFace() ? -t : t);
-            atEnd = crossMedium(atEnd, instance).set;
-        } else {
-            attenuation *= 1.0 - opacityAt(scene, instance,
-                                           query.CandidatePrimitiveIndex(),
-                                           query.CandidateTriangleBarycentrics());
-            if (attenuation < 1e-4) {
-                return float3(0.0); // solidly occluded, to any precision that matters
-            }
-        }
-    }
-    if (query.CommittedStatus() != COMMITTED_NOTHING
-        && (query.CommittedInstanceID() != light
-            || query.CommittedPrimitiveIndex() != primitive)) {
-        return float3(0.0);
-    }
-    if (VOLUMES == 0) {
-        return float3(attenuation);
-    }
-    for (uint slot = 0; slot < MEDIUM_SLOTS; slot++) {
-        // Volumes only: an interior shares the set but not this sum, and
-        // the crossings above could only ever have added a null boundary.
-        if (atEnd[slot] != STACK_EMPTY && (atEnd[slot] & STACK_INTERIOR) == 0) {
-            extent += extinctionOf(scene, atEnd[slot] & STACK_INDEX_MASK) * ray.TMax;
-        }
-    }
-    // A negative extent means a volume was entered and never left, or wound
-    // inside-out; clamping is what keeps that a missing shadow rather than a
-    // medium that amplifies.
-    return attenuation * exp(-max(extent, float3(0.0)));
-}

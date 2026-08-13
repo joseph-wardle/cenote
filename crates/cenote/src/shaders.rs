@@ -67,6 +67,10 @@ pub struct Kernels {
     /// point of the same module, so that measuring a connection's way
     /// through them costs registers only where there are any.
     pub trace_shadow_volumes: Kernel,
+    /// And a third, for a scene where one of those volumes is a density
+    /// grid: it ratio-tracks the connection's way through the grid, and
+    /// carries the tracker's registers to do it.
+    pub trace_shadow_grids: Kernel,
     /// The camera's own medium set, resolved into the scene table at every
     /// accumulation restart — one thread, one ray.
     pub resolve_camera: Kernel,
@@ -103,6 +107,7 @@ impl Kernels {
             shade_subsurface: kernel(spirv!("shade_subsurface"), c"shade_subsurface"),
             trace_shadow: kernel(spirv!("trace_shadow"), c"trace_shadow"),
             trace_shadow_volumes: kernel(spirv!("trace_shadow"), c"trace_shadow_volumes"),
+            trace_shadow_grids: kernel(spirv!("trace_shadow"), c"trace_shadow_grids"),
             resolve_camera: kernel(spirv!("resolve_camera"), c"resolve_camera"),
             accumulate: kernel(spirv!("accumulate"), c"accumulate"),
             resolve: kernel(spirv!("resolve"), c"resolve"),
@@ -172,8 +177,12 @@ impl Kernels {
                 spirv: shade_subsurface?,
                 entry: c"shade_subsurface",
             },
+            trace_shadow_grids: Kernel {
+                // The same module, further entry points in it.
+                spirv: shadow.clone(),
+                entry: c"trace_shadow_grids",
+            },
             trace_shadow_volumes: Kernel {
-                // The same module, a second entry point in it.
                 spirv: shadow.clone(),
                 entry: c"trace_shadow_volumes",
             },
@@ -315,7 +324,7 @@ mod tests {
         u32::from_le_bytes(bytes[..4].try_into().unwrap()) == 0x0723_0203
     }
 
-    fn all(kernels: &Kernels) -> [&Kernel; 12] {
+    fn all(kernels: &Kernels) -> [&Kernel; 13] {
         [
             &kernels.raygen,
             &kernels.intersect,
@@ -325,6 +334,7 @@ mod tests {
             &kernels.shade_subsurface,
             &kernels.trace_shadow,
             &kernels.trace_shadow_volumes,
+            &kernels.trace_shadow_grids,
             &kernels.resolve_camera,
             &kernels.accumulate,
             &kernels.resolve,

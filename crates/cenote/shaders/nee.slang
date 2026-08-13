@@ -217,9 +217,9 @@ public NeeCandidate sampleNeeExit(SceneTable* scene, SpawnPoint spawn,
 }
 
 // A candidate as the shadow queue carries it — trace_shadow adds
-// `contribution` if the connection is unoccluded. The pads are wire
-// layout only.
-public ShadowRay shadowRay(NeeCandidate nee, uint pixel, uint path) {
+// `contribution` if the connection is unoccluded. `key` separates this
+// pixel's connections within the wave; the pad is layout only.
+public ShadowRay shadowRay(NeeCandidate nee, uint pixel, uint path, uint key) {
     ShadowRay shadow;
     shadow.origin = nee.origin;
     shadow.light = nee.light;
@@ -229,8 +229,8 @@ public ShadowRay shadowRay(NeeCandidate nee, uint pixel, uint path) {
     shadow.tmax = nee.tmax;
     shadow.pixel = pixel;
     shadow.path = path;
+    shadow.key = key;
     shadow.pad0 = 0;
-    shadow.pad1 = 0;
     return shadow;
 }
 

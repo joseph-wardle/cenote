@@ -296,6 +296,10 @@ public struct Queue<Entry> {
 // no instance's ID matches: they pass iff nothing commits within `tmax`
 // (open for the environment and distant lights; the distance itself for
 // point lights, where anything nearer is a real occluder).
+// The bit of `ShadowRay.key` that separates the walk-exit dispatch's
+// connections from the vertex connections a pixel makes in the same bounce.
+public static const uint SHADOW_KEY_WALK = 1 << 8;
+
 public struct ShadowRay {
     public float3 origin;
     public uint light; // target light's TLAS custom index, or LIGHT_NONE
@@ -311,6 +315,10 @@ public struct ShadowRay {
     // pass measures volumes alone: the membership it reads is the one at the
     // connection's own vertex.
     public uint path;
+    // Which of the pixel's connections this is within the wave — its bounce,
+    // plus which queue carried it. Nothing but the grid transmittance's seed
+    // reads it, and it lives here rather than in the dispatch's push
+    // constants because the two queues' dispatches share one.
+    public uint key;
     public uint pad0;
-    public uint pad1;
 };

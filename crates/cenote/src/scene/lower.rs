@@ -1025,18 +1025,6 @@ fn lower_medium(name: &str, medium: &description::Medium) -> Result<super::Mediu
 /// `.vdb` if needed (content-cached), parse the header, and derive the
 /// shell transform from the active bounds.
 fn lower_volume(source: &description::VolumeSource) -> Result<super::GridVolume> {
-    // The one place a scene grows its first grid, and so where the rung-11-c
-    // hole gets said out loud: grid volumes do not attenuate shadow rays yet
-    // (`extinctionOf` in scene.slang reads them as zero), and the volume
-    // stage skips next-event estimation inside one rather than trust it.
-    static DEFERRAL: std::sync::Once = std::sync::Once::new();
-    DEFERRAL.call_once(|| {
-        log::warn!(
-            "heterogeneous media do not cast shadows yet: a light connection through a grid \
-             volume is unattenuated, and paths scattering inside one sample light \
-             directionally only"
-        );
-    });
     let nvdb = crate::vdb::prepared(&source.path)?;
     let header = crate::vdb::grid_header(&nvdb, &source.grid)?;
     let (lo, hi) = crate::vdb::shell_box(&header.meta.index_bbox);

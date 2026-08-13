@@ -110,7 +110,7 @@ struct Params {
 [vk::push_constant]
 Params params;
 
-// The stage body, specialized like `shadowVisibility`: HETERO = 0 is the
+// The stage body, specialized like `connectionTransmittance`: HETERO = 0 is the
 // homogeneous engine exactly, HETERO = 1 adds the null-collision tracker
 // for sub-segments whose set holds a grid medium. A specialization and not
 // a flag so gridless scenes keep their register allocation.
@@ -152,8 +152,8 @@ void shadeVolume<let HETERO : int>(uint3 tid) {
     MediumRecord record;
     // Whether the sub-segment that ended the loop had a grid medium in its
     // set — which is when `record.g` and this albedo came from the tracker's
-    // collision point rather than the record, and when next-event estimation
-    // is skipped. Constant false under HETERO = 0.
+    // collision point rather than the record. Constant false under
+    // HETERO = 0.
     var hadGrid = false;
     var trackedAlbedo = float3(0.0);
     for (;;) {
@@ -337,19 +337,15 @@ void shadeVolume<let HETERO : int>(uint3 tid) {
 
     // Next-event estimation from inside the medium, drawn and weighted by
     // `sampleNeeVolume` (nee.slang); the connection's own transmittance is
-    // trace_shadow's to apply. Skipped wherever the dominant interior
-    // scatters: a connection from inside one cannot refract through its
-    // boundary, and the boundary occludes every straight one — so
-    // directional sampling is the only strategy, conveyed to the next
-    // vertex as throughput.w = 0. The dominant is invariant across the
-    // march (see the loop), so reading it here is reading it at entry.
-    //
-    // A scatter inside a grid medium skips on the same terms, and for now
-    // for a second reason: trace_shadow cannot yet measure a connection's
-    // transmittance through a grid (rung 11-c), and an unattenuated
-    // connection would be bias where directional sampling is only noise.
-    let scatterInterior = (interiorOf(set) & STACK_SCATTERING) != 0;
-    let skipNee = scatterInterior || hadGrid;
+    // trace_shadow's to apply — ratio-tracked where it crosses a grid, so a
+    // scatter inside a cloud connects to the lights like any other. Skipped
+    // wherever the dominant interior scatters: a connection from inside one
+    // cannot refract through its boundary, and the boundary occludes every
+    // straight one — so directional sampling is the only strategy, conveyed
+    // to the next vertex as throughput.w = 0. The dominant is invariant
+    // across the march (see the loop), so reading it here is reading it at
+    // entry.
+    let skipNee = (interiorOf(set) & STACK_SCATTERING) != 0;
     let wo = -direction;
     if (!skipNee && lightSampling != LIGHT_SAMPLING_BSDF
         && (params.scene.lightCount > 0 || params.scene.env.selectProb > 0.0)) {
@@ -360,7 +356,7 @@ void shadeVolume<let HETERO : int>(uint3 tid) {
         let nee = sampleNeeVolume(params.scene, position, record.g, wo,
                                   throughput.xyz, lightSampling, uLight, uPoint);
         if (any(nee.unshadowed > 0.0)) {
-            params.queues.shadows.push(shadowRay(nee, pixel, path));
+            params.queues.shadows.push(shadowRay(nee, pixel, path, bounce));
         }
     }
 

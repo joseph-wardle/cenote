@@ -258,7 +258,7 @@ struct Media {
 
 impl Media {
     fn of(scene: &Scene) -> Self {
-        Self {
+        let media = Self {
             any: scene.has_media(),
             interiors: scene.has_interiors(),
             volumes: scene.has_volumes(),
@@ -266,7 +266,15 @@ impl Media {
             priority: scene.has_priority(),
             subsurface: scene.has_subsurface(),
             heterogeneous: scene.has_heterogeneous(),
-        }
+        };
+        // A grid medium is bounded by a `MediumBounds` shell and validation
+        // refuses it anywhere else, so the grid shadow pipeline always finds
+        // the stack the volume flag allocated.
+        debug_assert!(
+            !media.heterogeneous || media.volumes,
+            "a heterogeneous medium without a bounding shell"
+        );
+        media
     }
 
     /// Whether the path pool carries a medium set at all. The same
@@ -538,6 +546,11 @@ struct TraceShadowParams {
     /// interiors alone allocates a stack whose volume lanes were never
     /// seeded, so having one is not the same as having them.
     stack: vk::DeviceAddress,
+    /// The wave's sample index, which with each connection's own key seeds
+    /// the ratio tracking through grid media. Read by the grid entry point
+    /// alone — every other shadow draw is deterministic.
+    sample_index: u32,
+    _pad0: u32,
 }
 
 /// Allocate a device-local buffer into `cell` unless it already holds one.
@@ -937,8 +950,11 @@ pub struct Wavefront {
     shade_subsurface: ComputePipeline,
     trace_shadow: ComputePipeline,
     /// The shadow stage specialized for bounded volumes — see
-    /// `trace_shadow.slang`. One or the other is recorded, never both.
+    /// `trace_shadow.slang`. Exactly one of the three is recorded.
     trace_shadow_volumes: ComputePipeline,
+    /// And for volumes a density grid fills, whose transmittance is
+    /// ratio-tracked rather than integrated.
+    trace_shadow_grids: ComputePipeline,
     /// The camera's own medium set, resolved once at the head of every
     /// restart wave — recorded only when the scene has boundary instances.
     resolve_camera: ComputePipeline,
@@ -1042,6 +1058,11 @@ impl Wavefront {
             )?,
             trace_shadow_volumes: pipeline(
                 &kernels.trace_shadow_volumes,
+                size_of::<TraceShadowParams>(),
+                Bindings::Scene,
+            )?,
+            trace_shadow_grids: pipeline(
+                &kernels.trace_shadow_grids,
                 size_of::<TraceShadowParams>(),
                 Bindings::Scene,
             )?,
@@ -1255,6 +1276,8 @@ impl Wavefront {
             } else {
                 0
             },
+            sample_index: sample,
+            _pad0: 0,
         };
         let intersect = |bounce: u32| IntersectParams {
             paths: self.paths.addresses(),
@@ -1559,10 +1582,12 @@ impl Wavefront {
                         queue::WALK,
                     ));
                 }
-                // The same `media.volumes` that picked this pipeline handed
-                // `trace_shadow` its stack address: the volumes entry point
-                // never runs with a null one.
-                let shadow_pipeline = if media.volumes {
+                // The same `media.volumes` that picked either volume
+                // pipeline handed `trace_shadow` its stack address: neither
+                // ever runs with a null one.
+                let shadow_pipeline = if media.heterogeneous {
+                    &self.trace_shadow_grids
+                } else if media.volumes {
                     &self.trace_shadow_volumes
                 } else {
                     &self.trace_shadow

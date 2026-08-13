@@ -160,6 +160,26 @@ public float2 trackerUniform2(uint pixel, uint sampleIndex, uint bounce, uint ke
     return float2(toUnitFloat(h), toUnitFloat(lowbias32(h ^ 0x3c6ef372u)));
 }
 
+// The shadow pass's ratio-tracking seed: one connection's crossing of the
+// grid filling one placement. Keyed by the placement rather than by a
+// running counter because the traversal that finds them delivers them in no
+// order — a stream that depended on *when* one was found would make the
+// image depend on it too — and per placement rather than per medium so that
+// two overlapping placements of one grid get independent estimates, whose
+// product is then unbiased for their summed extinction. `key` separates a
+// pixel's connections within one wave (its bounce, and which queue carried
+// it).
+public uint shadowSeed(uint pixel, uint sampleIndex, uint key, uint instance) {
+    let h = lowbias32(pixel ^ lowbias32(sampleIndex ^ 0xa54ff53au));
+    return lowbias32(lowbias32(h ^ key) ^ instance);
+}
+
+// That seed's `collision`-th flight length. Unbounded in number like the
+// tracker's, so a hash stream rather than a Sobol dimension.
+public float shadowUniform(uint seed, uint collision) {
+    return toUnitFloat(lowbias32(seed ^ collision));
+}
+
 // The subsurface walk's draws — each interior event's distance and phase
 // turn, and the exit's direction and next-event pair — keyed by (event,
 // draw). Like the march's sub-segments the events are unbounded in

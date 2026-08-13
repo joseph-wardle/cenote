@@ -103,6 +103,27 @@ fn bsdf_only_sum_deep(
     bsdf_only_trace(gpu, scene, size, samples, bounces).1
 }
 
+/// The same sums under an explicit light-sampling strategy — for the
+/// agreement gates, where the point is that three different derivations of
+/// one image land in the same place.
+fn strategy_sum(
+    gpu: &Context,
+    scene: &Scene,
+    size: u32,
+    samples: u32,
+    light_sampling: LightSampling,
+) -> Vec<f32> {
+    traced_sum(
+        gpu,
+        scene,
+        size,
+        samples,
+        Wavefront::DEFAULT_MAX_BOUNCES,
+        light_sampling,
+    )
+    .1
+}
+
 /// The engine under [`bsdf_only_sum_deep`], handing back the wavefront that
 /// traced the sums as well: the probe gates read their histogram off it,
 /// and a wavefront built per call is what makes the counts this scene's
@@ -114,12 +135,23 @@ fn bsdf_only_trace(
     samples: u32,
     bounces: u32,
 ) -> (Wavefront, Vec<f32>) {
+    traced_sum(gpu, scene, size, samples, bounces, LightSampling::BsdfOnly)
+}
+
+fn traced_sum(
+    gpu: &Context,
+    scene: &Scene,
+    size: u32,
+    samples: u32,
+    bounces: u32,
+    light_sampling: LightSampling,
+) -> (Wavefront, Vec<f32>) {
     let wavefront = Wavefront::new(
         gpu,
         &Kernels::embedded(),
         Wavefront::DEFAULT_CAPACITY,
         bounces,
-        LightSampling::BsdfOnly,
+        light_sampling,
     )
     .expect("wavefront");
     let radiance = gpu
@@ -1215,12 +1247,30 @@ fn grid_slab_ops(
 /// frame — an independent spelling of the box `MeshSource::MediumBounds`
 /// generates, so the twin below compares transports and not shells.
 fn grid_slab_box() -> crate::scene::description::MeshSource {
+    inline_box([GRID_SLAB_LO; 3], GRID_SLAB_EXTENT)
+}
+
+/// A ground plane at y = 0, `half` metres either side of the origin.
+fn ground_quad(half: f32) -> crate::scene::description::MeshSource {
+    crate::scene::description::MeshSource::Inline {
+        positions: vec![
+            [-half, 0.0, -half],
+            [half, 0.0, -half],
+            [half, 0.0, half],
+            [-half, 0.0, half],
+        ],
+        normals: None,
+        uvs: None,
+        triangles: vec![[0, 2, 1], [0, 3, 2]],
+    }
+}
+
+/// An axis-aligned box from `lo`, `size` on every axis, wound outward.
+fn inline_box(lo: [f32; 3], size: f32) -> crate::scene::description::MeshSource {
     crate::scene::description::MeshSource::Inline {
         positions: (0..8)
             .map(|corner: u32| {
-                [0, 1, 2].map(|axis| {
-                    GRID_SLAB_LO + ((corner >> axis) & 1) as f32 * GRID_SLAB_EXTENT
-                })
+                [0, 1, 2].map(|axis| lo[axis] + ((corner >> axis) & 1) as f32 * size)
             })
             .collect(),
         normals: None,
@@ -1455,6 +1505,182 @@ fn a_constant_grid_matches_its_homogeneous_twin() {
             twin_means[channel]
         );
     }
+}
+
+/// The 11-c gate: the three light-sampling strategies must agree on a scene
+/// where density grids stand between the lights and everything else.
+///
+/// This is the only gate that can see a wrong shadow transmittance through a
+/// grid. BSDF-only never queues a connection, so every other grid test in
+/// this file measures the tracker alone; next-event-only measures the shadow
+/// pass alone — its connections are ratio-tracked through the cloud, and
+/// nothing else decides the image. Agreement between the two is therefore
+/// agreement between the tracker and the estimator that must integrate the
+/// same medium.
+///
+/// Verified by mutation to see: no grid transmittance at all (20.4 %),
+/// grids named by crossings but not by the launching vertex's membership
+/// (14.2 %), only the first grid of an overlapping pair (6.3 %), a grid's
+/// extinction summed in closed form as well as tracked (6.7 %), and a
+/// lattice span truncated to half its length (8.0 %) — against a clean
+/// margin of 0.9 % and a 3 % bound.
+///
+/// One thing it provably cannot see: an unbiased-roulette mistake. A
+/// maximally broken `SHADOW_ROULETTE` — survivors never scaled back up —
+/// moves this scene's mean by 0.013 %, because a threshold of 0.05 bounds
+/// how much of the image can depend on the connections it plays against.
+#[test]
+fn light_sampling_strategies_agree_across_a_grid_volume() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let Some(nvdb) = constant_grid_fixture("shadow", GRID_SLAB_DENSITY) else {
+        return;
+    };
+    let scene = grid_shadow_scene(&gpu, &nvdb);
+    let (size, samples) = (24, 192);
+    let mean = |light_sampling| {
+        let sum = strategy_sum(&gpu, &scene, size, samples, light_sampling);
+        let means = channel_means(&sum, size, samples);
+        (means[0] + means[1] + means[2]) / 3.0
+    };
+    let mis = mean(LightSampling::Mis);
+    let bsdf = mean(LightSampling::BsdfOnly);
+    let nee = mean(LightSampling::NeeOnly);
+    let _ = std::fs::remove_file(&nvdb);
+    assert!(mis > 0.01, "the scene should be lit, got mean {mis}");
+    for (name, value) in [("BSDF-only", bsdf), ("NEE-only", nee)] {
+        let deviation = (value - mis).abs() / mis;
+        assert!(
+            deviation < 0.03,
+            "{name} disagrees with MIS: {value} vs {mis} ({deviation:.4} relative)"
+        );
+    }
+}
+
+/// That gate's scene: the constant-density fixture as a cloud hanging over a
+/// matte floor, under a white sky, with a small emitter buried inside it — a
+/// second, smaller placement of the same grid pushed into its side, and a
+/// homogeneous haze standing around both.
+///
+/// Every way a connection can meet a medium is in this one frame. It starts
+/// inside a grid (the scatter vertices, and the buried emitter's), ends
+/// inside one (every connection aimed at that emitter), crosses one from
+/// outside (the floor's), crosses *two* where the placements overlap — which
+/// must be two independent tracks, one per placement — and crosses the haze
+/// alongside all of it, whose closed-form extent must compose with the
+/// tracked ones rather than double-count them.
+fn grid_shadow_scene(gpu: &Context, nvdb: &std::path::Path) -> Scene {
+    use crate::scene::changeset::{
+        CameraPatch, ChangeSet, EnvironmentPatch, InstancePatch, MaterialPatch, MediumPatch,
+        MeshPatch, Op, SettingsPatch,
+    };
+    use crate::scene::description::{MeshSource, Transform};
+
+    // The fixture box is [−0.05, 1.6] on each axis; this lands its center at
+    // (0, 1, 0), hanging over the floor with room to see under it.
+    let center = [-0.775, 0.225, -0.775];
+    let ops = vec![
+        Op::Settings(SettingsPatch::new("settings")),
+        Op::Camera(CameraPatch {
+            position: Some([0.0, 1.6, 4.5]),
+            look_at: Some([0.0, 0.9, 0.0]),
+            vfov_degrees: Some(45.0),
+            ..CameraPatch::new("camera")
+        }),
+        Op::Environment(EnvironmentPatch::new("sky")),
+        Op::Mesh(MeshPatch {
+            source: Some(ground_quad(4.0)),
+            ..MeshPatch::new("floor")
+        }),
+        Op::Mesh(MeshPatch {
+            source: Some(MeshSource::MediumBounds),
+            ..MeshPatch::new("shell")
+        }),
+        // A light *inside* the cloud: its connections start and end within
+        // the shell, crossing no face of it, so nothing but the launching
+        // vertex's membership can name the grid they are tracked through.
+        Op::Mesh(MeshPatch {
+            source: Some(inline_box([-0.1, 0.9, -0.1], 0.2)),
+            ..MeshPatch::new("ember")
+        }),
+        Op::Material(Box::new(MaterialPatch {
+            emission_luminance: Some(30.0),
+            ..MaterialPatch::new("glow")
+        })),
+        Op::Material(Box::new(MaterialPatch {
+            base_color: Some(crate::scene::description::Texturable::Constant([0.6; 3])),
+            ..MaterialPatch::new("matte")
+        })),
+        // Chromatic, so a channel dropped from the transmittance reads as a
+        // tint rather than a level.
+        Op::Medium(grid_slab_medium(
+            nvdb,
+            [0.30, 0.18, 0.09],
+            [1.5, 2.4, 3.3],
+            0.3,
+        )),
+        Op::Instance(InstancePatch {
+            mesh: Some("floor".into()),
+            material: Some("matte".into()),
+            ..InstancePatch::new("ground")
+        }),
+        Op::Instance(InstancePatch {
+            mesh: Some("ember".into()),
+            material: Some("glow".into()),
+            ..InstancePatch::new("light")
+        }),
+        Op::Instance(InstancePatch {
+            mesh: Some("shell".into()),
+            material: Some("matte".into()),
+            medium: Some(Some("cloud".into())),
+            transforms: Some(vec![Transform::Trs {
+                translate: center,
+                rotate_degrees: [0.0; 3],
+                scale: [1.0; 3],
+            }]),
+            ..InstancePatch::new("cloud")
+        }),
+        // The same medium placed a second time, half-size and sunk into the
+        // first around the emitter, so that every connection to it — and
+        // every scatter near it — crosses two grids and must be tracked
+        // twice. A different transform is a different record, so this is
+        // also where a traversal that folded two placements into one, or
+        // tracked only the first it found, shows up.
+        Op::Instance(InstancePatch {
+            mesh: Some("shell".into()),
+            material: Some("matte".into()),
+            medium: Some(Some("cloud".into())),
+            transforms: Some(vec![Transform::Trs {
+                translate: [-0.375, 0.625, -0.375],
+                rotate_degrees: [0.0; 3],
+                scale: [0.5; 3],
+            }]),
+            ..InstancePatch::new("wisp")
+        }),
+        // And a homogeneous volume around both, whose extent the same
+        // traversal measures in closed form on the same connections.
+        Op::Medium(MediumPatch {
+            absorption: Some([0.04; 3]),
+            scattering: Some([0.10; 3]),
+            ..MediumPatch::new("haze")
+        }),
+        Op::Mesh(MeshPatch {
+            source: Some(inline_box([-1.5, 0.05, -1.5], 3.0)),
+            ..MeshPatch::new("hazebox")
+        }),
+        Op::Instance(InstancePatch {
+            mesh: Some("hazebox".into()),
+            material: Some("matte".into()),
+            medium: Some(Some("haze".into())),
+            ..InstancePatch::new("fog")
+        }),
+    ];
+    let mut description = crate::scene::description::SceneDescription::new();
+    description
+        .apply(&ChangeSet { ops })
+        .expect("the cloud set is valid");
+    Scene::prep(gpu, &mut description).expect("prep the cloud scene")
 }
 
 /// Milk at albedo exactly 1: a white transmission color makes the whole

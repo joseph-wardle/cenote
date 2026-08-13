@@ -1,7 +1,9 @@
 // Heterogeneous-medium transport: null-collision (delta) tracking against a
-// piecewise-constant majorant. Only shade_volume's tracking entry point
-// imports this module, so gridless scenes — and every other kernel — pay
-// none of PNanoVDB's code or the tracker's registers.
+// piecewise-constant majorant. Two stages import this module — the volume
+// stage's tracking entry point, for the distances a path travels, and the
+// shadow stage's, for what a connection keeps crossing a grid — and only
+// their grid-specialized entry points read any of it, so gridless scenes and
+// every other kernel pay none of PNanoVDB's code or the tracker's registers.
 //
 // The estimator is weighted delta tracking: one uniform decides each
 // collision's fate from the channel-average probabilities, and the weight
@@ -23,7 +25,7 @@
 
 import medium;    // MediaSplit
 import pathstate; // MEDIUM_SLOTS
-import rng;       // trackerUniform2
+import rng;       // trackerUniform2, shadowUniform
 import scene;     // SceneTable, MediumRecord
 
 // Density at a continuous index-space position, nanovdb convention: values
@@ -88,25 +90,22 @@ public struct TrackEvent {
 // the march's own degradation direction.
 static const uint TRACKER_CAP = 1 << 12;
 
+// Where a shadow connection's surviving transmittance starts costing more
+// than it carries: below this the ratio-tracking walk plays roulette
+// against it. Unbiased either way — the survivors are scaled back up.
+static const float SHADOW_ROULETTE = 0.05;
+
 // And the same bound on lattice cells crossed, across every flight of one
 // sub-segment. Three times the lattice's longest axis bounds a diagonal
 // crossing, and this leaves room for any resolution a record can carry.
 static const uint MAJORANT_STEP_CAP = 1 << 12;
 
-// The lattice walk, in the leading grid's cell coordinates.
+// The lattice walk, in one grid's cell coordinates.
 //
 // NUMERICAL CONSTRAINT: boundary times are *stepped* (`tNext += tDelta`),
 // never recomputed from a reprojected `origin + t·direction`. The round trip
 // through world space lands epsilon behind the boundary just crossed, and
 // the walk re-crosses it forever. Only `tNext += tDelta` is monotone.
-//
-// Grids beyond the first — an overlap, which prep does not forbid — get no
-// second walk. Their whole-lattice maxima ride along in `constant`, which is
-// a valid majorant and exactly the bound the scalar tracker used: the looser
-// estimator is paid for only where volumes actually overlap. Which grid
-// leads is `split.grids[0]`, the lowest occupied medium slot — a function of
-// the order the path crossed the shells. Delta tracking is unbiased under
-// *any* valid majorant, so that ordering costs variance, never correctness.
 struct Walk {
     int3 cell;      // the cell the ray is in; outside the lattice at the ends
     int3 advance;   // ±1 per axis, 0 where the ray does not move along it
@@ -114,10 +113,56 @@ struct Walk {
     float3 tDelta;  // t per whole cell on each axis
     int3 res;       // the lattice's cell counts
     uint base;      // its byte offset in the pool
-    float3 sigmaT;  // the leading grid's coefficients
-    float3 constant; // the majorant everything but the walked cell contributes
+    float3 sigmaT;  // the walked grid's coefficients
     float ceiling;  // the current cell's density ceiling
 };
+
+// A ray in one grid's majorant-cell coordinates: where it stands at `start`
+// and how far each axis advances per world unit of `t`. Both the walk and
+// the span the grid can contribute over read off it.
+struct CellRay {
+    float3 at;
+    float3 perT;
+    int3 res;
+};
+
+CellRay cellRay(MediumRecord record, float3 origin, float3 direction, float start) {
+    CellRay ray;
+    ray.res = int3(record.majorantRes & 0x3ff, (record.majorantRes >> 10) & 0x3ff,
+                   (record.majorantRes >> 20) & 0x3ff);
+    ray.at = toIndex(record, origin + start * direction) * record.majorantScale
+             + record.majorantBias;
+    ray.perT = float3(dot(record.worldToIndex[0].xyz, direction),
+                      dot(record.worldToIndex[1].xyz, direction),
+                      dot(record.worldToIndex[2].xyz, direction))
+               * record.majorantScale;
+    return ray;
+}
+
+// Where along `[0, tmax]` the grid can contribute at all: the ray's crossing
+// of the lattice box. The lattice covers the shell exactly (`vdb::shell_box`)
+// and density is zero outside it, so beyond this span there is nothing to
+// track — and the border ceilings `readCell` clamps to would otherwise
+// invent extinction out there. Empty when `y <= x`.
+float2 latticeSpan(CellRay ray, float tmax) {
+    var t0 = 0.0;
+    var t1 = tmax;
+    [unroll]
+    for (uint axis = 0; axis < 3; axis++) {
+        let far = float(ray.res[axis]);
+        if (ray.perT[axis] != 0.0) {
+            let a = -ray.at[axis] / ray.perT[axis];
+            let b = (far - ray.at[axis]) / ray.perT[axis];
+            t0 = max(t0, min(a, b));
+            t1 = min(t1, max(a, b));
+        } else if (ray.at[axis] < 0.0 || ray.at[axis] > far) {
+            // Parallel to this pair of faces and outside them. `t0` only
+            // rises and `t1` only falls below, so this stays empty.
+            t1 = t0 - 1.0;
+        }
+    }
+    return float2(t0, t1);
+}
 
 // Where the current cell stops being the majorant's authority.
 float cellExit(Walk walk) {
@@ -127,6 +172,10 @@ float cellExit(Walk walk) {
 // The current cell's ceiling, cached in the walk. A cell outside the lattice
 // clamps to the border — and so did every splat that reached past it, so the
 // border bounds whatever the tree reads out there too.
+//
+// Ceilings are non-negative: prep floors the lattice's background at zero
+// (`Majorants::new`), which is what lets every majorant derived from one be
+// read as a bound rather than checked for sign.
 void readCell(pnanovdb_buf_t buf, inout Walk walk) {
     let at = clamp(walk.cell, int3(0), walk.res - 1);
     pnanovdb_address_t addr = {
@@ -135,21 +184,14 @@ void readCell(pnanovdb_buf_t buf, inout Walk walk) {
     walk.ceiling = pnanovdb_read_float(buf, addr);
 }
 
-// Open the walk at `t = 0` of the sub-segment.
-Walk openWalk(SceneTable* scene, pnanovdb_buf_t buf, MediaSplit split,
-              float3 origin, float3 direction, float start) {
+// Open the walk where `ray` stands.
+Walk openWalk(MediumRecord record, pnanovdb_buf_t buf, CellRay ray) {
     Walk walk;
-    let leading = scene.media[split.grids[0]];
-    walk.res = int3(leading.majorantRes & 0x3ff, (leading.majorantRes >> 10) & 0x3ff,
-                    (leading.majorantRes >> 20) & 0x3ff);
-    walk.base = leading.majorant;
-    walk.sigmaT = leading.sigmaT;
-    let at = toIndex(leading, origin + start * direction) * leading.majorantScale
-             + leading.majorantBias;
-    let perT = float3(dot(leading.worldToIndex[0].xyz, direction),
-                      dot(leading.worldToIndex[1].xyz, direction),
-                      dot(leading.worldToIndex[2].xyz, direction))
-               * leading.majorantScale;
+    walk.res = ray.res;
+    walk.base = record.majorant;
+    walk.sigmaT = record.sigmaT;
+    let at = ray.at;
+    let perT = ray.perT;
     [unroll]
     for (uint axis = 0; axis < 3; axis++) {
         // A ray sitting exactly on a boundary is in the cell it is heading
@@ -176,16 +218,6 @@ Walk openWalk(SceneTable* scene, pnanovdb_buf_t buf, MediaSplit split,
             walk.tDelta[axis] = 1e30;
         }
     }
-    // Everything the cell lookup does not move: the gridless media summed,
-    // plus any overlapping grid at its own whole-lattice maximum.
-    walk.constant = split.homogeneous.sigmaT;
-    [unroll]
-    for (uint slot = 1; slot < MEDIUM_SLOTS; slot++) {
-        if (slot < split.gridCount) {
-            let record = scene.media[split.grids[slot]];
-            walk.constant += record.densityMax * record.sigmaT;
-        }
-    }
     readCell(buf, walk);
     return walk;
 }
@@ -202,6 +234,43 @@ void stepWalk(pnanovdb_buf_t buf, inout Walk walk) {
         }
     }
     readCell(buf, walk);
+}
+
+// One free flight, drawn in optical depth and spent cell by cell from `t`
+// until either it runs out — a collision, `false`, with `t` on it and `m`
+// the majorant it was drawn against — or the walk leaves `[0, length]`,
+// which is `true` and the flight transmitting. `constant` is whatever
+// extinction the cell lookup does not move.
+//
+// Spending one draw across cells rather than redrawing per cell is what
+// makes empty space cost a lookup instead of a collision, and what keeps a
+// 1³ lattice's sequence of uniforms identical to the scalar majorant this
+// replaced. Both estimators below run this same walk; only what they do
+// where it stops differs.
+bool spendFlight(pnanovdb_buf_t buf, inout Walk walk, float3 constant, float length,
+                 float tau, inout float t, inout uint steps, out float m) {
+    for (;;) {
+        let majorant = constant + walk.ceiling * walk.sigmaT;
+        m = max(majorant.x, max(majorant.y, majorant.z));
+        let end = min(cellExit(walk), length);
+        // `m > 0` and not just the depth test: `toUnitFloat` can return
+        // exactly 0, making tau exactly 0, and an empty cell (m = 0) is
+        // ordinary in a grid — the test alone would then divide 0 by 0.
+        // Skipping the cell is also what a zero depth means: the collision
+        // belongs at the first point that has a majorant.
+        if (m > 0.0 && m * (end - t) >= tau) {
+            t += tau / m;
+            return false;
+        }
+        // Nothing collides in this cell, and an empty one costs the walk
+        // nothing but the lookup that found it empty.
+        tau -= m * (end - t);
+        t = end;
+        if (t >= length || ++steps >= MAJORANT_STEP_CAP) {
+            return true;
+        }
+        stepWalk(buf, walk);
+    }
 }
 
 // Track a distance through `split`'s grids over `[start, start + tmax)` of
@@ -225,48 +294,39 @@ public TrackEvent trackMedia(SceneTable* scene, pnanovdb_buf_t buf, MediaSplit s
     event.steps = 0;
 #endif
 
-    var walk = openWalk(scene, buf, split, origin, direction, start);
+    // Which grid gets the walk is `split.grids[0]`, the lowest occupied
+    // medium slot — a function of the order the path crossed the shells.
+    // Grids beyond it — an overlap, which prep does not forbid — get no
+    // second walk: their whole-lattice maxima ride along in `constant`,
+    // which is a valid majorant and exactly the bound the scalar tracker
+    // used, so the looser estimator is paid for only where volumes actually
+    // overlap. Delta tracking is unbiased under *any* valid majorant, so
+    // that ordering costs variance, never correctness.
+    let leading = scene.media[split.grids[0]];
+    var walk = openWalk(leading, buf, cellRay(leading, origin, direction, start));
+    // Everything the cell lookup does not move.
+    var constant = split.homogeneous.sigmaT;
+    [unroll]
+    for (uint slot = 1; slot < MEDIUM_SLOTS; slot++) {
+        if (slot < split.gridCount) {
+            let record = scene.media[split.grids[slot]];
+            constant += record.densityMax * record.sigmaT;
+        }
+    }
     var t = 0.0;
     var u = uFirst;
     var steps = 0u;
     for (uint collision = 0; collision < TRACKER_CAP; collision++) {
-        // The optical depth this flight must accumulate, in majorant units.
-        // Spending it across cells rather than redrawing per cell is what
-        // keeps the sequence of uniforms — and so a 1³ lattice — exactly the
-        // scalar-majorant tracker's.
-        var tau = -log(1.0 - u.y);
-        var m = 0.0;
-        var transmitted = false;
-        for (;;) {
-            let majorant = walk.constant + walk.ceiling * walk.sigmaT;
-            m = max(majorant.x, max(majorant.y, majorant.z));
-            let end = min(cellExit(walk), tmax);
-            // `m > 0` and not just the depth test: `toUnitFloat` can return
-            // exactly 0, making tau exactly 0, and an empty cell (m = 0) is
-            // ordinary in a grid — the test alone would then divide 0 by 0.
-            // Skipping the cell is also what a zero depth means: the
-            // collision belongs at the first point that has a majorant.
-            if (m > 0.0 && m * (end - t) >= tau) {
-                t += tau / m; // the flight ends inside this cell
-                break;
-            }
-            // Nothing collides in this cell, and an empty one costs the walk
-            // nothing but the lookup that found it empty.
-            tau -= m * (end - t);
-            t = end;
-            if (t >= tmax || ++steps >= MAJORANT_STEP_CAP) {
-                transmitted = true; // the null weights are the estimate
-                break;
-            }
-            stepWalk(buf, walk);
-        }
+        float m;
+        let transmitted =
+            spendFlight(buf, walk, constant, tmax, -log(1.0 - u.y), t, steps, m);
 #ifdef PROBES
         // Every exit below is in this iteration, so one assignment carries
         // the count out of all of them.
         event.steps = steps;
 #endif
         if (transmitted) {
-            return event;
+            return event; // the null weights are the estimate
         }
         let x = origin + (start + t) * direction;
         var sigmaT = split.homogeneous.sigmaT;
@@ -326,4 +386,67 @@ public TrackEvent trackMedia(SceneTable* scene, pnanovdb_buf_t buf, MediaSplit s
                             (crossed << 12) | ((collision + 1) & 0xfff));
     }
     return event;
+}
+
+// What a next-event connection keeps of itself crossing the grid that fills
+// one placement.
+//
+// Ratio tracking, which is delta tracking with the scattering decision taken
+// away: a shadow connection may not scatter, so every collision is a null
+// and the estimate is the running product of the null weights (m − σ_t)/m —
+// unbiased under any valid majorant, and never negative because σ_t ≤ m
+// holds by construction (see `sampleDensity`).
+//
+// One call per *placement*, which is what makes this agree with `splitMedia`
+// where two of them overlap: the set gives a coefficient per placement, and
+// the product of two independently seeded tracks estimates exactly the
+// transmittance their summed extinction has. Each is tracked over its own
+// lattice box against `seed`'s stream, so nothing here depends on which
+// placements the traversal found first, or on how many — which is what lets
+// the shadow pass keep measuring an unordered candidate stream.
+public float3 gridTransmittance(SceneTable* scene, pnanovdb_buf_t buf, uint instance,
+                                float3 origin, float3 direction, float tmax, uint seed) {
+    let record = scene.media[scene.geometry[instance].medium];
+    let span = latticeSpan(cellRay(record, origin, direction, 0.0), tmax);
+    if (span.y <= span.x) {
+        return float3(1.0); // the connection misses the shell
+    }
+    // Re-anchored at the entry point rather than advanced from the origin:
+    // a connection can start far outside a small grid, where `at + t·perT`
+    // would spend its precision on the journey.
+    var walk = openWalk(record, buf, cellRay(record, origin, direction, span.x));
+    pnanovdb_grid_handle_t grid = { pnanovdb_address_t(record.grid) };
+    pnanovdb_readaccessor_t acc;
+    pnanovdb_readaccessor_init(
+        PNANOVDB_REF(acc),
+        pnanovdb_tree_get_root(buf, pnanovdb_grid_get_tree(buf, grid)));
+
+    let length = span.y - span.x;
+    var transmittance = float3(1.0);
+    var t = 0.0;
+    var steps = 0u;
+    for (uint collision = 0; collision < TRACKER_CAP; collision++) {
+        float m;
+        if (spendFlight(buf, walk, float3(0.0), length,
+                        -log(1.0 - shadowUniform(seed, collision)), t, steps, m)) {
+            break; // out the far side: the null weights are the estimate
+        }
+        let density = sampleDensity(buf, acc,
+                                    toIndex(record, origin + (span.x + t) * direction),
+                                    walk.ceiling);
+        transmittance *= max(m - density * record.sigmaT, float3(0.0)) / m;
+        // Roulette on what is left: a connection that has already lost most
+        // of itself to the cloud costs the same per collision as one that
+        // has not, and a dense grid makes many more of them. Unbiased — the
+        // survivors are scaled back up — and keyed clear of the flight draws
+        // above.
+        let survival = max(transmittance.x, max(transmittance.y, transmittance.z));
+        if (survival < SHADOW_ROULETTE) {
+            if (shadowUniform(seed, collision | 0x10000) * SHADOW_ROULETTE >= survival) {
+                return float3(0.0);
+            }
+            transmittance *= SHADOW_ROULETTE / survival;
+        }
+    }
+    return transmittance;
 }

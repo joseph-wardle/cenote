@@ -571,13 +571,20 @@ struct Majorants {
 
 impl Majorants {
     /// An empty lattice, every cell at `floor` — what the tree reads
-    /// wherever no node covers it.
+    /// wherever no node covers it, never below zero.
+    ///
+    /// That clamp is what makes every ceiling non-negative, and so every
+    /// majorant the shaders derive from one. It costs nothing: the shader
+    /// floors density at zero too (`sampleDensity`), so zero bounds a
+    /// negative background exactly as the background itself would, and a
+    /// negative majorant is not a bound at all — it would leave the free
+    /// flight spending optical depth backwards.
     fn new(index_bbox: &[i32; 6], floor: f32) -> Self {
         let res = majorant_resolution(index_bbox);
         let (lo, hi) = shell_box(index_bbox);
         Self {
             res,
-            cells: vec![floor; (res[0] * res[1] * res[2]) as usize],
+            cells: vec![floor.max(0.0); (res[0] * res[1] * res[2]) as usize],
             lo,
             scale: std::array::from_fn(|axis| res[axis] as f32 / (hi[axis] - lo[axis])),
             malformed: false,

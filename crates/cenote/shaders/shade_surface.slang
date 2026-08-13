@@ -260,7 +260,7 @@ void shade_surface(uint3 tid: SV_DispatchThreadID) {
         let nee = sampleNee(params.scene, spawn, frame, closure, wo,
                             throughput.xyz, lightSampling, uLight, uPoint);
         if (any(nee.unshadowed > 0.0)) {
-            params.aux.shadows.push(shadowRay(nee, pixel, path));
+            params.aux.shadows.push(shadowRay(nee, pixel, path, bounce));
         }
     }
 
