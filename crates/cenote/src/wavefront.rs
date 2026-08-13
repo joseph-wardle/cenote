@@ -229,7 +229,7 @@ struct ResolveCameraParams {
 #[derive(Clone, Copy)]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "six independent questions about one scene, each a flag bit downstream — \
+    reason = "seven independent questions about one scene, each a flag bit downstream — \
               a two-variant enum apiece would name the same booleans twice"
 )]
 struct Media {
@@ -250,6 +250,10 @@ struct Media {
     /// Some material carries an active subsurface lobe, so the surface
     /// stage can draw the subsurface technique and the walk stage runs.
     subsurface: bool,
+    /// Some bounded medium is heterogeneous, so the volume stage runs its
+    /// tracking entry point — which is the only kernel that reads the
+    /// grid pool binding.
+    heterogeneous: bool,
 }
 
 impl Media {
@@ -261,6 +265,7 @@ impl Media {
             global: scene.has_global_medium(),
             priority: scene.has_priority(),
             subsurface: scene.has_subsurface(),
+            heterogeneous: scene.has_heterogeneous(),
         }
     }
 
@@ -439,12 +444,29 @@ pub const PROBE_EXIT_REJECT_BIN: usize = PROBE_ENTRY_REJECT_BIN + 1;
 #[cfg(feature = "probes")]
 pub const PROBE_ROULETTE_BIN: usize = PROBE_EXIT_REJECT_BIN + 1;
 
-/// The whole histogram: both stages side by side, then the rejection and
-/// roulette counters. A path scatters at most once per bounce and walks at
-/// most once per bounce, so a `u32` bin cannot overflow short of 2^32
-/// camera paths in one accumulation.
+/// Majorant collisions the tracker drew, summed over all bounces and
+/// sub-segments — a total, not a per-bounce bin.
 #[cfg(feature = "probes")]
-const PROBE_BINS: usize = PROBE_ROULETTE_BIN + 1;
+pub const PROBE_TRACKER_COLLISION_BIN: usize = PROBE_ROULETTE_BIN + 1;
+
+/// The null outcomes among them: nulls / collisions is the fraction of
+/// tracker work the majorant wastes on empty space.
+#[cfg(feature = "probes")]
+pub const PROBE_TRACKER_NULL_BIN: usize = PROBE_TRACKER_COLLISION_BIN + 1;
+
+/// Majorant cells the walk stepped through without colliding — the price
+/// the lattice charges for the collisions it saves.
+#[cfg(feature = "probes")]
+pub const PROBE_TRACKER_STEP_BIN: usize = PROBE_TRACKER_NULL_BIN + 1;
+
+/// The whole histogram: both stages side by side, then the rejection,
+/// roulette, and tracker counters. A path scatters at most once per bounce
+/// and walks at most once per bounce, so a `u32` bin cannot overflow short
+/// of 2^32 camera paths in one accumulation — except the tracker totals,
+/// which grow by tens per path and overflow around 10^8 paths; the probe
+/// gates accumulate far less.
+#[cfg(feature = "probes")]
+const PROBE_BINS: usize = PROBE_TRACKER_STEP_BIN + 1;
 
 /// Push constants for the volume kernel (`shaders/shade_volume.slang`);
 /// recorded only when the scene has media. One instance per bounce — the
@@ -909,6 +931,9 @@ pub struct Wavefront {
     shade_miss: ComputePipeline,
     shade_surface: ComputePipeline,
     shade_volume: ComputePipeline,
+    /// The volume stage specialized for heterogeneous (grid) media — see
+    /// `shade_volume.slang`. One or the other is recorded, never both.
+    shade_volume_hetero: ComputePipeline,
     shade_subsurface: ComputePipeline,
     trace_shadow: ComputePipeline,
     /// The shadow stage specialized for bounded volumes — see
@@ -997,6 +1022,11 @@ impl Wavefront {
             )?,
             shade_volume: pipeline(
                 &kernels.shade_volume,
+                size_of::<ShadeVolumeParams>(),
+                Bindings::Scene,
+            )?,
+            shade_volume_hetero: pipeline(
+                &kernels.shade_volume_hetero,
                 size_of::<ShadeVolumeParams>(),
                 Bindings::Scene,
             )?,
@@ -1395,6 +1425,7 @@ impl Wavefront {
             textures: scene.texture_descriptors(),
             table_planes,
             table_volumes,
+            grid_pool: scene.grid_pool(),
         };
         // An indirect stage: workgroup counts read from its queue's header,
         // which the producing stage maintained.
@@ -1494,10 +1525,16 @@ impl Wavefront {
                 }
                 // Medium events resolve before the surface stage consumes
                 // the hit queue: a path that survives one is pushed there
-                // and shades as ever.
+                // and shades as ever. The same `media.heterogeneous` that
+                // bound the grid pool picks the tracking entry point.
                 if volume_stage {
+                    let volume_pipeline = if media.heterogeneous {
+                        &self.shade_volume_hetero
+                    } else {
+                        &self.shade_volume
+                    };
                     passes.push(indirect(
-                        &self.shade_volume,
+                        volume_pipeline,
                         bytemuck::bytes_of(&params.shade_volume[bounce as usize]),
                         queue::VOLUME,
                     ));
@@ -1626,6 +1663,7 @@ mod tests {
             absorption: Vec3::splat(0.05),
             scattering: Vec3::splat(0.1),
             anisotropy: 0.0,
+            volume: None,
         };
         let camera = Camera {
             position: Vec3::new(0.0, 2.0, 8.5),
@@ -1697,9 +1735,10 @@ mod tests {
             absorption: Vec3::splat(0.05),
             scattering: Vec3::splat(0.1),
             anisotropy: 0.0,
+            volume: None,
         };
         let kernels = Kernels::embedded();
-        for (global, wanted) in [(None, false), (Some(fog), true)] {
+        for (global, wanted) in [(None, false), (Some(&fog), true)] {
             let scene = Scene::new_in_medium(
                 &gpu,
                 &[Object {
@@ -2237,10 +2276,11 @@ mod tests {
             &objects,
             camera,
             &Environment::constant(Vec3::splat(0.02)),
-            Some(crate::scene::Medium {
+            Some(&crate::scene::Medium {
                 absorption: Vec3::splat(0.01),
                 scattering: Vec3::splat(0.06),
                 anisotropy: -0.2,
+                volume: None,
             }),
         )
         .expect("scene");
@@ -2293,6 +2333,7 @@ mod tests {
                     absorption: Vec3::new(0.05, 0.02, 0.01),
                     scattering: Vec3::new(0.10, 0.16, 0.22),
                     anisotropy: 0.3,
+                    volume: None,
                 }),
                 interior_priority: 0,
             },

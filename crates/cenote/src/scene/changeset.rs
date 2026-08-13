@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 
 use super::description::{
     Camera, Instance, Light, Medium, Mesh, MeshSource, Objects, SceneDescription, Settings,
-    Texturable, TextureRef, Transform,
+    Texturable, TextureRef, Transform, VolumeSource,
 };
 use super::scene_error;
 use crate::error::Result;
@@ -245,6 +245,9 @@ pub struct MediumPatch {
     pub scattering: Option<[f32; 3]>,
     /// Henyey–Greenstein anisotropy.
     pub anisotropy: Option<f32>,
+    /// Doubly optional, like the environment's path: `None` leaves the
+    /// grid alone, `Some(None)` makes the medium homogeneous again.
+    pub volume: Option<Option<VolumeSource>>,
 }
 
 /// Patch for a [`Light`]: the definition replaces wholesale — a delta
@@ -400,6 +403,11 @@ impl ChangeSet {
                         visit(path);
                     }
                 }
+                Op::Medium(patch) => {
+                    if let Some(Some(volume)) = &mut patch.volume {
+                        visit(&mut volume.path);
+                    }
+                }
                 _ => {}
             }
         }
@@ -518,7 +526,7 @@ fn apply_op(objects: &mut Objects, dirty: &mut Dirty, op: &Op) -> Result<()> {
             );
         }),
         Op::Medium(patch) => upsert(&mut objects.media, &name, |medium| {
-            merge!(medium, patch; absorption, scattering, anisotropy);
+            merge!(medium, patch; absorption, scattering, anisotropy, volume);
         }),
         Op::Light(patch) => upsert(&mut objects.lights, &name, |light| {
             if let Some(value) = patch.light {
@@ -669,6 +677,9 @@ fn validate_mesh(name: &str, mesh: &Mesh) -> Result<()> {
             Ok(())
         }
         MeshSource::Ply { path } => validate_path(&format!("mesh \"{name}\""), path),
+        // The canonical unit cube — nothing of the author's to check; the
+        // instance-side pairing rule is validate_instance's.
+        MeshSource::MediumBounds => Ok(()),
     }
 }
 
@@ -680,6 +691,31 @@ fn validate_instance(objects: &Objects, name: &str, instance: &Instance) -> Resu
     {
         return Err(scene_error(format!(
             "instance \"{name}\" bounds a medium \"{medium}\" that does not exist"
+        )));
+    }
+    // A heterogeneous medium's extent is its grid's active bounds and
+    // nothing else, so it pairs with the auto-generated shell exactly:
+    // a user mesh under one — or the shell under anything else — would be
+    // a mesh-clipped volume, which is a non-goal (clip in the DCC).
+    let heterogeneous = instance
+        .medium
+        .as_ref()
+        .and_then(|medium| objects.media.get(medium))
+        .is_some_and(|medium| medium.volume.is_some());
+    let bounds_mesh = objects
+        .meshes
+        .get(&instance.mesh)
+        .is_some_and(|mesh| matches!(mesh.source, MeshSource::MediumBounds));
+    if heterogeneous && !bounds_mesh {
+        return Err(scene_error(format!(
+            "instance \"{name}\" bounds a heterogeneous medium on a user mesh — the grid \
+             defines its own extent, so the instance must place a MediumBounds mesh"
+        )));
+    }
+    if bounds_mesh && !heterogeneous {
+        return Err(scene_error(format!(
+            "instance \"{name}\" places a MediumBounds mesh without a heterogeneous medium — \
+             the shell's size comes from the medium's grid, so there is nothing to derive it from"
         )));
     }
     // Element by element — an empty array is a valid instance that places
@@ -771,16 +807,30 @@ fn validate_medium(name: &str, medium: &Medium) -> Result<()> {
             medium.anisotropy
         )));
     }
+    if let Some(volume) = &medium.volume {
+        validate_path(&format!("medium \"{name}\"'s volume"), &volume.path)?;
+        if volume.grid.is_empty() {
+            return Err(scene_error(format!(
+                "medium \"{name}\": the volume's grid name is empty"
+            )));
+        }
+    }
     Ok(())
 }
 
 fn validate_settings(objects: &Objects, name: &str, settings: &Settings) -> Result<()> {
-    if let Some(medium) = &settings.global_medium
-        && !objects.media.contains_key(medium)
-    {
-        return Err(scene_error(format!(
-            "settings \"{name}\" name a global medium \"{medium}\" that does not exist"
-        )));
+    if let Some(medium) = &settings.global_medium {
+        let Some(global) = objects.media.get(medium) else {
+            return Err(scene_error(format!(
+                "settings \"{name}\" name a global medium \"{medium}\" that does not exist"
+            )));
+        };
+        if global.volume.is_some() {
+            return Err(scene_error(format!(
+                "settings \"{name}\": the global medium \"{medium}\" is heterogeneous — a grid \
+                 has bounds and the open space has none; place it with a MediumBounds instance"
+            )));
+        }
     }
     if settings.resolution.contains(&0) {
         return Err(scene_error(format!(

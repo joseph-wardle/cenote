@@ -26,10 +26,16 @@ import nee;
 import pathstate;
 import rng;
 import scene;
+import tracking;
 
 // The scene TLAS — the march re-traces against it.
 [vk::binding(0, 0)]
 RaytracingAccelerationStructure sceneTlas;
+
+// The NanoVDB grid pool. Partially bound: only the tracking entry point
+// reads it, and it is dispatched only for scenes whose prep wrote it.
+[[vk::binding(5, 0)]]
+StructuredBuffer<uint> gridPool;
 
 // Bit 25 of `Params.packed`, as in shade_surface: the path pool carries a
 // medium set. A scene whose only medium is the global one has none — there
@@ -76,6 +82,14 @@ struct VolumeQueues {
 #endif
 };
 
+#ifdef PROBES
+// The tracker's totals — `PROBE_TRACKER_COLLISION_BIN` and the two bins
+// after it in wavefront.rs, which owns the layout.
+static const uint PROBE_TRACKER_COLLISIONS = 515;
+static const uint PROBE_TRACKER_NULLS = 516;
+static const uint PROBE_TRACKER_STEPS = 517;
+#endif
+
 struct Params {
     Paths paths;
     VolumeQueues* queues;
@@ -96,9 +110,11 @@ struct Params {
 [vk::push_constant]
 Params params;
 
-[shader("compute")]
-[numthreads(WORKGROUP_SIZE, 1, 1)]
-void shade_volume(uint3 tid: SV_DispatchThreadID) {
+// The stage body, specialized like `shadowVisibility`: HETERO = 0 is the
+// homogeneous engine exactly, HETERO = 1 adds the null-collision tracker
+// for sub-segments whose set holds a grid medium. A specialization and not
+// a flag so gridless scenes keep their register allocation.
+void shadeVolume<let HETERO : int>(uint3 tid) {
     if (tid.x >= params.queues.volumes.count()) {
         return;
     }
@@ -134,8 +150,13 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
     var crossed = 0u;
     MediumEvent event;
     MediumRecord record;
+    // Whether the sub-segment that ended the loop had a grid medium in its
+    // set — which is when `record.g` and this albedo came from the tracker's
+    // collision point rather than the record, and when next-event estimation
+    // is skipped. Constant false under HETERO = 0.
+    var hadGrid = false;
+    var trackedAlbedo = float3(0.0);
     for (;;) {
-        record = combineMedia(params.scene, set);
         // The first sub-segment keeps the Sobol dimension the bounce block
         // reserved; the rest draw from the hash stream, having no reserved
         // dimensions of their own. A segment no boundary interrupts
@@ -144,7 +165,32 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
                             ? sample_2d(pixel, params.sampleIndex,
                                         bounceDimension(bounce, VOLUME_DISTANCE))
                             : hashUniform2(pixel, params.sampleIndex, bounce, crossed);
-        event = sampleMedium(record, end - start, uDistance);
+        let split = splitMedia<HETERO>(params.scene, set);
+        record = split.homogeneous;
+        hadGrid = HETERO != 0 && split.gridCount != 0;
+        if (!hadGrid) {
+            event = sampleMedium(record, end - start, uDistance);
+        } else {
+            let tracked = trackMedia(params.scene, gridPool, split, origin,
+                                     direction, start, end - start, pixel,
+                                     params.sampleIndex, bounce, crossed,
+                                     uDistance);
+            event.scattered = tracked.scattered;
+            event.distance = tracked.distance;
+            event.weight = tracked.weight;
+            // The phase context is the collision point's, not the record's:
+            // g is the σ_s-weighted mix of everything scattering *there*,
+            // and the guide albedo likewise.
+            record.g = tracked.g;
+            trackedAlbedo = tracked.albedo;
+#ifdef PROBES
+            // Per sub-segment rather than per path: the totals are the same
+            // and nothing has to be carried to the exits.
+            params.queues.probes[PROBE_TRACKER_COLLISIONS].add(tracked.collisions);
+            params.queues.probes[PROBE_TRACKER_NULLS].add(tracked.nulls);
+            params.queues.probes[PROBE_TRACKER_STEPS].add(tracked.steps);
+#endif
+        }
         throughput.xyz *= event.weight;
         if (event.scattered) {
             break;
@@ -273,7 +319,8 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
         // has no surface, so — as with the environment — no normal.
         let guide = bounce == 0 ? float3(1.0) : params.aov.guide[pixel].xyz;
         if (any(guide > 0.0)) {
-            let albedo = record.sigmaS / max(record.sigmaT, 1e-9);
+            let albedo = hadGrid ? trackedAlbedo
+                                 : record.sigmaS / max(record.sigmaT, 1e-9);
             params.aov.albedo[pixel] += float4(guide * albedo, 0.0);
         }
         params.aov.guide[pixel] = float4(0.0);
@@ -296,9 +343,15 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
     // directional sampling is the only strategy, conveyed to the next
     // vertex as throughput.w = 0. The dominant is invariant across the
     // march (see the loop), so reading it here is reading it at entry.
+    //
+    // A scatter inside a grid medium skips on the same terms, and for now
+    // for a second reason: trace_shadow cannot yet measure a connection's
+    // transmittance through a grid (rung 11-c), and an unattenuated
+    // connection would be bias where directional sampling is only noise.
     let scatterInterior = (interiorOf(set) & STACK_SCATTERING) != 0;
+    let skipNee = scatterInterior || hadGrid;
     let wo = -direction;
-    if (!scatterInterior && lightSampling != LIGHT_SAMPLING_BSDF
+    if (!skipNee && lightSampling != LIGHT_SAMPLING_BSDF
         && (params.scene.lightCount > 0 || params.scene.env.selectProb > 0.0)) {
         let uLight = sample_1d(pixel, params.sampleIndex,
                                bounceDimension(bounce, NEE_LIGHT));
@@ -342,6 +395,20 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
     params.paths.origin[path] = float4(position, 0.0);
     params.paths.direction[path] = float4(scatter.wi, 0.0);
     params.paths.throughput[path] =
-        float4(scattered, scatterInterior ? 0.0 : scatter.pdf);
+        float4(scattered, skipNee ? 0.0 : scatter.pdf);
     params.queues.rays.push(path);
+}
+
+[shader("compute")]
+[numthreads(WORKGROUP_SIZE, 1, 1)]
+void shade_volume(uint3 tid: SV_DispatchThreadID) {
+    shadeVolume<0>(tid);
+}
+
+// Dispatched instead of (never beside) `shade_volume` when the scene holds
+// a grid medium.
+[shader("compute")]
+[numthreads(WORKGROUP_SIZE, 1, 1)]
+void shade_volume_hetero(uint3 tid: SV_DispatchThreadID) {
+    shadeVolume<1>(tid);
 }

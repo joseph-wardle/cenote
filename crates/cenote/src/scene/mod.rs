@@ -270,6 +270,10 @@ struct PlacementMedia {
     /// wavefront records the walk stage for and what a closure can draw
     /// can never disagree.
     subsurface: bool,
+    /// Some bounded medium is heterogeneous — a density grid fills it, so
+    /// the volume stage dispatches its tracking entry point and binds the
+    /// grid pool. Implies `volumes`.
+    heterogeneous: bool,
 }
 
 fn placement_media(placements: &[Placement]) -> PlacementMedia {
@@ -279,6 +283,7 @@ fn placement_media(placements: &[Placement]) -> PlacementMedia {
         priority: false,
         scattering_interiors: false,
         subsurface: false,
+        heterogeneous: false,
     };
     for placement in placements {
         let word = boundary_word(placement);
@@ -287,6 +292,10 @@ fn placement_media(placements: &[Placement]) -> PlacementMedia {
         media.priority |= word & (MAX_PRIORITY << STACK_PRIORITY_SHIFT) != 0;
         media.scattering_interiors |= word & STACK_SCATTERING != 0;
         media.subsurface |= subsurface(&placement.material).is_some();
+        media.heterogeneous |= placement
+            .medium
+            .as_ref()
+            .is_some_and(|medium| medium.volume.is_some());
     }
     media
 }
@@ -369,9 +378,11 @@ const _: () = assert!((MAX_PRIORITY + 1) << STACK_PRIORITY_SHIFT == STACK_INTERI
 const _: () =
     assert!(STACK_SCATTERING > BOUNDARY_MASK && STACK_SCATTERING < 1 << STACK_PRIORITY_SHIFT);
 
-/// A homogeneous medium as the renderer holds it: coefficients per `ACEScg`
-/// channel in inverse meters, and the phase function's anisotropy.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// A medium as the renderer holds it: coefficients per `ACEScg` channel in
+/// inverse meters, the phase function's anisotropy, and — for a
+/// heterogeneous medium — the density grid that multiplies the
+/// coefficients point by point.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Medium {
     /// Absorption `σ_a`: the part of the extinction that removes light.
     pub absorption: Vec3,
@@ -382,6 +393,39 @@ pub struct Medium {
     /// forward. Clamped to [`MAX_ANISOTROPY`] on its way into the table —
     /// the one place it can reach a shader.
     pub anisotropy: f32,
+    /// The density grid, resolved at lowering; `None` is homogeneous.
+    pub volume: Option<GridVolume>,
+}
+
+/// A heterogeneous medium's grid, resolved at lowering from the `.nvdb`
+/// header: everything prep derives the shell and the two sampling
+/// transforms from, with the multi-GiB payload — and the majorant lattice
+/// built out of it — left to the [`crate::vdb::GridPool`] upload.
+///
+/// "Asset space" is the grid's own world space — the space its `.vdb` was
+/// authored in, which the instance transform then places in the scene.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GridVolume {
+    /// The prepared `.nvdb` (the cache output, or the authored file
+    /// itself) — what the pool uploads.
+    pub nvdb: PathBuf,
+    /// The grid's name inside the container.
+    pub grid: String,
+    /// Rows of the affine asset→index map, from the grid's own transform.
+    pub asset_to_index: [[f32; 4]; 3],
+    /// Unit cube [0, 1]³ → the grid's active bounds in asset space,
+    /// dilated by one voxel so the trilinear stencil's whole support sits
+    /// inside the shell — the transform the `MediumBounds` placement bakes.
+    pub bounds_to_asset: Mat4,
+    /// Cells of the majorant lattice per axis, from
+    /// [`crate::vdb::majorant_resolution`].
+    pub majorant_res: [u32; 3],
+    /// Index space → lattice cell coordinates: `cell = index · scale +
+    /// bias`. The lattice holds unitless density ceilings, so coefficients
+    /// multiply in-shader and a lookdev edit of σ touches no grid data.
+    pub majorant_scale: [f32; 3],
+    /// The translation half of the same map.
+    pub majorant_bias: [f32; 3],
 }
 
 /// One entry of the medium table. Mirrors `struct MediumRecord` in
@@ -390,16 +434,70 @@ pub struct Medium {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct MediumRecord {
     /// Extinction `σ_a` + `σ_s`, per `ACEScg` channel, in inverse meters —
-    /// the σ of Beer–Lambert, and the density distance sampling draws against.
+    /// the σ of Beer–Lambert, and the density distance sampling draws
+    /// against. For a heterogeneous medium these are the *coefficients*
+    /// the grid's density multiplies: σ(x) = density(x) · σ.
     sigma_t: [f32; 3],
     /// Henyey–Greenstein anisotropy, clamped inside (−1, 1).
     g: f32,
     /// Scattering `σ_s`. Zero routes no path to the volume stage.
     sigma_s: [f32; 3],
-    _pad0: f32,
+    /// The grid's byte offset in the pool, or [`GRID_NONE`] for a
+    /// homogeneous medium. It took `pad0`'s word, so every field a
+    /// homogeneous record uses kept its offset.
+    grid: u32,
+    /// Rows of the world→index transform: the grid's asset→index map
+    /// composed with the placement's world→asset inverse. Zero (harmless)
+    /// on homogeneous records.
+    world_to_index: [[f32; 4]; 3],
+    /// Index space → majorant-cell coordinates (`cell = index · scale +
+    /// bias`), the lattice's byte offset in the pool, and its cell counts
+    /// packed ten bits per axis, x lowest.
+    majorant_scale: [f32; 3],
+    majorant: u32,
+    majorant_bias: [f32; 3],
+    majorant_res: u32,
+    /// The largest ceiling anywhere in the lattice: the bound a grid falls
+    /// back to where the tracker walks another grid's lattice.
+    density_max: f32,
+    /// Not slack to reclaim: `world_to_index`'s `float4` rows already force
+    /// a 16-byte stride, so the record is 128 bytes with or without this —
+    /// the tail is only named here so both sides spell the same layout.
+    _pad0: [f32; 3],
 }
 
-const _: () = assert!(size_of::<MediumRecord>() == 32);
+const _: () = assert!(size_of::<MediumRecord>() == 128);
+
+/// A [`MediumRecord`] as its own identity: the bits it computed to, which
+/// is what interning keys on. Sized off the record so a field added to one
+/// cannot leave the other behind.
+type MediumKey = [u32; size_of::<MediumRecord>() / 4];
+
+/// [`MediumRecord::grid`] for a homogeneous medium — mirrors `GRID_NONE`
+/// in `shaders/scene.slang`.
+const GRID_NONE: u32 = u32::MAX;
+
+impl MediumRecord {
+    /// A homogeneous record: coefficients only, no grid, zeroed transform.
+    /// The one construction path for interiors, subsurface interiors, and
+    /// gridless authored media, so none of them can drift from the
+    /// sentinel.
+    fn homogeneous(sigma_t: [f32; 3], g: f32, sigma_s: [f32; 3]) -> Self {
+        Self {
+            sigma_t,
+            g,
+            sigma_s,
+            grid: GRID_NONE,
+            world_to_index: [[0.0; 4]; 3],
+            majorant_scale: [0.0; 3],
+            majorant: 0,
+            majorant_bias: [0.0; 3],
+            majorant_res: 0,
+            density_max: 0.0,
+            _pad0: [0.0; 3],
+        }
+    }
+}
 
 /// How far `g` may reach: at ±1 the Henyey–Greenstein denominator vanishes
 /// and both the phase value and its sampled direction go non-finite.
@@ -418,14 +516,17 @@ fn bounded_anisotropy(g: f32) -> f32 {
     }
 }
 
-impl From<Medium> for MediumRecord {
-    fn from(medium: Medium) -> Self {
-        Self {
-            sigma_t: (medium.absorption + medium.scattering).to_array(),
-            g: bounded_anisotropy(medium.anisotropy),
-            sigma_s: medium.scattering.to_array(),
-            _pad0: 0.0,
-        }
+impl From<&Medium> for MediumRecord {
+    /// The homogeneous half of a medium — coefficients and phase. A
+    /// heterogeneous medium's grid fields land in
+    /// [`upload_instance_tables`], where the pool offset and the
+    /// placement transform exist.
+    fn from(medium: &Medium) -> Self {
+        Self::homogeneous(
+            (medium.absorption + medium.scattering).to_array(),
+            bounded_anisotropy(medium.anisotropy),
+            medium.scattering.to_array(),
+        )
     }
 }
 
@@ -468,21 +569,15 @@ fn interior(material: &Material) -> Option<MediumRecord> {
             // Purely absorbing: return σ_t untouched — even adding a zero
             // shift would flip a white channel's −0.0, and an absorbing
             // interior's record must be exactly its authored logarithm.
-            return MediumRecord {
-                sigma_t,
-                g: 0.0,
-                sigma_s: [0.0; 3],
-                _pad0: 0.0,
-            };
+            return MediumRecord::homogeneous(sigma_t, 0.0, [0.0; 3]);
         }
         let sigma_s = scatter / depth;
         let shift = (sigma_s - Vec3::from(sigma_t)).max_element().max(0.0);
-        MediumRecord {
-            sigma_t: (Vec3::from(sigma_t) + shift).to_array(),
-            g: bounded_anisotropy(material.transmission_scatter_anisotropy),
-            sigma_s: sigma_s.to_array(),
-            _pad0: 0.0,
-        }
+        MediumRecord::homogeneous(
+            (Vec3::from(sigma_t) + shift).to_array(),
+            bounded_anisotropy(material.transmission_scatter_anisotropy),
+            sigma_s.to_array(),
+        )
     })
 }
 
@@ -569,16 +664,15 @@ fn subsurface(material: &Material) -> Option<MediumRecord> {
                 .subsurface_color
                 .to_array()
                 .map(|channel| single_scatter_albedo(channel, g));
-            MediumRecord {
+            MediumRecord::homogeneous(
                 sigma_t,
                 g,
-                sigma_s: [
+                [
                     alpha[0] * sigma_t[0],
                     alpha[1] * sigma_t[1],
                     alpha[2] * sigma_t[2],
                 ],
-                _pad0: 0.0,
-            }
+            )
         })
 }
 
@@ -607,10 +701,56 @@ fn subsurface_textured(material: &Material) -> bool {
 /// surface — whatever its material's interior holds. A mesh that bounds a
 /// medium is a null boundary, so the material's own interior can never also
 /// apply.
-fn placement_medium(placement: &Placement) -> Option<MediumRecord> {
-    placement.medium.map_or_else(
-        || interior(&placement.material),
-        |medium| Some(medium.into()),
+///
+/// `grids` maps every heterogeneous medium's (nvdb, grid) to where its
+/// payload and majorant lattice landed — uploaded by
+/// [`upload_instance_tables`] before any record is built, so the lookup
+/// cannot miss.
+fn placement_medium(
+    placement: &Placement,
+    grids: &HashMap<(PathBuf, String), crate::vdb::ResidentGrid>,
+) -> Option<MediumRecord> {
+    let Some(medium) = placement.medium.as_ref() else {
+        return interior(&placement.material);
+    };
+    let mut record = MediumRecord::from(medium);
+    if let Some(volume) = &medium.volume {
+        let resident = grids[&(volume.nvdb.clone(), volume.grid.clone())];
+        record.grid = resident.grid;
+        record.majorant = resident.majorant;
+        record.density_max = resident.density_max;
+        record.majorant_scale = volume.majorant_scale;
+        record.majorant_bias = volume.majorant_bias;
+        let res = volume.majorant_res;
+        assert!(
+            res.iter().all(|&axis| axis <= MAJORANT_RES_MAX),
+            "majorant resolution {res:?} exceeds the ten bits the record packs it into"
+        );
+        record.majorant_res = res[0] | res[1] << 10 | res[2] << 20;
+        // world → asset is the *author's* transform inverted, which is the
+        // placement's (element · bounds) with the bounds folded back out:
+        // B · (E·B)⁻¹ = E⁻¹. Composed with the grid's own asset→index map,
+        // one affine takes a world sample point to index space.
+        record.world_to_index = transform_rows(
+            rows_to_mat4(&volume.asset_to_index)
+                * volume.bounds_to_asset
+                * placement.transform.inverse(),
+        );
+    }
+    Some(record)
+}
+
+/// The largest cell count per axis the record's packed `majorant_res` word
+/// can hold — mirrors the shader's ten-bit unpack.
+const MAJORANT_RES_MAX: u32 = 1023;
+
+/// Rows-of-affine (the [`GridVolume`] form) back into a `Mat4`.
+fn rows_to_mat4(rows: &[[f32; 4]; 3]) -> Mat4 {
+    Mat4::from_cols(
+        glam::Vec4::new(rows[0][0], rows[1][0], rows[2][0], 0.0),
+        glam::Vec4::new(rows[0][1], rows[1][1], rows[2][1], 0.0),
+        glam::Vec4::new(rows[0][2], rows[1][2], rows[2][2], 0.0),
+        glam::Vec4::new(rows[0][3], rows[1][3], rows[2][3], 1.0),
     )
 }
 
@@ -628,10 +768,10 @@ fn placement_medium(placement: &Placement) -> Option<MediumRecord> {
 /// another.
 fn medium_table(
     filled: impl Iterator<Item = Option<MediumRecord>>,
-    global: Option<Medium>,
+    global: Option<&Medium>,
 ) -> (Vec<u32>, u32, Vec<MediumRecord>) {
     let mut records: Vec<MediumRecord> = Vec::new();
-    let mut interned: HashMap<[u32; 8], u32> = HashMap::new();
+    let mut interned: HashMap<MediumKey, u32> = HashMap::new();
     let mut intern = |record: Option<MediumRecord>| {
         record.map_or(MEDIUM_NONE, |record| {
             *interned
@@ -774,6 +914,10 @@ pub struct Scene {
     /// The placement-derived media predicates, recomputed on every build
     /// and update — see [`PlacementMedia`].
     media: PlacementMedia,
+    /// The `NanoVDB` grid pool: every heterogeneous medium's density grid,
+    /// resident for the scene's lifetime. Grow-only and content-keyed, so
+    /// edits re-upload nothing; a scene swap drops it.
+    grids: crate::vdb::GridPool,
     /// The environment's dimensions and emitted power (untinted), retained
     /// so a light edit can rebuild the scene table (its selection
     /// probability weighs the light list against the environment) without
@@ -872,7 +1016,7 @@ impl Scene {
         objects: &[Object],
         camera: Camera,
         environment: &Environment,
-        global: Option<Medium>,
+        global: Option<&Medium>,
     ) -> Result<Self> {
         assert!(!objects.is_empty(), "a scene needs at least one object");
         let mut upload = gpu.upload()?;
@@ -918,13 +1062,15 @@ impl Scene {
                 transform: object.transform,
                 material: *material,
                 camera_visible: true,
-                medium: object.medium,
+                medium: object.medium.clone(),
                 priority: object.interior_priority,
             })
             .collect();
         let tlas = build_scene_tlas(gpu, &placements)?;
         let media = placement_media(&placements);
-        let instances = upload_instance_tables(gpu, &placements, &triangle_lights, &[], global)?;
+        let mut grids = crate::vdb::GridPool::new();
+        let instances =
+            upload_instance_tables(gpu, &mut grids, &placements, &triangle_lights, &[], global)?;
         let GpuEnvironment {
             image,
             marginal,
@@ -969,6 +1115,7 @@ impl Scene {
             descriptors: Vec::new(),
             camera,
             media,
+            grids,
             env_size,
             env_power: power,
             env_source: None,
@@ -1017,6 +1164,24 @@ impl Scene {
     #[must_use]
     pub fn has_volumes(&self) -> bool {
         self.media.volumes
+    }
+
+    /// Whether any bounded medium is heterogeneous — a density grid fills
+    /// it. True, the wavefront dispatches the volume stage's tracking
+    /// entry point and binds the grid pool beside the TLAS; false, the
+    /// homogeneous entry runs and no dispatch ever reads the pool binding.
+    #[must_use]
+    pub fn has_heterogeneous(&self) -> bool {
+        self.media.heterogeneous
+    }
+
+    /// The grid pool's buffer for descriptor binding — `None` until some
+    /// heterogeneous medium made a grid resident. [`Self::has_heterogeneous`]
+    /// implies `Some`: the same prep pass that set the flag uploaded the
+    /// grid.
+    #[must_use]
+    pub fn grid_pool(&self) -> Option<&Buffer> {
+        self.grids.buffer()
     }
 
     /// Whether any interior is authored with a nesting priority the
@@ -1272,10 +1437,11 @@ fn upload_table<T: Pod>(gpu: &Context, name: &str, records: &[T]) -> Result<Buff
 /// contiguous primitive order `GeometryRecord.light` depends on.
 fn upload_instance_tables(
     gpu: &Context,
+    pool: &mut crate::vdb::GridPool,
     placements: &[Placement],
     triangle_lights: &[TriangleLight],
     delta_lights: &[DeltaLight],
-    global: Option<Medium>,
+    global: Option<&Medium>,
 ) -> Result<InstanceTables> {
     let light_records = crate::lights::build(triangle_lights, delta_lights);
     assert!(
@@ -1289,12 +1455,31 @@ fn upload_instance_tables(
         .iter()
         .map(|placement| placement.material)
         .collect();
+    // Grid payloads first: every heterogeneous medium's grid becomes pool-
+    // resident (the pool dedups, so an edit that keeps a grid re-uploads
+    // nothing), and the offsets feed the records below.
+    let mut grids: HashMap<(PathBuf, String), crate::vdb::ResidentGrid> = HashMap::new();
+    for placement in placements {
+        if let Some(volume) = placement.medium.as_ref().and_then(|m| m.volume.as_ref())
+            && !grids.contains_key(&(volume.nvdb.clone(), volume.grid.clone()))
+        {
+            let resident = pool.upload(gpu, &volume.nvdb, &volume.grid)?;
+            grids.insert((volume.nvdb.clone(), volume.grid.clone()), resident);
+        }
+    }
+    // The tracking entry point reads binding 5 unconditionally, and the
+    // binding is only written when the pool has a buffer: a scene that
+    // dispatches it without one would read an unwritten descriptor.
+    assert!(
+        grids.is_empty() || pool.buffer().is_some(),
+        "a scene with grid media must leave the pool resident"
+    );
     // One intern pass over both kinds of interior — a subsurface interior
     // that extinguishes like a transmissive one *is* the same medium.
     let (medium_indices, global_medium, media) = medium_table(
         placements
             .iter()
-            .map(placement_medium)
+            .map(|p| placement_medium(p, &grids))
             .chain(placements.iter().map(|p| subsurface(&p.material))),
         global,
     );
@@ -1628,6 +1813,7 @@ mod tests {
             absorption: Vec3::splat(0.2),
             scattering: Vec3::splat(0.3),
             anisotropy: 0.0,
+            volume: None,
         };
         let (indices, global, records) = medium_table(
             [
@@ -1639,7 +1825,7 @@ mod tests {
             ]
             .iter()
             .map(interior),
-            Some(fog),
+            Some(&fog),
         );
         assert_eq!(
             indices,
@@ -1671,8 +1857,9 @@ mod tests {
             absorption: Vec3::from(interior(&deep).expect("an interior").sigma_t),
             scattering: Vec3::ZERO,
             anisotropy: 0.0,
+            volume: None,
         };
-        let shared = medium_table(std::iter::once(interior(&deep)), Some(matching));
+        let shared = medium_table(std::iter::once(interior(&deep)), Some(&matching));
         assert_eq!(
             (shared.0, shared.1, shared.2.len()),
             (vec![0], 0, 1),
@@ -1804,8 +1991,8 @@ mod tests {
             })
             .expect("an interior");
             assert_eq!(
-                bytemuck::cast::<_, [u32; 8]>(fallen),
-                bytemuck::cast::<_, [u32; 8]>(base),
+                bytemuck::cast::<_, MediumKey>(fallen),
+                bytemuck::cast::<_, MediumKey>(base),
                 "scatter {scatter} is no scatter at all"
             );
         }

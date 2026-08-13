@@ -457,6 +457,8 @@ impl Context {
                         && std::ptr::eq(other.textures, scene.textures)
                         && std::ptr::eq(other.table_planes, scene.table_planes)
                         && std::ptr::eq(other.table_volumes, scene.table_volumes)
+                        && other.grid_pool.map(super::Buffer::handle)
+                            == scene.grid_pool.map(super::Buffer::handle)
                 }),
             "one pipeline, two scenes — its single descriptor set can hold only one"
         );
@@ -507,6 +509,23 @@ impl Context {
                     .dst_binding(2)
                     .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                     .image_info(scene.textures),
+            );
+        }
+        // The grid pool, only where the scene has one — the binding is
+        // partially bound, and no gridless dispatch reads it.
+        let pool_info = scene.grid_pool.map(|pool| {
+            vk::DescriptorBufferInfo::default()
+                .buffer(pool.handle())
+                .offset(0)
+                .range(vk::WHOLE_SIZE)
+        });
+        if let Some(info) = &pool_info {
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(descriptors.set)
+                    .dst_binding(5)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(slice::from_ref(info)),
             );
         }
         unsafe {

@@ -277,6 +277,33 @@ impl Context {
         })
     }
 
+    /// Copy `bytes` from `from` at `from_offset` into `to` at `to_offset`
+    /// in one blocking submit — the offset form of
+    /// [`Context::copy_buffers`], for callers packing many payloads into
+    /// one large buffer (the VDB grid pool streams multi-GiB grids through
+    /// a bounded staging buffer this way). A region past either end is a
+    /// panic, not a truncation.
+    pub fn copy_buffer_region(
+        &self,
+        from: &Buffer,
+        to: &Buffer,
+        from_offset: u64,
+        to_offset: u64,
+        bytes: u64,
+    ) -> Result<()> {
+        assert!(
+            from_offset + bytes <= from.size() && to_offset + bytes <= to.size(),
+            "copy of {bytes} bytes past the end of a buffer"
+        );
+        self.submit_once(|device, cmd| {
+            let region = vk::BufferCopy::default()
+                .src_offset(from_offset)
+                .dst_offset(to_offset)
+                .size(bytes);
+            unsafe { device.cmd_copy_buffer(cmd, from.handle(), to.handle(), &[region]) };
+        })
+    }
+
     /// Read a buffer's full contents back to the host through a transient
     /// staging buffer. The source must have `TRANSFER_SRC` usage.
     pub fn download_buffer(&self, buffer: &Buffer) -> Result<Vec<u8>> {

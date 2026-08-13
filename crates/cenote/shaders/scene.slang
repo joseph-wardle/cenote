@@ -24,6 +24,9 @@ public static const uint BOUNDARY_MASK = 0xff;
 // are separate index spaces.
 public static const uint MEDIUM_NONE = 0xffffffff;
 
+// `MediumRecord.grid` for a homogeneous medium — mirrors `scene/mod.rs`.
+public static const uint GRID_NONE = 0xffffffff;
+
 // What fills an instance's interior, or the open space around everything —
 // one record per distinct medium, however many places it fills. Mirrors
 // `struct MediumRecord` in `scene.rs`.
@@ -32,6 +35,8 @@ public struct MediumRecord {
     // the σ of Beer–Lambert, and the density distance sampling draws
     // against. Derived at prep — storing σ_t rather than σ_a is what keeps
     // a purely absorbing interior's value bit-for-bit what it always was.
+    // For a heterogeneous medium these are the *coefficients* the grid's
+    // density multiplies: σ(x) = density(x) · σ.
     public float3 sigmaT;
     // Henyey–Greenstein anisotropy, in (−1, 1); 0 is isotropic.
     public float g;
@@ -39,7 +44,30 @@ public struct MediumRecord {
     // removes. Zero is a purely absorbing medium: no event to sample, so
     // intersect never routes a path to the volume stage.
     public float3 sigmaS;
-    float pad0;
+    // The grid's byte offset in the pool (binding 5), or GRID_NONE for a
+    // homogeneous medium. Only the volume stage's tracking entry reads past
+    // this word.
+    public uint grid;
+    // Rows of the world→index transform: the grid's own map composed with
+    // the placement's inverse at prep, so a sample point is one affine from
+    // world space to the trilinear lattice.
+    public float4 worldToIndex[3];
+    // Index space → majorant-cell coordinates, `cell = index · scale + bias`:
+    // the second half of the affine that takes a world point to the lattice
+    // the tracker's free flights are bounded by.
+    public float3 majorantScale;
+    // The lattice's byte offset in the pool — `res.x·res.y·res.z` unitless
+    // density ceilings, x fastest.
+    public uint majorant;
+    public float3 majorantBias;
+    // Its cell counts, ten bits per axis with x lowest.
+    public uint majorantRes;
+    // The largest ceiling anywhere in the lattice — the bound a grid falls
+    // back to where the tracker walks a different grid's lattice.
+    public float densityMax;
+    // worldToIndex's float4 rows already round the record to 128 bytes; this
+    // only names the tail so scene.rs can spell the same layout.
+    float3 pad0;
 };
 
 // Where an instance's triangles live, plus its transforms — everything
@@ -193,9 +221,20 @@ public float3 interiorTransmittance(SceneTable* scene, uint instance,
 }
 
 // The extinction of whatever fills `instance`, or zero where nothing does.
+//
+// DEFERRED (rung 11-c): a heterogeneous medium reads as zero here, so a
+// shadow connection crossing a grid volume is unattenuated by it. Its σ
+// varies point by point, which this signed-sum measure cannot express; the
+// ratio-tracked shadow leg replaces it. Until then grid volumes cast no
+// shadow — too little fog, never a wall that is not there — and the volume
+// stage skips next-event estimation inside one rather than trust it.
 public float3 extinctionOf(SceneTable* scene, uint instance) {
     let medium = scene.geometry[instance].medium;
-    return medium == MEDIUM_NONE ? float3(0.0) : scene.media[medium].sigmaT;
+    if (medium == MEDIUM_NONE) {
+        return float3(0.0);
+    }
+    let record = scene.media[medium];
+    return record.grid == GRID_NONE ? record.sigmaT : float3(0.0);
 }
 
 // Trace one next-event connection and return what reaches the light: 0 when a

@@ -255,6 +255,14 @@ pub enum MeshSource {
         /// The `.ply` file (absolute once applied, like every path).
         path: PathBuf,
     },
+    /// The auto-generated shell of a heterogeneous medium: a canonical unit
+    /// cube whose per-placement transform prep derives from the medium's
+    /// grid bounds — the author never sizes it. An instance placing this
+    /// mesh must bound a [`Medium`] with a [`volume`](Medium::volume), and
+    /// vice versa; either half alone is a validation error, because a
+    /// grid's extent is its own active bounds and nothing else
+    /// (mesh-clipped volumes are a non-goal — clip in the DCC).
+    MediumBounds,
 }
 
 impl Default for MeshSource {
@@ -505,8 +513,8 @@ impl Material {
     }
 }
 
-/// A homogeneous participating medium: what fills a volume, rather than what
-/// covers a surface. Named and referenced like every other object: by
+/// A participating medium: what fills a volume, rather than what covers a
+/// surface. Named and referenced like every other object: by
 /// [`Settings::global_medium`], the atmosphere everything stands in, and by
 /// [`Instance::medium`], a mesh that bounds it.
 ///
@@ -515,7 +523,15 @@ impl Material {
 /// authored value can land slightly negative, and clamps to zero. The
 /// default is vacuum, which is also what a get-or-create placeholder wants:
 /// a medium with no coefficients extinguishes nothing.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+///
+/// With a [`volume`](Self::volume) block the medium is *heterogeneous*: the
+/// grid's unitless density multiplies the authored coefficients point by
+/// point — σ(x) = density(x) · σ, the Arnold `standard_volume` / Cycles
+/// Principled Volume convention, so a lookdev edit of the coefficients or
+/// anisotropy touches no grid data. It is placed by an instance whose mesh
+/// is [`MeshSource::MediumBounds`], and cannot be the global medium (a grid
+/// has bounds; the open space has none).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Medium {
     /// Absorption coefficient `σ_a`: how much light the medium removes per
@@ -532,6 +548,27 @@ pub struct Medium {
     /// at prep, where the phase function stays finite.
     #[serde(default)]
     pub anisotropy: f32,
+    /// The density grid, or `None` (the default) for a homogeneous medium.
+    #[serde(default)]
+    pub volume: Option<VolumeSource>,
+}
+
+/// A density grid reference: what makes a [`Medium`] heterogeneous.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VolumeSource {
+    /// The grid file — `.vdb` (converted through the beside-the-source
+    /// prep cache) or `.nvdb` (read directly). Absolute once applied,
+    /// like every path.
+    pub path: PathBuf,
+    /// The density grid's name inside the file. Default `"density"`, the
+    /// convention every DCC writes.
+    #[serde(default = "default_density_grid")]
+    pub grid: String,
+}
+
+fn default_density_grid() -> String {
+    "density".to_owned()
 }
 
 /// A delta light — zero area, so next-event estimation is its only

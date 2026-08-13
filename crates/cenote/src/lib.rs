@@ -58,6 +58,7 @@ pub mod shaders;
 pub mod stats;
 mod tables;
 mod texture;
+mod vdb;
 pub mod wavefront;
 
 pub use error::{Error, Result};

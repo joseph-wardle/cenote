@@ -120,12 +120,14 @@ impl Scene {
         let tlas = build_scene_tlas(gpu, &placements)?;
         let tabling = Instant::now();
         let media = super::placement_media(&placements);
+        let mut grids = crate::vdb::GridPool::new();
         let instances = upload_instance_tables(
             gpu,
+            &mut grids,
             &placements,
             &host.triangle_lights,
             &host.delta_lights,
-            host.global_medium,
+            host.global_medium.as_ref(),
         )?;
         drop(placements);
         let resident =
@@ -152,6 +154,7 @@ impl Scene {
             descriptors,
             camera: host.camera.expect("a fresh build always adopts its camera"),
             media,
+            grids,
             env_size,
             env_power: power,
             env_source: spec.source.clone(),
@@ -242,12 +245,17 @@ impl Scene {
         }
         let tabling = Instant::now();
         self.media = super::placement_media(&placements);
+        // Grid payloads stream from disk here rather than in the host phase
+        // — multi-GiB files can't be held in memory across the boundary.
+        // The host phase already validated each header, so a scene error
+        // out of this call means the file changed under us mid-update.
         self.resident.instances = upload_instance_tables(
             gpu,
+            &mut self.grids,
             &placements,
             &host.triangle_lights,
             &host.delta_lights,
-            host.global_medium,
+            host.global_medium.as_ref(),
         )?;
         drop(placements);
         let env_power = self.tinted_env_power();
@@ -339,7 +347,7 @@ fn placements<'a>(
             transform: spec.transform,
             material: spec.material,
             camera_visible: spec.camera_visible,
-            medium: spec.medium,
+            medium: spec.medium.clone(),
             priority: spec.priority,
         })
         .collect()

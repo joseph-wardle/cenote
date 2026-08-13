@@ -446,10 +446,19 @@ fn write_probes(
         /// Summed over [`Self::walk_exits_by_events`], and therefore over
         /// exits alone — see [`Self::walk_roulette_deaths`].
         total_walk_events: u64,
+        /// Majorant collisions the heterogeneous tracker drew, and the
+        /// null outcomes among them — the fraction of tracker work the
+        /// majorant wastes on empty space. Zero in gridless scenes.
+        tracker_collisions: u32,
+        tracker_nulls: u32,
+        /// Majorant cells the walk stepped through without colliding — what
+        /// the lattice charges for the collisions it saves.
+        tracker_steps: u32,
         /// Camera paths traced: width × height × spp.
         paths: u64,
         mean_events_per_path: f64,
         mean_walk_events_per_path: f64,
+        mean_tracker_collisions_per_path: f64,
     }
     let bins = renderer.probes(gpu)?;
     let split = cenote::wavefront::PROBE_VOLUME_BINS;
@@ -458,6 +467,9 @@ fn write_probes(
     let walk_entry_rejects = bins[cenote::wavefront::PROBE_ENTRY_REJECT_BIN];
     let walk_exit_rejects = bins[cenote::wavefront::PROBE_EXIT_REJECT_BIN];
     let walk_roulette_deaths = bins[cenote::wavefront::PROBE_ROULETTE_BIN];
+    let tracker_collisions = bins[cenote::wavefront::PROBE_TRACKER_COLLISION_BIN];
+    let tracker_nulls = bins[cenote::wavefront::PROBE_TRACKER_NULL_BIN];
+    let tracker_steps = bins[cenote::wavefront::PROBE_TRACKER_STEP_BIN];
     let mut events = bins[..split].to_vec();
     let mut walk_exits = bins[split..cenote::wavefront::PROBE_ENTRY_REJECT_BIN].to_vec();
     // The two exitless deaths sit on top of the exit lengths, cap kills
@@ -491,9 +503,13 @@ fn write_probes(
         walk_exit_rejects,
         walk_roulette_deaths,
         total_walk_events,
+        tracker_collisions,
+        tracker_nulls,
+        tracker_steps,
         paths,
         mean_events_per_path: total_events as f64 / paths as f64,
         mean_walk_events_per_path: total_walk_events as f64 / paths as f64,
+        mean_tracker_collisions_per_path: f64::from(tracker_collisions) / paths as f64,
     };
     let sidecar = out.with_extension("probes.ron");
     std::fs::write(
@@ -504,7 +520,7 @@ fn write_probes(
     println!(
         "wrote {} ({} scatter events, {:.2} per path; {} walk events, {:.2} per path, \
          {} cap kills, {} leaks, {} entry rejects, {} exit rejects, \
-         {} roulette deaths)",
+         {} roulette deaths; {} tracker collisions, {:.1}% null, {} lattice steps)",
         sidecar.display(),
         report.total_events,
         report.mean_events_per_path,
@@ -514,7 +530,10 @@ fn write_probes(
         report.walk_leak_deaths,
         report.walk_entry_rejects,
         report.walk_exit_rejects,
-        report.walk_roulette_deaths
+        report.walk_roulette_deaths,
+        report.tracker_collisions,
+        100.0 * f64::from(report.tracker_nulls) / f64::from(report.tracker_collisions.max(1)),
+        report.tracker_steps,
     );
     Ok(())
 }

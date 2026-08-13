@@ -1,17 +1,27 @@
-// Homogeneous-medium transport: what fills a path's current segment, how far
-// it travels before it scatters, and which way it leaves. The last two are
-// closed-form — one extinction holds everywhere in the medium, so there is
-// nothing to track along the segment and no majorant to bound.
+// Medium transport: what fills a path's current segment, how far it travels
+// before it scatters, and which way it leaves. Where the segment's media are
+// all homogeneous the last two are closed-form — one extinction holds
+// everywhere, so there is nothing to track and no majorant to bound. A grid
+// medium is separated out here and tracked in `tracking.slang` instead.
 
 import openpbr; // Frame, PI
 import pathstate; // STACK_EMPTY, MEDIUM_SLOTS, interiorOf
 import scene;
 
-// The medium filling the segment a path is travelling: the volumes it is
-// inside, added coefficient by coefficient to whatever fills the open space
-// around them. Addition is what makes overlap order-free, and order-free is
-// what lets the shadow pass measure the same extinction from unordered
-// traversal candidates.
+// What fills the segment a path is travelling, split into the part with a
+// closed form and the grids that need tracking: `homogeneous` is every
+// gridless medium summed, `grids` lists the rest by medium index.
+public struct MediaSplit {
+    public MediumRecord homogeneous;
+    public uint gridCount;
+    public uint grids[MEDIUM_SLOTS];
+};
+
+// The medium filling the segment: the volumes the path is inside, added
+// coefficient by coefficient to whatever fills the open space around them.
+// Addition is what makes overlap order-free, and order-free is what lets
+// the shadow pass measure the same extinction from unordered traversal
+// candidates.
 //
 // A refractive interior displaces all of it — a path inside glass is not
 // also in the room's haze. A *scattering* interior (the `STACK_SCATTERING`
@@ -19,27 +29,33 @@ import scene;
 // record, alone. An absorbing one returns vacuum here — its Beer–Lambert
 // absorption is the surface stage's closed form, applied once over the
 // whole segment, so it stays bit-identical to a renderer with no volume
-// stage at all. Both resolve by the
-// register-held bit, never by re-reading σ_s: a second spelling of the
-// predicate could drift from the one intersect routed by, and a segment
-// would be weighted twice or not at all.
-public MediumRecord combineMedia(SceneTable* scene, uint4 set) {
-    MediumRecord total;
-    total.sigmaT = float3(0.0);
-    total.sigmaS = float3(0.0);
-    total.g = 0.0;
+// stage at all. Both resolve by the register-held bit, never by re-reading
+// σ_s: a second spelling of the predicate could drift from the one
+// intersect routed by, and a segment would be weighted twice or not at all.
+//
+// GRIDS = 0 compiles the grid arm away, so a scene without grids pays
+// neither the branch nor the array: the homogeneous engine, exactly as it
+// was before grids existed. Interiors lower from materials and can never be
+// grids, so the interior arm is common to both.
+public MediaSplit splitMedia<let GRIDS : int>(SceneTable* scene, uint4 set) {
+    MediaSplit split;
+    split.homogeneous.sigmaT = float3(0.0);
+    split.homogeneous.sigmaS = float3(0.0);
+    split.homogeneous.g = 0.0;
+    split.gridCount = 0;
     let interior = interiorOf(set);
     if (interior != STACK_EMPTY) {
         if ((interior & STACK_SCATTERING) != 0) {
-            return scene.media[scene.geometry[interior & STACK_INDEX_MASK].medium];
+            split.homogeneous =
+                scene.media[scene.geometry[interior & STACK_INDEX_MASK].medium];
         }
-        return total;
+        return split;
     }
     // A mixture's true phase function is the σ_s-weighted average of its
     // components', which one Henyey–Greenstein lobe cannot be; its
-    // anisotropy is that average instead — `total.g` carries the weighted
-    // sum until the division below. Exact wherever a single component
-    // scatters, which is every case but two scattering volumes overlapping.
+    // anisotropy is that average instead — `g` carries the weighted sum
+    // until the division below. Exact wherever a single component scatters,
+    // which is every case but two scattering volumes overlapping.
     var weight = 0.0;
     for (uint slot = 0; slot <= MEDIUM_SLOTS; slot++) {
         // Slots first, then the open space they stand in, which adds the
@@ -53,14 +69,18 @@ public MediumRecord combineMedia(SceneTable* scene, uint4 set) {
             continue;
         }
         let record = scene.media[index];
-        total.sigmaT += record.sigmaT;
-        total.sigmaS += record.sigmaS;
+        if (GRIDS != 0 && record.grid != GRID_NONE) {
+            split.grids[split.gridCount++] = index;
+            continue;
+        }
+        split.homogeneous.sigmaT += record.sigmaT;
+        split.homogeneous.sigmaS += record.sigmaS;
         let scattering = record.sigmaS.x + record.sigmaS.y + record.sigmaS.z;
-        total.g += scattering * record.g;
+        split.homogeneous.g += scattering * record.g;
         weight += scattering;
     }
-    total.g = weight > 0.0 ? total.g / weight : 0.0;
-    return total;
+    split.homogeneous.g = weight > 0.0 ? split.homogeneous.g / weight : 0.0;
+    return split;
 }
 
 // -- The subsurface interior, resolved on the GPU -------------------------

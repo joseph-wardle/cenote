@@ -2182,7 +2182,7 @@ Translate 1 0 0
                 })
                 .and_then(|source| match source {
                     MeshSource::Inline { uvs, .. } => uvs.clone(),
-                    MeshSource::Ply { .. } => unreachable!(),
+                    MeshSource::Ply { .. } | MeshSource::MediumBounds => unreachable!(),
                 })
                 .expect("authored uvs");
             assert_eq!(uvs, [[0.0, 1.0], [1.0, 1.0], [1.0, 0.75]]);
@@ -2226,7 +2226,7 @@ Translate 1 0 0
                     normals.as_ref().expect("authored normals")[0][2],
                     triangles[0],
                 ),
-                MeshSource::Ply { .. } => unreachable!(),
+                MeshSource::Ply { .. } | MeshSource::MediumBounds => unreachable!(),
             };
             let (plain, plain_winding) = normal_z(mesh("trianglemesh-0"));
             let (reversed, reversed_winding) = normal_z(mesh("trianglemesh-1"));

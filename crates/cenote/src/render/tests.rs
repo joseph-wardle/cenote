@@ -970,10 +970,11 @@ fn a_global_medium_attenuates_by_beer_lambert() {
             lens: None,
         },
         &Environment::constant(Vec3::ZERO),
-        Some(crate::scene::Medium {
+        Some(&crate::scene::Medium {
             absorption: sigma_t,
             scattering: Vec3::ZERO,
             anisotropy: 0.0,
+            volume: None,
         }),
     )
     .expect("scene");
@@ -1035,10 +1036,11 @@ fn the_volumetric_furnace_closes() {
         // Half a mean free path across the shell's radius: a path turns a
         // few times before it leaves, and the bounce cap truncates nothing
         // measurable.
-        Some(crate::scene::Medium {
+        Some(&crate::scene::Medium {
             absorption: Vec3::ZERO,
             scattering: Vec3::splat(0.25),
             anisotropy: 0.3,
+            volume: None,
         }),
     )
     .expect("scene");
@@ -1090,6 +1092,7 @@ fn a_camera_inside_a_bounded_fog_attenuates_from_its_first_segment() {
                 absorption: sigma,
                 scattering: Vec3::ZERO,
                 anisotropy: 0.0,
+                volume: None,
             }),
             interior_priority: 0,
         }],
@@ -1111,6 +1114,345 @@ fn a_camera_inside_a_bounded_fog_attenuates_from_its_first_segment() {
             "channel {channel}: {mean} vs Beer–Lambert's {expected} \
              (the unattenuated sky is {})",
             sky[channel]
+        );
+    }
+}
+
+/// Synthesize the grid gates' fixture: a constant-density `.nvdb`
+/// (`cenote-vdb-prep --constant`), whose background *equals* the constant —
+/// so trilinear interpolation reads exactly `value` everywhere inside the
+/// dilated shell, and the homogeneous limit compares with no
+/// interpolation-falloff residual. `None` skips the test, the way a
+/// GPU-less machine skips GPU tests: the tool is an optional build.
+fn constant_grid_fixture(name: &str, value: f32) -> Option<std::path::PathBuf> {
+    let tool = crate::vdb::find_prep_tool()?;
+    let path =
+        std::env::temp_dir().join(format!("cenote-gate-{name}-{}.nvdb", std::process::id()));
+    let output = std::process::Command::new(tool)
+        .args(["--constant", "32", &value.to_string(), &GRID_SLAB_VOXEL.to_string()])
+        .arg(&path)
+        .output()
+        .expect("run cenote-vdb-prep");
+    assert!(
+        output.status.success(),
+        "--constant failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some(path)
+}
+
+/// The fixture grid's voxel size, and the density it is filled with.
+const GRID_SLAB_VOXEL: f32 = 0.05;
+const GRID_SLAB_DENSITY: f32 = 0.75;
+/// Its shell in the placement's local frame: active `[0, 31]³` voxels
+/// dilated one voxel each way, so `[−0.05, 1.6]` m on every axis.
+const GRID_SLAB_LO: f32 = -GRID_SLAB_VOXEL;
+const GRID_SLAB_EXTENT: f32 = 33.0 * GRID_SLAB_VOXEL;
+/// Placed so the world box is `[−0.825, 0.825]²` across and
+/// `z ∈ [−2.575, −0.925]` deep — every ray of the 2° frustum crosses its
+/// full 1.65 m.
+const GRID_SLAB_TRANSLATE: [f32; 3] = [
+    -0.825 - GRID_SLAB_LO,
+    -0.825 - GRID_SLAB_LO,
+    -2.575 - GRID_SLAB_LO,
+];
+
+/// A description-path scene: the slab `ops` describe, floating between a
+/// narrow-fov camera at the origin and the constant white sky, nothing
+/// else.
+fn grid_slab_scene(gpu: &Context, ops: Vec<crate::scene::changeset::Op>) -> Scene {
+    use crate::scene::changeset::{CameraPatch, ChangeSet, EnvironmentPatch, Op, SettingsPatch};
+
+    let mut all = vec![
+        Op::Settings(SettingsPatch::new("settings")),
+        Op::Camera(CameraPatch {
+            position: Some([0.0; 3]),
+            look_at: Some([0.0, 0.0, -1.0]),
+            vfov_degrees: Some(2.0),
+            ..CameraPatch::new("camera")
+        }),
+        // Pathless: the constant white sky, the gate's light source.
+        Op::Environment(EnvironmentPatch::new("sky")),
+    ];
+    all.extend(ops);
+    let mut description = crate::scene::description::SceneDescription::new();
+    description
+        .apply(&ChangeSet { ops: all })
+        .expect("the slab set is valid");
+    Scene::prep(gpu, &mut description).expect("prep the slab scene")
+}
+
+/// The slab, as `mesh` bounding `medium` — the two arms of the homogeneous
+/// limit differ in exactly these two and nothing else.
+fn grid_slab_ops(
+    mesh: crate::scene::description::MeshSource,
+    medium: crate::scene::changeset::MediumPatch,
+) -> Vec<crate::scene::changeset::Op> {
+    use crate::scene::changeset::{InstancePatch, MaterialPatch, MeshPatch, Op};
+    use crate::scene::description::Transform;
+    vec![
+        Op::Mesh(MeshPatch {
+            source: Some(mesh),
+            ..MeshPatch::new("shell")
+        }),
+        Op::Material(Box::new(MaterialPatch::new("inert"))),
+        Op::Medium(medium),
+        Op::Instance(InstancePatch {
+            mesh: Some("shell".into()),
+            material: Some("inert".into()),
+            medium: Some(Some("cloud".into())),
+            transforms: Some(vec![Transform::Trs {
+                translate: GRID_SLAB_TRANSLATE,
+                rotate_degrees: [0.0; 3],
+                scale: [1.0; 3],
+            }]),
+            ..InstancePatch::new("slab")
+        }),
+    ]
+}
+
+/// The fixture grid's shell as an ordinary authored mesh, in the same local
+/// frame — an independent spelling of the box `MeshSource::MediumBounds`
+/// generates, so the twin below compares transports and not shells.
+fn grid_slab_box() -> crate::scene::description::MeshSource {
+    crate::scene::description::MeshSource::Inline {
+        positions: (0..8)
+            .map(|corner: u32| {
+                [0, 1, 2].map(|axis| {
+                    GRID_SLAB_LO + ((corner >> axis) & 1) as f32 * GRID_SLAB_EXTENT
+                })
+            })
+            .collect(),
+        normals: None,
+        uvs: None,
+        triangles: vec![
+            [0, 2, 3],
+            [0, 3, 1],
+            [4, 5, 7],
+            [4, 7, 6],
+            [0, 1, 5],
+            [0, 5, 4],
+            [2, 6, 7],
+            [2, 7, 3],
+            [0, 4, 6],
+            [0, 6, 2],
+            [1, 3, 7],
+            [1, 7, 5],
+        ],
+    }
+}
+
+/// The grid medium: the fixture at `absorption`/`scattering`, which the
+/// grid's density multiplies point by point.
+fn grid_slab_medium(
+    nvdb: &std::path::Path,
+    absorption: [f32; 3],
+    scattering: [f32; 3],
+    anisotropy: f32,
+) -> crate::scene::changeset::MediumPatch {
+    use crate::scene::changeset::MediumPatch;
+    use crate::scene::description::VolumeSource;
+    MediumPatch {
+        absorption: Some(absorption),
+        scattering: Some(scattering),
+        anisotropy: Some(anisotropy),
+        volume: Some(Some(VolumeSource {
+            path: nvdb.to_owned(),
+            grid: "density".to_owned(),
+        })),
+        ..MediumPatch::new("cloud")
+    }
+}
+
+/// Per-channel mean of an accumulated sum.
+fn channel_means(sum: &[f32], size: u32, samples: u32) -> [f64; 3] {
+    let count = f64::from(samples * size * size);
+    std::array::from_fn(|channel| {
+        sum.chunks_exact(4)
+            .map(|pixel| f64::from(pixel[channel]))
+            .sum::<f64>()
+            / count
+    })
+}
+
+/// Gate 2: the tracker against the closed form it must agree with. A purely
+/// absorbing constant grid is ratio tracking exactly, and its mean
+/// transmittance over the slab must be Beer–Lambert's `exp(−density · σ ·
+/// L)` — σ gray, so the working-space conversion (white-point preserving)
+/// leaves the authored value intact.
+#[test]
+fn a_constant_grid_slab_is_beer_lambert_exact() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let Some(nvdb) = constant_grid_fixture("absorb", GRID_SLAB_DENSITY) else {
+        return;
+    };
+    let sigma = 0.4;
+    let scene = grid_slab_scene(
+        &gpu,
+        grid_slab_ops(
+            crate::scene::description::MeshSource::MediumBounds,
+            grid_slab_medium(&nvdb, [sigma; 3], [0.0; 3], 0.0),
+        ),
+    );
+    let (size, samples) = (16, 2048);
+    let sum = bsdf_only_sum(&gpu, &scene, size, samples);
+    let _ = std::fs::remove_file(&nvdb);
+    assert_all_paths_finished(&sum, samples);
+    let means = channel_means(&sum, size, samples);
+    let expected = f64::from(-GRID_SLAB_DENSITY * sigma * GRID_SLAB_EXTENT).exp();
+    for (channel, mean) in means.iter().enumerate() {
+        assert!(
+            (mean - expected).abs() / expected < 0.01,
+            "channel {channel}: {mean} vs Beer–Lambert's {expected}"
+        );
+    }
+}
+
+/// The ramp fixture's profile: `base + amplitude · sin(π(k + ½)/32)` at
+/// integer index `k` along z, and `base` — the tree's background — outside.
+const GRID_RAMP_BASE: f32 = 0.25;
+const GRID_RAMP_AMPLITUDE: f32 = 1.0;
+
+/// The same 32³ shell as [`constant_grid_fixture`], carrying that profile.
+fn ramp_grid_fixture(name: &str) -> Option<std::path::PathBuf> {
+    let tool = crate::vdb::find_prep_tool()?;
+    let path =
+        std::env::temp_dir().join(format!("cenote-gate-{name}-{}.nvdb", std::process::id()));
+    let output = std::process::Command::new(tool)
+        .args([
+            "--ramp",
+            "32",
+            &GRID_RAMP_BASE.to_string(),
+            &GRID_RAMP_AMPLITUDE.to_string(),
+            &GRID_SLAB_VOXEL.to_string(),
+        ])
+        .arg(&path)
+        .output()
+        .expect("run cenote-vdb-prep");
+    assert!(
+        output.status.success(),
+        "--ramp failed (rebuild vdb-prep): {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some(path)
+}
+
+/// Gate 3: the tracker where the majorant genuinely varies, which no
+/// constant grid can reach. Purely absorbing, so this is still ratio
+/// tracking and its mean transmittance must be `exp(−σ ∫ d dl)`; along the
+/// view axis the interpolated field is the piecewise-linear function through
+/// the fixture's samples, so that integral is the trapezoid sum below.
+///
+/// Nothing here mirrors the lattice — the expectation is a property of the
+/// *field*. What it falsifies is a ceiling that underestimates the density
+/// under it, whatever the cause (dilation, the two spellings of the lattice
+/// transform disagreeing, a walk one cell off): the shader's density bound
+/// then clamps, and the slab comes out too bright. The rays run down −z, so
+/// the backward branch of the walk's opening is the one under test.
+#[test]
+fn a_ramped_grid_slab_integrates_to_its_trapezoid_sum() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let Some(nvdb) = ramp_grid_fixture("ramp") else {
+        return;
+    };
+    let sigma = 0.4;
+    let scene = grid_slab_scene(
+        &gpu,
+        grid_slab_ops(
+            crate::scene::description::MeshSource::MediumBounds,
+            grid_slab_medium(&nvdb, [sigma; 3], [0.0; 3], 0.0),
+        ),
+    );
+    let (size, samples) = (16, 2048);
+    let sum = bsdf_only_sum(&gpu, &scene, size, samples);
+    let _ = std::fs::remove_file(&nvdb);
+    assert_all_paths_finished(&sum, samples);
+
+    // The shell spans index z ∈ [−1, 32]: 33 unit segments, the outer two
+    // running down to the background the tree reads beyond the ramp.
+    let profile = |k: i32| {
+        if (0..32).contains(&k) {
+            f64::from(GRID_RAMP_BASE)
+                + f64::from(GRID_RAMP_AMPLITUDE)
+                    * (std::f64::consts::PI * (f64::from(k) + 0.5) / 32.0).sin()
+        } else {
+            f64::from(GRID_RAMP_BASE)
+        }
+    };
+    let trapezoid: f64 = (-1..32).map(|k| f64::midpoint(profile(k), profile(k + 1))).sum();
+    let expected =
+        (-f64::from(sigma) * f64::from(GRID_SLAB_VOXEL) * trapezoid).exp();
+    for (channel, mean) in channel_means(&sum, size, samples).iter().enumerate() {
+        // Tight on purpose: the measured residual is 0.08 % (path
+        // lengthening across the 2° frustum, plus the estimator's noise at
+        // 2048 samples), while a lattice one cell out of step shows up as
+        // 1.7 %. Determinism is bitwise, so this does not flake.
+        assert!(
+            (mean - expected).abs() / expected < 0.005,
+            "channel {channel}: {mean} vs the profile's {expected}"
+        );
+    }
+}
+
+/// Gate 1: the homogeneous limit. A constant grid (density d, coefficients
+/// σ) and a homogeneous volume of the same box at d·σ are the same medium;
+/// the tracker and the closed form must converge to the same image.
+/// Scattering on, so the whole tracker runs — collisions, spectral weights,
+/// the phase mix, and the grid vertices' NEE skip (unbiased: BSDF-only
+/// rendering, so both scenes sample lights the same way). The comparison is
+/// statistical — two estimators, one mean.
+#[test]
+fn a_constant_grid_matches_its_homogeneous_twin() {
+    use crate::scene::changeset::MediumPatch;
+    use crate::scene::description::MeshSource;
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let Some(nvdb) = constant_grid_fixture("twin", GRID_SLAB_DENSITY) else {
+        return;
+    };
+    let absorption = [0.05, 0.1, 0.2];
+    let scattering = [0.3, 0.5, 0.7];
+    let grid = grid_slab_scene(
+        &gpu,
+        grid_slab_ops(
+            MeshSource::MediumBounds,
+            grid_slab_medium(&nvdb, absorption, scattering, 0.4),
+        ),
+    );
+    // The twin: the same world box as an authored mesh, the same medium at
+    // density-scaled coefficients, no grid — B8's engine verbatim.
+    let scaled = |sigma: [f32; 3]| sigma.map(|s| GRID_SLAB_DENSITY * s);
+    let twin = grid_slab_scene(
+        &gpu,
+        grid_slab_ops(
+            grid_slab_box(),
+            MediumPatch {
+                absorption: Some(scaled(absorption)),
+                scattering: Some(scaled(scattering)),
+                anisotropy: Some(0.4),
+                ..MediumPatch::new("cloud")
+            },
+        ),
+    );
+    let (size, samples, bounces) = (16, 2048, 32);
+    let grid_sum = bsdf_only_sum_deep(&gpu, &grid, size, samples, bounces);
+    let twin_sum = bsdf_only_sum_deep(&gpu, &twin, size, samples, bounces);
+    let _ = std::fs::remove_file(&nvdb);
+    assert_all_paths_finished(&grid_sum, samples);
+    assert_all_paths_finished(&twin_sum, samples);
+    let grid_means = channel_means(&grid_sum, size, samples);
+    let twin_means = channel_means(&twin_sum, size, samples);
+    for channel in 0..3 {
+        assert!(
+            (grid_means[channel] - twin_means[channel]).abs() / twin_means[channel] < 0.02,
+            "channel {channel}: tracker mean {} vs closed-form twin {}",
+            grid_means[channel],
+            twin_means[channel]
         );
     }
 }
@@ -1499,6 +1841,7 @@ fn bounded_volumes_absorb_over_exactly_the_extent_they_bound() {
         absorption: sigma * scale,
         scattering: Vec3::ZERO,
         anisotropy: 0.0,
+        volume: None,
     };
     let row = |boxes: u8| -> Vec<Object> {
         (0..boxes)
@@ -1576,6 +1919,7 @@ fn an_interior_displaces_the_medium_it_stands_in() {
                 absorption: Vec3::splat(sigma_fog),
                 scattering: Vec3::ZERO,
                 anisotropy: 0.0,
+                volume: None,
             }),
             interior_priority: 0,
         },
@@ -1690,6 +2034,7 @@ fn the_camera_seed_names_exactly_what_the_camera_is_inside_of() {
         absorption: Vec3::splat(0.1),
         scattering: Vec3::splat(0.4),
         anisotropy: 0.0,
+        volume: None,
     };
     // Instance 0: outer glass box, z in [-8, -4]. Instance 1: the milk
     // inside it, z in [-7, -5], priority 1. Instance 2: a fog cube far
@@ -2109,6 +2454,7 @@ fn nested_volumes_sum_at_full_depth_and_stay_sound_past_it() {
             absorption: Vec3::splat(sigma),
             scattering: Vec3::ZERO,
             anisotropy: 0.0,
+            volume: None,
         }),
         interior_priority: 0,
     };
@@ -2168,6 +2514,7 @@ fn a_scattering_box_in_a_uniform_sky_disappears() {
                 absorption: Vec3::ZERO,
                 scattering: Vec3::splat(0.5),
                 anisotropy: 0.4,
+                volume: None,
             }),
             interior_priority: 0,
         }],
@@ -2231,7 +2578,7 @@ fn a_transparent_channel_reaches_the_environment() {
             lens: None,
         },
         &Environment::constant(Vec3::splat(sky)),
-        Some(crate::scene::Medium {
+        Some(&crate::scene::Medium {
             // Red passes; green and blue turn back and never escape. It has
             // to be *scattering* that stops them: a medium that only
             // absorbs takes the closed-form branch, where no distance is
@@ -2239,6 +2586,7 @@ fn a_transparent_channel_reaches_the_environment() {
             absorption: Vec3::ZERO,
             scattering: Vec3::new(0.0, 0.5, 0.5),
             anisotropy: 0.0,
+            volume: None,
         }),
     )
     .expect("scene");

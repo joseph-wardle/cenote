@@ -53,6 +53,11 @@ pub struct Kernels {
     /// Medium events on path segments — recorded only when the scene has
     /// media.
     pub shade_volume: Kernel,
+    /// The same, for a scene with heterogeneous (grid) media: a second
+    /// entry point of the same module running the null-collision tracker,
+    /// so gridless scenes pay none of its registers — the
+    /// `trace_shadow_volumes` pattern.
+    pub shade_volume_hetero: Kernel,
     /// The subsurface random walk — recorded only when the scene has
     /// subsurface materials.
     pub shade_subsurface: Kernel,
@@ -94,6 +99,7 @@ impl Kernels {
             shade_miss: kernel(spirv!("shade_miss"), c"shade_miss"),
             shade_surface: kernel(spirv!("shade_surface"), c"shade_surface"),
             shade_volume: kernel(spirv!("shade_volume"), c"shade_volume"),
+            shade_volume_hetero: kernel(spirv!("shade_volume"), c"shade_volume_hetero"),
             shade_subsurface: kernel(spirv!("shade_subsurface"), c"shade_subsurface"),
             trace_shadow: kernel(spirv!("trace_shadow"), c"trace_shadow"),
             trace_shadow_volumes: kernel(spirv!("trace_shadow"), c"trace_shadow_volumes"),
@@ -135,6 +141,7 @@ impl Kernels {
                 .map(|handle| handle.join().expect("compile thread panicked"))
         });
         let shadow = trace_shadow?;
+        let volume = shade_volume?;
         Ok(Self {
             raygen: Kernel {
                 spirv: raygen?,
@@ -152,8 +159,13 @@ impl Kernels {
                 spirv: shade_surface?,
                 entry: c"shade_surface",
             },
+            shade_volume_hetero: Kernel {
+                // The same module, a second entry point in it.
+                spirv: volume.clone(),
+                entry: c"shade_volume_hetero",
+            },
             shade_volume: Kernel {
-                spirv: shade_volume?,
+                spirv: volume,
                 entry: c"shade_volume",
             },
             shade_subsurface: Kernel {

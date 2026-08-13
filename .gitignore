@@ -9,6 +9,16 @@
 # Texture-prep caches, written beside their source images
 *.dds
 
+# VDB-prep caches (cenote-vdb-prep output), written beside their source
+# .vdb files, plus the source-hash sidecar that validates them
+*.nvdb
+*.nvdb.src
+
+# B11 volume assets (scenes/vdb/fetch.sh) — wdas_cloud's license is
+# research/non-commercial, so like the kroken sources nothing here is
+# ever committed
+/scenes/vdb/sources/
+
 # Research-corpus sources (scenes/corpus/fetch.sh) and the derived assets
 # import writes beside the curated RONs — only the RONs, README.md, and
 # fetch.sh are tracked there
@@ -50,3 +60,7 @@
 # in tracking — the walk's histograms are deterministic, so those files
 # compare exactly across machines, but they still name a build.
 /b9-baselines/
+
+# B10 denoise and B11 volume captures — the same machine-local class.
+/b10-baselines/
+/b11-baselines/

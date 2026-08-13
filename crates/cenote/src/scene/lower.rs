@@ -211,8 +211,16 @@ pub(super) fn host_phase(
     }
     warn_textured_without_uvs(description, dirty);
 
+    // Media lower once by name, however many instances share one — and a
+    // heterogeneous medium's grid preps and parses here, in the fallible
+    // half, so a bad file rejects the description before any GPU work.
+    let mut media: BTreeMap<&str, super::Medium> = BTreeMap::new();
+    for (name, medium) in description.media() {
+        media.insert(name, lower_medium(name, medium)?);
+    }
+
     let delta_lights = lower_delta_lights(description);
-    let (instances, triangle_lights) = lower_instances(description, &materials, &meshes)?;
+    let (instances, triangle_lights) = lower_instances(description, &materials, &media, &meshes)?;
 
     let touched = |kind: Kind| {
         dirty
@@ -228,7 +236,7 @@ pub(super) fn host_phase(
         None
     };
 
-    let global_medium = global_medium(description, settings.global_medium.as_deref())?;
+    let global_medium = global_medium(settings.global_medium.as_deref(), &media)?;
 
     Ok(HostScene {
         meshes,
@@ -309,6 +317,7 @@ fn lower_delta_lights(description: &SceneDescription) -> Vec<DeltaLight> {
 fn lower_instances(
     description: &SceneDescription,
     materials: &BTreeMap<&str, Material>,
+    media: &BTreeMap<&str, super::Medium>,
     resolved: &BTreeMap<String, Mesh>,
 ) -> Result<(Vec<InstanceSpec>, Vec<TriangleLight>)> {
     let mut instances = Vec::with_capacity(description.instances().len());
@@ -320,7 +329,7 @@ fn lower_instances(
         let medium = instance
             .medium
             .as_ref()
-            .map(|named| lower_medium(named, &description.media()[named]));
+            .map(|named| media[named.as_str()].clone());
         // A volume's boundary is crossed, never shaded, so nothing its
         // material describes can be honoured; `boundary_material` says which
         // parts have to be dropped rather than merely ignored, and this is
@@ -345,7 +354,14 @@ fn lower_instances(
         };
         for transform in &instance.transforms {
             let index = instances.len() as u32;
-            let transform = transform.to_mat4();
+            let mut transform = transform.to_mat4();
+            // A heterogeneous medium's shell is the canonical unit cube:
+            // the grid's dilated active bounds bake into each placement's
+            // transform, so every volume shares one mesh (and one BLAS)
+            // while the author's transform still places the asset.
+            if let Some(volume) = medium.as_ref().and_then(|m| m.volume.as_ref()) {
+                transform *= volume.bounds_to_asset;
+            }
             if let Some((positions, triangles)) = &geometry {
                 triangle_lights.extend(emissive_triangles(
                     positions,
@@ -360,7 +376,7 @@ fn lower_instances(
                 transform,
                 material,
                 camera_visible: instance.camera_visible,
-                medium,
+                medium: medium.clone(),
                 priority: instance.interior_priority,
             });
         }
@@ -609,7 +625,8 @@ fn warn_textured_without_uvs(description: &SceneDescription, dirty: &Dirty) {
             // This warning reads the description only; whether a PLY file
             // carries UVs is known after resolution, so a UV-less one gets
             // the benefit of the doubt (its lookups still read texel (0, 0)).
-            MeshSource::Ply { .. } => true,
+            // A medium shell never shades, so its zero UVs warn nothing.
+            MeshSource::Ply { .. } | MeshSource::MediumBounds => true,
         };
         let touched = |kind: Kind, target: &str| dirty.changed.contains(&(kind, target.to_owned()));
         if !has_uvs
@@ -653,6 +670,44 @@ fn resolve_mesh(name: &str, mesh: &description::Mesh) -> Result<Mesh> {
                 normals,
                 uvs,
                 triangles: triangles.clone(),
+            })
+        }
+        // The heterogeneous shell: the canonical unit cube, outward-wound.
+        // The grid's bounds bake into each placement's transform (see
+        // `lower_instances`), so one mesh — one BLAS — serves every volume.
+        // A null boundary never shades, so only the winding matters; the
+        // shared-corner normals below are never read.
+        MeshSource::MediumBounds => {
+            let positions: Vec<Vec3> = (0..8)
+                .map(|corner| {
+                    Vec3::new(
+                        (corner & 1) as f32,
+                        ((corner >> 1) & 1) as f32,
+                        ((corner >> 2) & 1) as f32,
+                    )
+                })
+                .collect();
+            let triangles = vec![
+                [0, 2, 3],
+                [0, 3, 1], // −Z
+                [4, 5, 7],
+                [4, 7, 6], // +Z
+                [0, 1, 5],
+                [0, 5, 4], // −Y
+                [2, 6, 7],
+                [2, 7, 3], // +Y
+                [0, 4, 6],
+                [0, 6, 2], // −X
+                [1, 3, 7],
+                [1, 7, 5], // +X
+            ];
+            let normals = smooth_normals(&positions, &triangles);
+            let uvs = vec![Vec2::ZERO; positions.len()];
+            Ok(Mesh {
+                positions,
+                normals,
+                uvs,
+                triangles,
             })
         }
         MeshSource::Ply { path } => {
@@ -875,6 +930,9 @@ fn emissive_geometry(
             let ply = crate::ply::read(path)?;
             Ok((ply.positions, ply.triangles))
         }
+        // A medium shell's material is forced inert, so it never emits and
+        // this is never reached with one — but the resolver is total.
+        MeshSource::MediumBounds => Ok((Vec::new(), Vec::new())),
     }
 }
 
@@ -902,40 +960,41 @@ fn environment_spec(
 /// whole description in without one — so it is checked here too, where every
 /// other failure on user data is caught.
 fn global_medium(
-    description: &SceneDescription,
     name: Option<&str>,
+    media: &BTreeMap<&str, super::Medium>,
 ) -> Result<Option<super::Medium>> {
     match name {
-        Some(name) => description
-            .media()
-            .get(name)
-            .ok_or_else(|| scene_error(format!("the global medium \"{name}\" does not exist")))
-            .map(|medium| {
-                let lowered = lower_medium(name, medium);
-                // Only an unbounded medium is affected: it extinguishes over
-                // an infinite path, so with nothing scattering light back
-                // there is no route to the sky at all. A bounded volume that
-                // only absorbs is an ordinary dark solid.
-                if lowered.scattering == Vec3::ZERO && lowered.absorption != Vec3::ZERO {
-                    log::warn!(
-                        "the global medium \"{name}\" only absorbs, which leaves the environment \
-                         and the distant lights unreachable"
-                    );
-                }
-                Some(lowered)
-            }),
+        Some(name) => {
+            let lowered = media
+                .get(name)
+                .ok_or_else(|| scene_error(format!("the global medium \"{name}\" does not exist")))?
+                .clone();
+            // Only an unbounded medium is affected: it extinguishes over
+            // an infinite path, so with nothing scattering light back
+            // there is no route to the sky at all. A bounded volume that
+            // only absorbs is an ordinary dark solid.
+            if lowered.scattering == Vec3::ZERO && lowered.absorption != Vec3::ZERO {
+                log::warn!(
+                    "the global medium \"{name}\" only absorbs, which leaves the environment \
+                     and the distant lights unreachable"
+                );
+            }
+            Ok(Some(lowered))
+        }
         None => Ok(None),
     }
 }
 
-/// Lower one description medium into the renderer's coefficients.
+/// Lower one description medium into the renderer's coefficients — and,
+/// for a heterogeneous one, resolve its grid. The multi-GiB payload is
+/// deliberately not read here: the GPU phase streams it into the pool.
 ///
 /// The coefficients convert to the working space like every other authored
 /// color, and clamp at zero on the far side: the `Rec.709` → `ACEScg` matrix
 /// has negative entries, so a saturated authored coefficient can land below
 /// zero — which would be a medium that *amplifies*, and one path's runaway
 /// throughput reaches the whole image through next-event estimation.
-fn lower_medium(name: &str, medium: &description::Medium) -> super::Medium {
+fn lower_medium(name: &str, medium: &description::Medium) -> Result<super::Medium> {
     let convert = |what: &str, authored: [f32; 3]| {
         let converted = crate::color::acescg_from_rec709(Vec3::from(authored));
         if converted.min_element() < 0.0 {
@@ -953,11 +1012,51 @@ fn lower_medium(name: &str, medium: &description::Medium) -> super::Medium {
             super::MAX_ANISOTROPY
         );
     }
-    super::Medium {
+    let volume = medium.volume.as_ref().map(lower_volume).transpose()?;
+    Ok(super::Medium {
         absorption: convert("absorption", medium.absorption),
         scattering: convert("scattering", medium.scattering),
         anisotropy: medium.anisotropy,
-    }
+        volume,
+    })
+}
+
+/// Resolve one grid reference into a [`super::GridVolume`]: prep the
+/// `.vdb` if needed (content-cached), parse the header, and derive the
+/// shell transform from the active bounds.
+fn lower_volume(source: &description::VolumeSource) -> Result<super::GridVolume> {
+    // The one place a scene grows its first grid, and so where the rung-11-c
+    // hole gets said out loud: grid volumes do not attenuate shadow rays yet
+    // (`extinctionOf` in scene.slang reads them as zero), and the volume
+    // stage skips next-event estimation inside one rather than trust it.
+    static DEFERRAL: std::sync::Once = std::sync::Once::new();
+    DEFERRAL.call_once(|| {
+        log::warn!(
+            "heterogeneous media do not cast shadows yet: a light connection through a grid \
+             volume is unattenuated, and paths scattering inside one sample light \
+             directionally only"
+        );
+    });
+    let nvdb = crate::vdb::prepared(&source.path)?;
+    let header = crate::vdb::grid_header(&nvdb, &source.grid)?;
+    let (lo, hi) = crate::vdb::shell_box(&header.meta.index_bbox);
+    let (lo, hi) = (Vec3::from(lo), Vec3::from(hi));
+    // The unit cube maps onto the shell box, and so does the majorant
+    // lattice — `res` cells across it, which is what turns an index-space
+    // position into the cell coordinate the tracker's walk steps through.
+    let bounds_to_index = Mat4::from_translation(lo) * Mat4::from_scale(hi - lo);
+    let bounds_to_asset = super::rows_to_mat4(&header.index_to_asset) * bounds_to_index;
+    let res = crate::vdb::majorant_resolution(&header.meta.index_bbox);
+    let majorant_scale = Vec3::new(res[0] as f32, res[1] as f32, res[2] as f32) / (hi - lo);
+    Ok(super::GridVolume {
+        nvdb,
+        grid: source.grid.clone(),
+        asset_to_index: header.asset_to_index,
+        bounds_to_asset,
+        majorant_res: res,
+        majorant_scale: majorant_scale.to_array(),
+        majorant_bias: (-lo * majorant_scale).to_array(),
+    })
 }
 
 /// Lower one description environment: the tint converts to `ACEScg` and

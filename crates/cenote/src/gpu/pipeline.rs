@@ -36,8 +36,10 @@ pub enum Bindings {
     None,
     /// Set 0 — binding 0: the scene TLAS; binding 1: the environment
     /// texture; binding 2: the bindless material-texture array; bindings
-    /// 3 and 4: the closure's 2D and 3D lookup tables. All written at
-    /// dispatch time.
+    /// 3 and 4: the closure's 2D and 3D lookup tables; binding 5: the
+    /// `NanoVDB` grid pool (partially bound — written only when the scene
+    /// holds grids, and only the volume stage's tracking entry reads it).
+    /// All written at dispatch time.
     Scene,
 }
 
@@ -71,6 +73,10 @@ pub struct SceneBindings<'a> {
     pub table_planes: &'a [vk::DescriptorImageInfo],
     /// The 3D lookup tables (binding 4), [`TABLE_VOLUMES`] of them.
     pub table_volumes: &'a [vk::DescriptorImageInfo],
+    /// The `NanoVDB` grid pool (binding 5), or `None` for a scene with no
+    /// grids — the binding is partially bound, and no kernel that could
+    /// read it is ever dispatched for such a scene.
+    pub grid_pool: Option<&'a super::Buffer>,
 }
 
 /// A compute pipeline plus its layout and (for scene-resource kernels) its
@@ -224,6 +230,11 @@ impl Context {
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .descriptor_count(TABLE_VOLUMES)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(5)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
         ];
         let binding_flags = [
             vk::DescriptorBindingFlags::empty(),
@@ -231,6 +242,9 @@ impl Context {
             vk::DescriptorBindingFlags::PARTIALLY_BOUND,
             vk::DescriptorBindingFlags::empty(),
             vk::DescriptorBindingFlags::empty(),
+            // The grid pool exists only in scenes with grids; unwritten is
+            // legal because nothing dispatched without one reads it.
+            vk::DescriptorBindingFlags::PARTIALLY_BOUND,
         ];
         let mut flags_info =
             vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&binding_flags);
@@ -246,6 +260,9 @@ impl Context {
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .descriptor_count(1 + MAX_SCENE_TEXTURES + TABLE_PLANES + TABLE_VOLUMES),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1),
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(1)

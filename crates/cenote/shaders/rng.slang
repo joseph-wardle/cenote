@@ -148,6 +148,18 @@ public float2 hashUniform2(uint pixel, uint sampleIndex, uint bounce, uint cross
     return float2(toUnitFloat(h), toUnitFloat(lowbias32(h ^ 0x27d4eb2fu)));
 }
 
+// The null-collision tracker's draws — one flight length and one event
+// decision per collision, keyed by (sub-segment, collision) packed into
+// `key` by the caller. Like the walk's events the collisions are unbounded
+// in number, so they ride a hash stream on the same terms (the key wraps
+// where the walk's does); a salt of its own means no tracker draw can ever
+// repeat a march, transparency, or walk decision made this bounce.
+public float2 trackerUniform2(uint pixel, uint sampleIndex, uint bounce, uint key) {
+    var h = lowbias32(pixel ^ lowbias32(sampleIndex ^ 0x6a09e667u));
+    h = lowbias32(h ^ (bounce << 16 | key));
+    return float2(toUnitFloat(h), toUnitFloat(lowbias32(h ^ 0x3c6ef372u)));
+}
+
 // The subsurface walk's draws — each interior event's distance and phase
 // turn, and the exit's direction and next-event pair — keyed by (event,
 // draw). Like the march's sub-segments the events are unbounded in
