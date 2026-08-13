@@ -1,0 +1,56 @@
+// Rung 11-d's emission scene: the openvdb.org explosion, whose temperature
+// field rides beside its density on the same lattice — the pyro contract
+// every solver writes. The field is normalized to [0, 0.885], so the scale
+// below is what states its Kelvin: a 3100 K core falling away to nothing at
+// the edges, which is where a fire's color comes from.
+//
+// Emission is collected at the tracker's collisions and never sampled
+// toward, so there is no light in frame and no next-event estimation: the
+// fire lights only itself, through the smoke it is made of. A dim sky keeps
+// the cold shoulders of the plume readable.
+//
+// The emission scale is large because it carries two small physical
+// numbers at once. A blackbody's visible radiance is normalized against
+// 6500 K, and this fire tops out near 4700 K; and emission rides on
+// absorption, which smoke this thin sets at a hundredth. Scene load prints
+// where the pair lands — "a thick core settles at 12.8" — so the 400 is
+// arithmetic rather than a knob turned until it looked right. The offset
+// matters for the same reason: it is what stops the coolest smoke falling
+// forty stops below the core.
+//
+// Fetch the source first: scenes/vdb/fetch.sh (explosion is CC-BY).
+(
+    version: 2,
+    ops: [
+        Settings((name: "main", resolution: Some((960, 540)), max_bounces: Some(32))),
+        Camera((
+            name: "main",
+            position: Some((14.0, 100.0, 340.0)),
+            look_at: Some((14.0, 100.0, 5.0)),
+            vfov_degrees: Some(48.0),
+        )),
+        Environment((name: "sky", tint: Some((0.02, 0.03, 0.05)))),
+
+        Mesh((name: "shell", source: Some(MediumBounds))),
+        Material((name: "inert")),
+        Medium((
+            name: "fire",
+            absorption: Some((0.01, 0.01, 0.01)),
+            scattering: Some((0.06, 0.06, 0.06)),
+            anisotropy: Some(0.2),
+            volume: Some(Some((
+                path: "sources/explosion.vdb",
+                temperature_grid: Some("temperature"),
+                temperature_scale: 4000.0,
+                temperature_offset: 1200.0,
+                emission: (400.0, 400.0, 400.0),
+            ))),
+        )),
+        Instance((
+            name: "fire",
+            mesh: Some("shell"),
+            material: Some("inert"),
+            medium: Some(Some("fire")),
+        )),
+    ],
+)

@@ -28,21 +28,10 @@ import pathstate; // MEDIUM_SLOTS
 import rng;       // trackerUniform2, shadowUniform
 import scene;     // SceneTable, MediumRecord
 
-// Density at a continuous index-space position, nanovdb convention: values
-// on the integer lattice, trilinear over the 2×2×2 neighborhood.
-//
-// The result is bounded into [0, ceiling], and that bound is load-bearing
-// rather than defensive: it is what makes σ_t ≤ m hold *by construction*, so
-// no lattice error — a stale bound, an off-by-one cell at a boundary, a grid
-// whose stored voxels outran the majorant built from them — can produce a
-// negative null weight or a scatter probability above one. An underestimated
-// majorant costs density, never soundness.
-//
-// Written as a comparison rather than `clamp`: SPIR-V's FClamp is
-// FMin(FMax(…)), and both are *undefined* on a NaN operand, so an authored
-// NaN voxel would land wherever the driver put it. `> 0.0` is false for NaN.
-float sampleDensity(pnanovdb_buf_t buf, inout pnanovdb_readaccessor_t acc,
-                    float3 index, float ceiling) {
+// One grid's value at a continuous index-space position, nanovdb
+// convention: values on the integer lattice, trilinear over the 2×2×2
+// neighborhood.
+float trilinear(pnanovdb_buf_t buf, inout pnanovdb_readaccessor_t acc, float3 index) {
     float3 base = floor(index);
     float3 t = index - base;
     int3 ijk0 = int3(base);
@@ -57,7 +46,35 @@ float sampleDensity(pnanovdb_buf_t buf, inout pnanovdb_readaccessor_t acc,
             PNANOVDB_GRID_TYPE_FLOAT, buf, PNANOVDB_REF(acc), PNANOVDB_REF(ijk));
         value += weight * pnanovdb_read_float(buf, addr);
     }
+    return value;
+}
+
+// The density the tracker samples: `trilinear` bounded into [0, ceiling].
+//
+// That bound is load-bearing rather than defensive: it is what makes
+// σ_t ≤ m hold *by construction*, so no lattice error — a stale bound, an
+// off-by-one cell at a boundary, a grid whose stored voxels outran the
+// majorant built from them — can produce a negative null weight or a
+// scatter probability above one. An underestimated majorant costs density,
+// never soundness.
+//
+// Written as a comparison rather than `clamp`: SPIR-V's FClamp is
+// FMin(FMax(…)), and both are *undefined* on a NaN operand, so an authored
+// NaN voxel would land wherever the driver put it. `> 0.0` is false for NaN.
+float sampleDensity(pnanovdb_buf_t buf, inout pnanovdb_readaccessor_t acc,
+                    float3 index, float ceiling) {
+    let value = trilinear(buf, acc, index);
     return value > 0.0 ? min(value, ceiling) : 0.0;
+}
+
+// An accessor opened on the grid at `offset` in the pool.
+pnanovdb_readaccessor_t openGrid(pnanovdb_buf_t buf, uint offset) {
+    pnanovdb_grid_handle_t grid = { pnanovdb_address_t(offset) };
+    pnanovdb_readaccessor_t acc;
+    pnanovdb_readaccessor_init(
+        PNANOVDB_REF(acc),
+        pnanovdb_tree_get_root(buf, pnanovdb_grid_get_tree(buf, grid)));
+    return acc;
 }
 
 // The record's world→index affine applied to a world position.
@@ -66,6 +83,18 @@ float3 toIndex(MediumRecord record, float3 world) {
     return float3(dot(record.worldToIndex[0], p),
                   dot(record.worldToIndex[1], p),
                   dot(record.worldToIndex[2], p));
+}
+
+// The temperature field's reading, in Kelvin, at the same index-space
+// point the density was read from — the two fields share `worldToIndex`,
+// prep refusing a pair that would not, so one affine and one position
+// reach both. A second accessor and a second descent through a second
+// tree is what emission costs; keeping one open across collisions instead
+// measured 11 % *slower* (its live state spills the tracker's shared
+// memory), so it is opened here, per lookup, like the density's.
+float kelvinAt(pnanovdb_buf_t buf, MediumRecord record, float3 index) {
+    var acc = openGrid(buf, record.temperatureGrid);
+    return trilinear(buf, acc, index) * record.kelvinScale + record.kelvinOffset;
 }
 
 // Where the tracker ended a sub-segment, and what carrying the path there
@@ -77,6 +106,10 @@ public struct TrackEvent {
     public float3 weight;  // the collision weights' running product
     public float g;        // σ_s-weighted anisotropy at the scatter point
     public float3 albedo;  // σ_s/σ_t at the scatter point, for the guides
+    // What the sub-segment emitted toward the ray's origin, already carrying
+    // the collision weights that reached each emitting point but not the
+    // path's own throughput. Zero unless the tracker was told to collect it.
+    public float3 emission;
 #ifdef PROBES
     public uint collisions;
     public uint nulls;
@@ -278,16 +311,44 @@ bool spendFlight(pnanovdb_buf_t buf, inout Walk walk, float3 constant, float len
 // block's reserved Sobol pair — the first collision is the one draw whose
 // stratification matters — and the rest ride the hash stream keyed by
 // (crossed, collision).
-public TrackEvent trackMedia(SceneTable* scene, pnanovdb_buf_t buf, MediaSplit split,
-                             float3 origin, float3 direction, float start, float tmax,
-                             uint pixel, uint sampleIndex, uint bounce, uint crossed,
-                             float2 uFirst) {
+//
+// EMISSIVE = 1 also collects what the sub-segment emits, at the same
+// collisions and against the same majorant. The transport equation's source
+// term is σ_a·L_e — Kirchhoff's law, a body absorbing and emitting through
+// the same coefficient — and a collision estimator that adds σ_a·L_e/m
+// weighted by the collision weights so far is unbiased for its integral
+// over the segment, because collisions arrive at rate m. Emission is
+// *collected*, never sampled toward, so it costs no draw, no strategy, and
+// nothing of MIS. pbrt-v4's VolPathIntegrator does the same thing at the
+// same place.
+//
+// σ_a is what makes that estimator SAFE, and not only what makes it
+// physical. σ_a ≤ σ_t ≤ m holds by construction (see `sampleDensity`), so
+// each collision's σ_a·L_e/m is at most L_e however the medium is authored:
+// the estimator cannot manufacture a sample brighter than the fire is. A
+// decoupled emission coefficient — what Cycles, Arnold and Karma expose,
+// where emission survives a medium being made purely scattering — has no
+// such bound under a majorant, which is why those renderers ray-march their
+// emission instead of collecting it. Coupling to σ_t rather than σ_a would
+// stay bounded and stop the albedo from dimming the fire, but it would make
+// the scattering share emit too, and it is not the transport equation.
+//
+// Two consequences worth knowing before authoring: raising a medium's
+// single-scattering albedo dims what it radiates, and nothing is collected
+// where no collision happens, so a hot cell that holds no smoke emits
+// nothing. The second is the limitation every majorant-driven collector
+// has, and it is the density grid that defines where a medium is.
+public TrackEvent trackMedia<let EMISSIVE : int>(
+    SceneTable* scene, pnanovdb_buf_t buf, MediaSplit split, float3 origin, float3 direction,
+    float start, float tmax, uint pixel, uint sampleIndex, uint bounce, uint crossed,
+    float2 uFirst) {
     TrackEvent event;
     event.scattered = false;
     event.distance = tmax;
     event.weight = float3(1.0);
     event.g = split.homogeneous.g;
     event.albedo = float3(0.0);
+    event.emission = float3(0.0);
 #ifdef PROBES
     event.collisions = 0;
     event.nulls = 0;
@@ -334,26 +395,42 @@ public TrackEvent trackMedia(SceneTable* scene, pnanovdb_buf_t buf, MediaSplit s
         // The homogeneous g is already σ_s-normalized; multiplying it back
         // out recovers Σ σ_s·g, which the grids then add their share to.
         var gSum = split.homogeneous.g * (sigmaS.x + sigmaS.y + sigmaS.z);
+        // Σ σ_a·L_e over the media meeting here — the RTE's source term,
+        // which is per medium and so is summed the way the coefficients are.
+        var emitted = float3(0.0);
         [unroll]
         for (uint slot = 0; slot < MEDIUM_SLOTS; slot++) {
             if (slot >= split.gridCount) {
                 continue;
             }
             let record = scene.media[split.grids[slot]];
-            pnanovdb_grid_handle_t grid = { pnanovdb_address_t(record.grid) };
-            pnanovdb_tree_handle_t tree = pnanovdb_grid_get_tree(buf, grid);
-            pnanovdb_root_handle_t root = pnanovdb_tree_get_root(buf, tree);
-            pnanovdb_readaccessor_t acc;
-            pnanovdb_readaccessor_init(PNANOVDB_REF(acc), root);
+            var acc = openGrid(buf, record.grid);
+            let index = toIndex(record, x);
             // Each grid clamps to the ceiling that entered the majorant
             // above: the walked cell's for the leading grid, the whole
             // lattice's maximum for any other.
-            let density = sampleDensity(buf, acc, toIndex(record, x),
+            let density = sampleDensity(buf, acc, index,
                                         slot == 0 ? walk.ceiling : record.densityMax);
-            sigmaT += density * record.sigmaT;
+            let extinction = density * record.sigmaT;
+            sigmaT += extinction;
             let scatter = density * record.sigmaS;
             sigmaS += scatter;
             gSum += record.g * (scatter.x + scatter.y + scatter.z);
+            // `extinction − scatter` is density·σ_a, the source coefficient.
+            // Guarded on density as well as on the field: an empty point
+            // emits nothing whatever its temperature, and skipping it there
+            // is a whole tree descent saved.
+            if (EMISSIVE != 0 && density > 0.0 && record.temperatureGrid != GRID_NONE) {
+                emitted += (extinction - scatter) * record.emission
+                           * blackbody(scene, kelvinAt(buf, record, index));
+            }
+        }
+        if (EMISSIVE != 0) {
+            // Collected before the collision is classified, and with the
+            // weights that reached here: what this estimates is the
+            // emission integral over the whole segment, not the part in
+            // front of whichever event happens to end it.
+            event.emission += event.weight * emitted / m;
         }
 #ifdef PROBES
         event.collisions++;
@@ -415,12 +492,7 @@ public float3 gridTransmittance(SceneTable* scene, pnanovdb_buf_t buf, uint inst
     // a connection can start far outside a small grid, where `at + t·perT`
     // would spend its precision on the journey.
     var walk = openWalk(record, buf, cellRay(record, origin, direction, span.x));
-    pnanovdb_grid_handle_t grid = { pnanovdb_address_t(record.grid) };
-    pnanovdb_readaccessor_t acc;
-    pnanovdb_readaccessor_init(
-        PNANOVDB_REF(acc),
-        pnanovdb_tree_get_root(buf, pnanovdb_grid_get_tree(buf, grid)));
-
+    var acc = openGrid(buf, record.grid);
     let length = span.y - span.x;
     var transmittance = float3(1.0);
     var t = 0.0;

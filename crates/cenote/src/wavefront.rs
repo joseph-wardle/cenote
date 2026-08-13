@@ -254,6 +254,9 @@ struct Media {
     /// tracking entry point — which is the only kernel that reads the
     /// grid pool binding.
     heterogeneous: bool,
+    /// One of those grid media carries a temperature field, so that tracker
+    /// also collects blackbody emission. Implies `heterogeneous`.
+    emissive: bool,
 }
 
 impl Media {
@@ -266,6 +269,7 @@ impl Media {
             priority: scene.has_priority(),
             subsurface: scene.has_subsurface(),
             heterogeneous: scene.has_heterogeneous(),
+            emissive: scene.has_emissive(),
         };
         // A grid medium is bounded by a `MediumBounds` shell and validation
         // refuses it anywhere else, so the grid shadow pipeline always finds
@@ -273,6 +277,10 @@ impl Media {
         debug_assert!(
             !media.heterogeneous || media.volumes,
             "a heterogeneous medium without a bounding shell"
+        );
+        debug_assert!(
+            !media.emissive || media.heterogeneous,
+            "an emissive medium without a density grid to collide in"
         );
         media
     }
@@ -944,9 +952,11 @@ pub struct Wavefront {
     shade_miss: ComputePipeline,
     shade_surface: ComputePipeline,
     shade_volume: ComputePipeline,
-    /// The volume stage specialized for heterogeneous (grid) media — see
-    /// `shade_volume.slang`. One or the other is recorded, never both.
+    /// The volume stage specialized for heterogeneous (grid) media, and for
+    /// grid media that also emit — see `shade_volume.slang`. Exactly one of
+    /// the three is recorded.
     shade_volume_hetero: ComputePipeline,
+    shade_volume_emissive: ComputePipeline,
     shade_subsurface: ComputePipeline,
     trace_shadow: ComputePipeline,
     /// The shadow stage specialized for bounded volumes — see
@@ -1043,6 +1053,11 @@ impl Wavefront {
             )?,
             shade_volume_hetero: pipeline(
                 &kernels.shade_volume_hetero,
+                size_of::<ShadeVolumeParams>(),
+                Bindings::Scene,
+            )?,
+            shade_volume_emissive: pipeline(
+                &kernels.shade_volume_emissive,
                 size_of::<ShadeVolumeParams>(),
                 Bindings::Scene,
             )?,
@@ -1551,7 +1566,9 @@ impl Wavefront {
                 // and shades as ever. The same `media.heterogeneous` that
                 // bound the grid pool picks the tracking entry point.
                 if volume_stage {
-                    let volume_pipeline = if media.heterogeneous {
+                    let volume_pipeline = if media.emissive {
+                        &self.shade_volume_emissive
+                    } else if media.heterogeneous {
                         &self.shade_volume_hetero
                     } else {
                         &self.shade_volume

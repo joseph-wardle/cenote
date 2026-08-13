@@ -1012,7 +1012,11 @@ fn lower_medium(name: &str, medium: &description::Medium) -> Result<super::Mediu
             super::MAX_ANISOTROPY
         );
     }
-    let volume = medium.volume.as_ref().map(lower_volume).transpose()?;
+    let volume = medium
+        .volume
+        .as_ref()
+        .map(|volume| lower_volume(volume, convert("emission", volume.emission)))
+        .transpose()?;
     Ok(super::Medium {
         absorption: convert("absorption", medium.absorption),
         scattering: convert("scattering", medium.scattering),
@@ -1024,9 +1028,55 @@ fn lower_medium(name: &str, medium: &description::Medium) -> Result<super::Mediu
 /// Resolve one grid reference into a [`super::GridVolume`]: prep the
 /// `.vdb` if needed (content-cached), parse the header, and derive the
 /// shell transform from the active bounds.
-fn lower_volume(source: &description::VolumeSource) -> Result<super::GridVolume> {
+///
+/// A temperature field is resolved here too, and refused unless it maps
+/// index space the way the density grid does. Everything downstream — the
+/// shell, the majorant lattice, the one world→index affine a record
+/// carries — is derived from the density grid alone, so a temperature
+/// field on a different lattice would be sampled at the wrong place; a
+/// solver's fields share a transform, and the ones that do not are worth
+/// stopping for.
+/// Whether two grids' world→index affines agree closely enough to be read
+/// through one of them. Compared to a tolerance rather than bit for bit:
+/// the rows arrive as `f32` from the file, and two grids that a solver
+/// wrote from the same transform can still differ in the last place after
+/// a resample or a round trip through another DCC. A relative disagreement
+/// this small is worth far less than a voxel; a real mismatch is orders
+/// above it and still refused.
+fn same_index_map(left: &[[f32; 4]; 3], right: &[[f32; 4]; 3]) -> bool {
+    // Row-relative, so the translation column is judged against the row's
+    // own magnitude rather than against a scale it has no relation to.
+    left.iter().zip(right).all(|(a, b)| {
+        let scale = a.iter().chain(b).fold(0.0_f32, |m, v| m.max(v.abs()));
+        a.iter().zip(b).all(|(x, y)| (x - y).abs() <= 1e-5 * scale)
+    })
+}
+
+fn lower_volume(source: &description::VolumeSource, emission: Vec3) -> Result<super::GridVolume> {
     let nvdb = crate::vdb::prepared(&source.path)?;
     let header = crate::vdb::grid_header(&nvdb, &source.grid)?;
+    let mut temperature_grid = source.temperature_grid.clone();
+    if let Some(name) = &temperature_grid {
+        let temperature = crate::vdb::grid_header(&nvdb, name)?;
+        if !same_index_map(&temperature.asset_to_index, &header.asset_to_index) {
+            return Err(super::scene_error(format!(
+                "volume \"{}\": temperature grid \"{name}\" maps index space differently from \
+                 density grid \"{}\" ({:?} vs {:?}); one simulation's fields share a transform",
+                nvdb.display(),
+                source.grid,
+                temperature.asset_to_index,
+                header.asset_to_index
+            )));
+        }
+        // Named but multiplied by nothing: the field is dropped here rather
+        // than carried, so a fire turned down to black stops paying for a
+        // second grid — its upload, its residency, and the emissive volume
+        // stage all key off this being `Some`. Checked *after* the pair is
+        // validated, so a broken file is refused whatever the scale says.
+        if emission.cmple(Vec3::ZERO).all() {
+            temperature_grid = None;
+        }
+    }
     let (lo, hi) = crate::vdb::shell_box(&header.meta.index_bbox);
     let (lo, hi) = (Vec3::from(lo), Vec3::from(hi));
     // The unit cube maps onto the shell box, and so does the majorant
@@ -1044,6 +1094,10 @@ fn lower_volume(source: &description::VolumeSource) -> Result<super::GridVolume>
         majorant_res: res,
         majorant_scale: majorant_scale.to_array(),
         majorant_bias: (-lo * majorant_scale).to_array(),
+        temperature: temperature_grid,
+        kelvin_scale: source.temperature_scale,
+        kelvin_offset: source.temperature_offset,
+        emission,
     })
 }
 
@@ -2011,5 +2065,49 @@ mod tests {
         mesh.triangles.push([base, base + 1, base + 2]); // zero area
         mesh.triangles.push([0, 1, base + 1]); // zero-length normal
         assert_eq!(facet_lean_degrees(&mesh, 1e-6), lidded);
+    }
+
+    /// One affine reaches both of a medium's fields, so two lattices
+    /// cannot: lowering must refuse the pair rather than sample the
+    /// temperature somewhere the density is not. Checked against a
+    /// fixture whose two grids differ only in voxel size, and against its
+    /// twin that does not — the tolerance the comparison carries is for
+    /// last-place drift, not for a real mismatch.
+    #[test]
+    fn a_temperature_grid_on_its_own_lattice_is_refused() {
+        let Some(tool) = crate::vdb::find_prep_tool() else {
+            return;
+        };
+        let fire = |voxel: &str, tag: &str| {
+            let path = std::env::temp_dir()
+                .join(format!("cenote-lower-fire-{tag}-{}.nvdb", std::process::id()));
+            let run = std::process::Command::new(&tool)
+                .args(["--fire", "8", "1.0", "1000", "0.5"])
+                .arg(&path)
+                .args(voxel.split_whitespace())
+                .output()
+                .expect("run cenote-vdb-prep");
+            assert!(run.status.success(), "--fire failed (rebuild vdb-prep)");
+            path
+        };
+        let source = |path: &std::path::Path| description::VolumeSource {
+            path: path.to_owned(),
+            grid: "density".to_owned(),
+            temperature_grid: Some("temperature".to_owned()),
+            temperature_scale: 1.0,
+            temperature_offset: 0.0,
+            emission: [1.0; 3],
+        };
+
+        let matched = fire("", "matched");
+        lower_volume(&source(&matched), Vec3::ONE).expect("one transform, both fields");
+        let _ = std::fs::remove_file(&matched);
+
+        let skewed = fire("0.25", "skewed");
+        let error = lower_volume(&source(&skewed), Vec3::ONE)
+            .expect_err("two lattices under one affine")
+            .to_string();
+        let _ = std::fs::remove_file(&skewed);
+        assert!(error.contains("maps index space differently"), "{error}");
     }
 }

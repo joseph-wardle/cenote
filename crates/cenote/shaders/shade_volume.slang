@@ -112,9 +112,12 @@ Params params;
 
 // The stage body, specialized like `connectionTransmittance`: HETERO = 0 is the
 // homogeneous engine exactly, HETERO = 1 adds the null-collision tracker
-// for sub-segments whose set holds a grid medium. A specialization and not
-// a flag so gridless scenes keep their register allocation.
-void shadeVolume<let HETERO : int>(uint3 tid) {
+// for sub-segments whose set holds a grid medium, and EMISSIVE = 1 has that
+// tracker collect what the medium radiates on its way. A specialization and
+// not a flag so a scene keeps the register allocation of the transport it
+// actually runs; which entry point a wave records is `has_heterogeneous`
+// and `has_emissive_media`, host-side.
+void shadeVolume<let HETERO : int, let EMISSIVE : int>(uint3 tid) {
     if (tid.x >= params.queues.volumes.count()) {
         return;
     }
@@ -171,10 +174,18 @@ void shadeVolume<let HETERO : int>(uint3 tid) {
         if (!hadGrid) {
             event = sampleMedium(record, end - start, uDistance);
         } else {
-            let tracked = trackMedia(params.scene, gridPool, split, origin,
-                                     direction, start, end - start, pixel,
-                                     params.sampleIndex, bounce, crossed,
-                                     uDistance);
+            let tracked = trackMedia<EMISSIVE>(params.scene, gridPool, split, origin,
+                                               direction, start, end - start, pixel,
+                                               params.sampleIndex, bounce, crossed,
+                                               uDistance);
+            if (EMISSIVE != 0) {
+                // Emitted light joins the pixel where it was emitted,
+                // carrying the throughput that reached the sub-segment —
+                // the estimator already carries everything inside it. No
+                // next-event strategy competes for it, so no MIS weight
+                // does either.
+                params.radiance[pixel] += float4(throughput.xyz * tracked.emission, 0.0);
+            }
             event.scattered = tracked.scattered;
             event.distance = tracked.distance;
             event.weight = tracked.weight;
@@ -398,7 +409,7 @@ void shadeVolume<let HETERO : int>(uint3 tid) {
 [shader("compute")]
 [numthreads(WORKGROUP_SIZE, 1, 1)]
 void shade_volume(uint3 tid: SV_DispatchThreadID) {
-    shadeVolume<0>(tid);
+    shadeVolume<0, 0>(tid);
 }
 
 // Dispatched instead of (never beside) `shade_volume` when the scene holds
@@ -406,5 +417,12 @@ void shade_volume(uint3 tid: SV_DispatchThreadID) {
 [shader("compute")]
 [numthreads(WORKGROUP_SIZE, 1, 1)]
 void shade_volume_hetero(uint3 tid: SV_DispatchThreadID) {
-    shadeVolume<1>(tid);
+    shadeVolume<1, 0>(tid);
+}
+
+// And instead of that one when a grid medium carries a temperature field.
+[shader("compute")]
+[numthreads(WORKGROUP_SIZE, 1, 1)]
+void shade_volume_emissive(uint3 tid: SV_DispatchThreadID) {
+    shadeVolume<1, 1>(tid);
 }

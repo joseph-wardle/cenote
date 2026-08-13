@@ -176,6 +176,10 @@ fn one3() -> [f32; 3] {
     [1.0; 3]
 }
 
+fn one() -> f32 {
+    1.0
+}
+
 fn zero2() -> [f32; 2] {
     [0.0; 2]
 }
@@ -565,6 +569,41 @@ pub struct VolumeSource {
     /// convention every DCC writes.
     #[serde(default = "default_density_grid")]
     pub grid: String,
+    /// The temperature field's name in the same file, or `None` (the
+    /// default) for a medium that does not emit. `"temperature"` is what
+    /// every pyro solver writes beside its density.
+    ///
+    /// It must share the density grid's index transform — one simulation's
+    /// fields do, and prep refuses the pair rather than sampling the
+    /// temperature somewhere the density is not.
+    #[serde(default)]
+    pub temperature_grid: Option<String>,
+    /// Kelvin per unit of that field: `K = value · scale + offset`. The
+    /// default reads the field as Kelvin outright; a solver writing a
+    /// normalized `[0, 1]` heat wants the scale set to the temperature its
+    /// 1 stands for.
+    #[serde(default = "one")]
+    pub temperature_scale: f32,
+    /// The other half of that map — a floor a normalized field never
+    /// reaches below. Default zero.
+    #[serde(default)]
+    pub temperature_offset: f32,
+    /// What multiplies the blackbody radiance at that temperature, linear
+    /// `Rec.709` like every other color.
+    ///
+    /// The source term is `density · absorption · emission · B(K)`, so
+    /// this is what the medium radiates per unit of *absorption* optical
+    /// depth, in units of a 6500 K body — which is why fire wants a large
+    /// number twice over. A flame is a thousand times dimmer than 6500 K
+    /// in the visible, and smoke that reads well usually absorbs at a
+    /// hundredth. Scene load prints the peak the mapping reaches, so the
+    /// number can be read rather than guessed.
+    ///
+    /// Emission riding on absorption is what the transport equation says
+    /// and what keeps the estimator bounded (`tracking.slang`); its cost
+    /// is that making the medium more scattering makes it dimmer.
+    #[serde(default = "one3")]
+    pub emission: [f32; 3],
 }
 
 fn default_density_grid() -> String {

@@ -65,9 +65,23 @@ public struct MediumRecord {
     // The largest ceiling anywhere in the lattice — the bound a grid falls
     // back to where the tracker walks a different grid's lattice.
     public float densityMax;
-    // worldToIndex's float4 rows already round the record to 128 bytes; this
+    // The temperature grid's byte offset in the pool, or GRID_NONE for a
+    // medium that does not emit. Read through `worldToIndex`, the density
+    // grid's: prep refuses a pair whose index maps differ. Pool offsets are
+    // 32-byte aligned, so the low bits are spare if a later rung needs a
+    // field read as radiance outright rather than as a temperature.
+    public uint temperatureGrid;
+    // Kelvin from a field value: value·kelvinScale + kelvinOffset.
+    public float kelvinScale;
+    public float kelvinOffset;
+    // ACEScg multiplier on the blackbody radiance at that temperature — so
+    // the source term is density·σ_a·emission·blackbody(K), and `emission`
+    // is what the medium radiates per unit of *absorption* optical depth,
+    // in units of a 6500 K body.
+    public float3 emission;
+    // worldToIndex's float4 rows already round the record to 144 bytes; this
     // only names the tail so scene.rs can spell the same layout.
-    float3 pad0;
+    float pad0;
 };
 
 // Where an instance's triangles live, plus its transforms — everything
@@ -178,6 +192,11 @@ public struct SceneTable {
     // infinite optical depth in every channel that extinguishes at all: the
     // environment and the distant lights are unreachable through one.
     public uint globalMedium;
+    // `blackbody::table` — log2 ACEScg radiance sampled uniformly in
+    // temperature, read only where a medium emits. `pad0` keeps the uint4
+    // below on its alignment.
+    public float4* blackbody;
+    uint2 pad0;
     // The camera's medium set — what the eye itself is inside of, and the
     // seed intersect gives every path at bounce 0. It lives here because
     // raygen's and intersect's push constants are both full to Vulkan's
@@ -187,6 +206,33 @@ public struct SceneTable {
     // field of this table a kernel writes.
     public uint4 cameraMedia;
 };
+
+// The blackbody table's grid, mirroring `blackbody.rs`: this many samples
+// spread over [0, BLACKBODY_MAX_K], sample k standing at k·MAX/(SIZE − 1).
+static const uint BLACKBODY_SIZE = 2048;
+static const float BLACKBODY_MAX_K = 20000.0;
+
+// What a blackbody at `kelvin` emits, in ACEScg, scaled so that 6500 K has
+// luminance 1. The samples are interpolated where they are *stored* — in
+// log2 — because the radiance they stand for climbs by orders of magnitude
+// between neighbours, and only its logarithm is smooth enough for a lerp to
+// land on. Hotter than the table reads as its top sample.
+//
+// Nothing here is physics: `blackbody.rs` integrates Planck's law against
+// the CIE observer and bakes the result, and this only reads it back, so
+// there is no second spelling of the emission spectrum to drift from that
+// one.
+//
+// The bound is written as a comparison rather than `clamp`: SPIR-V's FClamp
+// is undefined on a NaN operand, and a NaN Kelvin would then index wherever
+// the driver put it.
+public float3 blackbody(SceneTable* scene, float kelvin) {
+    let bounded = kelvin > 0.0 ? min(kelvin, BLACKBODY_MAX_K) : 0.0;
+    let x = bounded * (float(BLACKBODY_SIZE - 1) / BLACKBODY_MAX_K);
+    let lo = uint(x);
+    let hi = min(lo + 1, BLACKBODY_SIZE - 1);
+    return exp2(lerp(scene.blackbody[lo].xyz, scene.blackbody[hi].xyz, x - float(lo)));
+}
 
 // Crossings after this many commit as opaque, in whichever traversal is
 // resolving them: a bound on pathological transparent stacks, and on the

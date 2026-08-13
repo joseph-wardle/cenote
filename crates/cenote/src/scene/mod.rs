@@ -32,6 +32,7 @@ mod shapes;
 
 pub use shapes::{cube, ground_plane, icosphere};
 
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
@@ -274,6 +275,10 @@ struct PlacementMedia {
     /// the volume stage dispatches its tracking entry point and binds the
     /// grid pool. Implies `volumes`.
     heterogeneous: bool,
+    /// Some heterogeneous medium carries a temperature field, so the
+    /// tracker collects blackbody emission at its collisions. Implies
+    /// `heterogeneous`.
+    emissive: bool,
 }
 
 fn placement_media(placements: &[Placement]) -> PlacementMedia {
@@ -284,6 +289,7 @@ fn placement_media(placements: &[Placement]) -> PlacementMedia {
         scattering_interiors: false,
         subsurface: false,
         heterogeneous: false,
+        emissive: false,
     };
     for placement in placements {
         let word = boundary_word(placement);
@@ -292,10 +298,9 @@ fn placement_media(placements: &[Placement]) -> PlacementMedia {
         media.priority |= word & (MAX_PRIORITY << STACK_PRIORITY_SHIFT) != 0;
         media.scattering_interiors |= word & STACK_SCATTERING != 0;
         media.subsurface |= subsurface(&placement.material).is_some();
-        media.heterogeneous |= placement
-            .medium
-            .as_ref()
-            .is_some_and(|medium| medium.volume.is_some());
+        let volume = placement.medium.as_ref().and_then(|medium| medium.volume.as_ref());
+        media.heterogeneous |= volume.is_some();
+        media.emissive |= volume.is_some_and(|volume| volume.temperature.is_some());
     }
     media
 }
@@ -426,6 +431,17 @@ pub struct GridVolume {
     pub majorant_scale: [f32; 3],
     /// The translation half of the same map.
     pub majorant_bias: [f32; 3],
+    /// The temperature field beside the density, or `None` for a medium
+    /// that does not emit — including one whose emission is black, which
+    /// lowering resolves to the same thing. It shares `asset_to_index`
+    /// (lowering refuses the pair otherwise), so one affine reaches both.
+    pub temperature: Option<String>,
+    /// Kelvin from a field value: `K = value · scale + offset`.
+    pub kelvin_scale: f32,
+    /// The offset half of that map.
+    pub kelvin_offset: f32,
+    /// `ACEScg` multiplier on the blackbody radiance at that temperature.
+    pub emission: Vec3,
 }
 
 /// One entry of the medium table. Mirrors `struct MediumRecord` in
@@ -460,13 +476,22 @@ struct MediumRecord {
     /// The largest ceiling anywhere in the lattice: the bound a grid falls
     /// back to where the tracker walks another grid's lattice.
     density_max: f32,
-    /// Not slack to reclaim: `world_to_index`'s `float4` rows already force
-    /// a 16-byte stride, so the record is 128 bytes with or without this —
-    /// the tail is only named here so both sides spell the same layout.
-    _pad0: [f32; 3],
+    /// The temperature grid's byte offset in the pool, or [`GRID_NONE`] for
+    /// a medium that does not emit. It is read through `world_to_index`,
+    /// the density grid's — lowering refuses a pair that would not be.
+    temperature_grid: u32,
+    /// Kelvin from a field value: `K = value · scale + offset`.
+    kelvin_scale: f32,
+    kelvin_offset: f32,
+    /// `ACEScg` multiplier on the blackbody radiance at that temperature.
+    emission: [f32; 3],
+    /// `world_to_index`'s `float4` rows force a 16-byte stride, so the
+    /// record rounds to 144 bytes with or without this — the tail is only
+    /// named here so both sides spell the same layout.
+    _pad0: f32,
 }
 
-const _: () = assert!(size_of::<MediumRecord>() == 128);
+const _: () = assert!(size_of::<MediumRecord>() == 144);
 
 /// A [`MediumRecord`] as its own identity: the bits it computed to, which
 /// is what interning keys on. Sized off the record so a field added to one
@@ -494,7 +519,11 @@ impl MediumRecord {
             majorant_bias: [0.0; 3],
             majorant_res: 0,
             density_max: 0.0,
-            _pad0: [0.0; 3],
+            temperature_grid: GRID_NONE,
+            kelvin_scale: 0.0,
+            kelvin_offset: 0.0,
+            emission: [0.0; 3],
+            _pad0: 0.0,
         }
     }
 }
@@ -705,6 +734,33 @@ fn subsurface_textured(material: &Material) -> bool {
 /// `grids` maps every heterogeneous medium's (nvdb, grid) to where its
 /// payload and majorant lattice landed — uploaded by
 /// [`upload_instance_tables`] before any record is built, so the lookup
+/// What the temperature mapping actually reached, at scene load.
+///
+/// A medium's emission scale reads as absurd — `explosion.ron` wants 400 —
+/// because it multiplies two small physical numbers: how dim a flame is
+/// beside a 6500 K body, and how weakly smoke absorbs. Both are knowable
+/// and neither is guessable, so the hottest place the mapping reaches is
+/// printed with the radiance an optically thick core there would settle
+/// at: `emission · B(K) · σ_a/σ_t`, which is what the film will show and
+/// is free of the density. The peak itself costs nothing — the majorant
+/// scan every uploaded grid gets has already reduced the field to its
+/// largest stored value, which for a temperature grid is exactly this.
+fn report_emission(field: &str, peak: f32, volume: &GridVolume, record: &MediumRecord) {
+    let kelvin = f64::from(peak * volume.kelvin_scale + volume.kelvin_offset);
+    let sigma_t = Vec3::from(record.sigma_t);
+    // Per channel and then to luminance, so a colored medium is not
+    // reported through its red. A medium that extinguishes nothing never
+    // collides, so it settles at nothing — which the division would
+    // otherwise say as a NaN.
+    let share = (sigma_t - Vec3::from(record.sigma_s)) / sigma_t.max(Vec3::splat(f32::MIN));
+    let core = volume.emission * crate::blackbody::radiance(kelvin) * share;
+    log::info!(
+        "  emission: \"{field}\" peaks at {peak:.4} → {kelvin:.0} K; \
+         a thick core there settles at {:.3}",
+        crate::color::luminance(core),
+    );
+}
+
 /// cannot miss.
 fn placement_medium(
     placement: &Placement,
@@ -727,6 +783,14 @@ fn placement_medium(
             "majorant resolution {res:?} exceeds the ten bits the record packs it into"
         );
         record.majorant_res = res[0] | res[1] << 10 | res[2] << 20;
+        if let Some(temperature) = &volume.temperature {
+            let field = grids[&(volume.nvdb.clone(), temperature.clone())];
+            record.temperature_grid = field.grid;
+            record.kelvin_scale = volume.kelvin_scale;
+            record.kelvin_offset = volume.kelvin_offset;
+            record.emission = volume.emission.to_array();
+            report_emission(temperature, field.density_max, volume, &record);
+        }
         // world → asset is the *author's* transform inverted, which is the
         // placement's (element · bounds) with the bounds folded back out:
         // B · (E·B)⁻¹ = E⁻¹. Composed with the grid's own asset→index map,
@@ -821,6 +885,10 @@ struct SceneTable {
     light_count: u32,
     /// What fills the open space between instances, or [`MEDIUM_NONE`].
     global_medium: u32,
+    /// [`crate::blackbody::table`], read only where a medium emits.
+    blackbody: vk::DeviceAddress,
+    /// Padding, so `camera_media` keeps the alignment below.
+    _pad0: [u32; 2],
     /// The camera's medium set — the bounce-0 seed. Uploaded
     /// all-[`STACK_EMPTY`] and overwritten in place by `resolve_camera`
     /// at every accumulation restart; sits last so the `uint4` lands on
@@ -830,7 +898,7 @@ struct SceneTable {
 
 // The Slang side lays these out from its own rules, so the sizes are
 // pinned here: a mirror that drifts reads garbage rather than failing.
-const _: () = assert!(size_of::<SceneTable>() == 208);
+const _: () = assert!(size_of::<SceneTable>() == 224);
 
 /// Sample-time parameters of one bindless texture slot: the affine UV
 /// remap and the value multiplier a [`description::TextureRef`] carries
@@ -955,6 +1023,9 @@ struct ResidentBuffers {
     /// The closure's lookup tables — uploaded once at build and never
     /// dirtied (the data is embedded in the binary).
     bsdf_tables: BsdfTables,
+    /// Temperature → emitted color, on the same terms: baked from physics
+    /// rather than from the scene, so no edit can dirty it.
+    blackbody: Buffer,
     /// Per-texture sample-time parameters, in bindless-index order —
     /// rebuilt whenever the texture residency changes.
     texture_params: Buffer,
@@ -980,6 +1051,7 @@ impl ResidentBuffers {
         Ok(Self {
             instances,
             bsdf_tables: crate::tables::upload(gpu)?,
+            blackbody: crate::blackbody::upload(gpu)?,
             texture_params,
             env_marginal,
             env_conditional,
@@ -1173,6 +1245,14 @@ impl Scene {
     #[must_use]
     pub fn has_heterogeneous(&self) -> bool {
         self.media.heterogeneous
+    }
+
+    /// Whether any heterogeneous medium carries a temperature field. True,
+    /// the volume stage dispatches the entry point that collects blackbody
+    /// emission at the tracker's collisions.
+    #[must_use]
+    pub fn has_emissive(&self) -> bool {
+        self.media.emissive
     }
 
     /// The grid pool's buffer for descriptor binding — `None` until some
@@ -1455,16 +1535,26 @@ fn upload_instance_tables(
         .iter()
         .map(|placement| placement.material)
         .collect();
-    // Grid payloads first: every heterogeneous medium's grid becomes pool-
+    // Grid payloads first: every field a heterogeneous medium reads —
+    // its density, and the temperature it may emit by — becomes pool-
     // resident (the pool dedups, so an edit that keeps a grid re-uploads
-    // nothing), and the offsets feed the records below.
+    // nothing), and the offsets feed the records below. A temperature
+    // field goes through the same call, so it arrives with a majorant
+    // lattice the tracker never walks — emission is collected at the
+    // density's collisions, never sampled against a bound of its own —
+    // but its reduction is the peak `report_emission` reports.
     let mut grids: HashMap<(PathBuf, String), crate::vdb::ResidentGrid> = HashMap::new();
     for placement in placements {
-        if let Some(volume) = placement.medium.as_ref().and_then(|m| m.volume.as_ref())
-            && !grids.contains_key(&(volume.nvdb.clone(), volume.grid.clone()))
+        let Some(volume) = placement.medium.as_ref().and_then(|m| m.volume.as_ref()) else {
+            continue;
+        };
+        for field in [Some(&volume.grid), volume.temperature.as_ref()]
+            .into_iter()
+            .flatten()
         {
-            let resident = pool.upload(gpu, &volume.nvdb, &volume.grid)?;
-            grids.insert((volume.nvdb.clone(), volume.grid.clone()), resident);
+            if let Entry::Vacant(slot) = grids.entry((volume.nvdb.clone(), field.clone())) {
+                slot.insert(pool.upload(gpu, &volume.nvdb, field)?);
+            }
         }
     }
     // The tracking entry point reads binding 5 unconditionally, and the
@@ -1562,6 +1652,8 @@ fn upload_scene_table(
         media: resident.instances.media.device_address(),
         light_count,
         global_medium: resident.instances.global_medium,
+        blackbody: resident.blackbody.device_address(),
+        _pad0: [0; 2],
         camera_media: [STACK_EMPTY; MEDIUM_SLOTS],
     };
     // TRANSFER_SRC so tests can read back the one field a kernel writes

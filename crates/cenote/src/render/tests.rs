@@ -1309,6 +1309,10 @@ fn grid_slab_medium(
         volume: Some(Some(VolumeSource {
             path: nvdb.to_owned(),
             grid: "density".to_owned(),
+            temperature_grid: None,
+            temperature_scale: 1.0,
+            temperature_offset: 0.0,
+            emission: [1.0; 3],
         })),
         ..MediumPatch::new("cloud")
     }
@@ -1444,6 +1448,123 @@ fn a_ramped_grid_slab_integrates_to_its_trapezoid_sum() {
         assert!(
             (mean - expected).abs() / expected < 0.005,
             "channel {channel}: {mean} vs the profile's {expected}"
+        );
+    }
+}
+
+/// The emission fixture's constants: the same 32³ slab, carrying a second
+/// grid beside its density that holds this value everywhere. It is *not*
+/// the temperature — the scale and offset below map it to 2500 K, so both
+/// knobs are load-bearing and neither can be dropped unnoticed.
+const GRID_FIRE_FIELD: f32 = 1000.0;
+const GRID_FIRE_SCALE: f32 = 1.5;
+const GRID_FIRE_OFFSET: f32 = 1000.0;
+const GRID_FIRE_KELVIN: f64 =
+    GRID_FIRE_FIELD as f64 * GRID_FIRE_SCALE as f64 + GRID_FIRE_OFFSET as f64;
+
+/// Gate 11: what an emissive medium radiates, against the integral it is
+/// estimating. The slab absorbs and scatters at gray coefficients, emits at
+/// a constant 2500 K, and stands in front of a black sky with one bounce
+/// allowed — so nothing reaches the film but the source term, and its
+/// integral along a ray closes:
+///
+///     ∫₀ᴸ e^(−σ_t t) σ_a L_e dt  =  L_e · (σ_a/σ_t) · (1 − e^(−σ_t L)).
+///
+/// The bounce cap is what makes it closed: a path that scatters would
+/// otherwise turn back through the same fire and collect more of it. The
+/// emission collected *before* that scatter still belongs here, and the
+/// null-collision weights are what make its expectation the whole integral
+/// rather than the part in front of wherever the walk stopped — which is
+/// the estimator claim this gate exists to falsify.
+///
+/// Every factor is separately visible: `σ_a/σ_t` is under one if the
+/// scattering share is dropped, the exponential moves if the interval is
+/// clipped, and `L_e` is *colored* — the temperature reaches the film only
+/// through the blackbody table, so a channel swap, a wrong Kelvin mapping,
+/// or an emission read off the density grid rather than the temperature one
+/// all land somewhere else entirely.
+///
+/// Run at two albedos, which are two transports rather than two numbers.
+/// The scattering pair is what separates absorption from extinction: at
+/// that share an estimator coupled to `σ_t` reads three times high. The purely
+/// absorbing one degenerates the tracker to ratio tracking — `ps` is zero,
+/// no collision ever takes the scatter arm — so it is the case where
+/// nothing but the null weights carries the emission out.
+#[test]
+fn an_emissive_grid_slab_radiates_its_source_integral() {
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let Some(tool) = crate::vdb::find_prep_tool() else {
+        return;
+    };
+    let nvdb = std::env::temp_dir().join(format!("cenote-gate-fire-{}.nvdb", std::process::id()));
+    let output = std::process::Command::new(tool)
+        .args([
+            "--fire",
+            "32",
+            &GRID_SLAB_DENSITY.to_string(),
+            &GRID_FIRE_FIELD.to_string(),
+            &GRID_SLAB_VOXEL.to_string(),
+        ])
+        .arg(&nvdb)
+        .output()
+        .expect("run cenote-vdb-prep");
+    assert!(
+        output.status.success(),
+        "--fire failed (rebuild vdb-prep): {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for (absorption, scattering) in [(0.25_f32, 0.55_f32), (0.8_f32, 0.0_f32)] {
+        emissive_slab_matches_its_integral(&gpu, &nvdb, absorption, scattering);
+    }
+    let _ = std::fs::remove_file(&nvdb);
+}
+
+fn emissive_slab_matches_its_integral(
+    gpu: &crate::gpu::Context,
+    nvdb: &std::path::Path,
+    absorption: f32,
+    scattering: f32,
+) {
+    use crate::scene::changeset::{EnvironmentPatch, MediumPatch, Op};
+    use crate::scene::description::{MeshSource, VolumeSource};
+    let mut ops = grid_slab_ops(
+        MeshSource::MediumBounds,
+        MediumPatch {
+            absorption: Some([absorption; 3]),
+            scattering: Some([scattering; 3]),
+            volume: Some(Some(VolumeSource {
+                path: nvdb.to_owned(),
+                grid: "density".to_owned(),
+                temperature_grid: Some("temperature".to_owned()),
+                temperature_scale: GRID_FIRE_SCALE,
+                temperature_offset: GRID_FIRE_OFFSET,
+                emission: [1.0; 3],
+            })),
+            ..MediumPatch::new("cloud")
+        },
+    );
+    // A black sky, so the film carries the source term and nothing else.
+    ops.push(Op::Environment(EnvironmentPatch {
+        tint: Some([0.0; 3]),
+        ..EnvironmentPatch::new("sky")
+    }));
+    let scene = grid_slab_scene(gpu, ops);
+    let (size, samples) = (16, 4096);
+    let sum = bsdf_only_sum_deep(gpu, &scene, size, samples, 1);
+    assert_all_paths_finished(&sum, samples);
+
+    let sigma_t = f64::from(GRID_SLAB_DENSITY * (absorption + scattering));
+    let share = f64::from(absorption / (absorption + scattering));
+    let depth = 1.0 - (-sigma_t * f64::from(GRID_SLAB_EXTENT)).exp();
+    let emitted = crate::blackbody::radiance(GRID_FIRE_KELVIN);
+    for (channel, mean) in channel_means(&sum, size, samples).iter().enumerate() {
+        let expected = f64::from(emitted[channel]) * share * depth;
+        assert!(
+            (mean - expected).abs() / expected < 0.02,
+            "σ_a {absorption} σ_s {scattering}, channel {channel}: \
+             {mean} vs the source integral's {expected}"
         );
     }
 }

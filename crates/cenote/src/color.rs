@@ -32,9 +32,27 @@ pub fn rec709_from_acescg() -> Mat3 {
     ACESCG_FROM_REC709.inverse()
 }
 
-/// Luminance of an `ACEScg` color — the Y row of the AP1 RGB→XYZ matrix
-/// (ACES TB S-2014-004). The scalar "how bright" every power-proportional
-/// sampling decision (light selection, environment CDFs) weighs by.
+/// `ACEScg` → CIE XYZ: the AP1 primaries at D60 (ACES TB S-2014-004).
+/// Columns are the primaries' tristimulus values, so the middle *row* is
+/// [`luminance`]'s weights — the same three numbers, spelled once each
+/// because nothing here can derive the other.
+const XYZ_FROM_ACESCG: Mat3 = Mat3::from_cols(
+    Vec3::new(0.662_454_2, 0.272_228_7, -0.005_574_649_5),
+    Vec3::new(0.134_004_2, 0.674_081_8, 0.004_060_733_5),
+    Vec3::new(0.156_187_7, 0.053_689_5, 1.010_339_1),
+);
+
+/// CIE XYZ → `ACEScg`: the way *in* for a color derived from a spectrum
+/// rather than authored — the blackbody table is the only one. Returned as
+/// the matrix, like [`rec709_from_acescg`], so a bake loop inverts once.
+#[must_use]
+pub fn acescg_from_xyz() -> Mat3 {
+    XYZ_FROM_ACESCG.inverse()
+}
+
+/// Luminance of an `ACEScg` color — the Y row of [`XYZ_FROM_ACESCG`]. The
+/// scalar "how bright" every power-proportional sampling decision (light
+/// selection, environment CDFs) weighs by.
 #[must_use]
 pub fn luminance(acescg: Vec3) -> f32 {
     acescg.dot(Vec3::new(0.272_228_7, 0.674_081_8, 0.053_689_5))
@@ -61,6 +79,25 @@ mod tests {
         let authored = Vec3::new(0.25, 0.5, 0.75);
         let back = rec709_from_acescg() * acescg_from_rec709(authored);
         assert!(back.abs_diff_eq(authored, 1e-6), "{back}");
+    }
+
+    /// The XYZ matrix agrees with [`luminance`] on its own middle row —
+    /// the one place the two spellings of AP1's Y weights could drift.
+    #[test]
+    fn luminance_is_the_xyz_matrix_row() {
+        for primary in [Vec3::X, Vec3::Y, Vec3::Z] {
+            let y = (XYZ_FROM_ACESCG * primary).y;
+            assert!((luminance(primary) - y).abs() < 1e-7, "{primary} -> {y}");
+        }
+    }
+
+    /// XYZ round-trips through `ACEScg`, which is what makes the blackbody
+    /// bake's one-way conversion trustworthy.
+    #[test]
+    fn xyz_round_trips() {
+        let xyz = Vec3::new(0.4, 0.35, 0.5);
+        let back = XYZ_FROM_ACESCG * (acescg_from_xyz() * xyz);
+        assert!(back.abs_diff_eq(xyz, 1e-6), "{back}");
     }
 
     /// The primaries land on their published `ACEScg` coordinates (ACES TB

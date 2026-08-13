@@ -58,6 +58,10 @@ pub struct Kernels {
     /// so gridless scenes pay none of its registers — the
     /// `trace_shadow_volumes` pattern.
     pub shade_volume_hetero: Kernel,
+    /// And a third, for a scene where one of those grid media carries a
+    /// temperature field: the tracker collects its blackbody emission at
+    /// the collisions it already makes.
+    pub shade_volume_emissive: Kernel,
     /// The subsurface random walk — recorded only when the scene has
     /// subsurface materials.
     pub shade_subsurface: Kernel,
@@ -104,6 +108,7 @@ impl Kernels {
             shade_surface: kernel(spirv!("shade_surface"), c"shade_surface"),
             shade_volume: kernel(spirv!("shade_volume"), c"shade_volume"),
             shade_volume_hetero: kernel(spirv!("shade_volume"), c"shade_volume_hetero"),
+            shade_volume_emissive: kernel(spirv!("shade_volume"), c"shade_volume_emissive"),
             shade_subsurface: kernel(spirv!("shade_subsurface"), c"shade_subsurface"),
             trace_shadow: kernel(spirv!("trace_shadow"), c"trace_shadow"),
             trace_shadow_volumes: kernel(spirv!("trace_shadow"), c"trace_shadow_volumes"),
@@ -164,8 +169,12 @@ impl Kernels {
                 spirv: shade_surface?,
                 entry: c"shade_surface",
             },
+            shade_volume_emissive: Kernel {
+                // The same module, further entry points in it.
+                spirv: volume.clone(),
+                entry: c"shade_volume_emissive",
+            },
             shade_volume_hetero: Kernel {
-                // The same module, a second entry point in it.
                 spirv: volume.clone(),
                 entry: c"shade_volume_hetero",
             },
@@ -324,13 +333,15 @@ mod tests {
         u32::from_le_bytes(bytes[..4].try_into().unwrap()) == 0x0723_0203
     }
 
-    fn all(kernels: &Kernels) -> [&Kernel; 13] {
+    fn all(kernels: &Kernels) -> [&Kernel; 15] {
         [
             &kernels.raygen,
             &kernels.intersect,
             &kernels.shade_miss,
             &kernels.shade_surface,
             &kernels.shade_volume,
+            &kernels.shade_volume_hetero,
+            &kernels.shade_volume_emissive,
             &kernels.shade_subsurface,
             &kernels.trace_shadow,
             &kernels.trace_shadow_volumes,

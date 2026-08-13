@@ -13,7 +13,13 @@ repository.workspace = true
 [dependencies]
 ash = "0.38.0"
 ash-window = "0.13.0"
-bytemuck = { version = "1.25.0", features = ["derive", "extern_crate_alloc"] }
+bytemuck = { version = "1.25.0", features = [
+    "derive",
+    "extern_crate_alloc",
+    # `MediumKey` is a record's worth of words, past the 32 the unfeatured
+    # crate implements `Pod` for.
+    "min_const_generics",
+] }
 # Types only (tessellated meshes, texture deltas) — the UI itself lives in
 # cenote-viewer, which enables the fonts.
 egui = { version = "0.33.0", default-features = false }

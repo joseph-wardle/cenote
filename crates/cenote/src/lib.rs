@@ -42,6 +42,7 @@
 //! between the two surfaces as a failed golden-image test, never as silent
 //! corruption.
 
+mod blackbody;
 pub mod color;
 pub mod denoise;
 pub mod environment;
