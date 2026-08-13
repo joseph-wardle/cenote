@@ -1161,7 +1161,7 @@ fn constant_grid_fixture(name: &str, value: f32) -> Option<std::path::PathBuf> {
 }
 
 /// [`constant_grid_fixture`] at an explicit resolution and voxel size — the
-/// overlap gates' second grid, which must land on a lattice that shares
+/// overlap gate's second grid, which must land on a lattice that shares
 /// neither spacing nor phase with the first.
 fn constant_grid_fixture_at(
     name: &str,
@@ -1203,8 +1203,11 @@ const GRID_SLAB_TRANSLATE: [f32; 3] = [
 
 /// A description-path scene: the slab `ops` describe, floating between a
 /// narrow-fov camera at the origin and the constant white sky, nothing
-/// else.
-fn grid_slab_scene(gpu: &Context, ops: Vec<crate::scene::changeset::Op>) -> Scene {
+/// else. The description is handed back rather than consumed because the
+/// edit gate goes on to patch it.
+fn grid_slab_description(
+    ops: Vec<crate::scene::changeset::Op>,
+) -> crate::scene::description::SceneDescription {
     use crate::scene::changeset::{CameraPatch, ChangeSet, EnvironmentPatch, Op, SettingsPatch};
 
     let mut all = vec![
@@ -1223,7 +1226,12 @@ fn grid_slab_scene(gpu: &Context, ops: Vec<crate::scene::changeset::Op>) -> Scen
     description
         .apply(&ChangeSet { ops: all })
         .expect("the slab set is valid");
-    Scene::prep(gpu, &mut description).expect("prep the slab scene")
+    description
+}
+
+/// [`grid_slab_description`], prepped.
+fn grid_slab_scene(gpu: &Context, ops: Vec<crate::scene::changeset::Op>) -> Scene {
+    Scene::prep(gpu, &mut grid_slab_description(ops)).expect("prep the slab scene")
 }
 
 /// The slab, as `mesh` bounding `medium` — the two arms of the homogeneous
@@ -1353,6 +1361,23 @@ fn channel_means(sum: &[f32], size: u32, samples: u32) -> [f64; 3] {
     })
 }
 
+/// Every grid gate below is one assertion: a slab scene's mean
+/// transmittance against an optical depth the field determines. The sky is
+/// white and the media purely absorbing, so what arrives is `exp(−τ)` and
+/// nothing else — no lattice appears in the expectation, only the physics.
+fn assert_transmittance(gpu: &Context, scene: &Scene, tau: f64, tolerance: f64) {
+    let (size, samples) = (16, 2048);
+    let sum = bsdf_only_sum(gpu, scene, size, samples);
+    assert_all_paths_finished(&sum, samples);
+    let expected = (-tau).exp();
+    for (channel, mean) in channel_means(&sum, size, samples).iter().enumerate() {
+        assert!(
+            (mean - expected).abs() / expected < tolerance,
+            "channel {channel}: {mean} vs the closed form's {expected}"
+        );
+    }
+}
+
 /// Gate 2: the tracker against the closed form it must agree with. A purely
 /// absorbing constant grid is ratio tracking exactly, and its mean
 /// transmittance over the slab must be Beer–Lambert's `exp(−density · σ ·
@@ -1374,18 +1399,13 @@ fn a_constant_grid_slab_is_beer_lambert_exact() {
             grid_slab_medium(&nvdb, [sigma; 3], [0.0; 3], 0.0),
         ),
     );
-    let (size, samples) = (16, 2048);
-    let sum = bsdf_only_sum(&gpu, &scene, size, samples);
+    assert_transmittance(
+        &gpu,
+        &scene,
+        f64::from(GRID_SLAB_DENSITY * sigma * GRID_SLAB_EXTENT),
+        0.01,
+    );
     let _ = std::fs::remove_file(&nvdb);
-    assert_all_paths_finished(&sum, samples);
-    let means = channel_means(&sum, size, samples);
-    let expected = f64::from(-GRID_SLAB_DENSITY * sigma * GRID_SLAB_EXTENT).exp();
-    for (channel, mean) in means.iter().enumerate() {
-        assert!(
-            (mean - expected).abs() / expected < 0.01,
-            "channel {channel}: {mean} vs Beer–Lambert's {expected}"
-        );
-    }
 }
 
 /// The ramp fixture's profile: `base + amplitude · sin(π(k + ½)/32)` at
@@ -1458,28 +1478,22 @@ fn a_ramped_grid_slab_integrates_to_its_trapezoid_sum() {
             grid_slab_medium(&nvdb, [sigma; 3], [0.0; 3], 0.0),
         ),
     );
-    let (size, samples) = (16, 2048);
-    let sum = bsdf_only_sum(&gpu, &scene, size, samples);
-    let _ = std::fs::remove_file(&nvdb);
-    assert_all_paths_finished(&sum, samples);
-
     // The shell spans index z ∈ [−1, 32]: 33 unit segments, the outer two
     // running down to the background the tree reads beyond the ramp.
     let trapezoid: f64 = (-1..32)
         .map(|k| f64::midpoint(ramp_profile(k), ramp_profile(k + 1)))
         .sum();
-    let expected =
-        (-f64::from(sigma) * f64::from(GRID_SLAB_VOXEL) * trapezoid).exp();
-    for (channel, mean) in channel_means(&sum, size, samples).iter().enumerate() {
-        // Tight on purpose: the measured residual is 0.08 % (path
-        // lengthening across the 2° frustum, plus the estimator's noise at
-        // 2048 samples), while a lattice one cell out of step shows up as
-        // 1.7 %. Determinism is bitwise, so this does not flake.
-        assert!(
-            (mean - expected).abs() / expected < 0.005,
-            "channel {channel}: {mean} vs the profile's {expected}"
-        );
-    }
+    // Tight on purpose: the measured residual is 0.08 % (path lengthening
+    // across the 2° frustum, plus the estimator's noise at 2048 samples),
+    // while a lattice one cell out of step shows up as 1.7 %. Determinism
+    // is bitwise, so this does not flake.
+    assert_transmittance(
+        &gpu,
+        &scene,
+        f64::from(sigma) * f64::from(GRID_SLAB_VOXEL) * trapezoid,
+        0.005,
+    );
+    let _ = std::fs::remove_file(&nvdb);
 }
 
 /// The emission fixture's constants: the same 32³ slab, carrying a second
@@ -1658,7 +1672,7 @@ fn a_constant_grid_matches_its_homogeneous_twin() {
     }
 }
 
-/// The overlap gates' second grid: a *different* resolution and a
+/// The overlap gate's second grid: a *different* resolution and a
 /// *different* voxel size from the fixture slab's, placed so its lattice
 /// shares neither spacing nor phase with it — its world origin sits
 /// 0.275 m up the slab's z axis, five and a half of the slab's voxels, so no
@@ -1669,43 +1683,40 @@ fn a_constant_grid_matches_its_homogeneous_twin() {
 /// whole 2° frustum across it. Every camera ray therefore crosses slab
 /// alone, then both, then slab alone: three segments, and the middle one is
 /// the case under test.
-const OVERLAP_RES: u32 = 21;
-const OVERLAP_VOXEL: f32 = 0.06;
-const OVERLAP_DENSITY: f32 = 0.5;
+const INNER_RES: u32 = 21;
+const INNER_VOXEL: f32 = 0.06;
+const INNER_DENSITY: f32 = 0.5;
 /// Its shell, `[−voxel, res·voxel]` dilated the same one voxel each way.
-const OVERLAP_EXTENT: f32 = 22.0 * OVERLAP_VOXEL;
-const OVERLAP_TRANSLATE: [f32; 3] = [
-    -0.66 + OVERLAP_VOXEL,
-    -0.66 + OVERLAP_VOXEL,
-    -2.30 + OVERLAP_VOXEL,
+const INNER_EXTENT: f32 = 22.0 * INNER_VOXEL;
+const INNER_TRANSLATE: [f32; 3] = [
+    -0.66 + INNER_VOXEL,
+    -0.66 + INNER_VOXEL,
+    -2.30 + INNER_VOXEL,
 ];
 
-/// That grid as a medium named apart from the slab's, purely absorbing —
-/// the overlap arms are transmittance gates, and absorption alone keeps
-/// them closed forms rather than statistics.
-fn overlap_medium(nvdb: &std::path::Path, absorption: [f32; 3]) -> crate::scene::changeset::MediumPatch {
-    crate::scene::changeset::MediumPatch {
-        name: "inner".into(),
-        ..grid_slab_medium(nvdb, absorption, [0.0; 3], 0.0)
-    }
-}
-
-/// Its placement, reusing the slab set's `inert` boundary material.
-fn overlap_ops(medium: crate::scene::changeset::MediumPatch) -> Vec<crate::scene::changeset::Op> {
-    use crate::scene::changeset::{InstancePatch, MeshPatch, Op};
+/// That grid, as a purely absorbing medium named apart from the slab's and
+/// placed inside it — reusing the slab set's `inert` boundary material.
+fn inner_grid_ops(
+    nvdb: &std::path::Path,
+    absorption: [f32; 3],
+) -> Vec<crate::scene::changeset::Op> {
+    use crate::scene::changeset::{InstancePatch, MediumPatch, MeshPatch, Op};
     use crate::scene::description::{MeshSource, Transform};
     vec![
         Op::Mesh(MeshPatch {
             source: Some(MeshSource::MediumBounds),
             ..MeshPatch::new("inner-shell")
         }),
-        Op::Medium(medium),
+        Op::Medium(MediumPatch {
+            name: "inner".into(),
+            ..grid_slab_medium(nvdb, absorption, [0.0; 3], 0.0)
+        }),
         Op::Instance(InstancePatch {
             mesh: Some("inner-shell".into()),
             material: Some("inert".into()),
             medium: Some(Some("inner".into())),
             transforms: Some(vec![Transform::Trs {
-                translate: OVERLAP_TRANSLATE,
+                translate: INNER_TRANSLATE,
                 rotate_degrees: [0.0; 3],
                 scale: [1.0; 3],
             }]),
@@ -1714,94 +1725,35 @@ fn overlap_ops(medium: crate::scene::changeset::MediumPatch) -> Vec<crate::scene
     ]
 }
 
-/// Assert a slab scene's mean transmittance against an optical depth,
-/// per channel. The sky is white and the media purely absorbing, so what
-/// arrives is `exp(−τ)` and nothing else.
-fn assert_transmittance(gpu: &Context, scene: &Scene, tau: f64, tolerance: f64) {
-    let (size, samples) = (16, 2048);
-    let sum = bsdf_only_sum(gpu, scene, size, samples);
-    assert_all_paths_finished(&sum, samples);
-    let expected = (-tau).exp();
-    for (channel, mean) in channel_means(&sum, size, samples).iter().enumerate() {
-        assert!(
-            (mean - expected).abs() / expected < tolerance,
-            "channel {channel}: {mean} vs the closed form's {expected}"
-        );
-    }
-}
-
-/// Gate 12, first arm: two heterogeneous grids over one region compose by
-/// *adding* their optical depths, across lattices that agree about nothing.
+/// Gate 12: two grids over one region compose by *adding* their optical
+/// depths, across lattices that agree about nothing.
 ///
-/// Extinctions add, so the transmittance of the overlap is
-/// `exp(−(σ_A d_A + σ_B d_B) L)` — the product of what each grid would do
-/// alone. That is the whole claim, and it is what pins the majorant policy:
-/// a bound for the pair is `m_A + m_B`, never `max(m_A, m_B)`. Two
-/// different voxel sizes at two different phases (the inner grid's origin
-/// stands five and a half of the outer's voxels up its z axis) mean no
-/// shared cell exists to take a max over in the first place — the arm is
-/// built so that any design assuming one lattice for both grids cannot even
-/// be expressed against it.
+/// Extinctions add, so the transmittance of the overlap is the product of
+/// what each grid would do alone, and the invariant that keeps the tracker
+/// unbiased is the same statement about the bound: whatever majorant the
+/// walk carries, it must never fall below the extinction every active
+/// medium contributes at that point. Fall short and the shader's density
+/// clamp bites, or the null weight goes negative; either way the slab comes
+/// out too bright.
 ///
-/// Verified by mutation to see a grid dropped from the majorant: 22.0 %
-/// against a 1 % bound and a clean margin of 0.12 %. What it does *not*
-/// separate is `max` from `+` as such — with one leading grid and one
-/// follower and no homogeneous medium beside them, `max(0, x)` and `0 + x`
-/// are the same arithmetic. Its teeth are against a bound that is too
-/// small, whatever made it so.
+/// One side of the overlap ramps and the other does not, which is what
+/// makes the pair's bound change at the *union* of two unrelated sets of
+/// cell faces — the inner grid's voxels are a different size and out of
+/// phase with the slab's, so no shared cell exists in the first place. A
+/// pair of constant grids would not reach that: two whole-grid maxima are
+/// exact bounds for constant density, so nothing about a spatial lattice is
+/// under test. The ramp's profile is also asymmetric about the slab's
+/// midpoint, so a walk that carried one grid's cell structure onto the
+/// other could not cancel its way back to the right answer.
 ///
-/// It is not a gate on speed. Today this scene is tracked with one grid on
-/// the spatial lattice and the other contributing its whole-grid maximum
-/// over the entire segment, which is sound and slow; 11-f replaces that
-/// with a flight per grid and must land on this same number.
+/// The oracle is physics and holds for any estimator: the trapezoid sum
+/// [`a_ramped_grid_slab_integrates_to_its_trapezoid_sum`] derives, plus the
+/// inner grid's `σ d L`, one term each.
+///
+/// Verified by mutation to see a grid dropped from the bound: 10.7 %
+/// against a 1 % tolerance, on a clean margin of 0.23 %.
 #[test]
 fn overlapping_grids_add_their_optical_depths() {
-    let Some(gpu) = crate::gpu::test_context() else {
-        return;
-    };
-    let Some(outer) = constant_grid_fixture("overlap-outer", GRID_SLAB_DENSITY) else {
-        return;
-    };
-    let Some(inner) =
-        constant_grid_fixture_at("overlap-inner", OVERLAP_DENSITY, OVERLAP_RES, OVERLAP_VOXEL)
-    else {
-        return;
-    };
-    let (sigma_outer, sigma_inner) = (0.4, 0.3);
-    let mut ops = grid_slab_ops(
-        crate::scene::description::MeshSource::MediumBounds,
-        grid_slab_medium(&outer, [sigma_outer; 3], [0.0; 3], 0.0),
-    );
-    ops.extend(overlap_ops(overlap_medium(&inner, [sigma_inner; 3])));
-    let scene = grid_slab_scene(&gpu, ops);
-    let tau = f64::from(GRID_SLAB_DENSITY * sigma_outer * GRID_SLAB_EXTENT)
-        + f64::from(OVERLAP_DENSITY * sigma_inner * OVERLAP_EXTENT);
-    assert_transmittance(&gpu, &scene, tau, 0.01);
-    let _ = std::fs::remove_file(&outer);
-    let _ = std::fs::remove_file(&inner);
-}
-
-/// Gate 12, second arm: the same sum where one side's majorant genuinely
-/// varies along the ray and the other's does not.
-///
-/// The constant arm above can be passed by an estimator that never walks a
-/// lattice at all — two whole-grid maxima are exact bounds when the density
-/// is constant, so nothing there separates a spatial majorant from a global
-/// one. Here the ramp's ceiling changes cell by cell while the inner grid's
-/// does not, so the pair's bound changes at the *union* of two unrelated
-/// sets of cell faces. What it falsifies beyond the arm above is a walk that
-/// carries one grid's cell structure onto the other: the ramp's profile is
-/// asymmetric about the slab's midpoint, so borrowing the wrong lattice does
-/// not cancel.
-///
-/// The oracle is the trapezoid sum
-/// [`a_ramped_grid_slab_integrates_to_its_trapezoid_sum`] derives, plus the
-/// inner grid's `σ d L` — one term each, because optical depths add.
-///
-/// Verified by the same mutation, a grid dropped from the majorant: 10.7 %
-/// against a 1 % bound and a clean margin of 0.23 %.
-#[test]
-fn a_ramp_overlapping_a_constant_grid_integrates_to_their_sum() {
     let Some(gpu) = crate::gpu::test_context() else {
         return;
     };
@@ -1809,7 +1761,7 @@ fn a_ramp_overlapping_a_constant_grid_integrates_to_their_sum() {
         return;
     };
     let Some(inner) =
-        constant_grid_fixture_at("overlap-flat", OVERLAP_DENSITY, OVERLAP_RES, OVERLAP_VOXEL)
+        constant_grid_fixture_at("overlap-flat", INNER_DENSITY, INNER_RES, INNER_VOXEL)
     else {
         return;
     };
@@ -1818,45 +1770,35 @@ fn a_ramp_overlapping_a_constant_grid_integrates_to_their_sum() {
         crate::scene::description::MeshSource::MediumBounds,
         grid_slab_medium(&ramp, [sigma_ramp; 3], [0.0; 3], 0.0),
     );
-    ops.extend(overlap_ops(overlap_medium(&inner, [sigma_inner; 3])));
+    ops.extend(inner_grid_ops(&inner, [sigma_inner; 3]));
     let scene = grid_slab_scene(&gpu, ops);
     let trapezoid: f64 = (-1..32)
         .map(|k| f64::midpoint(ramp_profile(k), ramp_profile(k + 1)))
         .sum();
     let tau = f64::from(sigma_ramp) * f64::from(GRID_SLAB_VOXEL) * trapezoid
-        + f64::from(OVERLAP_DENSITY * sigma_inner * OVERLAP_EXTENT);
+        + f64::from(INNER_DENSITY * sigma_inner * INNER_EXTENT);
     assert_transmittance(&gpu, &scene, tau, 0.01);
     let _ = std::fs::remove_file(&ramp);
     let _ = std::fs::remove_file(&inner);
 }
 
-/// The camera-inside slab's placement: the ramp fixture standing *around*
-/// the origin rather than in front of it, and **turned to face the camera**
-/// — a half turn about y, so the grid's +z runs down the view direction and
-/// `world_to_index` is not the identity rotation any other grid gate uses.
-///
-/// Local coordinates are index coordinates scaled by the voxel size, so the
-/// camera lands at index (15.5, 15.5, 3.3): mid-voxel and mid-majorant-cell
-/// on every axis, which is the whole point. It looks up the ramp toward its
-/// peak, and every ray of the 2° frustum leaves through the far face at
-/// index 32, having crossed 28.7 voxels of it.
-///
-/// Where along z is chosen, not arbitrary. The majorant lattice over this
-/// fixture is five cells spanning the 33-voxel shell — 6.6 voxels each — and
-/// their ceilings run 0.92, 1.25, 1.25, 1.25, 0.92, so only the two ends
-/// step at all. The camera stands in the first cell, one step below the
-/// rise: an opening that carries that cell's *lower* ceiling into the next
-/// one clamps the density it then meets, and the slab comes out bright.
-/// Standing anywhere in the middle three, the same mistake swaps one ceiling
-/// for an identical one and is invisible — measured, not assumed.
+/// Where the camera stands inside the ramp fixture, as an index along its z
+/// axis — low in the ramp, where the field is about to rise.
+const CAMERA_INSIDE_AT: f32 = 3.3;
+/// That placement: the ramp standing *around* the origin instead of in
+/// front of it, and turned a half turn about y so its +z runs down the view
+/// direction. The camera then lands at index (15.5, 15.5,
+/// [`CAMERA_INSIDE_AT`]) — mid-voxel and mid-majorant-cell on every axis —
+/// and looks *up* the ramp, crossing 28.7 voxels to the far face at index
+/// 32. The turn is load-bearing twice over: it is the only grid gate whose
+/// `world_to_index` carries a rotation, and the only one whose walk runs
+/// forwards along an index axis rather than down it.
 const CAMERA_INSIDE_TRANSLATE: [f32; 3] = [
     0.825 + GRID_SLAB_LO,
     -0.825 - GRID_SLAB_LO,
-    3.3 * GRID_SLAB_VOXEL,
+    CAMERA_INSIDE_AT * GRID_SLAB_VOXEL,
 ];
 const CAMERA_INSIDE_TURN: [f32; 3] = [0.0, 180.0, 0.0];
-/// The camera's index along z: local `0.165` over a `0.05` voxel.
-const CAMERA_INSIDE_AT: f64 = 3.3;
 
 /// Gate 13: a camera standing inside a *grid*, not a homogeneous fog.
 ///
@@ -1871,30 +1813,28 @@ const CAMERA_INSIDE_AT: f64 = 3.3;
 /// whole cell away — true on entry, false from inside — carries the opening
 /// cell's ceiling too far.
 ///
-/// The grid is the ramp, not the constant slab, and that is load-bearing: a
-/// constant grid gives every cell the same ceiling, so no lattice mistake it
-/// could make is visible in the image at all.
+/// Two choices make that observable, and both are measured rather than
+/// argued. The grid is the ramp, because a constant grid gives every cell
+/// the same ceiling and no lattice mistake it could make would reach the
+/// image at all — and the camera stands in the lattice's *first* cell,
+/// whose ceiling is the lowest, one step below the rise. The lattice here
+/// is five cells over the 33-voxel shell and the middle three share a
+/// ceiling, so from any of them the same mistake swaps one ceiling for an
+/// identical one and is invisible. σ is 2.0 rather than the 0.4 the other
+/// slab gates use for the same reason: the clamp only bites over the few
+/// voxels where the next cell's density exceeds this one's ceiling, and at
+/// 0.4 that band moves the image 0.5 % — a ceiling error is not a large
+/// effect on a smooth field.
 ///
 /// The oracle is the trapezoid sum of
 /// [`a_ramped_grid_slab_integrates_to_its_trapezoid_sum`] truncated where
 /// the camera stands: the part of the opening voxel in front of it, then
-/// whole unit segments from index 7 up to the far face at 32.
+/// whole unit segments up to the far face at index 32.
 ///
-/// Verified by mutation to see an opening that steps a whole cell before its
-/// first crossing (`tNext = ±1/perT`, which is what the arithmetic reduces
-/// to when the walk begins on a boundary): 2.8 % against a 1 % bound, on a
-/// clean margin of 0.11 %.
-///
-/// Two things about that number are worth keeping, because both were
-/// measured rather than reasoned and both cost time to find. The mutation is
-/// **invisible** from three of the five majorant cells, which share a
-/// ceiling — placement is what makes this gate a gate. And it is invisible
-/// at the σ = 0.4 the other slab gates use, where it moves the image 0.5 %:
-/// the clamp only bites over the few voxels where the next cell's density
-/// actually exceeds this one's ceiling, so the σ here is raised to 2.0 to
-/// put that band above the noise. A ceiling error is not a large effect on
-/// a smooth field, which is worth knowing before trusting any gate to catch
-/// one.
+/// Verified by mutation to see an opening that steps a whole cell before
+/// its first crossing (`tNext = ±1/perT`, which is what the arithmetic
+/// reduces to when the walk begins on a boundary): 2.8 % against a 1 %
+/// tolerance, on a clean margin of 0.11 %.
 #[test]
 fn a_camera_inside_a_grid_tracks_from_where_it_stands() {
     let Some(gpu) = crate::gpu::test_context() else {
@@ -1913,12 +1853,13 @@ fn a_camera_inside_a_grid_tracks_from_where_it_stands() {
             CAMERA_INSIDE_TURN,
         ),
     );
-    let fraction = CAMERA_INSIDE_AT.fract();
+    let at = f64::from(CAMERA_INSIDE_AT);
+    let fraction = at.fract();
     #[expect(
         clippy::cast_possible_truncation,
         reason = "the camera's index is a small literal"
     )]
-    let opening = CAMERA_INSIDE_AT.floor() as i32;
+    let opening = at.floor() as i32;
     // ∫_f^1 (1−s)·p(opening) + s·p(opening+1) ds — the part of the voxel the
     // camera stands in that is still in front of it.
     let partial = ramp_profile(opening) * (0.5 - fraction + 0.5 * fraction * fraction)
@@ -1934,13 +1875,17 @@ fn a_camera_inside_a_grid_tracks_from_where_it_stands() {
 
 /// Gate 14: editing a medium's coefficients re-uploads no grid.
 ///
-/// The pool keys residency on (canonical file, grid name) and never
-/// evicts, so an edit that leaves the `VolumeSource` alone finds every grid
-/// it needs already there — [`GridPool::resident_bytes`] is flat across the
-/// rebuild, and flat means nothing streamed from disk. That is the property
-/// worth pinning: grids are the largest thing a scene owns (the wdas cloud
-/// is 1.6 GiB), and re-streaming one on a coefficient slider would make
-/// heterogeneous media uneditable regardless of how fast the tracker runs.
+/// The pool keys residency on (canonical file, grid name) and never evicts,
+/// so an edit that leaves the `VolumeSource` alone finds every grid it needs
+/// already there. What it does *not* skip is the host phase: `lower` reads
+/// the file's header on every update whether or not the payload is
+/// resident, so the property to pin is upload reuse and not that the file
+/// went untouched. The pool buffer is the observable — it is exact-fit
+/// (`GridPool::reserve`), so its size is the bytes resident, and a grid
+/// arriving a second time grows it. Grids are the largest thing a scene
+/// owns (the wdas cloud is 1.6 GiB), and re-streaming one on a coefficient
+/// slider would make heterogeneous media uneditable however fast the
+/// tracker runs.
 ///
 /// The render after the edit is half the gate. A pool that kept its bytes
 /// but dropped the *offsets* would also read flat, so the edited scene has
@@ -1951,9 +1896,7 @@ fn a_camera_inside_a_grid_tracks_from_where_it_stands() {
 /// doubles, 885 620 bytes against 442 804.
 #[test]
 fn a_coefficient_edit_re_uploads_no_grid() {
-    use crate::scene::changeset::{
-        CameraPatch, ChangeSet, EnvironmentPatch, Op, SettingsPatch,
-    };
+    use crate::scene::changeset::{ChangeSet, MediumPatch, Op};
     let Some(gpu) = crate::gpu::test_context() else {
         return;
     };
@@ -1961,35 +1904,24 @@ fn a_coefficient_edit_re_uploads_no_grid() {
         return;
     };
     let (before, after) = (0.15, 0.45);
-    let mut ops = vec![
-        Op::Settings(SettingsPatch::new("settings")),
-        Op::Camera(CameraPatch {
-            position: Some([0.0; 3]),
-            look_at: Some([0.0, 0.0, -1.0]),
-            vfov_degrees: Some(2.0),
-            ..CameraPatch::new("camera")
-        }),
-        Op::Environment(EnvironmentPatch::new("sky")),
-    ];
-    ops.extend(grid_slab_ops(
+    let mut description = grid_slab_description(grid_slab_ops(
         crate::scene::description::MeshSource::MediumBounds,
         grid_slab_medium(&nvdb, [before; 3], [0.0; 3], 0.0),
     ));
-    let mut description = crate::scene::description::SceneDescription::new();
-    description
-        .apply(&ChangeSet { ops })
-        .expect("the slab set is valid");
     let mut scene = Scene::prep(&gpu, &mut description).expect("prep the slab scene");
-    let resident = scene.grid_bytes();
-    assert!(resident > 0, "the slab's grid should be resident");
+    let resident = scene.grid_pool().map(Buffer::size);
+    assert!(
+        resident.is_some_and(|bytes| bytes > 0),
+        "the slab's grid should be resident"
+    );
 
     // The edit: absorption only. The `VolumeSource` is untouched, so the
     // medium is dirty and the grid is not.
     description
         .apply(&ChangeSet {
-            ops: vec![Op::Medium(crate::scene::changeset::MediumPatch {
+            ops: vec![Op::Medium(MediumPatch {
                 absorption: Some([after; 3]),
-                ..crate::scene::changeset::MediumPatch::new("cloud")
+                ..MediumPatch::new("cloud")
             })],
         })
         .expect("the edit is valid");
@@ -1998,7 +1930,7 @@ fn a_coefficient_edit_re_uploads_no_grid() {
         .update(&gpu, &description, &dirty)
         .expect("rebuild the edited scene");
     assert_eq!(
-        scene.grid_bytes(),
+        scene.grid_pool().map(Buffer::size),
         resident,
         "a coefficient edit grew the grid pool — the residency cache missed"
     );
