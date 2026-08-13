@@ -949,6 +949,15 @@ impl GridPool {
         self.buffer.as_ref()
     }
 
+    /// Bytes of the pool in use: every grid resident so far, payload and
+    /// majorant lattice both. It only ever grows, and only when a grid
+    /// arrives that was not already resident — so a rebuild that leaves it
+    /// where it was is a rebuild that streamed nothing from disk.
+    #[must_use]
+    pub fn resident_bytes(&self) -> u64 {
+        self.cursor
+    }
+
     /// Make `grid_name` from the `.nvdb` at `path` resident — payload and
     /// majorant lattice both — and return where the two landed. A grid
     /// already resident under the same canonical path and name returns its

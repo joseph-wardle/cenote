@@ -1264,6 +1264,13 @@ impl Scene {
         self.grids.buffer()
     }
 
+    /// Bytes of the grid pool in use — see
+    /// [`GridPool::resident_bytes`](crate::vdb::GridPool::resident_bytes).
+    #[must_use]
+    pub fn grid_bytes(&self) -> u64 {
+        self.grids.resident_bytes()
+    }
+
     /// Whether any interior is authored with a nesting priority the
     /// kernels can act on — see [`PlacementMedia`]. True, a hit can be an
     /// interface a higher-priority interior cuts away, which is resolved
