@@ -66,13 +66,21 @@ fn parse(bytes: &[u8]) -> Result<Strands> {
             "not a HAIR file (the first four bytes are its signature)",
         ));
     }
-    let strand_count = u32(bytes, 4) as usize;
-    let point_count = u32(bytes, 8) as usize;
-    let flags = u32(bytes, 12);
-    let default_segments = u32(bytes, 16) as usize;
-    let default_width = f32(bytes, 20);
+    let strand_count = read_u32(bytes, 4) as usize;
+    let point_count = read_u32(bytes, 8) as usize;
+    let flags = read_u32(bytes, 12);
+    let default_segments = read_u32(bytes, 16) as usize;
+    let default_width = read_f32(bytes, 20);
     if flags & arrays::POINTS == 0 {
         return Err(scene("carries no points array"));
+    }
+    // Every strand holds at least one point, so this bounds the header's
+    // strand count by a number the file's own length has to cover — a
+    // corrupt count cannot ask for an allocation the file cannot justify.
+    if strand_count > point_count {
+        return Err(scene(format!(
+            "declares {strand_count} strands across only {point_count} points"
+        )));
     }
 
     // Every array's extent, in the order the format writes them.
@@ -114,9 +122,13 @@ fn parse(bytes: &[u8]) -> Result<Strands> {
     for count in counts {
         for index in point..point + count {
             let at = points_at + 12 * index;
-            let position = Vec3::new(f32(bytes, at), f32(bytes, at + 4), f32(bytes, at + 8));
+            let position = Vec3::new(
+                read_f32(bytes, at),
+                read_f32(bytes, at + 4),
+                read_f32(bytes, at + 8),
+            );
             let width = if flags & arrays::THICKNESS != 0 {
-                f32(bytes, thickness_at + 4 * index)
+                read_f32(bytes, thickness_at + 4 * index)
             } else {
                 default_width
             };
@@ -132,9 +144,11 @@ fn scene(message: impl Into<String>) -> Error {
     Error::Scene(message.into())
 }
 
-/// A little-endian `u32` at `offset` — every scalar in the format is one
-/// of these or an `f32` beside it.
-fn u32(bytes: &[u8], offset: usize) -> u32 {
+/// A little-endian `u32` at `offset`. The arrays are read scalar by
+/// scalar rather than cast wholesale: an odd strand count leaves the
+/// points array on a two-byte boundary, where a `f32` slice cast would be
+/// unaligned.
+fn read_u32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes([
         bytes[offset],
         bytes[offset + 1],
@@ -143,7 +157,7 @@ fn u32(bytes: &[u8], offset: usize) -> u32 {
     ])
 }
 
-fn f32(bytes: &[u8], offset: usize) -> f32 {
+fn read_f32(bytes: &[u8], offset: usize) -> f32 {
     f32::from_le_bytes([
         bytes[offset],
         bytes[offset + 1],
@@ -245,6 +259,59 @@ mod tests {
         let bytes = fixture(arrays::POINTS | arrays::SEGMENTS, &[], Some(&[9]), &points);
         let message = parse(&bytes).expect_err("ten points were promised, three delivered");
         assert!(format!("{message}").contains("declares"), "{message}");
+    }
+
+    /// The two ingestion paths meet: a groom read from a file and the
+    /// same strands spelled as linear cells land on the same canonical
+    /// form, point for point and radius for radius. There is one curve
+    /// representation, not one per source.
+    #[test]
+    fn a_groom_and_the_cells_that_spell_it_agree() {
+        use crate::scene::curves::evaluate;
+        use crate::scene::description::{CurveBasis, CurveType, CurveWrap, WidthInterpolation};
+
+        let points = line(3, 0.0);
+        let authored = [0.4f32, 0.2, 0.0];
+        let mut widths = Vec::new();
+        for width in authored {
+            widths.extend_from_slice(&width.to_le_bytes());
+        }
+        let bytes = fixture(
+            arrays::POINTS | arrays::THICKNESS | arrays::SEGMENTS,
+            &widths,
+            Some(&[2]),
+            &points,
+        );
+        let groom = parse(&bytes).expect("a valid groom");
+        let cells = evaluate(
+            &points,
+            &[3],
+            Some(&crate::scene::description::Widths {
+                values: authored.to_vec(),
+                interpolation: WidthInterpolation::Vertex,
+            }),
+            CurveType::Linear,
+            CurveBasis::Bezier,
+            CurveWrap::Nonperiodic,
+        )
+        .expect("valid cells");
+        assert_eq!(groom.len(), cells.len());
+        assert_eq!(groom.points(), cells.points());
+        for index in 0..groom.points() {
+            assert_eq!(groom.point(index), cells.point(index), "point {index}");
+            assert!(
+                (groom.radius(index) - cells.radius(index)).abs() < 1e-9,
+                "radius {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_strand_count_the_points_cannot_cover_is_refused() {
+        let mut bytes = fixture(arrays::POINTS, &[], None, &line(3, 0.0));
+        bytes[4..8].copy_from_slice(&1_000_000_000u32.to_le_bytes());
+        let message = parse(&bytes).expect_err("three points cannot hold a billion strands");
+        assert!(format!("{message}").contains("strands"), "{message}");
     }
 
     #[test]

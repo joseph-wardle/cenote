@@ -30,8 +30,8 @@ use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
 use super::description::{
-    Camera, CurveWrap, Curves, CurvesSource, Geometry, Instance, Light, Medium, Mesh, MeshSource,
-    Objects, SceneDescription, Settings, Texturable, TextureRef, Transform, VolumeSource,
+    Camera, Curves, CurvesSource, Geometry, Instance, Light, Medium, Mesh, MeshSource, Objects,
+    SceneDescription, Settings, Texturable, TextureRef, Transform, VolumeSource,
     WidthInterpolation,
 };
 use super::scene_error;
@@ -746,37 +746,33 @@ fn validate_mesh(name: &str, mesh: &Mesh) -> Result<()> {
 /// is built.
 fn validate_curves(name: &str, curves: &Curves) -> Result<()> {
     let named = |message: String| scene_error(format!("curves \"{name}\" {message}"));
-    let CurvesSource::Inline {
-        points,
-        curve_vertex_counts,
-        widths,
-        curve_type,
-        basis,
-        wrap,
-    } = &curves.source
-    else {
-        let CurvesSource::Hair { path } = &curves.source else {
-            unreachable!("the source is one of two variants")
-        };
-        return validate_path(&format!("curves \"{name}\""), path);
+    let (points, curve_vertex_counts, widths, curve_type, basis, wrap) = match &curves.source {
+        // A groom by reference carries its topology inside the file:
+        // apply checks that the file is there, and prep reads it.
+        CurvesSource::Hair { path } => return validate_path(&format!("curves \"{name}\""), path),
+        CurvesSource::Inline {
+            points,
+            curve_vertex_counts,
+            widths,
+            curve_type,
+            basis,
+            wrap,
+        } => (points, curve_vertex_counts, widths, curve_type, basis, wrap),
     };
     if curve_vertex_counts.is_empty() {
         return Err(named("has no curves".to_owned()));
-    }
-    if *wrap == CurveWrap::Periodic {
-        return Err(named(
-            "are periodic; the renderer sweeps a strand from its root, and a closed loop \
-             has none"
-                .to_owned(),
-        ));
     }
     let mut vertices = 0usize;
     let mut varying = 0usize;
     for (index, &count) in curve_vertex_counts.iter().enumerate() {
         let count = count as usize;
+        // The topology rules — including the periodic refusal — live in
+        // the segment table itself, so this walk states none of them.
         let segments = super::curves::segment_count(count, *curve_type, *basis, *wrap)
             .map_err(|error| match error {
-                crate::error::Error::Scene(message) => named(format!("hold curve {index}: {message}")),
+                crate::error::Error::Scene(message) => {
+                    named(format!("hold curve {index}: {message}"))
+                }
                 other => other,
             })?;
         vertices += count;
@@ -1029,7 +1025,7 @@ fn validate_path(what: &str, path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::description::{CurveBasis, CurveType, Widths};
+    use super::super::description::{CurveBasis, CurveType, CurveWrap, Widths};
     use super::*;
 
     /// An absolute path that certainly exists — apply only checks

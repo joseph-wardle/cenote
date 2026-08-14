@@ -24,6 +24,15 @@
 //!   pieces. An error smaller than the strand's own footprint cannot be
 //!   seen at any distance, so the rule needs no camera — which is what
 //!   keeps a tessellation bit-stable across frames, edits, and machines.
+//!
+//!   The bound is on *position*, and only on position. The ring's normals
+//!   are radial about the polyline's tangent, which turns discontinuously
+//!   at every joint by roughly eight times the sagitta over the chord —
+//!   an angle that grows with the tolerance, and the tolerance is the
+//!   radius. A thin strand's joints are therefore invisible and a thick
+//!   one's read as a shading kink close up. The cure is a second,
+//!   angular term in the same predicate; the evaluator above it does not
+//!   change.
 //! - **Radial.** Three sides, not four or eight: the fewest that never
 //!   let a strand vanish (a triangle seen from its worst angle still
 //!   spans 87% of its width, where a ribbon would disappear outright),
@@ -40,6 +49,13 @@
 //! UV-derived tangent frame in `surface.slang` finds no `v` axis and
 //! tangent-space normal maps fall back to the interpolated normal. Hair
 //! does not wear normal maps; per-strand variation it cannot do without.
+//!
+//! What that degeneracy does *not* cost is the strand tangent. It is the
+//! direction of increasing `u` across a face, which a triangle fixes on
+//! its own — the full 2×2 solve is singular here, the gradient of `u`
+//! alone is not — so an anisotropic closure can recover the fiber
+//! direction from the geometry it already has, with no second attribute
+//! and no convention invented to carry it.
 
 use std::f32::consts::TAU;
 
@@ -56,12 +72,17 @@ use crate::error::{Error, Result};
 /// strand's own body covers, at any distance and from any angle.
 const FLATNESS: f32 = 0.5;
 
-/// The most pieces one cubic span may flatten into — three levels of
-/// bisection. A cap is what keeps a pathological control polygon (a
-/// hairpin authored across four points) from turning one span into
-/// thousands of triangles; 16 is the escape hatch if a groom is ever
-/// measured to need it.
+/// The most pieces one cubic span may flatten into. A cap is what keeps a
+/// pathological control polygon (a hairpin authored across four points)
+/// from turning one span into thousands of triangles; 16 is the escape
+/// hatch if a groom is ever measured to need it. Bisection reaches it in
+/// [`MAX_SPAN_DEPTH`] levels, so the cap is a power of two by
+/// construction.
 const MAX_SPAN_SEGMENTS: u32 = 8;
+
+/// The bisection depth [`MAX_SPAN_SEGMENTS`] allows — stated once, rather
+/// than at the one place that would otherwise silently round it down.
+const MAX_SPAN_DEPTH: u32 = MAX_SPAN_SEGMENTS.ilog2();
 
 /// Sides per tube — see the module docs. Three vertices per ring, six
 /// triangles per segment.
@@ -101,13 +122,19 @@ impl Strands {
         self.offsets.reserve(strands);
     }
 
-    /// Append one point to the strand under construction. Radii clamp at
-    /// zero: an interpolating basis can undershoot a width stream the way
-    /// it undershoots a position, and a negative radius would turn the
-    /// ring inside out.
+    /// Append one point to the strand under construction.
+    ///
+    /// A finite radius at or above zero is the canonical form's one
+    /// numerical invariant, and this is the single place it is enforced —
+    /// for cells and for `.hair` grooms alike. An interpolating basis
+    /// undershoots a width stream the way it undershoots a position, and a
+    /// negative radius turns the ring inside out; a NaN or an infinity out
+    /// of a corrupt file would reach the acceleration structure as a
+    /// vertex its build cannot bound.
     pub(crate) fn push_point(&mut self, point: Vec3, radius: f32) {
         self.points.push(point);
-        self.radii.push(radius.max(0.0));
+        self.radii
+            .push(if radius.is_finite() { radius.max(0.0) } else { 0.0 });
     }
 
     /// Close the strand under construction. A strand of fewer than two
@@ -159,8 +186,10 @@ impl Strands {
 /// # Errors
 ///
 /// [`Error::Scene`](crate::Error) naming the curves object: a `.hair` file
-/// that will not read, or — defensively, since apply validated the cells —
-/// a topology that cannot be walked.
+/// that will not read, a topology that cannot be walked (defensively,
+/// since apply validated the cells), or a batch that sweeps nothing at
+/// all — residency has no room for geometry with no vertices, and a
+/// zero-byte buffer is not a thing Vulkan will allocate.
 pub(crate) fn resolve(name: &str, curves: &Curves) -> Result<Mesh> {
     let named = |error| match error {
         Error::Scene(message) => scene_error(format!("curves \"{name}\": {message}")),
@@ -185,6 +214,11 @@ pub(crate) fn resolve(name: &str, curves: &Curves) -> Result<Mesh> {
         .map_err(named)?,
         CurvesSource::Hair { path } => crate::hair::read(path).map_err(named)?,
     };
+    if strands.len() == 0 {
+        return Err(named(scene_error(
+            "carry no strand long enough to sweep".to_owned(),
+        )));
+    }
     let mesh = tessellate(&strands);
     log::debug!(
         "curves \"{name}\": {} strands, {} points, {} triangles",
@@ -200,8 +234,8 @@ pub(crate) fn resolve(name: &str, curves: &Curves) -> Result<Mesh> {
 ///
 /// # Errors
 ///
-/// [`Error::Scene`](crate::Error) for a periodic wrap (refused outright,
-/// never silently opened) or a vertex count no segment rule accepts.
+/// [`Error::Scene`](crate::Error) for any topology [`segment_count`]
+/// refuses — a periodic wrap, or a vertex count no segment rule accepts.
 pub(crate) fn evaluate(
     points: &[[f32; 3]],
     counts: &[u32],
@@ -210,13 +244,6 @@ pub(crate) fn evaluate(
     basis: CurveBasis,
     wrap: CurveWrap,
 ) -> Result<Strands> {
-    if wrap == CurveWrap::Periodic {
-        return Err(scene_error(
-            "periodic curves are not supported — the renderer sweeps strands from a root, \
-             and a closed loop has none"
-                .to_owned(),
-        ));
-    }
     let mut strands = Strands::new();
     strands.reserve(counts.len(), points.len());
     let mut at = Cursor::default();
@@ -248,16 +275,10 @@ pub(crate) fn evaluate(
 }
 
 /// A linear curve is already a polyline: its vertices *are* the strand,
-/// and only the radii have to be resolved onto them.
+/// and its widths land on them one for one — no basis, no flattening.
 fn push_linear(strands: &mut Strands, control: &[[f32; 3]], widths: &CurveWidths) {
-    // Never read — a linear curve's widths are constant or interpolate
-    // linearly across a segment, and neither asks for a basis.
-    let matrix = CurveBasis::Bezier.matrix();
     for (index, point) in control.iter().enumerate() {
-        let segment = index.min(control.len() - 2);
-        let t = (index - segment) as f32;
-        let radius = widths.segment(segment).radius(&matrix, t);
-        strands.push_point(Vec3::from(*point), radius);
+        strands.push_point(Vec3::from(*point), widths.at_vertex(index));
     }
 }
 
@@ -293,19 +314,57 @@ fn push_cubic(
 
     for segment in 0..segments {
         let base = segment * step;
-        let span = [
-            points[base],
-            points[base + 1],
-            points[base + 2],
-            points[base + 3],
-        ];
-        let radii = widths.segment(segment);
+        let span = Span {
+            matrix: &matrix,
+            control: [
+                points[base],
+                points[base + 1],
+                points[base + 2],
+                points[base + 3],
+            ],
+            widths: widths.segment(segment),
+        };
         // The root of the whole strand is emitted once; every span after
         // it starts where the last one ended.
         if segment == 0 {
-            strands.push_point(evaluate_span(&matrix, &span, 0.0), radii.radius(&matrix, 0.0));
+            let (root, radius) = span.at(0.0);
+            strands.push_point(root, radius);
         }
-        flatten(strands, &matrix, &span, &radii, 0.0, 1.0, 0);
+        flatten(strands, &span, 0.0, 1.0, 0);
+    }
+}
+
+/// One cubic span, ready to sample: the four control points its basis
+/// reads, the widths on them, and the matrix that turns a parameter into
+/// weights.
+struct Span<'a> {
+    matrix: &'a [[f32; 4]; 4],
+    control: [Vec3; 4],
+    widths: SegmentWidths,
+}
+
+impl Span<'_> {
+    /// Position and radius at `t`. They are sampled together because they
+    /// share one set of basis weights: USD says a `vertex` width stream
+    /// rides the same basis its centerline does.
+    ///
+    /// The weights are the row vector `[t³ t² t 1]` through the basis
+    /// matrix, exactly as `UsdGeomBasisCurves` (and `RenderMan`'s `Basis`
+    /// before it) defines them.
+    fn at(&self, t: f32) -> (Vec3, f32) {
+        let weights = basis_weights(self.matrix, t);
+        let point = weights[0] * self.control[0]
+            + weights[1] * self.control[1]
+            + weights[2] * self.control[2]
+            + weights[3] * self.control[3];
+        let radius = match &self.widths {
+            SegmentWidths::Everywhere(radius) => *radius,
+            SegmentWidths::Ends(near, far) => near + t * (far - near),
+            SegmentWidths::Cubic(control) => {
+                (0..4).map(|index| weights[index] * control[index]).sum()
+            }
+        };
+        (point, radius)
     }
 }
 
@@ -314,48 +373,30 @@ fn push_cubic(
 /// half, and three-quarter points rather than at the midpoint alone: an
 /// S-shaped span passes straight through the middle of its own chord, and
 /// a midpoint-only test would call it flat.
-fn flatten(
-    strands: &mut Strands,
-    matrix: &[[f32; 4]; 4],
-    span: &[Vec3; 4],
-    widths: &SegmentWidths,
-    t0: f32,
-    t1: f32,
-    depth: u32,
-) {
-    if depth < MAX_SPAN_SEGMENTS.ilog2() {
-        let a = evaluate_span(matrix, span, t0);
-        let b = evaluate_span(matrix, span, t1);
+fn flatten(strands: &mut Strands, span: &Span, t0: f32, t1: f32, depth: u32) {
+    let (b, far) = span.at(t1);
+    if depth < MAX_SPAN_DEPTH {
+        let (a, near) = span.at(t0);
         // The tolerance rides the fatter end: that is where a given
         // deviation is least hidden by the strand's own body, and it keeps
         // a tapered tip from demanding subdivision as its radius goes to
         // zero.
-        let radius = widths.radius(matrix, t0).max(widths.radius(matrix, t1));
+        let radius = near.max(far);
         let deviation = [0.25_f32, 0.5, 0.75]
             .into_iter()
-            .map(|s| evaluate_span(matrix, span, t0 + s * (t1 - t0)).distance(a.lerp(b, s)))
+            .map(|s| span.at(t0 + s * (t1 - t0)).0.distance(a.lerp(b, s)))
             .fold(0.0_f32, f32::max);
         if deviation > FLATNESS * radius {
             let mid = 0.5 * (t0 + t1);
-            flatten(strands, matrix, span, widths, t0, mid, depth + 1);
-            flatten(strands, matrix, span, widths, mid, t1, depth + 1);
+            flatten(strands, span, t0, mid, depth + 1);
+            flatten(strands, span, mid, t1, depth + 1);
             return;
         }
     }
-    strands.push_point(evaluate_span(matrix, span, t1), widths.radius(matrix, t1));
+    strands.push_point(b, far);
 }
 
-/// One cubic span at parameter `t`: the basis weights are the row vector
-/// `[t³ t² t 1]` through the basis matrix, exactly as `UsdGeomBasisCurves`
-/// (and `RenderMan`'s `Basis` before it) defines them.
-fn evaluate_span(matrix: &[[f32; 4]; 4], span: &[Vec3; 4], t: f32) -> Vec3 {
-    let weights = basis_weights(matrix, t);
-    weights[0] * span[0] + weights[1] * span[1] + weights[2] * span[2] + weights[3] * span[3]
-}
-
-/// The four basis weights at `t` — shared by the positions and by the
-/// `vertex`-interpolated width stream, which USD says rides the same
-/// basis the centerline does.
+/// The four basis weights at `t`.
 fn basis_weights(matrix: &[[f32; 4]; 4], t: f32) -> [f32; 4] {
     let t2 = t * t;
     let t3 = t2 * t;
@@ -371,15 +412,23 @@ fn pinned(wrap: CurveWrap, basis: CurveBasis) -> bool {
     wrap == CurveWrap::Pinned && basis != CurveBasis::Bezier
 }
 
-/// A curve's segment count, per `UsdGeomBasisCurves`' own table. Apply
-/// validated this already; the error path is what keeps a future caller
-/// (a fixture, a fuzzer) from indexing off the end of `points`.
+/// A curve's segment count, per `UsdGeomBasisCurves`' own table — and, by
+/// the topologies it refuses, the single statement of what geometry the
+/// renderer accepts. Validation and evaluation both come through here, so
+/// neither carries a copy of the rules.
 pub(crate) fn segment_count(
     count: usize,
     curve_type: CurveType,
     basis: CurveBasis,
     wrap: CurveWrap,
 ) -> Result<usize> {
+    if wrap == CurveWrap::Periodic {
+        return Err(scene_error(
+            "a closed loop has no root to sweep a strand from, so periodic curves are not \
+             supported"
+                .to_owned(),
+        ));
+    }
     let step = basis.vstep();
     match curve_type {
         CurveType::Linear if count >= 2 => Ok(count - 1),
@@ -441,7 +490,9 @@ impl<'a> CurveWidths<'a> {
         match widths.interpolation {
             WidthInterpolation::Constant => Self::Everywhere(0.5 * values[0]),
             WidthInterpolation::Uniform => Self::Everywhere(0.5 * values[at.curve]),
-            WidthInterpolation::Varying => Self::Varying(&values[at.varying..=at.varying + at.segments]),
+            WidthInterpolation::Varying => {
+                Self::Varying(&values[at.varying..=at.varying + at.segments])
+            }
             WidthInterpolation::Vertex if curve_type == CurveType::Linear => {
                 Self::Vertex(&values[at.vertex..at.vertex + at.count])
             }
@@ -463,6 +514,17 @@ impl<'a> CurveWidths<'a> {
         }
     }
 
+    /// The radius at one vertex of a *linear* curve, whose vertices are
+    /// its segment ends and its control points at once — so no basis and
+    /// no interpolation apply, whichever stream the batch authored.
+    fn at_vertex(&self, index: usize) -> f32 {
+        match self {
+            Self::Everywhere(radius) => *radius,
+            Self::Varying(values) | Self::Vertex(values) => 0.5 * values[index],
+            Self::Cubic { values, .. } => 0.5 * values[index],
+        }
+    }
+
     /// What segment `index` reads.
     fn segment(&self, index: usize) -> SegmentWidths {
         match self {
@@ -478,7 +540,7 @@ impl<'a> CurveWidths<'a> {
     }
 }
 
-/// The width rule of one segment, in the form its parameter evaluates.
+/// The width rule of one segment, in the form [`Span::at`] evaluates.
 enum SegmentWidths {
     /// One radius across the whole segment.
     Everywhere(f32),
@@ -486,20 +548,6 @@ enum SegmentWidths {
     Ends(f32, f32),
     /// Four control radii through the curve's basis.
     Cubic([f32; 4]),
-}
-
-impl SegmentWidths {
-    /// The radius at parameter `t`.
-    fn radius(&self, matrix: &[[f32; 4]; 4], t: f32) -> f32 {
-        match self {
-            Self::Everywhere(radius) => *radius,
-            Self::Ends(near, far) => near + t * (far - near),
-            Self::Cubic(control) => {
-                let weights = basis_weights(matrix, t);
-                (0..4).map(|index| weights[index] * control[index]).sum()
-            }
-        }
-    }
 }
 
 /// Sweep a three-sided tube along every strand.
@@ -536,7 +584,7 @@ pub(crate) fn tessellate(strands: &Strands) -> Mesh {
         let phase = (noise & 0xffff) as f32 / 65536.0 * (TAU / SIDES as f32);
         let base = mesh.positions.len() as u32;
         let mut tangent = tangent_at(points, 0);
-        let mut across = orthogonal(tangent);
+        let mut across = tangent.any_orthonormal_vector();
         let mut travelled = 0.0;
         let length: f32 = points
             .windows(2)
@@ -593,12 +641,6 @@ fn tangent_at(points: &[Vec3], index: usize) -> Vec3 {
     Vec3::Y
 }
 
-/// Any unit vector perpendicular to `axis` — the first ring's reference
-/// direction, before the per-strand phase turns it.
-fn orthogonal(axis: Vec3) -> Vec3 {
-    axis.any_orthonormal_vector()
-}
-
 /// Carry `across` from one point's frame to the next with no twist added:
 /// reflect it through the plane of the step, then through the plane that
 /// takes the reflected tangent onto the new one. Two reflections compose
@@ -625,7 +667,7 @@ fn transport(across: Vec3, from: Vec3, tangent: Vec3, to: Vec3, next: Vec3) -> V
     // the reflections are exact in theory and drift in float.
     (carried - next * next.dot(carried))
         .try_normalize()
-        .unwrap_or_else(|| orthogonal(next))
+        .unwrap_or_else(|| next.any_orthonormal_vector())
 }
 
 /// A stable integer hash — the per-strand phase and `v` come off it, so it
@@ -976,6 +1018,23 @@ mod tests {
         assert_eq!(strands.points(), 2);
     }
 
+    /// A batch that sweeps nothing is refused rather than uploaded: its
+    /// buffers would be zero bytes, which is not a thing Vulkan allocates.
+    /// Cells cannot reach this (validation demands curves), so the guard
+    /// is what a `.hair` file of one-point strands runs into.
+    #[test]
+    fn a_batch_with_nothing_to_sweep_is_refused() {
+        let Err(error) = resolve(
+            "bald",
+            &Curves {
+                source: CurvesSource::default(),
+            },
+        ) else {
+            panic!("an empty batch has no geometry to resolve")
+        };
+        assert!(format!("{error}").contains("bald"), "{error}");
+    }
+
     /// The tube's analytic normals are the whole reason three sides are
     /// enough: every ring vertex sits one radius off the axis, carries the
     /// radial direction it sits on, and its faces wind outward to agree.
@@ -1055,6 +1114,37 @@ mod tests {
         assert_eq!(mesh.normals, again.normals);
         assert_eq!(mesh.uvs, again.uvs);
         assert_eq!(mesh.triangles, again.triangles);
+    }
+
+    /// Grooms arrive hostile. A strand that doubles straight back on
+    /// itself turns its frame through 180°, and a width stream can carry a
+    /// negative, a NaN, and an infinity in the same breath — none of which
+    /// may reach the acceleration structure as an unbounded vertex or an
+    /// inside-out ring.
+    #[test]
+    fn hostile_widths_and_a_reversal_still_tessellate() {
+        let doubled_back = [
+            [0.0; 3],
+            [0.0, 1.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0; 3],
+        ];
+        let strands = linear(
+            &doubled_back,
+            &[5],
+            Some(&Widths {
+                values: vec![0.2, -0.4, f32::NAN, f32::INFINITY, 0.1],
+                interpolation: WidthInterpolation::Vertex,
+            }),
+        );
+        for index in 0..strands.points() {
+            let radius = strands.radius(index);
+            assert!(radius.is_finite() && radius >= 0.0, "radius {radius}");
+        }
+        let mesh = tessellate(&strands);
+        assert!(mesh.positions.iter().all(|p| p.is_finite()));
+        assert!(mesh.normals.iter().all(|n| n.is_normalized()));
     }
 
     /// A groom with a duplicated point (every exporter writes one

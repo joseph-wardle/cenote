@@ -951,7 +951,7 @@ fn upload_texture_params<'k>(
 
 /// The scene, resident on the GPU and ready to trace against.
 pub struct Scene {
-    // Declared before `meshes`: the TLAS dies before the BLASes its
+    // Declared before `geometry`: the TLAS dies before the BLASes its
     // instances reference.
     tlas: AccelerationStructure,
     /// The environment radiance image — the binding model's one texture,
@@ -962,10 +962,10 @@ pub struct Scene {
     /// The buffers `table` points into, replaced piecewise as edits dirty
     /// them.
     resident: ResidentBuffers,
-    /// Mesh residency by name — prep rebuilds only the names an edit
-    /// dirtied. The procedural [`Scene::new`] path keys them by object
-    /// index and never updates.
-    meshes: BTreeMap<Geometry, GpuMesh>,
+    /// Geometry residency, keyed by the reference an instance holds —
+    /// prep rebuilds only what an edit dirtied. The procedural
+    /// [`Scene::new`] path keys them by object index and never updates.
+    geometry: BTreeMap<Geometry, GpuMesh>,
     /// Material-texture residency by prep request, with the content hash
     /// each image was built from — how an update tells a real image edit
     /// from a mere re-reference. Bindless indices are this map's iteration
@@ -1176,7 +1176,7 @@ impl Scene {
             environment: image,
             table,
             resident,
-            meshes: meshes
+            geometry: meshes
                 .into_iter()
                 .enumerate()
                 .map(|(index, mesh)| (Geometry::Mesh(format!("object{index}")), mesh))

@@ -89,9 +89,9 @@ impl Scene {
         let host = host_phase(description, &all_dirty(description), true, &BTreeMap::new(), None)?;
         let uploading = Instant::now();
         let mut upload = gpu.upload()?;
-        let mut meshes = BTreeMap::new();
-        for (name, mesh) in &host.meshes {
-            meshes.insert(name.clone(), upload_mesh(&mut upload, name, mesh)?);
+        let mut resident_geometry = BTreeMap::new();
+        for (geometry, mesh) in &host.geometry {
+            resident_geometry.insert(geometry.clone(), upload_mesh(&mut upload, geometry, mesh)?);
         }
         upload.finish()?;
         let textures = upload_textures(gpu, BTreeMap::new(), &host.textures)?;
@@ -116,7 +116,7 @@ impl Scene {
             power,
         } = upload_environment(gpu, environment)?;
         let building = Instant::now();
-        let placements = placements(&meshes, &host.instances);
+        let placements = placements(&resident_geometry, &host.instances);
         let tlas = build_scene_tlas(gpu, &placements)?;
         let tabling = Instant::now();
         let media = super::placement_media(&placements);
@@ -149,7 +149,7 @@ impl Scene {
             environment: image,
             table,
             resident,
-            meshes,
+            geometry: resident_geometry,
             textures,
             descriptors,
             camera: host.camera.expect("a fresh build always adopts its camera"),
@@ -208,13 +208,13 @@ impl Scene {
         let uploading = Instant::now();
         // Only device faults from here on — the untouched-on-Scene-error
         // contract holds because everything fallible already ran.
-        for name in &host.removed_meshes {
-            self.meshes.remove(name);
+        for geometry in &host.removed_geometry {
+            self.geometry.remove(geometry);
         }
         let mut upload = gpu.upload()?;
-        for (name, mesh) in &host.meshes {
-            self.meshes
-                .insert(name.clone(), upload_mesh(&mut upload, name, mesh)?);
+        for (geometry, mesh) in &host.geometry {
+            self.geometry
+                .insert(geometry.clone(), upload_mesh(&mut upload, geometry, mesh)?);
         }
         upload.finish()?;
         self.textures = upload_textures(gpu, std::mem::take(&mut self.textures), &host.textures)?;
@@ -239,7 +239,7 @@ impl Scene {
             self.env_from_world = spec.from_world;
         }
         let building = Instant::now();
-        let placements = placements(&self.meshes, &host.instances);
+        let placements = placements(&self.geometry, &host.instances);
         if host.tlas_dirty {
             self.tlas = build_scene_tlas(gpu, &placements)?;
         }
@@ -336,14 +336,14 @@ fn upload_textures(
 /// dirty mesh and curve batch, so residency tracks the description
 /// reference for reference.
 fn placements<'a>(
-    meshes: &'a BTreeMap<Geometry, GpuMesh>,
+    resident: &'a BTreeMap<Geometry, GpuMesh>,
     instances: &[InstanceSpec],
 ) -> Vec<Placement<'a>> {
     instances
         .iter()
         .map(|spec| Placement {
-            mesh: meshes
-                .get(&spec.mesh)
+            mesh: resident
+                .get(&spec.geometry)
                 .expect("geometry residency tracks the description"),
             transform: spec.transform,
             material: spec.material,

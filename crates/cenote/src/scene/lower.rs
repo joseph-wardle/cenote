@@ -39,10 +39,10 @@ pub(super) struct HostScene {
     /// their normals derived where absent and curve batches tessellated
     /// into tubes. Keyed by the reference an instance holds, so the two
     /// kinds share one residency map without sharing a namespace.
-    pub(super) meshes: BTreeMap<Geometry, Mesh>,
+    pub(super) geometry: BTreeMap<Geometry, Mesh>,
     /// Geometry residency to retire. Processed before `meshes`, so a
     /// remove-then-recreate lands the new build.
-    pub(super) removed_meshes: Vec<Geometry>,
+    pub(super) removed_geometry: Vec<Geometry>,
     /// Every instance, in name order — custom index is position.
     pub(super) instances: Vec<InstanceSpec>,
     /// The emissive geometry, one entry per triangle of every emissive
@@ -88,7 +88,7 @@ impl HostScene {
 /// placements lowers to N specs, and the flattened position is the TLAS
 /// custom index everywhere downstream.
 pub(super) struct InstanceSpec {
-    pub(super) mesh: Geometry,
+    pub(super) geometry: Geometry,
     pub(super) transform: Mat4,
     pub(super) material: Material,
     pub(super) camera_visible: bool,
@@ -148,7 +148,7 @@ pub(super) fn host_phase(
         )));
     }
 
-    let (meshes, removed_meshes) = resolve_geometry(description, dirty)?;
+    let (geometry, removed_geometry) = resolve_geometry(description, dirty)?;
 
     let changed_materials = names(&dirty.changed, Kind::Material);
 
@@ -214,7 +214,8 @@ pub(super) fn host_phase(
     }
 
     let delta_lights = lower_delta_lights(description);
-    let (instances, triangle_lights) = lower_instances(description, &materials, &media, &meshes)?;
+    let (instances, triangle_lights) =
+        lower_instances(description, &materials, &media, &geometry)?;
 
     let touched = |kind: Kind| {
         dirty
@@ -233,8 +234,8 @@ pub(super) fn host_phase(
     let global_medium = global_medium(settings.global_medium.as_deref(), &media)?;
 
     Ok(HostScene {
-        meshes,
-        removed_meshes,
+        geometry,
+        removed_geometry,
         instances,
         triangle_lights,
         delta_lights,
@@ -408,7 +409,7 @@ fn lower_instances(
                 ));
             }
             instances.push(InstanceSpec {
-                mesh: instance.geometry.clone(),
+                geometry: instance.geometry.clone(),
                 transform,
                 material,
                 camera_visible: instance.camera_visible,
@@ -961,30 +962,28 @@ fn emissive_geometry(
     if let Some(mesh) = resolved {
         return Ok((mesh.positions.clone(), mesh.triangles.clone()));
     }
-    let name = geometry.name();
-    let mesh = match geometry {
-        Geometry::Mesh(_) => &description.meshes()[name],
-        Geometry::Curves(_) => {
+    match geometry {
+        Geometry::Curves(name) => {
             let tessellated = super::curves::resolve(name, &description.curves()[name])?;
-            return Ok((tessellated.positions, tessellated.triangles));
+            Ok((tessellated.positions, tessellated.triangles))
         }
-    };
-    match &mesh.source {
-        MeshSource::Inline {
-            positions,
-            triangles,
-            ..
-        } => Ok((
-            positions.iter().copied().map(Vec3::from).collect(),
-            triangles.clone(),
-        )),
-        MeshSource::Ply { path } => {
-            let ply = crate::ply::read(path)?;
-            Ok((ply.positions, ply.triangles))
-        }
-        // A medium shell's material is forced inert, so it never emits and
-        // this is never reached with one — but the resolver is total.
-        MeshSource::MediumBounds => Ok((Vec::new(), Vec::new())),
+        Geometry::Mesh(name) => match &description.meshes()[name].source {
+            MeshSource::Inline {
+                positions,
+                triangles,
+                ..
+            } => Ok((
+                positions.iter().copied().map(Vec3::from).collect(),
+                triangles.clone(),
+            )),
+            MeshSource::Ply { path } => {
+                let ply = crate::ply::read(path)?;
+                Ok((ply.positions, ply.triangles))
+            }
+            // A medium shell's material is forced inert, so it never emits
+            // and this is never reached with one — but the resolver is total.
+            MeshSource::MediumBounds => Ok((Vec::new(), Vec::new())),
+        },
     }
 }
 
@@ -1538,7 +1537,7 @@ mod tests {
             })
             .expect("valid data");
         let host = host(&description).expect("a PLY mesh preps");
-        let mesh = &host.meshes[&Geometry::Mesh("tri".to_owned())];
+        let mesh = &host.geometry[&Geometry::Mesh("tri".to_owned())];
         assert_eq!(mesh.positions.len(), 4);
         assert_eq!(mesh.triangles.len(), 2);
         // No authored normals: derived, and this quad's winding faces +Z.
