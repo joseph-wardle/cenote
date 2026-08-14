@@ -59,9 +59,17 @@ static const uint MARCH_OPACITY_CAP = TRANSPARENT_CAP * (MARCH_BOUNDARY_CAP + 1)
 // How far past a crossing the next leg starts. Relative, so it holds at any
 // scene scale, and at least eight float32 ulps wide, so re-testing the same
 // triangle cannot return the boundary just crossed. Two boundaries closer
-// together than this read as one: the march misses the inner volume's near
-// face and then takes its far face for an entry, so coincident volume
-// surfaces are outside the model — see `crossMedium` in pathstate.slang.
+// together than this read as one — which is why a leg leaving a *null*
+// boundary opens a window's width behind it instead and crosses the whole
+// group at once (see the march). Duplicated shells, volumes sharing a face
+// plane, and a wall standing exactly on a boundary are all ordinary
+// authoring, and losing one crossing of a pair leaves a medium the path is
+// not in — or omits one it is.
+//
+// Refractive interfaces keep the plain forward nudge: an opaque one commits
+// in hardware and never reaches a candidate loop to be grouped, so
+// coincident *dielectric* surfaces remain outside the model, as every
+// boundary was before.
 static const float MARCH_NUDGE = 1e-6;
 
 // The five queues this stage touches, behind one pointer: consuming one and
@@ -228,11 +236,15 @@ void shadeVolume<let HETERO : int, let EMISSIVE : int>(uint3 tid) {
         // beats a wall that is not there.
         var toggled = Crossing(set, MEDIUM_SLOTS);
         var cross = false;
+        // Whether the crossing about to be made is a null boundary, which is
+        // what decides how the next leg opens — see the window below.
+        var grouped = false;
         if (hit.instance != INSTANCE_NONE) {
             let mesh = params.scene.geometry[hit.instance];
             if (crossable(mesh, interiorOf(set))) {
                 toggled = crossMedium(set, stackEntry(mesh, hit.instance));
-                cross = boundaryOf(mesh) == BOUNDARY_NULL || toggled.slot < MEDIUM_SLOTS;
+                grouped = boundaryOf(mesh) == BOUNDARY_NULL;
+                cross = grouped || toggled.slot < MEDIUM_SLOTS;
             }
         }
         if (!cross || !any(throughput.xyz > 0.0)) {
@@ -272,10 +284,23 @@ void shadeVolume<let HETERO : int, let EMISSIVE : int>(uint3 tid) {
         // measured shade_volume +2.4% on an L2-resident fog scene, the
         // march being register-bound while three maxes are free.
         let interior = interiorOf(set);
+        // Half the width of the nudge, and the leg's whole story about
+        // coincidence: everything within it of the crossing just made is at
+        // the *same* distance as far as this march can tell, because a
+        // forward-nudged leg would step over all of it. Where the crossing
+        // was a null boundary the leg opens a window's width *behind* it
+        // instead and toggles that group in the candidate loop below — so
+        // the group is exactly what the nudge would have lost, no wider and
+        // no narrower, and one constant defines both.
+        //
+        // Behind, not from the crossing itself: a coincident face's `t` can
+        // compute marginally nearer than the one that committed, and a
+        // one-sided open would cut it.
+        let window = start * MARCH_NUDGE + MARCH_NUDGE;
         RayDesc ray;
         ray.Origin = origin;
         ray.Direction = direction;
-        ray.TMin = start * (1.0 + MARCH_NUDGE) + MARCH_NUDGE;
+        ray.TMin = grouped ? max(0.0, start - window) : start + window;
         ray.TMax = 1e30;
         RayQuery<RAY_FLAG_NONE> query;
         query.TraceRayInline(sceneTlas, RAY_FLAG_NONE, params.rayMask, ray);
@@ -283,6 +308,37 @@ void shadeVolume<let HETERO : int, let EMISSIVE : int>(uint3 tid) {
             let candidate = query.CandidateInstanceID();
             if (exhausted && crossable(params.scene.geometry[candidate], interior)) {
                 continue;
+            }
+            // Inside the window: this candidate is coincident with the
+            // crossing just made, and the leg opened behind it to find
+            // exactly this.
+            //
+            // The surface that committed is dropped outright — it has been
+            // crossed, and committing it again would end the leg where it
+            // began and cross straight back. (A mesh contributing two faces
+            // to one group loses the second this way, exactly as it does
+            // without any of this.) A crossable partner is crossed here and
+            // the leg runs on. Anything else — a wall standing on the
+            // boundary — falls through and shades, which the plain forward
+            // nudge used to run straight through.
+            //
+            // Partners are never committed, so `TMax` still closes on the
+            // first thing that ends the leg, and they are skipped before the
+            // opacity draw below, so a scene with no coincident boundary
+            // spends the same keys in the same order as it always has.
+            //
+            // Toggles commute — `crossMedium` matches on membership, never
+            // on facing, and the dominant interior is invariant across the
+            // march — so a group needs no order, only completeness.
+            if (grouped && query.CandidateTriangleRayT() <= start + window) {
+                if (candidate == hit.instance) {
+                    continue;
+                }
+                let mesh = params.scene.geometry[candidate];
+                if (crossable(mesh, interior)) {
+                    set = crossMedium(set, stackEntry(mesh, candidate)).set;
+                    continue;
+                }
             }
             let opacity = opacityAt(params.scene, candidate,
                                     query.CandidatePrimitiveIndex(),

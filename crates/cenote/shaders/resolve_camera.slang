@@ -53,14 +53,21 @@ Params params;
 void resolve_camera() {
     var set = uint4(STACK_EMPTY);
     var start = 0.0;
+    // The instance the last leg crossed, so this one can tell its coincident
+    // partners from itself. No instance until the first leg commits.
+    var crossedInstance = ~0u;
     for (uint crossed = 0; crossed < RESOLVE_CROSSING_CAP; crossed++) {
+        // Half the nudge, and what counts as the same distance — the march's
+        // `window`, for the march's reasons (shade_volume.slang).
+        let window = start * RESOLVE_NUDGE + RESOLVE_NUDGE;
         RayDesc ray;
         ray.Origin = params.position;
         ray.Direction = RESOLVE_DIRECTION;
-        // The first leg starts at the camera itself; each later one just
-        // past the crossing that ended the last, in the ray's own parameter
-        // — shade_volume's march, minus the medium sampling.
-        ray.TMin = start == 0.0 ? 0.0 : start * (1.0 + RESOLVE_NUDGE) + RESOLVE_NUDGE;
+        // The first leg starts at the camera itself; each later one a
+        // window's width *behind* the crossing that ended the last, so the
+        // boundaries coincident with it arrive as candidates rather than
+        // being stepped over — the march's leg, minus the medium sampling.
+        ray.TMin = start == 0.0 ? 0.0 : max(0.0, start - window);
         ray.TMax = 1e30;
         RayQuery<RAY_FLAG_NONE> query;
         // Force everything non-opaque so every surface arrives as a
@@ -73,9 +80,23 @@ void resolve_camera() {
         query.TraceRayInline(sceneTlas, RAY_FLAG_FORCE_NON_OPAQUE, 0xff, ray);
         while (query.Proceed()) {
             let candidate = query.CandidateInstanceID();
-            if (boundaryOf(params.scene.geometry[candidate]) != BOUNDARY_OPAQUE) {
-                query.CommitNonOpaqueTriangleHit();
+            let mesh = params.scene.geometry[candidate];
+            if (boundaryOf(mesh) == BOUNDARY_OPAQUE) {
+                continue;
             }
+            // Coincident with the crossing that ended the last leg: cross it
+            // here and let the leg run on to the next distinct one. Nothing
+            // in the window may commit — the leg would end where it began.
+            // Every boundary class groups here, unlike the march: this walk
+            // forces non-opaque, so a dielectric interface arrives as a
+            // candidate too.
+            if (start > 0.0 && query.CandidateTriangleRayT() <= start + window) {
+                if (candidate != crossedInstance) {
+                    set = crossMedium(set, stackEntry(mesh, candidate)).set;
+                }
+                continue;
+            }
+            query.CommitNonOpaqueTriangleHit();
         }
         if (query.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
             break;
@@ -86,6 +107,7 @@ void resolve_camera() {
         let instance = query.CommittedInstanceID();
         set = crossMedium(set, stackEntry(params.scene.geometry[instance], instance)).set;
         start = query.CommittedRayT();
+        crossedInstance = instance;
     }
     params.scene.cameraMedia = set;
 }

@@ -1782,6 +1782,65 @@ fn overlapping_grids_add_their_optical_depths() {
     let _ = std::fs::remove_file(&inner);
 }
 
+/// Gate 12b: the same grid placed twice in the same spot.
+///
+/// Not a variation on the gate above — that one is about *bounds* over
+/// lattices that agree about nothing, and it deliberately keeps the two
+/// grids out of phase. This one is about *membership*, and it is the case
+/// the march finds hardest: every face plane of the two shells coincides,
+/// so each of the four crossings a camera ray makes is a pair arriving at
+/// one distance. Resolve one of each pair and step over the other, and the
+/// path enters one grid and leaves the other — reading a single slab going
+/// in, and, where the pairing falls the other way, carrying a cloud with no
+/// far face out to the sky.
+///
+/// Duplicating a placement is ordinary authoring — a scattering instanced
+/// twice, a shot assembled from two layers that both bring their cloud —
+/// so this is the shape the defect reaches production in.
+///
+/// The two placements carry different σ over one fixture, so the oracle
+/// separates all three readings: the sum is what a complete march gives,
+/// either σ alone is what a march that lost an entry gives, and a march
+/// that lost an exit reaches the sky through an unbounded segment.
+#[test]
+fn coincident_grid_placements_add_their_optical_depths() {
+    use crate::scene::changeset::{InstancePatch, MediumPatch, Op};
+    use crate::scene::description::Transform;
+    let Some(gpu) = crate::gpu::test_context() else {
+        return;
+    };
+    let Some(ramp) = ramp_grid_fixture("coincident-ramp") else {
+        return;
+    };
+    let (sigma_near, sigma_far) = (0.4, 0.25);
+    let mut ops = grid_slab_ops(
+        crate::scene::description::MeshSource::MediumBounds,
+        grid_slab_medium(&ramp, [sigma_near; 3], [0.0; 3], 0.0),
+    );
+    ops.push(Op::Medium(MediumPatch {
+        name: "twin".into(),
+        ..grid_slab_medium(&ramp, [sigma_far; 3], [0.0; 3], 0.0)
+    }));
+    ops.push(Op::Instance(InstancePatch {
+        mesh: Some("shell".into()),
+        material: Some("inert".into()),
+        medium: Some(Some("twin".into())),
+        transforms: Some(vec![Transform::Trs {
+            translate: GRID_SLAB_TRANSLATE,
+            rotate_degrees: [0.0; 3],
+            scale: [1.0; 3],
+        }]),
+        ..InstancePatch::new("twin-slab")
+    }));
+    let scene = grid_slab_scene(&gpu, ops);
+    let trapezoid: f64 = (-1..32)
+        .map(|k| f64::midpoint(ramp_profile(k), ramp_profile(k + 1)))
+        .sum();
+    let tau = f64::from(sigma_near + sigma_far) * f64::from(GRID_SLAB_VOXEL) * trapezoid;
+    assert_transmittance(&gpu, &scene, tau, 0.01);
+    let _ = std::fs::remove_file(&ramp);
+}
+
 /// Where the camera stands inside the ramp fixture, as an index along its z
 /// axis — low in the ramp, where the field is about to rise.
 const CAMERA_INSIDE_AT: f32 = 3.3;
@@ -2526,6 +2585,30 @@ fn bounded_volumes_absorb_over_exactly_the_extent_they_bound() {
             vec![fog(-5.0, absorbing(1.0)), fog(-6.0, absorbing(2.0))],
             2.0f32.mul_add(2.0, 2.0),
         ),
+        // The same two meters twice over: one box standing exactly on
+        // another, so all six of their face planes coincide and every
+        // crossing the march makes is a pair at one distance. Six σ-meters,
+        // as the offset pair above — the same answer by a different route,
+        // which is the point. A march that resolved one crossing of each
+        // pair and stepped past the other would miss an *entry* and read
+        // four σ-meters, or miss an *exit* and carry fog to the sky.
+        (
+            "two coincident boxes",
+            vec![fog(-5.0, absorbing(1.0)), fog(-5.0, absorbing(2.0))],
+            2.0f32.mul_add(2.0, 2.0),
+        ),
+        // Boxes that touch rather than overlap: [−6, −4] and [−8, −6],
+        // sharing the plane z = −6, where one box's exit and the next
+        // one's entry are one distance apart. The pair does not commute
+        // with itself the way a coincident pair does — drop the exit and
+        // the path is inside both for the second box's two meters; drop
+        // the entry and it is inside neither — so this pins the *union*
+        // and the coincident row above pins the sum.
+        (
+            "two boxes sharing a face",
+            vec![fog(-5.0, absorbing(1.0)), fog(-7.0, absorbing(2.0))],
+            2.0f32.mul_add(2.0, 2.0),
+        ),
         ("four boxes in a row", row(4), 8.0),
         // Ten crossings against a cap of eight: the fifth box is run
         // through untracked, so exactly the first four absorb.
@@ -2725,7 +2808,7 @@ fn the_camera_seed_names_exactly_what_the_camera_is_inside_of() {
             mesh: crate::scene::cube(1.0),
             transform: Mat4::from_translation(Vec3::X * 10.0),
             material: Material::matte(Vec3::ONE, 0.0),
-            medium: Some(fog),
+            medium: Some(fog.clone()),
             interior_priority: 0,
         },
         Object {
@@ -2744,6 +2827,28 @@ fn the_camera_seed_names_exactly_what_the_camera_is_inside_of() {
             transform: Mat4::from_translation(Vec3::Y * 20.0),
             material: glass.thin_walled(),
             medium: None,
+            interior_priority: 0,
+        },
+        // Instances 5 and 6: one fog cube standing exactly on another at
+        // x = −10, every face plane shared. The walk crosses both at one
+        // distance, and a leg that resolved one and stepped over the other
+        // would seed every path with a set naming one of two media — or,
+        // on the way out, with one it left behind.
+        Object {
+            mesh: crate::scene::cube(1.0),
+            transform: Mat4::from_translation(Vec3::X * -10.0),
+            material: Material::matte(Vec3::ONE, 0.0),
+            medium: Some(fog.clone()),
+            interior_priority: 0,
+        },
+        Object {
+            mesh: crate::scene::cube(1.0),
+            transform: Mat4::from_translation(Vec3::X * -10.0),
+            material: Material::matte(Vec3::ONE, 0.0),
+            medium: Some(Medium {
+                absorption: Vec3::splat(0.2),
+                ..fog.clone()
+            }),
             interior_priority: 0,
         },
     ];
@@ -2776,6 +2881,7 @@ fn the_camera_seed_names_exactly_what_the_camera_is_inside_of() {
         ("inside both solids", Vec3::new(0.0, 0.0, -6.0), vec![outer, inner]),
         ("inside the fog", Vec3::new(10.0, 0.0, 0.0), vec![2]),
         ("inside a thin-walled box", Vec3::new(0.0, 20.0, 0.0), vec![]),
+        ("inside two coincident fogs", Vec3::new(-10.0, 0.0, 0.0), vec![5, 6]),
     ] {
         let camera = Camera {
             position,
