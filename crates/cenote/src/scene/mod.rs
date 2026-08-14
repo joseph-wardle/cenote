@@ -473,10 +473,8 @@ struct MediumRecord {
     majorant: u32,
     majorant_bias: [f32; 3],
     majorant_res: u32,
-    /// The largest ceiling anywhere in the lattice. No shader reads it now
-    /// that every grid draws its flights over its own lattice; the word
-    /// stands until the record is repacked.
-    density_max: f32,
+    /// `ACEScg` multiplier on the blackbody radiance at that temperature.
+    emission: [f32; 3],
     /// The temperature grid's byte offset in the pool, or [`GRID_NONE`] for
     /// a medium that does not emit. It is read through `world_to_index`,
     /// the density grid's — lowering refuses a pair that would not be.
@@ -484,12 +482,10 @@ struct MediumRecord {
     /// Kelvin from a field value: `K = value · scale + offset`.
     kelvin_scale: f32,
     kelvin_offset: f32,
-    /// `ACEScg` multiplier on the blackbody radiance at that temperature.
-    emission: [f32; 3],
     /// `world_to_index`'s `float4` rows force a 16-byte stride, so the
     /// record rounds to 144 bytes with or without this — the tail is only
     /// named here so both sides spell the same layout.
-    _pad0: f32,
+    _pad0: [f32; 2],
 }
 
 const _: () = assert!(size_of::<MediumRecord>() == 144);
@@ -519,12 +515,11 @@ impl MediumRecord {
             majorant: 0,
             majorant_bias: [0.0; 3],
             majorant_res: 0,
-            density_max: 0.0,
+            emission: [0.0; 3],
             temperature_grid: GRID_NONE,
             kelvin_scale: 0.0,
             kelvin_offset: 0.0,
-            emission: [0.0; 3],
-            _pad0: 0.0,
+            _pad0: [0.0; 2],
         }
     }
 }
@@ -727,14 +722,6 @@ fn subsurface_textured(material: &Material) -> bool {
     .any(|&slot| slot != TEXTURE_NONE)
 }
 
-/// What fills a placement: the medium its mesh bounds, or — for an ordinary
-/// surface — whatever its material's interior holds. A mesh that bounds a
-/// medium is a null boundary, so the material's own interior can never also
-/// apply.
-///
-/// `grids` maps every heterogeneous medium's (nvdb, grid) to where its
-/// payload and majorant lattice landed — uploaded by
-/// [`upload_instance_tables`] before any record is built, so the lookup
 /// What the temperature mapping actually reached, at scene load.
 ///
 /// A medium's emission scale reads as absurd — `explosion.ron` wants 400 —
@@ -762,6 +749,14 @@ fn report_emission(field: &str, peak: f32, volume: &GridVolume, record: &MediumR
     );
 }
 
+/// What fills a placement: the medium its mesh bounds, or — for an ordinary
+/// surface — whatever its material's interior holds. A mesh that bounds a
+/// medium is a null boundary, so the material's own interior can never also
+/// apply.
+///
+/// `grids` maps every heterogeneous medium's (nvdb, grid) to where its
+/// payload and majorant lattice landed — uploaded by
+/// [`upload_instance_tables`] before any record is built, so the lookup
 /// cannot miss.
 fn placement_medium(
     placement: &Placement,
@@ -775,7 +770,6 @@ fn placement_medium(
         let resident = grids[&(volume.nvdb.clone(), volume.grid.clone())];
         record.grid = resident.grid;
         record.majorant = resident.majorant;
-        record.density_max = resident.density_max;
         record.majorant_scale = volume.majorant_scale;
         record.majorant_bias = volume.majorant_bias;
         let res = volume.majorant_res;
@@ -790,7 +784,7 @@ fn placement_medium(
             record.kelvin_scale = volume.kelvin_scale;
             record.kelvin_offset = volume.kelvin_offset;
             record.emission = volume.emission.to_array();
-            report_emission(temperature, field.density_max, volume, &record);
+            report_emission(temperature, field.field_max, volume, &record);
         }
         // world → asset is the *author's* transform inverted, which is the
         // placement's (element · bounds) with the bounds folded back out:

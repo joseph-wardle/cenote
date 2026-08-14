@@ -20,11 +20,12 @@ import scene;
 [vk::binding(0, 0)]
 RaytracingAccelerationStructure sceneTlas;
 
-// Boundary crossings the walk resolves before giving up and keeping what it
-// has: a bound on pathological nesting, far above anything the four-slot
-// set can express. Truncation past it is the same class of accepted error
-// as the march's `MARCH_BOUNDARY_CAP`.
-static const uint RESOLVE_CROSSING_CAP = 32;
+// Legs the walk makes before giving up and keeping what it has — a leg is
+// one re-trace, and a coincident group spends one however many boundaries
+// stand in it. A bound on pathological nesting, far above anything the
+// four-slot set can express; truncation past it is the same class of
+// accepted error as the march's `MARCH_LEG_CAP`.
+static const uint RESOLVE_LEG_CAP = 32;
 
 // How far past a crossing the next leg starts — `MARCH_NUDGE`'s value and
 // reasoning (shade_volume.slang): relative so it holds at any scene scale,
@@ -56,7 +57,7 @@ void resolve_camera() {
     // The instance the last leg crossed, so this one can tell its coincident
     // partners from itself. No instance until the first leg commits.
     var crossedInstance = ~0u;
-    for (uint crossed = 0; crossed < RESOLVE_CROSSING_CAP; crossed++) {
+    for (uint leg = 0; leg < RESOLVE_LEG_CAP; leg++) {
         // Half the nudge, and what counts as the same distance — the march's
         // `window`, for the march's reasons (shade_volume.slang).
         let window = start * RESOLVE_NUDGE + RESOLVE_NUDGE;

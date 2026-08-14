@@ -42,19 +42,20 @@ StructuredBuffer<uint> gridPool;
 // is nothing to be inside of — and this stage still runs.
 static const uint FLAG_SET = 1 << 25;
 
-// Boundaries one segment may cross — null ones and the false interfaces a
-// dominant interior cuts away spend it alike — before the march stops
-// tracking media and runs straight through the rest: the bound on a
-// pathological stack of shells, mirroring `TRANSPARENT_CAP` for the other
-// unbounded traversal chain. Too-thin media beat both a black pixel and a
-// wall that is not there.
-static const uint MARCH_BOUNDARY_CAP = 8;
+// Legs one segment's march may make — a leg is one re-trace, and crossing a
+// coincident group spends one leg however many boundaries stand in it; null
+// boundaries and the false interfaces a dominant interior cuts away spend
+// alike. Past it the march stops tracking media and runs straight through
+// the rest: the bound on a pathological stack of shells, mirroring
+// `TRANSPARENT_CAP` for the other unbounded traversal chain. Too-thin media
+// beat both a black pixel and a wall that is not there.
+static const uint MARCH_LEG_CAP = 8;
 
 // The march's own budget of stochastic-opacity crossings, across every
 // re-trace it makes: what one traversal is allowed, once per leg. It starts
 // where intersect's chain left off, so no two of a path's crossings this
 // bounce ever draw the same key.
-static const uint MARCH_OPACITY_CAP = TRANSPARENT_CAP * (MARCH_BOUNDARY_CAP + 1);
+static const uint MARCH_OPACITY_CAP = TRANSPARENT_CAP * (MARCH_LEG_CAP + 1);
 
 // How far past a crossing the next leg starts. Relative, so it holds at any
 // scene scale, and at least eight float32 ulps wide, so re-testing the same
@@ -68,8 +69,7 @@ static const uint MARCH_OPACITY_CAP = TRANSPARENT_CAP * (MARCH_BOUNDARY_CAP + 1)
 //
 // Refractive interfaces keep the plain forward nudge: an opaque one commits
 // in hardware and never reaches a candidate loop to be grouped, so
-// coincident *dielectric* surfaces remain outside the model, as every
-// boundary was before.
+// coincident *dielectric* surfaces remain outside the model.
 static const float MARCH_NUDGE = 1e-6;
 
 // The five queues this stage touches, behind one pointer: consuming one and
@@ -158,7 +158,7 @@ void shadeVolume<let HETERO : int, let EMISSIVE : int>(uint3 tid) {
     // Continues intersect's transparency chain past its own cap, so the
     // march's stochastic-opacity draws can never repeat one it already made.
     var crossing = TRANSPARENT_CAP;
-    var crossed = 0u;
+    var leg = 0u;
     MediumEvent event;
     MediumRecord record;
     // Whether the sub-segment that ended the loop had a grid medium in its
@@ -172,10 +172,10 @@ void shadeVolume<let HETERO : int, let EMISSIVE : int>(uint3 tid) {
         // reserved; the rest draw from the hash stream, having no reserved
         // dimensions of their own. A segment no boundary interrupts
         // therefore draws exactly the samples an un-marched one would.
-        let uDistance = crossed == 0
+        let uDistance = leg == 0
                             ? sample_2d(pixel, params.sampleIndex,
                                         bounceDimension(bounce, VOLUME_DISTANCE))
-                            : hashUniform2(pixel, params.sampleIndex, bounce, crossed);
+                            : hashUniform2(pixel, params.sampleIndex, bounce, leg);
         let split = splitMedia<HETERO>(params.scene, set);
         record = split.homogeneous;
         hadGrid = HETERO != 0 && split.gridCount != 0;
@@ -184,7 +184,7 @@ void shadeVolume<let HETERO : int, let EMISSIVE : int>(uint3 tid) {
         } else {
             let tracked = trackMedia<EMISSIVE>(params.scene, gridPool, split, origin,
                                                direction, start, end - start, pixel,
-                                               params.sampleIndex, bounce, crossed,
+                                               params.sampleIndex, bounce, leg,
                                                uDistance);
             if (EMISSIVE != 0) {
                 // Emitted light joins the pixel where it was emitted,
@@ -251,7 +251,7 @@ void shadeVolume<let HETERO : int, let EMISSIVE : int>(uint3 tid) {
             params.paths.throughput[path] = throughput;
             // Only a march has anything to write back: without one the hit
             // is intersect's own and the membership is unchanged.
-            if (crossed != 0) {
+            if (leg != 0) {
                 params.paths.hit[path] = hit;
                 params.paths.setMedia(path, set);
             }
@@ -266,7 +266,7 @@ void shadeVolume<let HETERO : int, let EMISSIVE : int>(uint3 tid) {
         // Cross it, and trace on from just past it. Moving the near end
         // rather than respawning from the surface keeps every distance in
         // the original ray's parameter and needs no error bounds.
-        crossed++;
+        leg++;
         set = toggled.set;
         start = end;
 
@@ -276,7 +276,7 @@ void shadeVolume<let HETERO : int, let EMISSIVE : int>(uint3 tid) {
         // of shells reads as too little fog rather than as a wall that is
         // not there. It also ends the loop — the hit it commits cannot be
         // one of them.
-        let exhausted = crossed >= MARCH_BOUNDARY_CAP;
+        let exhausted = leg >= MARCH_LEG_CAP;
         // The dominant interior is invariant across every crossing the
         // march makes — a false one is strictly below it, a null one is no
         // interior at all — so reading it here is reading it at entry.
@@ -370,7 +370,7 @@ void shadeVolume<let HETERO : int, let EMISSIVE : int>(uint3 tid) {
     // The scatter ends the segment, so the stale hit above is never read —
     // the next bounce's intersect overwrites it. Membership is not stale:
     // the connection below and the next bounce both measure from here.
-    if (crossed != 0) {
+    if (leg != 0) {
         params.paths.setMedia(path, set);
     }
     let aovOn = params.aov.enabled != 0;

@@ -155,6 +155,13 @@ struct Walk {
     float ceiling;  // the current cell's density ceiling
 };
 
+// The record's packed lattice resolution, unpacked — the one spelling of
+// the ten-bit split, so a walk and a lookup cannot disagree about it.
+int3 latticeRes(MediumRecord record) {
+    return int3(record.majorantRes & 0x3ff, (record.majorantRes >> 10) & 0x3ff,
+                (record.majorantRes >> 20) & 0x3ff);
+}
+
 // A ray in one grid's majorant-cell coordinates: where it stands at `start`
 // and how far each axis advances per world unit of `t`. Both the walk and
 // the span the grid can contribute over read off it.
@@ -166,8 +173,7 @@ struct CellRay {
 
 CellRay cellRay(MediumRecord record, float3 origin, float3 direction, float start) {
     CellRay ray;
-    ray.res = int3(record.majorantRes & 0x3ff, (record.majorantRes >> 10) & 0x3ff,
-                   (record.majorantRes >> 20) & 0x3ff);
+    ray.res = latticeRes(record);
     ray.at = toIndex(record, origin + start * direction) * record.majorantScale
              + record.majorantBias;
     ray.perT = float3(dot(record.worldToIndex[0].xyz, direction),
@@ -180,8 +186,15 @@ CellRay cellRay(MediumRecord record, float3 origin, float3 direction, float star
 // Where along `[0, tmax]` the grid can contribute at all: the ray's crossing
 // of the lattice box. The lattice covers the shell exactly (`vdb::shell_box`)
 // and density is zero outside it, so beyond this span there is nothing to
-// track — and the border ceilings `readCell` clamps to would otherwise
-// invent extinction out there. Empty when `y <= x`.
+// track — the border ceilings `readCell` clamps to out there cost collisions
+// that all come up null, never extinction. Empty when `y <= x`.
+//
+// The shadow pass alone needs this: its connections start anywhere and run
+// to the light, so most of `[0, tmax]` is outside the shell. The tracker
+// does not clip to it, because it has nothing to clip — the march splits
+// segments at shell boundaries and the shell *is* the lattice box, so every
+// sub-segment already lies inside every grid its set names, to within the
+// march's nudge.
 float2 latticeSpan(CellRay ray, float tmax) {
     var t0 = 0.0;
     var t1 = tmax;
@@ -233,8 +246,7 @@ void readCell(pnanovdb_buf_t buf, inout Walk walk) {
 // the 2×2×2 neighbourhood the trilinear read reaches into — which is what
 // `no_interpolated_density_escapes_its_cell` gates.
 float ceilingAt(pnanovdb_buf_t buf, MediumRecord record, float3 world) {
-    let res = int3(record.majorantRes & 0x3ff, (record.majorantRes >> 10) & 0x3ff,
-                   (record.majorantRes >> 20) & 0x3ff);
+    let res = latticeRes(record);
     let at = toIndex(record, world) * record.majorantScale + record.majorantBias;
     let cell = clamp(int3(floor(at)), int3(0), res - 1);
     pnanovdb_address_t addr = {
@@ -342,7 +354,7 @@ bool spendFlight(pnanovdb_buf_t buf, inout Walk walk, float3 constant, float len
 // the ray `origin + t·direction` (world units). `uFirst` is the bounce
 // block's reserved Sobol pair — the first collision is the one draw whose
 // stratification matters — and the rest ride the hash stream keyed by
-// (crossed, collision).
+// (leg, collision).
 //
 // EMISSIVE = 1 also collects what the sub-segment emits, at the same
 // collisions and against the same majorant. The transport equation's source
@@ -372,7 +384,7 @@ bool spendFlight(pnanovdb_buf_t buf, inout Walk walk, float3 constant, float len
 // has, and it is the density grid that defines where a medium is.
 public TrackEvent trackMedia<let EMISSIVE : int>(
     SceneTable* scene, pnanovdb_buf_t buf, MediaSplit split, float3 origin, float3 direction,
-    float start, float tmax, uint pixel, uint sampleIndex, uint bounce, uint crossed,
+    float start, float tmax, uint pixel, uint sampleIndex, uint bounce, uint leg,
     float2 uFirst) {
     TrackEvent event;
     event.scattered = false;
@@ -402,8 +414,7 @@ public TrackEvent trackMedia<let EMISSIVE : int>(
     // that fires redraws. That is what keeps its walk moving down the
     // segment exactly once — redraw it at every collision and it re-walks
     // everything in front of it, which with a thin grid beside a dense one
-    // is the whole segment, every time. Measured: 644 lattice steps per
-    // collision, 20.6 ms where this is 4.2.
+    // is the whole segment every time (measured 5× this stage).
     //
     // The followers open a walk where the path stands and drop it again, so
     // one walk is live at a time past the first and the register cost is
@@ -465,7 +476,7 @@ public TrackEvent trackMedia<let EMISSIVE : int>(
             var probe =
                 openWalk(record, buf, cellRay(record, origin, direction, start + t));
             let tau = -log(1.0 - trackerFlight(pixel, sampleIndex, bounce,
-                                               (crossed << 12) | (collision & 0xfff), slot));
+                                               (leg << 12) | (collision & 0xfff), slot));
             var at = 0.0;
             float rate;
             if (!spendFlight(buf, probe, float3(0.0), d - t, tau, at, steps, rate)) {
@@ -568,7 +579,7 @@ public TrackEvent trackMedia<let EMISSIVE : int>(
 #endif
         event.weight *= max(m - sigmaT, float3(0.0)) / (m * (1.0 - ps));
         u = trackerUniform2(pixel, sampleIndex, bounce,
-                            (crossed << 12) | ((collision + 1) & 0xfff));
+                            (leg << 12) | ((collision + 1) & 0xfff));
     }
     return event;
 }

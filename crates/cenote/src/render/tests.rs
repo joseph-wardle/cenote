@@ -2531,7 +2531,8 @@ fn a_suppressed_boundary_inside_juice_is_no_boundary_at_all() {
 /// whether the boxes overlap, touch, or stand apart. The four disjoint
 /// boxes pin the two things a chain of crossings can get wrong: a slot
 /// freed on the way out has to be usable on the way into the next box,
-/// and the eighth crossing is the last one `MARCH_BOUNDARY_CAP` models.
+/// and the eighth crossing — nothing here coincident, so one leg each —
+/// is the last one `MARCH_LEG_CAP` models.
 /// Five boxes are ten crossings — past the cap — and pin the overflow
 /// from both sides at once: the march models exactly the first four
 /// boxes, then runs *through* the fifth to the sky, so the answer is the

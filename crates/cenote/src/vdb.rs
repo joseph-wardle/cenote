@@ -904,9 +904,10 @@ pub struct ResidentGrid {
     /// out x fastest. Its resolution is [`majorant_resolution`] of the same
     /// grid — recomputed rather than carried, so the two cannot disagree.
     pub majorant: u32,
-    /// The largest ceiling in that lattice, which is therefore the whole
-    /// grid's: what bounds it where the tracker walks another grid's.
-    pub density_max: f32,
+    /// The largest value in that lattice — the whole grid's peak. No kernel
+    /// wants it (each grid walks its own lattice), but the emission report
+    /// reads a temperature field's hottest sample from it for free.
+    pub field_max: f32,
 }
 
 /// The GPU home of every resident `NanoVDB` grid: one grow-only
@@ -1000,7 +1001,7 @@ impl GridPool {
         let resident = ResidentGrid {
             grid: u32::try_from(grid).expect("offset fits: end <= CAPACITY"),
             majorant: u32::try_from(majorant).expect("offset fits: end <= CAPACITY"),
-            density_max: majorants.cells.iter().copied().fold(0.0, f32::max),
+            field_max: majorants.cells.iter().copied().fold(0.0, f32::max),
         };
         log::debug!(
             "volume \"{}\": grid \"{grid_name}\" {} MiB, majorant {}×{}×{} ({} KiB)",

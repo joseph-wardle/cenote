@@ -62,27 +62,23 @@ public struct MediumRecord {
     public float3 majorantBias;
     // Its cell counts, ten bits per axis with x lowest.
     public uint majorantRes;
-    // The largest ceiling anywhere in the lattice. Nothing reads it now
-    // that every grid draws its flights over its own lattice; the word
-    // stands until the record is repacked.
-    public float densityMax;
-    // The temperature grid's byte offset in the pool, or GRID_NONE for a
-    // medium that does not emit. Read through `worldToIndex`, the density
-    // grid's: prep refuses a pair whose index maps differ. Pool offsets are
-    // 32-byte aligned, so the low bits are spare if a later rung needs a
-    // field read as radiance outright rather than as a temperature.
-    public uint temperatureGrid;
-    // Kelvin from a field value: value·kelvinScale + kelvinOffset.
-    public float kelvinScale;
-    public float kelvinOffset;
     // ACEScg multiplier on the blackbody radiance at that temperature — so
     // the source term is density·σ_a·emission·blackbody(K), and `emission`
     // is what the medium radiates per unit of *absorption* optical depth,
     // in units of a 6500 K body.
     public float3 emission;
+    // The temperature grid's byte offset in the pool, or GRID_NONE for a
+    // medium that does not emit. Read through `worldToIndex`, the density
+    // grid's: prep refuses a pair whose index maps differ. Pool offsets are
+    // 32-byte aligned, so the low bits are spare if a field ever needs to
+    // be read as radiance outright rather than as a temperature.
+    public uint temperatureGrid;
+    // Kelvin from a field value: value·kelvinScale + kelvinOffset.
+    public float kelvinScale;
+    public float kelvinOffset;
     // worldToIndex's float4 rows already round the record to 144 bytes; this
     // only names the tail so scene.rs can spell the same layout.
-    float pad0;
+    float2 pad0;
 };
 
 // Where an instance's triangles live, plus its transforms — everything

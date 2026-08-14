@@ -54,6 +54,12 @@ struct Params {
 [vk::push_constant]
 Params params;
 
+// Distinct grid placements one connection measures. Not `MEDIUM_SLOTS`,
+// though the values agree: that caps what a point is *inside*, this caps
+// what a ray *crosses* — five disjoint clouds in a row are ordinary, and
+// the cap is register budget, not a membership rule.
+static const uint CONNECTION_GRID_CAP = 4;
+
 // Remember `instance` if a grid fills it and we have not got it already.
 // One entry per *placement*, matching `splitMedia`, which gives a medium
 // filling two coincident placements twice the density; deduplicated because
@@ -61,7 +67,7 @@ Params params;
 // `latticeSpan` already spans the whole crossing. Past the cap the rest are
 // dropped, which is one grid's worth of missing shadow: too little fog,
 // never a wall that is not there.
-void rememberGrid(SceneTable* scene, uint instance, inout uint gridInstances[MEDIUM_SLOTS],
+void rememberGrid(SceneTable* scene, uint instance, inout uint gridInstances[CONNECTION_GRID_CAP],
                   inout uint count) {
     let medium = scene.geometry[instance].medium;
     if (medium == MEDIUM_NONE || scene.media[medium].grid == GRID_NONE) {
@@ -72,7 +78,7 @@ void rememberGrid(SceneTable* scene, uint instance, inout uint gridInstances[MED
             return;
         }
     }
-    if (count < MEDIUM_SLOTS) {
+    if (count < CONNECTION_GRID_CAP) {
         gridInstances[count++] = instance;
     }
 }
@@ -119,7 +125,7 @@ float3 connectionTransmittance<let MEASURES : int>(RayDesc ray, uint light, uint
     var attenuation = 1.0;
     var extent = float3(0.0);
     var atEnd = inside;
-    uint gridInstances[MEDIUM_SLOTS];
+    uint gridInstances[CONNECTION_GRID_CAP];
     var gridCount = 0u;
     if (MEASURES == MEASURE_GRIDS) {
         // A connection that starts inside a shell crosses no face of it, so
