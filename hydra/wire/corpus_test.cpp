@@ -110,6 +110,29 @@ ChangeSet genesis() {
             .name = "статуя",
             .source = Ply{.path = "/scènes/geo/статуя.ply"},
         },
+        // The curve batch twice over: cells inline with every field
+        // authored, and a groom by reference.
+        CurvesPatch{
+            .name = "groom",
+            .source =
+                CurveCells{
+                    .points = {{0.0f, 0.0f, 0.0f},
+                               {0.0f, 1.0f, 0.0f},
+                               {0.5f, 2.0f, 0.0f},
+                               {1.0f, 3.0f, 0.0f},
+                               {1.5f, 4.0f, 0.0f}},
+                    .curve_vertex_counts = {5},
+                    .widths = Widths{.values = {0.02f, 0.015f, 0.01f, 0.008f, 0.004f},
+                                     .interpolation = WidthInterpolation::Vertex},
+                    .curve_type = CurveType::Cubic,
+                    .basis = CurveBasis::CatmullRom,
+                    .wrap = CurveWrap::Pinned,
+                },
+        },
+        CurvesPatch{
+            .name = "волосы",
+            .source = Hair{.path = "/scènes/geo/волосы.hair"},
+        },
         InstancePatch{
             .name = "thing",
             .mesh = "tri",
@@ -144,6 +167,16 @@ ChangeSet genesis() {
             .mesh = "tri",
             .material = "m-leave",
             .transforms = std::vector<Transform>{},
+            .camera_visible = {},
+        },
+        // The other geometry reference: an instance that places a groom
+        // rather than a mesh.
+        InstancePatch{
+            .name = "hair",
+            .mesh = {},
+            .curves = "groom",
+            .material = "m-set",
+            .transforms = {},
             .camera_visible = {},
         },
         MaterialPatch{
@@ -320,6 +353,7 @@ int main(int argc, char** argv) {
                          ChangeSet{.ops =
                                        {
                                            Remove{.kind = Kind::Mesh, .name = "mesh"},
+                                           Remove{.kind = Kind::Curves, .name = "curves"},
                                            Remove{.kind = Kind::Instance, .name = "instance"},
                                            Remove{.kind = Kind::Material, .name = "材料/µaterial"},
                                            Remove{.kind = Kind::Light, .name = "light"},

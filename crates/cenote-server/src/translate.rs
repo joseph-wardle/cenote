@@ -69,10 +69,18 @@ fn op(op: wire::Op) -> core::Op {
                 source: source.map(mesh_source),
             })
         }
+        wire::Op::Curves(patch) => {
+            let wire::CurvesPatch { name, source } = patch;
+            core::Op::Curves(core::CurvesPatch {
+                name,
+                source: source.map(curves_source),
+            })
+        }
         wire::Op::Instance(patch) => {
             let wire::InstancePatch {
                 name,
                 mesh,
+                curves,
                 material,
                 transforms,
                 camera_visible,
@@ -80,6 +88,7 @@ fn op(op: wire::Op) -> core::Op {
             core::Op::Instance(core::InstancePatch {
                 name,
                 mesh,
+                curves,
                 material,
                 transforms: transforms
                     .map(|list| list.into_iter().map(self::transform).collect()),
@@ -232,6 +241,7 @@ fn kind(kind: wire::Kind) -> core::Kind {
         wire::Kind::Mesh => core::Kind::Mesh,
         wire::Kind::Instance => core::Kind::Instance,
         wire::Kind::Material => core::Kind::Material,
+        wire::Kind::Curves => core::Kind::Curves,
         wire::Kind::Light => core::Kind::Light,
         wire::Kind::Camera => core::Kind::Camera,
         wire::Kind::Environment => core::Kind::Environment,
@@ -253,6 +263,60 @@ fn mesh_source(source: wire::MeshSource) -> description::MeshSource {
             triangles,
         },
         wire::MeshSource::Ply { path } => description::MeshSource::Ply {
+            path: PathBuf::from(path),
+        },
+    }
+}
+
+fn curves_source(source: wire::CurvesSource) -> description::CurvesSource {
+    match source {
+        wire::CurvesSource::Inline {
+            points,
+            curve_vertex_counts,
+            widths,
+            curve_type,
+            basis,
+            wrap,
+        } => description::CurvesSource::Inline {
+            points,
+            curve_vertex_counts,
+            widths: widths.map(|widths| {
+                let wire::Widths {
+                    values,
+                    interpolation,
+                } = widths;
+                description::Widths {
+                    values,
+                    interpolation: match interpolation {
+                        wire::WidthInterpolation::Constant => {
+                            description::WidthInterpolation::Constant
+                        }
+                        wire::WidthInterpolation::Uniform => {
+                            description::WidthInterpolation::Uniform
+                        }
+                        wire::WidthInterpolation::Varying => {
+                            description::WidthInterpolation::Varying
+                        }
+                        wire::WidthInterpolation::Vertex => description::WidthInterpolation::Vertex,
+                    },
+                }
+            }),
+            curve_type: match curve_type {
+                wire::CurveType::Linear => description::CurveType::Linear,
+                wire::CurveType::Cubic => description::CurveType::Cubic,
+            },
+            basis: match basis {
+                wire::CurveBasis::Bezier => description::CurveBasis::Bezier,
+                wire::CurveBasis::BSpline => description::CurveBasis::BSpline,
+                wire::CurveBasis::CatmullRom => description::CurveBasis::CatmullRom,
+            },
+            wrap: match wrap {
+                wire::CurveWrap::Nonperiodic => description::CurveWrap::Nonperiodic,
+                wire::CurveWrap::Pinned => description::CurveWrap::Pinned,
+                wire::CurveWrap::Periodic => description::CurveWrap::Periodic,
+            },
+        },
+        wire::CurvesSource::Hair { path } => description::CurvesSource::Hair {
             path: PathBuf::from(path),
         },
     }
@@ -432,6 +496,7 @@ mod tests {
                 wire::Op::Instance(wire::InstancePatch {
                     name: "thing".into(),
                     mesh: Some("tri".into()),
+                    curves: None,
                     material: Some("gray".into()),
                     transforms: Some(vec![wire::Transform::Trs {
                         translate: [0.0; 3],

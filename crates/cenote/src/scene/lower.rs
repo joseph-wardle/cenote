@@ -21,7 +21,9 @@ use std::sync::Arc;
 use glam::{Mat3, Mat4, Vec2, Vec3};
 
 use super::changeset::{Dirty, Kind};
-use super::description::{self, ColorSpace, MeshSource, SceneDescription, Texturable, TextureRef};
+use super::description::{
+    self, ColorSpace, Geometry, MeshSource, SceneDescription, Texturable, TextureRef,
+};
 use super::{Camera, Lens, Mesh, emissive_triangles, scene_error};
 use crate::color::{acescg_from_rec709, luminance};
 use crate::environment::Environment;
@@ -33,12 +35,14 @@ use crate::texture;
 /// Everything prep derives host-side before touching the GPU — the
 /// fallible half, so a rejected description leaves residency untouched.
 pub(super) struct HostScene {
-    /// Meshes to (re)upload: the dirty subset, geometry resolved and
-    /// normals derived where absent.
-    pub(super) meshes: BTreeMap<String, Mesh>,
-    /// Mesh residency to retire. Processed before `meshes`, so a
+    /// Geometry to (re)upload: the dirty subset, meshes resolved with
+    /// their normals derived where absent and curve batches tessellated
+    /// into tubes. Keyed by the reference an instance holds, so the two
+    /// kinds share one residency map without sharing a namespace.
+    pub(super) meshes: BTreeMap<Geometry, Mesh>,
+    /// Geometry residency to retire. Processed before `meshes`, so a
     /// remove-then-recreate lands the new build.
-    pub(super) removed_meshes: Vec<String>,
+    pub(super) removed_meshes: Vec<Geometry>,
     /// Every instance, in name order — custom index is position.
     pub(super) instances: Vec<InstanceSpec>,
     /// The emissive geometry, one entry per triangle of every emissive
@@ -84,7 +88,7 @@ impl HostScene {
 /// placements lowers to N specs, and the flattened position is the TLAS
 /// custom index everywhere downstream.
 pub(super) struct InstanceSpec {
-    pub(super) mesh: String,
+    pub(super) mesh: Geometry,
     pub(super) transform: Mat4,
     pub(super) material: Material,
     pub(super) camera_visible: bool,
@@ -144,17 +148,7 @@ pub(super) fn host_phase(
         )));
     }
 
-    let changed_meshes = names(&dirty.changed, Kind::Mesh);
-    let mut meshes = BTreeMap::new();
-    for (name, mesh) in description.meshes() {
-        if changed_meshes.contains(name.as_str()) {
-            meshes.insert(name.clone(), resolve_mesh(name, mesh)?);
-        }
-    }
-    let removed_meshes: Vec<String> = names(&dirty.removed, Kind::Mesh)
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
+    let (meshes, removed_meshes) = resolve_geometry(description, dirty)?;
 
     let changed_materials = names(&dirty.changed, Kind::Material);
 
@@ -251,8 +245,49 @@ pub(super) fn host_phase(
         // Material dirt rebuilds the TLAS too: fractional opacity is baked
         // into each instance's non-opaque flag, and the TLAS over a scene's
         // handful of instances is the cheap structure (every BLAS stays).
-        tlas_dirty: touched(Kind::Mesh) || touched(Kind::Instance) || touched(Kind::Material),
+        tlas_dirty: touched(Kind::Mesh)
+            || touched(Kind::Curves)
+            || touched(Kind::Instance)
+            || touched(Kind::Material),
     })
+}
+
+/// Resolve the geometry this round must (re)build, and name what it must
+/// retire. Meshes and curve batches land in one map keyed by the
+/// reference an instance holds: a tessellated groom is a mesh in every
+/// way residency, the BLAS, and the light table can see, and keying by
+/// the reference is what lets the two kinds share that map without
+/// sharing a namespace.
+fn resolve_geometry(
+    description: &SceneDescription,
+    dirty: &Dirty,
+) -> Result<(BTreeMap<Geometry, Mesh>, Vec<Geometry>)> {
+    let mut resolved = BTreeMap::new();
+    let changed_meshes = names(&dirty.changed, Kind::Mesh);
+    for (name, mesh) in description.meshes() {
+        if changed_meshes.contains(name.as_str()) {
+            resolved.insert(Geometry::Mesh(name.clone()), resolve_mesh(name, mesh)?);
+        }
+    }
+    let changed_curves = names(&dirty.changed, Kind::Curves);
+    for (name, curves) in description.curves() {
+        if changed_curves.contains(name.as_str()) {
+            resolved.insert(
+                Geometry::Curves(name.clone()),
+                super::curves::resolve(name, curves)?,
+            );
+        }
+    }
+    let removed = names(&dirty.removed, Kind::Mesh)
+        .into_iter()
+        .map(|name| Geometry::Mesh(name.to_owned()))
+        .chain(
+            names(&dirty.removed, Kind::Curves)
+                .into_iter()
+                .map(|name| Geometry::Curves(name.to_owned())),
+        )
+        .collect();
+    Ok((resolved, removed))
 }
 
 /// Lower the description's camera, resolving the thin lens: a positive
@@ -318,7 +353,7 @@ fn lower_instances(
     description: &SceneDescription,
     materials: &BTreeMap<&str, Material>,
     media: &BTreeMap<&str, super::Medium>,
-    resolved: &BTreeMap<String, Mesh>,
+    resolved: &BTreeMap<Geometry, Mesh>,
 ) -> Result<(Vec<InstanceSpec>, Vec<TriangleLight>)> {
     let mut instances = Vec::with_capacity(description.instances().len());
     let mut triangle_lights = Vec::new();
@@ -341,13 +376,14 @@ fn lower_instances(
                  emission and opacity"
             );
         }
-        warn_if_coarse_for_subsurface(name, instance, &material, resolved.get(&instance.mesh));
+        warn_if_coarse_for_subsurface(name, instance, &material, resolved.get(&instance.geometry));
         // The geometry fetch is per instance, not per element: N emissive
         // placements share one resolve and pay only the N×T light records.
         let geometry = if luminance(material.emission) > 0.0 && !instance.transforms.is_empty() {
             Some(emissive_geometry(
-                resolved.get(&instance.mesh),
-                &description.meshes()[&instance.mesh],
+                resolved.get(&instance.geometry),
+                description,
+                &instance.geometry,
             )?)
         } else {
             None
@@ -372,7 +408,7 @@ fn lower_instances(
                 ));
             }
             instances.push(InstanceSpec {
-                mesh: instance.mesh.clone(),
+                mesh: instance.geometry.clone(),
                 transform,
                 material,
                 camera_visible: instance.camera_visible,
@@ -620,25 +656,31 @@ fn warn_textured_without_uvs(description: &SceneDescription, dirty: &Dirty) {
         if material.textures().next().is_none() {
             continue;
         }
-        let has_uvs = match &description.meshes()[&instance.mesh].source {
-            MeshSource::Inline { uvs, .. } => uvs.is_some(),
-            // This warning reads the description only; whether a PLY file
-            // carries UVs is known after resolution, so a UV-less one gets
-            // the benefit of the doubt (its lookups still read texel (0, 0)).
-            // A medium shell never shades, so its zero UVs warn nothing.
-            MeshSource::Ply { .. } | MeshSource::MediumBounds => true,
+        let has_uvs = match &instance.geometry {
+            // A tessellated strand always carries its own coordinates:
+            // root-to-tip along `u`, one random value per strand on `v`.
+            Geometry::Curves(_) => true,
+            Geometry::Mesh(mesh) => match &description.meshes()[mesh].source {
+                MeshSource::Inline { uvs, .. } => uvs.is_some(),
+                // This warning reads the description only; whether a PLY
+                // file carries UVs is known after resolution, so a UV-less
+                // one gets the benefit of the doubt (its lookups still
+                // read texel (0, 0)). A medium shell never shades, so its
+                // zero UVs warn nothing.
+                MeshSource::Ply { .. } | MeshSource::MediumBounds => true,
+            },
         };
         let touched = |kind: Kind, target: &str| dirty.changed.contains(&(kind, target.to_owned()));
         if !has_uvs
             && (touched(Kind::Instance, name)
                 || touched(Kind::Material, &instance.material)
-                || touched(Kind::Mesh, &instance.mesh))
+                || touched(instance.geometry.kind(), instance.geometry.name()))
         {
             log::warn!(
-                "instance \"{name}\": material \"{}\" is textured but mesh \"{}\" has \
+                "instance \"{name}\": material \"{}\" is textured but {} has \
                  no UVs — every lookup reads texel (0, 0)",
                 instance.material,
-                instance.mesh
+                instance.geometry
             );
         }
     }
@@ -904,19 +946,29 @@ fn facet_lean_degrees(mesh: &Mesh, mfp: f32) -> f32 {
     90.0
 }
 
-/// A mesh's positions and triangles for the light table. The resolved
-/// copy serves when this round already loaded the mesh; otherwise inline
-/// geometry converts from the description and a PLY reference re-reads
-/// its file — an emissive PLY mesh pays a re-read when a *non-mesh* edit
-/// rebuilds the lights, which is rare enough (emitters are almost always
-/// simple quads) to not be worth a host-side geometry cache.
+/// Some geometry's positions and triangles for the light table. The
+/// resolved copy serves when this round already built it; otherwise
+/// inline geometry converts from the description, a PLY reference
+/// re-reads its file, and a curve batch re-tessellates — the cost falls
+/// on an *emissive* object when a non-geometry edit rebuilds the lights,
+/// which is rare enough (emitters are almost always simple quads, and
+/// glowing hair rarer still) to not be worth a host-side geometry cache.
 fn emissive_geometry(
     resolved: Option<&Mesh>,
-    mesh: &description::Mesh,
+    description: &SceneDescription,
+    geometry: &Geometry,
 ) -> Result<(Vec<Vec3>, Vec<[u32; 3]>)> {
     if let Some(mesh) = resolved {
         return Ok((mesh.positions.clone(), mesh.triangles.clone()));
     }
+    let name = geometry.name();
+    let mesh = match geometry {
+        Geometry::Mesh(_) => &description.meshes()[name],
+        Geometry::Curves(_) => {
+            let tessellated = super::curves::resolve(name, &description.curves()[name])?;
+            return Ok((tessellated.positions, tessellated.triangles));
+        }
+    };
     match &mesh.source {
         MeshSource::Inline {
             positions,
@@ -1214,6 +1266,7 @@ pub(super) fn all_dirty(description: &SceneDescription) -> Dirty {
     }
     let mut dirty = Dirty::default();
     mark(&mut dirty, Kind::Mesh, description.meshes());
+    mark(&mut dirty, Kind::Curves, description.curves());
     mark(&mut dirty, Kind::Instance, description.instances());
     mark(&mut dirty, Kind::Material, description.materials());
     mark(&mut dirty, Kind::Medium, description.media());
@@ -1485,7 +1538,7 @@ mod tests {
             })
             .expect("valid data");
         let host = host(&description).expect("a PLY mesh preps");
-        let mesh = &host.meshes["tri"];
+        let mesh = &host.meshes[&Geometry::Mesh("tri".to_owned())];
         assert_eq!(mesh.positions.len(), 4);
         assert_eq!(mesh.triangles.len(), 2);
         // No authored normals: derived, and this quad's winding faces +Z.

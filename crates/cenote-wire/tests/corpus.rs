@@ -35,9 +35,10 @@ use std::path::PathBuf;
 
 use cenote_wire::protocol::{Camera, FbDesc, PROTOCOL, Request, Response, decode, encode};
 use cenote_wire::scene::{
-    CameraPatch, ChangeSet, Channel, ColorSpace, EnvironmentPatch, InstancePatch, Kind, Light,
-    LightPatch, MaterialPatch, MeshPatch, MeshSource, Op, Reset, SettingsPatch, TextureRef,
-    Texturable, Transform,
+    CameraPatch, ChangeSet, Channel, ColorSpace, CurveBasis, CurveType, CurveWrap, CurvesPatch,
+    CurvesSource, EnvironmentPatch, InstancePatch, Kind, Light, LightPatch, MaterialPatch,
+    MeshPatch, MeshSource, Op, Reset, SettingsPatch, TextureRef, Texturable, Transform,
+    WidthInterpolation, Widths,
 };
 
 /// One pinned message — the corpus is heterogeneous, so each case carries
@@ -132,6 +133,7 @@ fn corpus() -> Vec<(&'static str, Case)> {
             Case::Request(Request::Apply(ChangeSet {
                 ops: vec![
                     Op::Remove(Kind::Mesh, "mesh".into()),
+                    Op::Remove(Kind::Curves, "curves".into()),
                     Op::Remove(Kind::Instance, "instance".into()),
                     Op::Remove(Kind::Material, "材料/µaterial".into()),
                     Op::Remove(Kind::Light, "light".into()),
@@ -214,9 +216,39 @@ fn genesis() -> ChangeSet {
                     path: "/scènes/geo/статуя.ply".into(),
                 }),
             }),
+            // The curve batch twice over: cells inline with every field
+            // authored, and a groom by reference — both `CurvesSource`
+            // spellings, and every enum the schema carries.
+            Op::Curves(CurvesPatch {
+                name: "groom".into(),
+                source: Some(CurvesSource::Inline {
+                    points: vec![
+                        [0.0; 3],
+                        [0.0, 1.0, 0.0],
+                        [0.5, 2.0, 0.0],
+                        [1.0, 3.0, 0.0],
+                        [1.5, 4.0, 0.0],
+                    ],
+                    curve_vertex_counts: vec![5],
+                    widths: Some(Widths {
+                        values: vec![0.02, 0.015, 0.01, 0.008, 0.004],
+                        interpolation: WidthInterpolation::Vertex,
+                    }),
+                    curve_type: CurveType::Cubic,
+                    basis: CurveBasis::CatmullRom,
+                    wrap: CurveWrap::Pinned,
+                }),
+            }),
+            Op::Curves(CurvesPatch {
+                name: "волосы".into(),
+                source: Some(CurvesSource::Hair {
+                    path: "/scènes/geo/волосы.hair".into(),
+                }),
+            }),
             Op::Instance(InstancePatch {
                 name: "thing".into(),
                 mesh: Some("tri".into()),
+                curves: None,
                 material: Some("m-set".into()),
                 transforms: Some(vec![Transform::Trs {
                     translate: [1.0, 2.0, 3.0],
@@ -230,6 +262,7 @@ fn genesis() -> ChangeSet {
             Op::Instance(InstancePatch {
                 name: "matrix-thing".into(),
                 mesh: Some("статуя".into()),
+                curves: None,
                 material: Some("m-clear".into()),
                 transforms: Some(vec![
                     Transform::Matrix([
@@ -250,8 +283,19 @@ fn genesis() -> ChangeSet {
             Op::Instance(InstancePatch {
                 name: "masked".into(),
                 mesh: Some("tri".into()),
+                curves: None,
                 material: Some("m-leave".into()),
                 transforms: Some(vec![]),
+                camera_visible: None,
+            }),
+            // The other geometry reference: an instance that places a
+            // groom rather than a mesh.
+            Op::Instance(InstancePatch {
+                name: "hair".into(),
+                mesh: None,
+                curves: Some("groom".into()),
+                material: Some("m-set".into()),
+                transforms: None,
                 camera_visible: None,
             }),
             // The material patch three times over: every field `Some`

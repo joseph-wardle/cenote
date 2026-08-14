@@ -1,0 +1,121 @@
+// Curves, one prim per basis — the B12 contract, small enough to read:
+//
+//     cargo run -p cenote-viewer -- scenes/curves.ron
+//
+// Four `Curves` objects stand side by side, all four carrying the *same*
+// control vertices and differing only in how they are read: a polyline,
+// then the three cubic bases. Where their strands sit relative to those
+// vertices is the whole point — bezier interpolates its ends, b-spline
+// approximates every vertex, catmullRom interpolates the inner ones, and
+// pinning drags an approximating basis back onto the authored ends.
+//
+// Curves are geometry like meshes are, so an instance places them the same
+// way (`curves:` where it would say `mesh:`), they wear ordinary OpenPBR
+// materials, and the renderer owns every piece of the curve mathematics:
+// the basis, the flattening, and the three-sided tube it sweeps. The
+// strands carry their own coordinates — `u` runs root to tip, `v` is one
+// random value per strand — which is what lets a ramp texture color a
+// groom by length and vary it strand to strand.
+(
+    version: 2,
+    ops: [
+        Settings((name: "main", resolution: Some((960, 540)), spp: Some(256))),
+        Camera((
+            name: "main",
+            position: Some((0.0, 1.6, 10.5)),
+            look_at: Some((0.0, 1.4, 0.0)),
+            vfov_degrees: Some(35.0),
+        )),
+        Environment((
+            name: "sky",
+            path: Some(Some("../crates/cenote/assets/kloofendal_puresky.exr")),
+        )),
+
+        // The ground the strands stand on.
+        Mesh((
+            name: "plane",
+            source: Some(Inline(
+                positions: [(-8.0, 0.0, -8.0), (-8.0, 0.0, 8.0), (8.0, 0.0, 8.0), (8.0, 0.0, -8.0)],
+                normals: Some([(0.0, 1.0, 0.0), (0.0, 1.0, 0.0), (0.0, 1.0, 0.0), (0.0, 1.0, 0.0)]),
+                triangles: [(0, 1, 2), (0, 2, 3)],
+            )),
+        )),
+        Material((name: "ground", base_color: Some(Constant((0.18, 0.19, 0.2))))),
+        Instance((name: "ground", mesh: Some("plane"), material: Some("ground"))),
+
+        // A control polygon that zig-zags up: seven vertices, so every
+        // basis has spans to spend (bezier reads them 4 + 3, the others
+        // one at a time). Widths taper root to tip, `vertex`-interpolated,
+        // which on a cubic curve means the width rides the same basis the
+        // centerline does.
+        Curves((
+            name: "linear",
+            source: Some(Inline(
+                points: [
+                    (-4.5, 0.0, 0.0), (-4.2, 0.5, 0.0), (-4.8, 1.0, 0.0),
+                    (-4.2, 1.5, 0.0), (-4.8, 2.0, 0.0), (-4.2, 2.5, 0.0),
+                    (-4.5, 3.0, 0.0),
+                ],
+                curve_vertex_counts: [7],
+                widths: Some((values: [0.12, 0.11, 0.1, 0.08, 0.06, 0.04, 0.0])),
+                curve_type: Linear,
+            )),
+        )),
+        Curves((
+            name: "bezier",
+            source: Some(Inline(
+                points: [
+                    (-1.5, 0.0, 0.0), (-1.2, 0.5, 0.0), (-1.8, 1.0, 0.0),
+                    (-1.2, 1.5, 0.0), (-1.8, 2.0, 0.0), (-1.2, 2.5, 0.0),
+                    (-1.5, 3.0, 0.0),
+                ],
+                curve_vertex_counts: [7],
+                widths: Some((values: [0.12, 0.11, 0.1, 0.08, 0.06, 0.04, 0.0])),
+                curve_type: Cubic,
+                basis: Bezier,
+            )),
+        )),
+        Curves((
+            name: "bspline",
+            source: Some(Inline(
+                points: [
+                    (1.5, 0.0, 0.0), (1.8, 0.5, 0.0), (1.2, 1.0, 0.0),
+                    (1.8, 1.5, 0.0), (1.2, 2.0, 0.0), (1.8, 2.5, 0.0),
+                    (1.5, 3.0, 0.0),
+                ],
+                curve_vertex_counts: [7],
+                widths: Some((values: [0.12, 0.11, 0.1, 0.08, 0.06, 0.04, 0.0])),
+                curve_type: Cubic,
+                basis: BSpline,
+            )),
+        )),
+        // The same b-spline vertices, pinned: phantom points mirrored off
+        // each end drag the strand onto the authored root and tip, which
+        // is how Houdini writes hair.
+        Curves((
+            name: "pinned",
+            source: Some(Inline(
+                points: [
+                    (4.5, 0.0, 0.0), (4.8, 0.5, 0.0), (4.2, 1.0, 0.0),
+                    (4.8, 1.5, 0.0), (4.2, 2.0, 0.0), (4.8, 2.5, 0.0),
+                    (4.5, 3.0, 0.0),
+                ],
+                curve_vertex_counts: [7],
+                widths: Some((values: [0.12, 0.11, 0.1, 0.08, 0.06, 0.04, 0.0])),
+                curve_type: Cubic,
+                basis: CatmullRom,
+                wrap: Pinned,
+            )),
+        )),
+
+        Material((
+            name: "fiber",
+            base_color: Some(Constant((0.35, 0.18, 0.08))),
+            specular_roughness: Some(Constant(0.25)),
+        )),
+        Instance((name: "linear", curves: Some("linear"), material: Some("fiber"))),
+        Instance((name: "bezier", curves: Some("bezier"), material: Some("fiber"))),
+        Instance((name: "bspline", curves: Some("bspline"), material: Some("fiber"))),
+        Instance((name: "pinned", curves: Some("pinned"), material: Some("fiber"))),
+    ],
+)

@@ -9,8 +9,9 @@
 //
 // This is the whole scene model in one file: a scene file is an ordered
 // list of ops applied to an empty scene. Each op patches a named object
-// of one of seven kinds (mesh, instance, material, light, camera,
-// environment, settings), creating it on first mention; any field left
+// of one of nine kinds (mesh, curves, instance, material, medium, light,
+// camera, environment, settings), creating it on first mention — see
+// scenes/curves.ron for the curve half. Any field left
 // unmentioned keeps its default — material fields default to OpenPBR's.
 // Conventions: right-handed, Y-up, meters, linear Rec.709 colors,
 // vertical fov in degrees. Relative paths resolve against this file's

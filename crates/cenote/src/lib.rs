@@ -10,13 +10,14 @@
 //! |-------------|------|
 //! | `gpu`       | Unsafe-Vulkan quarantine: device context, buffers, submits, pipelines, acceleration structures, window presentation, the viewer's egui overlay pass. Code outside this module does not touch raw `vk` handles. |
 //! | `shaders`   | Embedded SPIR-V registry, `slangc` runtime recompile, hot-reload watching |
-//! | `scene`     | The scene model — `scene::description` is the typed named-object schema, `scene::changeset` its only edit path — and the prep path that joins it to GPU residency, rebuilding only what an edit dirtied |
+//! | `scene`     | The scene model — `scene::description` is the typed named-object schema, `scene::changeset` its only edit path — and the prep path that joins it to GPU residency, rebuilding only what an edit dirtied. `scene::curves` owns every piece of curve mathematics: `BasisCurves` cells in, strands out, three-sided tubes onto the ordinary triangle path |
 //! | `format`    | The `.ron` scene-file boundary: versioned RON serialization of change-sets |
 //! | `material`  | `OpenPBR` surface parameters — the host half of the material schema |
 //! | `lights`    | The light list — emissive triangles and delta lights — and its power-proportional alias table, built at prep |
 //! | `environment` | The equirect environment light: EXR load and the CDF sampling tables, built at prep |
 //! | `color`     | Authored `Rec.709` → `ACEScg` conversion at scene prep |
 //! | `ply`       | Hand-rolled PLY reader — the mesh schema's bulk-geometry payload, resolved at prep |
+//! | `hair`      | Reader for Cem Yuksel's `.hair` grooms — the curve schema's bulk payload, resolved at prep into the same strands `BasisCurves` cells evaluate to |
 //! | `tables`    | The closure's baked lookup tables — GGX energy data (regenerable from its own QMC baker) and the vendored LTC sheen fit — embedded, uploaded with the scene's resident buffers |
 //! | `texture`   | Texture prep: decode → mip-cap → BC encode, cached as a DDS beside the source; scene prep uploads the results into the bindless table |
 //! | `wavefront` | The engine core: `SoA` path state, GPU stage queues, indirect dispatch — one [`wavefront::Wavefront::trace`] is one sample per pixel, written pixel-owned so renders are bitwise deterministic |
@@ -49,6 +50,7 @@ pub mod environment;
 pub mod error;
 pub mod format;
 pub mod gpu;
+mod hair;
 pub mod lights;
 pub mod material;
 pub mod output;

@@ -64,3 +64,8 @@
 # B10 denoise and B11 volume captures — the same machine-local class.
 /b10-baselines/
 /b11-baselines/
+# B12 curve captures, plus the grooms themselves: Cem Yuksel's hair models
+# are free for research *with attribution*, not to redistribute, so the
+# .hair files and everything derived from them stay local. Fetch them from
+# http://www.cemyuksel.com/research/hairmodels/ into b12-baselines/sources/.
+/b12-baselines/

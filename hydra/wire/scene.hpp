@@ -27,9 +27,10 @@
 
 namespace cenote::wire {
 
-/// The seven object kinds — mirror of `Kind`.
+/// The eight object kinds — mirror of `Kind`.
 enum class Kind {
     Mesh,
+    Curves,
     Instance,
     Material,
     Light,
@@ -128,6 +129,69 @@ struct Ply {
 /// A mesh's geometry payload — mirror of `MeshSource`.
 using MeshSource = std::variant<Inline, Ply>;
 
+/// How a width stream maps onto the curves it belongs to — mirror of
+/// `WidthInterpolation`: one value for the batch, per curve, per segment
+/// end (linear across each segment), or per control vertex (through the
+/// curve's own basis).
+enum class WidthInterpolation {
+    Constant,
+    Uniform,
+    Varying,
+    Vertex,
+};
+
+/// Polyline or cubic control polygon — mirror of `CurveType`.
+enum class CurveType {
+    Linear,
+    Cubic,
+};
+
+/// Which cubic basis a control polygon is read through — mirror of
+/// `CurveBasis`.
+enum class CurveBasis {
+    Bezier,
+    BSpline,
+    CatmullRom,
+};
+
+/// How a curve's ends behave — mirror of `CurveWrap`. `Periodic` is
+/// carried so the renderer can refuse it by name rather than silently
+/// opening the loop.
+enum class CurveWrap {
+    Nonperiodic,
+    Pinned,
+    Periodic,
+};
+
+/// A curve batch's width stream — mirror of `Widths`. Widths are
+/// diameters, like USD's own.
+struct Widths {
+    std::vector<float> values;
+    WidthInterpolation interpolation;
+};
+
+/// `CurvesSource`'s Inline alternative: `BasisCurves` cells spelled out —
+/// control vertices end to end, how many belong to each curve, the widths
+/// (absent means one meter everywhere), and the three tokens that say how
+/// to read the vertices.
+struct CurveCells {
+    std::vector<std::array<float, 3>> points;
+    std::vector<std::uint32_t> curve_vertex_counts;
+    std::optional<Widths> widths;
+    CurveType curve_type;
+    CurveBasis basis;
+    CurveWrap wrap;
+};
+
+/// `CurvesSource`'s Hair alternative: a groom loaded server-side from an
+/// absolute `.hair` path.
+struct Hair {
+    std::string path;
+};
+
+/// A curve batch's payload — mirror of `CurvesSource`.
+using CurvesSource = std::variant<CurveCells, Hair>;
+
 /// `Light`'s Distant alternative: parallel light from infinitely far
 /// away — the direction it travels, and the irradiance on a facing
 /// surface (W/m², linear Rec.709).
@@ -152,12 +216,22 @@ struct MeshPatch {
     std::optional<MeshSource> source{};
 };
 
-/// Mirror of `InstancePatch`. `transforms` is the placements array —
+/// Mirror of `CurvesPatch`: the curve payload replaces wholesale, like a
+/// mesh's.
+struct CurvesPatch {
+    std::string name;
+    std::optional<CurvesSource> source{};
+};
+
+/// Mirror of `InstancePatch`. `mesh` and `curves` are two spellings of one
+/// field on the target — an instance places one thing, and a patch naming
+/// both is refused server-side. `transforms` is the placements array —
 /// one element per copy, the whole array replaces, and empty is legal
 /// (resident, places nothing).
 struct InstancePatch {
     std::string name;
     std::optional<std::string> mesh{};
+    std::optional<std::string> curves{};
     std::optional<std::string> material{};
     std::optional<std::vector<Transform>> transforms{};
     std::optional<bool> camera_visible{};
@@ -255,8 +329,8 @@ struct Remove {
 /// name through `encode`: the patches drop their `Patch` suffix, and
 /// `Remove` is itself. Rust boxes the material for size; here every `Op`
 /// is simply material-sized, which a change-set list can afford.
-using Op = std::variant<MeshPatch, InstancePatch, MaterialPatch, LightPatch, CameraPatch,
-                        EnvironmentPatch, SettingsPatch, Remove>;
+using Op = std::variant<MeshPatch, CurvesPatch, InstancePatch, MaterialPatch, LightPatch,
+                        CameraPatch, EnvironmentPatch, SettingsPatch, Remove>;
 
 /// An ordered list of edits, applied atomically server-side — mirror of
 /// `ChangeSet`, the payload of `Replace` and `Apply`.
@@ -287,8 +361,15 @@ void encode(Writer& writer, Channel value);
 void encode(Writer& writer, const TextureRef& value);
 void encode(Writer& writer, const Transform& value);
 void encode(Writer& writer, const MeshSource& value);
+void encode(Writer& writer, WidthInterpolation value);
+void encode(Writer& writer, CurveType value);
+void encode(Writer& writer, CurveBasis value);
+void encode(Writer& writer, CurveWrap value);
+void encode(Writer& writer, const Widths& value);
+void encode(Writer& writer, const CurvesSource& value);
 void encode(Writer& writer, const Light& value);
 void encode(Writer& writer, const MeshPatch& value);
+void encode(Writer& writer, const CurvesPatch& value);
 void encode(Writer& writer, const InstancePatch& value);
 void encode(Writer& writer, const MaterialPatch& value);
 void encode(Writer& writer, const LightPatch& value);

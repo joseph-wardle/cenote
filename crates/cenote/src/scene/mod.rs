@@ -23,6 +23,7 @@
 //! path as the demo.
 
 pub mod changeset;
+pub(crate) mod curves;
 mod demo;
 pub mod description;
 mod lower;
@@ -40,6 +41,7 @@ use ash::vk;
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat3, Mat4, Vec2, Vec3};
 
+use self::description::Geometry;
 use crate::color::luminance;
 use crate::environment::Environment;
 use crate::error::{Error, Result};
@@ -963,7 +965,7 @@ pub struct Scene {
     /// Mesh residency by name — prep rebuilds only the names an edit
     /// dirtied. The procedural [`Scene::new`] path keys them by object
     /// index and never updates.
-    meshes: BTreeMap<String, GpuMesh>,
+    meshes: BTreeMap<Geometry, GpuMesh>,
     /// Material-texture residency by prep request, with the content hash
     /// each image was built from — how an update tells a real image edit
     /// from a mere re-reference. Bindless indices are this map's iteration
@@ -1091,7 +1093,8 @@ impl Scene {
             .iter()
             .enumerate()
             .map(|(index, object)| {
-                upload_mesh(&mut upload, &format!("object{index}"), &object.mesh)
+                let name = Geometry::Mesh(format!("object{index}"));
+                upload_mesh(&mut upload, &name, &object.mesh)
             })
             .collect::<Result<Vec<GpuMesh>>>()?;
         // Before the TLAS below, which is the first thing to read them.
@@ -1176,7 +1179,7 @@ impl Scene {
             meshes: meshes
                 .into_iter()
                 .enumerate()
-                .map(|(index, mesh)| (index.to_string(), mesh))
+                .map(|(index, mesh)| (Geometry::Mesh(format!("object{index}")), mesh))
                 .collect(),
             textures: BTreeMap::new(),
             descriptors: Vec::new(),
@@ -1762,15 +1765,16 @@ fn transform_rows(transform: Mat4) -> [[f32; 4]; 3] {
     ]
 }
 
-/// Queue one mesh's buffers and its BLAS build on `upload`. `name` is the
-/// mesh's bare name — the `scene.mesh.` prefix that puts the bytes in the
-/// right memory bucket ([`crate::gpu`]'s ledger) is added here, once, so no
-/// caller has to remember it and no caller can add it twice.
+/// Queue one mesh's buffers and its BLAS build on `upload`. `geometry` is
+/// the reference it was resolved from — the `scene.` prefix and the kind
+/// that put the bytes in the right memory bucket ([`crate::gpu`]'s ledger)
+/// are added here, once, so no caller has to remember them and no caller
+/// can add them twice.
 ///
 /// The returned [`GpuMesh`] is resident only once the caller's
 /// [`Upload::finish`] returns; every caller finishes before the TLAS build
 /// that first reads these BLASes.
-fn upload_mesh(upload: &mut Upload, name: &str, mesh: &Mesh) -> Result<GpuMesh> {
+fn upload_mesh(upload: &mut Upload, geometry: &Geometry, mesh: &Mesh) -> Result<GpuMesh> {
     assert_eq!(
         mesh.normals.len(),
         mesh.positions.len(),
@@ -1781,33 +1785,34 @@ fn upload_mesh(upload: &mut Upload, name: &str, mesh: &Mesh) -> Result<GpuMesh> 
         mesh.positions.len(),
         "a mesh needs one uv per vertex (zeros when unauthored)"
     );
+    let label = geometry.label();
     // BUILD_INPUT for the BLAS build; STORAGE + device address so the
     // shading kernel can fetch triangle corners afterwards.
     let usage = vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
         | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
         | vk::BufferUsageFlags::STORAGE_BUFFER;
     let vertices = upload.buffer(
-        &format!("scene.mesh.{name}.vertices"),
+        &format!("scene.{label}.vertices"),
         bytemuck::cast_slice(&mesh.positions),
         usage,
     )?;
     let normals = upload.buffer(
-        &format!("scene.mesh.{name}.normals"),
+        &format!("scene.{label}.normals"),
         bytemuck::cast_slice(&mesh.normals),
         usage,
     )?;
     let uvs = upload.buffer(
-        &format!("scene.mesh.{name}.uvs"),
+        &format!("scene.{label}.uvs"),
         bytemuck::cast_slice(&mesh.uvs),
         usage,
     )?;
     let indices = upload.buffer(
-        &format!("scene.mesh.{name}.indices"),
+        &format!("scene.{label}.indices"),
         bytemuck::cast_slice(&mesh.triangles),
         usage,
     )?;
     let blas = upload.blas(
-        &format!("scene.mesh.{name}.blas"),
+        &format!("scene.{label}.blas"),
         &vertices,
         mesh.positions.len() as u32,
         &indices,

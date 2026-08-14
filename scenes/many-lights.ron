@@ -2658,6 +2658,7 @@
         Instance((
             name: "floor",
             mesh: Some("plane"),
+            curves: None,
             material: Some("floor"),
             transforms: Some([
                 Trs(
@@ -2705,6 +2706,7 @@
         Instance((
             name: "occluder_r0c0",
             mesh: Some("sphere"),
+            curves: None,
             material: Some("occluder_r0c0"),
             transforms: Some([
                 Trs(
@@ -2752,6 +2754,7 @@
         Instance((
             name: "occluder_r0c1",
             mesh: Some("sphere"),
+            curves: None,
             material: Some("occluder_r0c1"),
             transforms: Some([
                 Trs(
@@ -2799,6 +2802,7 @@
         Instance((
             name: "occluder_r0c2",
             mesh: Some("sphere"),
+            curves: None,
             material: Some("occluder_r0c2"),
             transforms: Some([
                 Trs(
@@ -2846,6 +2850,7 @@
         Instance((
             name: "occluder_r1c0",
             mesh: Some("sphere"),
+            curves: None,
             material: Some("occluder_r1c0"),
             transforms: Some([
                 Trs(
@@ -2893,6 +2898,7 @@
         Instance((
             name: "occluder_r1c1",
             mesh: Some("sphere"),
+            curves: None,
             material: Some("occluder_r1c1"),
             transforms: Some([
                 Trs(
@@ -2940,6 +2946,7 @@
         Instance((
             name: "occluder_r1c2",
             mesh: Some("sphere"),
+            curves: None,
             material: Some("occluder_r1c2"),
             transforms: Some([
                 Trs(
@@ -2987,6 +2994,7 @@
         Instance((
             name: "occluder_r2c0",
             mesh: Some("sphere"),
+            curves: None,
             material: Some("occluder_r2c0"),
             transforms: Some([
                 Trs(
@@ -3034,6 +3042,7 @@
         Instance((
             name: "occluder_r2c1",
             mesh: Some("sphere"),
+            curves: None,
             material: Some("occluder_r2c1"),
             transforms: Some([
                 Trs(
@@ -3081,6 +3090,7 @@
         Instance((
             name: "occluder_r2c2",
             mesh: Some("sphere"),
+            curves: None,
             material: Some("occluder_r2c2"),
             transforms: Some([
                 Trs(
@@ -3128,6 +3138,7 @@
         Instance((
             name: "light_r0c0",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r0c0"),
             transforms: Some([
                 Trs(
@@ -3175,6 +3186,7 @@
         Instance((
             name: "light_r0c1",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r0c1"),
             transforms: Some([
                 Trs(
@@ -3222,6 +3234,7 @@
         Instance((
             name: "light_r0c2",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r0c2"),
             transforms: Some([
                 Trs(
@@ -3269,6 +3282,7 @@
         Instance((
             name: "light_r0c3",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r0c3"),
             transforms: Some([
                 Trs(
@@ -3316,6 +3330,7 @@
         Instance((
             name: "light_r0c4",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r0c4"),
             transforms: Some([
                 Trs(
@@ -3363,6 +3378,7 @@
         Instance((
             name: "light_r0c5",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r0c5"),
             transforms: Some([
                 Trs(
@@ -3410,6 +3426,7 @@
         Instance((
             name: "light_r0c6",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r0c6"),
             transforms: Some([
                 Trs(
@@ -3457,6 +3474,7 @@
         Instance((
             name: "light_r0c7",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r0c7"),
             transforms: Some([
                 Trs(
@@ -3504,6 +3522,7 @@
         Instance((
             name: "light_r0c8",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r0c8"),
             transforms: Some([
                 Trs(
@@ -3551,6 +3570,7 @@
         Instance((
             name: "light_r0c9",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r0c9"),
             transforms: Some([
                 Trs(
@@ -3598,6 +3618,7 @@
         Instance((
             name: "light_r0c10",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r0c10"),
             transforms: Some([
                 Trs(
@@ -3645,6 +3666,7 @@
         Instance((
             name: "light_r0c11",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r0c11"),
             transforms: Some([
                 Trs(
@@ -3692,6 +3714,7 @@
         Instance((
             name: "light_r0c12",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r0c12"),
             transforms: Some([
                 Trs(
@@ -3739,6 +3762,7 @@
         Instance((
             name: "light_r0c13",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r0c13"),
             transforms: Some([
                 Trs(
@@ -3786,6 +3810,7 @@
         Instance((
             name: "light_r0c14",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r0c14"),
             transforms: Some([
                 Trs(
@@ -3833,6 +3858,7 @@
         Instance((
             name: "light_r0c15",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r0c15"),
             transforms: Some([
                 Trs(
@@ -3880,6 +3906,7 @@
         Instance((
             name: "light_r1c0",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r1c0"),
             transforms: Some([
                 Trs(
@@ -3927,6 +3954,7 @@
         Instance((
             name: "light_r1c1",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r1c1"),
             transforms: Some([
                 Trs(
@@ -3974,6 +4002,7 @@
         Instance((
             name: "light_r1c2",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r1c2"),
             transforms: Some([
                 Trs(
@@ -4021,6 +4050,7 @@
         Instance((
             name: "light_r1c3",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r1c3"),
             transforms: Some([
                 Trs(
@@ -4068,6 +4098,7 @@
         Instance((
             name: "light_r1c4",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r1c4"),
             transforms: Some([
                 Trs(
@@ -4115,6 +4146,7 @@
         Instance((
             name: "light_r1c5",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r1c5"),
             transforms: Some([
                 Trs(
@@ -4162,6 +4194,7 @@
         Instance((
             name: "light_r1c6",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r1c6"),
             transforms: Some([
                 Trs(
@@ -4209,6 +4242,7 @@
         Instance((
             name: "light_r1c7",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r1c7"),
             transforms: Some([
                 Trs(
@@ -4256,6 +4290,7 @@
         Instance((
             name: "light_r1c8",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r1c8"),
             transforms: Some([
                 Trs(
@@ -4303,6 +4338,7 @@
         Instance((
             name: "light_r1c9",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r1c9"),
             transforms: Some([
                 Trs(
@@ -4350,6 +4386,7 @@
         Instance((
             name: "light_r1c10",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r1c10"),
             transforms: Some([
                 Trs(
@@ -4397,6 +4434,7 @@
         Instance((
             name: "light_r1c11",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r1c11"),
             transforms: Some([
                 Trs(
@@ -4444,6 +4482,7 @@
         Instance((
             name: "light_r1c12",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r1c12"),
             transforms: Some([
                 Trs(
@@ -4491,6 +4530,7 @@
         Instance((
             name: "light_r1c13",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r1c13"),
             transforms: Some([
                 Trs(
@@ -4538,6 +4578,7 @@
         Instance((
             name: "light_r1c14",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r1c14"),
             transforms: Some([
                 Trs(
@@ -4585,6 +4626,7 @@
         Instance((
             name: "light_r1c15",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r1c15"),
             transforms: Some([
                 Trs(
@@ -4632,6 +4674,7 @@
         Instance((
             name: "light_r2c0",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r2c0"),
             transforms: Some([
                 Trs(
@@ -4679,6 +4722,7 @@
         Instance((
             name: "light_r2c1",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r2c1"),
             transforms: Some([
                 Trs(
@@ -4726,6 +4770,7 @@
         Instance((
             name: "light_r2c2",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r2c2"),
             transforms: Some([
                 Trs(
@@ -4773,6 +4818,7 @@
         Instance((
             name: "light_r2c3",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r2c3"),
             transforms: Some([
                 Trs(
@@ -4820,6 +4866,7 @@
         Instance((
             name: "light_r2c4",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r2c4"),
             transforms: Some([
                 Trs(
@@ -4867,6 +4914,7 @@
         Instance((
             name: "light_r2c5",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r2c5"),
             transforms: Some([
                 Trs(
@@ -4914,6 +4962,7 @@
         Instance((
             name: "light_r2c6",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r2c6"),
             transforms: Some([
                 Trs(
@@ -4961,6 +5010,7 @@
         Instance((
             name: "light_r2c7",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r2c7"),
             transforms: Some([
                 Trs(
@@ -5008,6 +5058,7 @@
         Instance((
             name: "light_r2c8",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r2c8"),
             transforms: Some([
                 Trs(
@@ -5055,6 +5106,7 @@
         Instance((
             name: "light_r2c9",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r2c9"),
             transforms: Some([
                 Trs(
@@ -5102,6 +5154,7 @@
         Instance((
             name: "light_r2c10",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r2c10"),
             transforms: Some([
                 Trs(
@@ -5149,6 +5202,7 @@
         Instance((
             name: "light_r2c11",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r2c11"),
             transforms: Some([
                 Trs(
@@ -5196,6 +5250,7 @@
         Instance((
             name: "light_r2c12",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r2c12"),
             transforms: Some([
                 Trs(
@@ -5243,6 +5298,7 @@
         Instance((
             name: "light_r2c13",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r2c13"),
             transforms: Some([
                 Trs(
@@ -5290,6 +5346,7 @@
         Instance((
             name: "light_r2c14",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r2c14"),
             transforms: Some([
                 Trs(
@@ -5337,6 +5394,7 @@
         Instance((
             name: "light_r2c15",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r2c15"),
             transforms: Some([
                 Trs(
@@ -5384,6 +5442,7 @@
         Instance((
             name: "light_r3c0",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r3c0"),
             transforms: Some([
                 Trs(
@@ -5431,6 +5490,7 @@
         Instance((
             name: "light_r3c1",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r3c1"),
             transforms: Some([
                 Trs(
@@ -5478,6 +5538,7 @@
         Instance((
             name: "light_r3c2",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r3c2"),
             transforms: Some([
                 Trs(
@@ -5525,6 +5586,7 @@
         Instance((
             name: "light_r3c3",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r3c3"),
             transforms: Some([
                 Trs(
@@ -5572,6 +5634,7 @@
         Instance((
             name: "light_r3c4",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r3c4"),
             transforms: Some([
                 Trs(
@@ -5619,6 +5682,7 @@
         Instance((
             name: "light_r3c5",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r3c5"),
             transforms: Some([
                 Trs(
@@ -5666,6 +5730,7 @@
         Instance((
             name: "light_r3c6",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r3c6"),
             transforms: Some([
                 Trs(
@@ -5713,6 +5778,7 @@
         Instance((
             name: "light_r3c7",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r3c7"),
             transforms: Some([
                 Trs(
@@ -5760,6 +5826,7 @@
         Instance((
             name: "light_r3c8",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r3c8"),
             transforms: Some([
                 Trs(
@@ -5807,6 +5874,7 @@
         Instance((
             name: "light_r3c9",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r3c9"),
             transforms: Some([
                 Trs(
@@ -5854,6 +5922,7 @@
         Instance((
             name: "light_r3c10",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r3c10"),
             transforms: Some([
                 Trs(
@@ -5901,6 +5970,7 @@
         Instance((
             name: "light_r3c11",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r3c11"),
             transforms: Some([
                 Trs(
@@ -5948,6 +6018,7 @@
         Instance((
             name: "light_r3c12",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r3c12"),
             transforms: Some([
                 Trs(
@@ -5995,6 +6066,7 @@
         Instance((
             name: "light_r3c13",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r3c13"),
             transforms: Some([
                 Trs(
@@ -6042,6 +6114,7 @@
         Instance((
             name: "light_r3c14",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r3c14"),
             transforms: Some([
                 Trs(
@@ -6089,6 +6162,7 @@
         Instance((
             name: "light_r3c15",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r3c15"),
             transforms: Some([
                 Trs(
@@ -6136,6 +6210,7 @@
         Instance((
             name: "light_r4c0",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r4c0"),
             transforms: Some([
                 Trs(
@@ -6183,6 +6258,7 @@
         Instance((
             name: "light_r4c1",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r4c1"),
             transforms: Some([
                 Trs(
@@ -6230,6 +6306,7 @@
         Instance((
             name: "light_r4c2",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r4c2"),
             transforms: Some([
                 Trs(
@@ -6277,6 +6354,7 @@
         Instance((
             name: "light_r4c3",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r4c3"),
             transforms: Some([
                 Trs(
@@ -6324,6 +6402,7 @@
         Instance((
             name: "light_r4c4",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r4c4"),
             transforms: Some([
                 Trs(
@@ -6371,6 +6450,7 @@
         Instance((
             name: "light_r4c5",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r4c5"),
             transforms: Some([
                 Trs(
@@ -6418,6 +6498,7 @@
         Instance((
             name: "light_r4c6",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r4c6"),
             transforms: Some([
                 Trs(
@@ -6465,6 +6546,7 @@
         Instance((
             name: "light_r4c7",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r4c7"),
             transforms: Some([
                 Trs(
@@ -6512,6 +6594,7 @@
         Instance((
             name: "light_r4c8",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r4c8"),
             transforms: Some([
                 Trs(
@@ -6559,6 +6642,7 @@
         Instance((
             name: "light_r4c9",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r4c9"),
             transforms: Some([
                 Trs(
@@ -6606,6 +6690,7 @@
         Instance((
             name: "light_r4c10",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r4c10"),
             transforms: Some([
                 Trs(
@@ -6653,6 +6738,7 @@
         Instance((
             name: "light_r4c11",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r4c11"),
             transforms: Some([
                 Trs(
@@ -6700,6 +6786,7 @@
         Instance((
             name: "light_r4c12",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r4c12"),
             transforms: Some([
                 Trs(
@@ -6747,6 +6834,7 @@
         Instance((
             name: "light_r4c13",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r4c13"),
             transforms: Some([
                 Trs(
@@ -6794,6 +6882,7 @@
         Instance((
             name: "light_r4c14",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r4c14"),
             transforms: Some([
                 Trs(
@@ -6841,6 +6930,7 @@
         Instance((
             name: "light_r4c15",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r4c15"),
             transforms: Some([
                 Trs(
@@ -6888,6 +6978,7 @@
         Instance((
             name: "light_r5c0",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r5c0"),
             transforms: Some([
                 Trs(
@@ -6935,6 +7026,7 @@
         Instance((
             name: "light_r5c1",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r5c1"),
             transforms: Some([
                 Trs(
@@ -6982,6 +7074,7 @@
         Instance((
             name: "light_r5c2",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r5c2"),
             transforms: Some([
                 Trs(
@@ -7029,6 +7122,7 @@
         Instance((
             name: "light_r5c3",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r5c3"),
             transforms: Some([
                 Trs(
@@ -7076,6 +7170,7 @@
         Instance((
             name: "light_r5c4",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r5c4"),
             transforms: Some([
                 Trs(
@@ -7123,6 +7218,7 @@
         Instance((
             name: "light_r5c5",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r5c5"),
             transforms: Some([
                 Trs(
@@ -7170,6 +7266,7 @@
         Instance((
             name: "light_r5c6",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r5c6"),
             transforms: Some([
                 Trs(
@@ -7217,6 +7314,7 @@
         Instance((
             name: "light_r5c7",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r5c7"),
             transforms: Some([
                 Trs(
@@ -7264,6 +7362,7 @@
         Instance((
             name: "light_r5c8",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r5c8"),
             transforms: Some([
                 Trs(
@@ -7311,6 +7410,7 @@
         Instance((
             name: "light_r5c9",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r5c9"),
             transforms: Some([
                 Trs(
@@ -7358,6 +7458,7 @@
         Instance((
             name: "light_r5c10",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r5c10"),
             transforms: Some([
                 Trs(
@@ -7405,6 +7506,7 @@
         Instance((
             name: "light_r5c11",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r5c11"),
             transforms: Some([
                 Trs(
@@ -7452,6 +7554,7 @@
         Instance((
             name: "light_r5c12",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r5c12"),
             transforms: Some([
                 Trs(
@@ -7499,6 +7602,7 @@
         Instance((
             name: "light_r5c13",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r5c13"),
             transforms: Some([
                 Trs(
@@ -7546,6 +7650,7 @@
         Instance((
             name: "light_r5c14",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r5c14"),
             transforms: Some([
                 Trs(
@@ -7593,6 +7698,7 @@
         Instance((
             name: "light_r5c15",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r5c15"),
             transforms: Some([
                 Trs(
@@ -7640,6 +7746,7 @@
         Instance((
             name: "light_r6c0",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r6c0"),
             transforms: Some([
                 Trs(
@@ -7687,6 +7794,7 @@
         Instance((
             name: "light_r6c1",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r6c1"),
             transforms: Some([
                 Trs(
@@ -7734,6 +7842,7 @@
         Instance((
             name: "light_r6c2",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r6c2"),
             transforms: Some([
                 Trs(
@@ -7781,6 +7890,7 @@
         Instance((
             name: "light_r6c3",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r6c3"),
             transforms: Some([
                 Trs(
@@ -7828,6 +7938,7 @@
         Instance((
             name: "light_r6c4",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r6c4"),
             transforms: Some([
                 Trs(
@@ -7875,6 +7986,7 @@
         Instance((
             name: "light_r6c5",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r6c5"),
             transforms: Some([
                 Trs(
@@ -7922,6 +8034,7 @@
         Instance((
             name: "light_r6c6",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r6c6"),
             transforms: Some([
                 Trs(
@@ -7969,6 +8082,7 @@
         Instance((
             name: "light_r6c7",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r6c7"),
             transforms: Some([
                 Trs(
@@ -8016,6 +8130,7 @@
         Instance((
             name: "light_r6c8",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r6c8"),
             transforms: Some([
                 Trs(
@@ -8063,6 +8178,7 @@
         Instance((
             name: "light_r6c9",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r6c9"),
             transforms: Some([
                 Trs(
@@ -8110,6 +8226,7 @@
         Instance((
             name: "light_r6c10",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r6c10"),
             transforms: Some([
                 Trs(
@@ -8157,6 +8274,7 @@
         Instance((
             name: "light_r6c11",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r6c11"),
             transforms: Some([
                 Trs(
@@ -8204,6 +8322,7 @@
         Instance((
             name: "light_r6c12",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r6c12"),
             transforms: Some([
                 Trs(
@@ -8251,6 +8370,7 @@
         Instance((
             name: "light_r6c13",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r6c13"),
             transforms: Some([
                 Trs(
@@ -8298,6 +8418,7 @@
         Instance((
             name: "light_r6c14",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r6c14"),
             transforms: Some([
                 Trs(
@@ -8345,6 +8466,7 @@
         Instance((
             name: "light_r6c15",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r6c15"),
             transforms: Some([
                 Trs(
@@ -8392,6 +8514,7 @@
         Instance((
             name: "light_r7c0",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r7c0"),
             transforms: Some([
                 Trs(
@@ -8439,6 +8562,7 @@
         Instance((
             name: "light_r7c1",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r7c1"),
             transforms: Some([
                 Trs(
@@ -8486,6 +8610,7 @@
         Instance((
             name: "light_r7c2",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r7c2"),
             transforms: Some([
                 Trs(
@@ -8533,6 +8658,7 @@
         Instance((
             name: "light_r7c3",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r7c3"),
             transforms: Some([
                 Trs(
@@ -8580,6 +8706,7 @@
         Instance((
             name: "light_r7c4",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r7c4"),
             transforms: Some([
                 Trs(
@@ -8627,6 +8754,7 @@
         Instance((
             name: "light_r7c5",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r7c5"),
             transforms: Some([
                 Trs(
@@ -8674,6 +8802,7 @@
         Instance((
             name: "light_r7c6",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r7c6"),
             transforms: Some([
                 Trs(
@@ -8721,6 +8850,7 @@
         Instance((
             name: "light_r7c7",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r7c7"),
             transforms: Some([
                 Trs(
@@ -8768,6 +8898,7 @@
         Instance((
             name: "light_r7c8",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r7c8"),
             transforms: Some([
                 Trs(
@@ -8815,6 +8946,7 @@
         Instance((
             name: "light_r7c9",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r7c9"),
             transforms: Some([
                 Trs(
@@ -8862,6 +8994,7 @@
         Instance((
             name: "light_r7c10",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r7c10"),
             transforms: Some([
                 Trs(
@@ -8909,6 +9042,7 @@
         Instance((
             name: "light_r7c11",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r7c11"),
             transforms: Some([
                 Trs(
@@ -8956,6 +9090,7 @@
         Instance((
             name: "light_r7c12",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r7c12"),
             transforms: Some([
                 Trs(
@@ -9003,6 +9138,7 @@
         Instance((
             name: "light_r7c13",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r7c13"),
             transforms: Some([
                 Trs(
@@ -9050,6 +9186,7 @@
         Instance((
             name: "light_r7c14",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r7c14"),
             transforms: Some([
                 Trs(
@@ -9097,6 +9234,7 @@
         Instance((
             name: "light_r7c15",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r7c15"),
             transforms: Some([
                 Trs(
@@ -9144,6 +9282,7 @@
         Instance((
             name: "light_r8c0",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r8c0"),
             transforms: Some([
                 Trs(
@@ -9191,6 +9330,7 @@
         Instance((
             name: "light_r8c1",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r8c1"),
             transforms: Some([
                 Trs(
@@ -9238,6 +9378,7 @@
         Instance((
             name: "light_r8c2",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r8c2"),
             transforms: Some([
                 Trs(
@@ -9285,6 +9426,7 @@
         Instance((
             name: "light_r8c3",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r8c3"),
             transforms: Some([
                 Trs(
@@ -9332,6 +9474,7 @@
         Instance((
             name: "light_r8c4",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r8c4"),
             transforms: Some([
                 Trs(
@@ -9379,6 +9522,7 @@
         Instance((
             name: "light_r8c5",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r8c5"),
             transforms: Some([
                 Trs(
@@ -9426,6 +9570,7 @@
         Instance((
             name: "light_r8c6",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r8c6"),
             transforms: Some([
                 Trs(
@@ -9473,6 +9618,7 @@
         Instance((
             name: "light_r8c7",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r8c7"),
             transforms: Some([
                 Trs(
@@ -9520,6 +9666,7 @@
         Instance((
             name: "light_r8c8",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r8c8"),
             transforms: Some([
                 Trs(
@@ -9567,6 +9714,7 @@
         Instance((
             name: "light_r8c9",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r8c9"),
             transforms: Some([
                 Trs(
@@ -9614,6 +9762,7 @@
         Instance((
             name: "light_r8c10",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r8c10"),
             transforms: Some([
                 Trs(
@@ -9661,6 +9810,7 @@
         Instance((
             name: "light_r8c11",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r8c11"),
             transforms: Some([
                 Trs(
@@ -9708,6 +9858,7 @@
         Instance((
             name: "light_r8c12",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r8c12"),
             transforms: Some([
                 Trs(
@@ -9755,6 +9906,7 @@
         Instance((
             name: "light_r8c13",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r8c13"),
             transforms: Some([
                 Trs(
@@ -9802,6 +9954,7 @@
         Instance((
             name: "light_r8c14",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r8c14"),
             transforms: Some([
                 Trs(
@@ -9849,6 +10002,7 @@
         Instance((
             name: "light_r8c15",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r8c15"),
             transforms: Some([
                 Trs(
@@ -9896,6 +10050,7 @@
         Instance((
             name: "light_r9c0",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r9c0"),
             transforms: Some([
                 Trs(
@@ -9943,6 +10098,7 @@
         Instance((
             name: "light_r9c1",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r9c1"),
             transforms: Some([
                 Trs(
@@ -9990,6 +10146,7 @@
         Instance((
             name: "light_r9c2",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r9c2"),
             transforms: Some([
                 Trs(
@@ -10037,6 +10194,7 @@
         Instance((
             name: "light_r9c3",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r9c3"),
             transforms: Some([
                 Trs(
@@ -10084,6 +10242,7 @@
         Instance((
             name: "light_r9c4",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r9c4"),
             transforms: Some([
                 Trs(
@@ -10131,6 +10290,7 @@
         Instance((
             name: "light_r9c5",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r9c5"),
             transforms: Some([
                 Trs(
@@ -10178,6 +10338,7 @@
         Instance((
             name: "light_r9c6",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r9c6"),
             transforms: Some([
                 Trs(
@@ -10225,6 +10386,7 @@
         Instance((
             name: "light_r9c7",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r9c7"),
             transforms: Some([
                 Trs(
@@ -10272,6 +10434,7 @@
         Instance((
             name: "light_r9c8",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r9c8"),
             transforms: Some([
                 Trs(
@@ -10319,6 +10482,7 @@
         Instance((
             name: "light_r9c9",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r9c9"),
             transforms: Some([
                 Trs(
@@ -10366,6 +10530,7 @@
         Instance((
             name: "light_r9c10",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r9c10"),
             transforms: Some([
                 Trs(
@@ -10413,6 +10578,7 @@
         Instance((
             name: "light_r9c11",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r9c11"),
             transforms: Some([
                 Trs(
@@ -10460,6 +10626,7 @@
         Instance((
             name: "light_r9c12",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r9c12"),
             transforms: Some([
                 Trs(
@@ -10507,6 +10674,7 @@
         Instance((
             name: "light_r9c13",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r9c13"),
             transforms: Some([
                 Trs(
@@ -10554,6 +10722,7 @@
         Instance((
             name: "light_r9c14",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r9c14"),
             transforms: Some([
                 Trs(
@@ -10601,6 +10770,7 @@
         Instance((
             name: "light_r9c15",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r9c15"),
             transforms: Some([
                 Trs(
@@ -10648,6 +10818,7 @@
         Instance((
             name: "light_r10c0",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r10c0"),
             transforms: Some([
                 Trs(
@@ -10695,6 +10866,7 @@
         Instance((
             name: "light_r10c1",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r10c1"),
             transforms: Some([
                 Trs(
@@ -10742,6 +10914,7 @@
         Instance((
             name: "light_r10c2",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r10c2"),
             transforms: Some([
                 Trs(
@@ -10789,6 +10962,7 @@
         Instance((
             name: "light_r10c3",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r10c3"),
             transforms: Some([
                 Trs(
@@ -10836,6 +11010,7 @@
         Instance((
             name: "light_r10c4",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r10c4"),
             transforms: Some([
                 Trs(
@@ -10883,6 +11058,7 @@
         Instance((
             name: "light_r10c5",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r10c5"),
             transforms: Some([
                 Trs(
@@ -10930,6 +11106,7 @@
         Instance((
             name: "light_r10c6",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r10c6"),
             transforms: Some([
                 Trs(
@@ -10977,6 +11154,7 @@
         Instance((
             name: "light_r10c7",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r10c7"),
             transforms: Some([
                 Trs(
@@ -11024,6 +11202,7 @@
         Instance((
             name: "light_r10c8",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r10c8"),
             transforms: Some([
                 Trs(
@@ -11071,6 +11250,7 @@
         Instance((
             name: "light_r10c9",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r10c9"),
             transforms: Some([
                 Trs(
@@ -11118,6 +11298,7 @@
         Instance((
             name: "light_r10c10",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r10c10"),
             transforms: Some([
                 Trs(
@@ -11165,6 +11346,7 @@
         Instance((
             name: "light_r10c11",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r10c11"),
             transforms: Some([
                 Trs(
@@ -11212,6 +11394,7 @@
         Instance((
             name: "light_r10c12",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r10c12"),
             transforms: Some([
                 Trs(
@@ -11259,6 +11442,7 @@
         Instance((
             name: "light_r10c13",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r10c13"),
             transforms: Some([
                 Trs(
@@ -11306,6 +11490,7 @@
         Instance((
             name: "light_r10c14",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r10c14"),
             transforms: Some([
                 Trs(
@@ -11353,6 +11538,7 @@
         Instance((
             name: "light_r10c15",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r10c15"),
             transforms: Some([
                 Trs(
@@ -11400,6 +11586,7 @@
         Instance((
             name: "light_r11c0",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r11c0"),
             transforms: Some([
                 Trs(
@@ -11447,6 +11634,7 @@
         Instance((
             name: "light_r11c1",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r11c1"),
             transforms: Some([
                 Trs(
@@ -11494,6 +11682,7 @@
         Instance((
             name: "light_r11c2",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r11c2"),
             transforms: Some([
                 Trs(
@@ -11541,6 +11730,7 @@
         Instance((
             name: "light_r11c3",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r11c3"),
             transforms: Some([
                 Trs(
@@ -11588,6 +11778,7 @@
         Instance((
             name: "light_r11c4",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r11c4"),
             transforms: Some([
                 Trs(
@@ -11635,6 +11826,7 @@
         Instance((
             name: "light_r11c5",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r11c5"),
             transforms: Some([
                 Trs(
@@ -11682,6 +11874,7 @@
         Instance((
             name: "light_r11c6",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r11c6"),
             transforms: Some([
                 Trs(
@@ -11729,6 +11922,7 @@
         Instance((
             name: "light_r11c7",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r11c7"),
             transforms: Some([
                 Trs(
@@ -11776,6 +11970,7 @@
         Instance((
             name: "light_r11c8",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r11c8"),
             transforms: Some([
                 Trs(
@@ -11823,6 +12018,7 @@
         Instance((
             name: "light_r11c9",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r11c9"),
             transforms: Some([
                 Trs(
@@ -11870,6 +12066,7 @@
         Instance((
             name: "light_r11c10",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r11c10"),
             transforms: Some([
                 Trs(
@@ -11917,6 +12114,7 @@
         Instance((
             name: "light_r11c11",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r11c11"),
             transforms: Some([
                 Trs(
@@ -11964,6 +12162,7 @@
         Instance((
             name: "light_r11c12",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r11c12"),
             transforms: Some([
                 Trs(
@@ -12011,6 +12210,7 @@
         Instance((
             name: "light_r11c13",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r11c13"),
             transforms: Some([
                 Trs(
@@ -12058,6 +12258,7 @@
         Instance((
             name: "light_r11c14",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r11c14"),
             transforms: Some([
                 Trs(
@@ -12105,6 +12306,7 @@
         Instance((
             name: "light_r11c15",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r11c15"),
             transforms: Some([
                 Trs(
@@ -12152,6 +12354,7 @@
         Instance((
             name: "light_r12c0",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r12c0"),
             transforms: Some([
                 Trs(
@@ -12199,6 +12402,7 @@
         Instance((
             name: "light_r12c1",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r12c1"),
             transforms: Some([
                 Trs(
@@ -12246,6 +12450,7 @@
         Instance((
             name: "light_r12c2",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r12c2"),
             transforms: Some([
                 Trs(
@@ -12293,6 +12498,7 @@
         Instance((
             name: "light_r12c3",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r12c3"),
             transforms: Some([
                 Trs(
@@ -12340,6 +12546,7 @@
         Instance((
             name: "light_r12c4",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r12c4"),
             transforms: Some([
                 Trs(
@@ -12387,6 +12594,7 @@
         Instance((
             name: "light_r12c5",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r12c5"),
             transforms: Some([
                 Trs(
@@ -12434,6 +12642,7 @@
         Instance((
             name: "light_r12c6",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r12c6"),
             transforms: Some([
                 Trs(
@@ -12481,6 +12690,7 @@
         Instance((
             name: "light_r12c7",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r12c7"),
             transforms: Some([
                 Trs(
@@ -12528,6 +12738,7 @@
         Instance((
             name: "light_r12c8",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r12c8"),
             transforms: Some([
                 Trs(
@@ -12575,6 +12786,7 @@
         Instance((
             name: "light_r12c9",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r12c9"),
             transforms: Some([
                 Trs(
@@ -12622,6 +12834,7 @@
         Instance((
             name: "light_r12c10",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r12c10"),
             transforms: Some([
                 Trs(
@@ -12669,6 +12882,7 @@
         Instance((
             name: "light_r12c11",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r12c11"),
             transforms: Some([
                 Trs(
@@ -12716,6 +12930,7 @@
         Instance((
             name: "light_r12c12",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r12c12"),
             transforms: Some([
                 Trs(
@@ -12763,6 +12978,7 @@
         Instance((
             name: "light_r12c13",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r12c13"),
             transforms: Some([
                 Trs(
@@ -12810,6 +13026,7 @@
         Instance((
             name: "light_r12c14",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r12c14"),
             transforms: Some([
                 Trs(
@@ -12857,6 +13074,7 @@
         Instance((
             name: "light_r12c15",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r12c15"),
             transforms: Some([
                 Trs(
@@ -12904,6 +13122,7 @@
         Instance((
             name: "light_r13c0",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r13c0"),
             transforms: Some([
                 Trs(
@@ -12951,6 +13170,7 @@
         Instance((
             name: "light_r13c1",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r13c1"),
             transforms: Some([
                 Trs(
@@ -12998,6 +13218,7 @@
         Instance((
             name: "light_r13c2",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r13c2"),
             transforms: Some([
                 Trs(
@@ -13045,6 +13266,7 @@
         Instance((
             name: "light_r13c3",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r13c3"),
             transforms: Some([
                 Trs(
@@ -13092,6 +13314,7 @@
         Instance((
             name: "light_r13c4",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r13c4"),
             transforms: Some([
                 Trs(
@@ -13139,6 +13362,7 @@
         Instance((
             name: "light_r13c5",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r13c5"),
             transforms: Some([
                 Trs(
@@ -13186,6 +13410,7 @@
         Instance((
             name: "light_r13c6",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r13c6"),
             transforms: Some([
                 Trs(
@@ -13233,6 +13458,7 @@
         Instance((
             name: "light_r13c7",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r13c7"),
             transforms: Some([
                 Trs(
@@ -13280,6 +13506,7 @@
         Instance((
             name: "light_r13c8",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r13c8"),
             transforms: Some([
                 Trs(
@@ -13327,6 +13554,7 @@
         Instance((
             name: "light_r13c9",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r13c9"),
             transforms: Some([
                 Trs(
@@ -13374,6 +13602,7 @@
         Instance((
             name: "light_r13c10",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r13c10"),
             transforms: Some([
                 Trs(
@@ -13421,6 +13650,7 @@
         Instance((
             name: "light_r13c11",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r13c11"),
             transforms: Some([
                 Trs(
@@ -13468,6 +13698,7 @@
         Instance((
             name: "light_r13c12",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r13c12"),
             transforms: Some([
                 Trs(
@@ -13515,6 +13746,7 @@
         Instance((
             name: "light_r13c13",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r13c13"),
             transforms: Some([
                 Trs(
@@ -13562,6 +13794,7 @@
         Instance((
             name: "light_r13c14",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r13c14"),
             transforms: Some([
                 Trs(
@@ -13609,6 +13842,7 @@
         Instance((
             name: "light_r13c15",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r13c15"),
             transforms: Some([
                 Trs(
@@ -13656,6 +13890,7 @@
         Instance((
             name: "light_r14c0",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r14c0"),
             transforms: Some([
                 Trs(
@@ -13703,6 +13938,7 @@
         Instance((
             name: "light_r14c1",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r14c1"),
             transforms: Some([
                 Trs(
@@ -13750,6 +13986,7 @@
         Instance((
             name: "light_r14c2",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r14c2"),
             transforms: Some([
                 Trs(
@@ -13797,6 +14034,7 @@
         Instance((
             name: "light_r14c3",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r14c3"),
             transforms: Some([
                 Trs(
@@ -13844,6 +14082,7 @@
         Instance((
             name: "light_r14c4",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r14c4"),
             transforms: Some([
                 Trs(
@@ -13891,6 +14130,7 @@
         Instance((
             name: "light_r14c5",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r14c5"),
             transforms: Some([
                 Trs(
@@ -13938,6 +14178,7 @@
         Instance((
             name: "light_r14c6",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r14c6"),
             transforms: Some([
                 Trs(
@@ -13985,6 +14226,7 @@
         Instance((
             name: "light_r14c7",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r14c7"),
             transforms: Some([
                 Trs(
@@ -14032,6 +14274,7 @@
         Instance((
             name: "light_r14c8",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r14c8"),
             transforms: Some([
                 Trs(
@@ -14079,6 +14322,7 @@
         Instance((
             name: "light_r14c9",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r14c9"),
             transforms: Some([
                 Trs(
@@ -14126,6 +14370,7 @@
         Instance((
             name: "light_r14c10",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r14c10"),
             transforms: Some([
                 Trs(
@@ -14173,6 +14418,7 @@
         Instance((
             name: "light_r14c11",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r14c11"),
             transforms: Some([
                 Trs(
@@ -14220,6 +14466,7 @@
         Instance((
             name: "light_r14c12",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r14c12"),
             transforms: Some([
                 Trs(
@@ -14267,6 +14514,7 @@
         Instance((
             name: "light_r14c13",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r14c13"),
             transforms: Some([
                 Trs(
@@ -14314,6 +14562,7 @@
         Instance((
             name: "light_r14c14",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r14c14"),
             transforms: Some([
                 Trs(
@@ -14361,6 +14610,7 @@
         Instance((
             name: "light_r14c15",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r14c15"),
             transforms: Some([
                 Trs(
@@ -14408,6 +14658,7 @@
         Instance((
             name: "light_r15c0",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r15c0"),
             transforms: Some([
                 Trs(
@@ -14455,6 +14706,7 @@
         Instance((
             name: "light_r15c1",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r15c1"),
             transforms: Some([
                 Trs(
@@ -14502,6 +14754,7 @@
         Instance((
             name: "light_r15c2",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r15c2"),
             transforms: Some([
                 Trs(
@@ -14549,6 +14802,7 @@
         Instance((
             name: "light_r15c3",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r15c3"),
             transforms: Some([
                 Trs(
@@ -14596,6 +14850,7 @@
         Instance((
             name: "light_r15c4",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r15c4"),
             transforms: Some([
                 Trs(
@@ -14643,6 +14898,7 @@
         Instance((
             name: "light_r15c5",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r15c5"),
             transforms: Some([
                 Trs(
@@ -14690,6 +14946,7 @@
         Instance((
             name: "light_r15c6",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r15c6"),
             transforms: Some([
                 Trs(
@@ -14737,6 +14994,7 @@
         Instance((
             name: "light_r15c7",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r15c7"),
             transforms: Some([
                 Trs(
@@ -14784,6 +15042,7 @@
         Instance((
             name: "light_r15c8",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r15c8"),
             transforms: Some([
                 Trs(
@@ -14831,6 +15090,7 @@
         Instance((
             name: "light_r15c9",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r15c9"),
             transforms: Some([
                 Trs(
@@ -14878,6 +15138,7 @@
         Instance((
             name: "light_r15c10",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r15c10"),
             transforms: Some([
                 Trs(
@@ -14925,6 +15186,7 @@
         Instance((
             name: "light_r15c11",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r15c11"),
             transforms: Some([
                 Trs(
@@ -14972,6 +15234,7 @@
         Instance((
             name: "light_r15c12",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r15c12"),
             transforms: Some([
                 Trs(
@@ -15019,6 +15282,7 @@
         Instance((
             name: "light_r15c13",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r15c13"),
             transforms: Some([
                 Trs(
@@ -15066,6 +15330,7 @@
         Instance((
             name: "light_r15c14",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r15c14"),
             transforms: Some([
                 Trs(
@@ -15113,6 +15378,7 @@
         Instance((
             name: "light_r15c15",
             mesh: Some("plane"),
+            curves: None,
             material: Some("light_r15c15"),
             transforms: Some([
                 Trs(

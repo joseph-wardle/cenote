@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use super::changeset::Dirty;
-use super::description::SceneDescription;
+use super::description::{Geometry, SceneDescription};
 use super::lower::{InstanceSpec, all_dirty, host_phase};
 use super::{
     GpuEnvironment, GpuMesh, Placement, ResidentBuffers, ResidentTexture, Scene,
@@ -331,11 +331,12 @@ fn upload_textures(
     Ok(textures)
 }
 
-/// Resolve instance specs against the resident mesh map. The lookup can't
-/// miss: apply validated every reference, and prep processes every dirty
-/// mesh, so residency tracks the description name for name.
+/// Resolve instance specs against the resident geometry map. The lookup
+/// can't miss: apply validated every reference, and prep processes every
+/// dirty mesh and curve batch, so residency tracks the description
+/// reference for reference.
 fn placements<'a>(
-    meshes: &'a BTreeMap<String, GpuMesh>,
+    meshes: &'a BTreeMap<Geometry, GpuMesh>,
     instances: &[InstanceSpec],
 ) -> Vec<Placement<'a>> {
     instances
@@ -343,7 +344,7 @@ fn placements<'a>(
         .map(|spec| Placement {
             mesh: meshes
                 .get(&spec.mesh)
-                .expect("mesh residency tracks the description"),
+                .expect("geometry residency tracks the description"),
             transform: spec.transform,
             material: spec.material,
             camera_visible: spec.camera_visible,

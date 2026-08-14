@@ -1962,6 +1962,7 @@ mod tests {
                 (
                     match kind {
                         cenote::scene::changeset::Kind::Mesh => "mesh",
+                        cenote::scene::changeset::Kind::Curves => "curves",
                         cenote::scene::changeset::Kind::Instance => "instance",
                         cenote::scene::changeset::Kind::Material => "material",
                         cenote::scene::changeset::Kind::Medium => "medium",

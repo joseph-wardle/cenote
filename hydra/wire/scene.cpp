@@ -9,6 +9,9 @@ void encode(Writer& writer, Kind value) {
     case Kind::Mesh:
         writer.str("Mesh");
         return;
+    case Kind::Curves:
+        writer.str("Curves");
+        return;
     case Kind::Instance:
         writer.str("Instance");
         return;
@@ -103,6 +106,90 @@ void encode(Writer& writer, const MeshSource& value) {
                value);
 }
 
+void encode(Writer& writer, WidthInterpolation value) {
+    switch (value) {
+    case WidthInterpolation::Constant:
+        writer.str("Constant");
+        return;
+    case WidthInterpolation::Uniform:
+        writer.str("Uniform");
+        return;
+    case WidthInterpolation::Varying:
+        writer.str("Varying");
+        return;
+    case WidthInterpolation::Vertex:
+        writer.str("Vertex");
+        return;
+    }
+}
+
+void encode(Writer& writer, CurveType value) {
+    switch (value) {
+    case CurveType::Linear:
+        writer.str("Linear");
+        return;
+    case CurveType::Cubic:
+        writer.str("Cubic");
+        return;
+    }
+}
+
+void encode(Writer& writer, CurveBasis value) {
+    switch (value) {
+    case CurveBasis::Bezier:
+        writer.str("Bezier");
+        return;
+    case CurveBasis::BSpline:
+        writer.str("BSpline");
+        return;
+    case CurveBasis::CatmullRom:
+        writer.str("CatmullRom");
+        return;
+    }
+}
+
+void encode(Writer& writer, CurveWrap value) {
+    switch (value) {
+    case CurveWrap::Nonperiodic:
+        writer.str("Nonperiodic");
+        return;
+    case CurveWrap::Pinned:
+        writer.str("Pinned");
+        return;
+    case CurveWrap::Periodic:
+        writer.str("Periodic");
+        return;
+    }
+}
+
+void encode(Writer& writer, const Widths& value) {
+    writer.array_header(2);
+    encode(writer, value.values);
+    encode(writer, value.interpolation);
+}
+
+void encode(Writer& writer, const CurvesSource& value) {
+    writer.map_header(1);
+    std::visit(Overloaded{
+                   [&](const CurveCells& cells) {
+                       writer.str("Inline");
+                       writer.array_header(6);
+                       encode(writer, cells.points);
+                       encode(writer, cells.curve_vertex_counts);
+                       encode(writer, cells.widths);
+                       encode(writer, cells.curve_type);
+                       encode(writer, cells.basis);
+                       encode(writer, cells.wrap);
+                   },
+                   [&](const Hair& hair) {
+                       writer.str("Hair");
+                       writer.array_header(1);
+                       encode(writer, hair.path);
+                   },
+               },
+               value);
+}
+
 void encode(Writer& writer, const Light& value) {
     writer.map_header(1);
     std::visit(Overloaded{
@@ -128,10 +215,17 @@ void encode(Writer& writer, const MeshPatch& value) {
     encode(writer, value.source);
 }
 
+void encode(Writer& writer, const CurvesPatch& value) {
+    writer.array_header(2);
+    encode(writer, value.name);
+    encode(writer, value.source);
+}
+
 void encode(Writer& writer, const InstancePatch& value) {
-    writer.array_header(5);
+    writer.array_header(6);
     encode(writer, value.name);
     encode(writer, value.mesh);
+    encode(writer, value.curves);
     encode(writer, value.material);
     encode(writer, value.transforms);
     encode(writer, value.camera_visible);
@@ -212,6 +306,10 @@ void encode(Writer& writer, const Op& value) {
     std::visit(Overloaded{
                    [&](const MeshPatch& patch) {
                        writer.str("Mesh");
+                       encode(writer, patch);
+                   },
+                   [&](const CurvesPatch& patch) {
+                       writer.str("Curves");
                        encode(writer, patch);
                    },
                    [&](const InstancePatch& patch) {

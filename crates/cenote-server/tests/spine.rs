@@ -168,6 +168,7 @@ fn genesis() -> wire::ChangeSet {
             wire::Op::Instance(wire::InstancePatch {
                 name: "panel".into(),
                 mesh: Some("quad".into()),
+                curves: None,
                 material: Some("lamp".into()),
                 transforms: None,
                 camera_visible: None,
@@ -365,6 +366,7 @@ fn the_transport_spine_renders_over_the_wire() {
             ops: vec![wire::Op::Instance(wire::InstancePatch {
                 name: "broken".into(),
                 mesh: Some("no-such-mesh".into()),
+                curves: None,
                 material: Some("lamp".into()),
                 transforms: None,
                 camera_visible: None,

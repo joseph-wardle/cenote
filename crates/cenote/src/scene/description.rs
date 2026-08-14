@@ -4,8 +4,9 @@
 //! [`super::changeset`]) is its *only* mutation path, so every consumer of
 //! an edit sees the same dirty accounting.
 //!
-//! The model is a closed set of eight object kinds — mesh, instance,
-//! material, medium, light, camera, environment, settings — each a map of
+//! The model is a closed set of nine object kinds — mesh, curves,
+//! instance, material, medium, light, camera, environment, settings —
+//! each a map of
 //! objects addressed by name. Names are stable identities: patches target objects
 //! by name (creating them on first mention), references between objects
 //! (instance → mesh, instance → material) are names, and a rename is a
@@ -26,6 +27,7 @@
 //! so the working directory can never leak into path resolution.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::PathBuf;
 
 use glam::Mat4;
@@ -282,14 +284,250 @@ impl Default for MeshSource {
     }
 }
 
-/// One thing standing in the scene: a mesh placed zero or more times,
+/// A named batch of curves — the `BasisCurves` prim, which is how every
+/// DCC in the pipeline spells hair, fur, grass, and fiber.
+///
+/// Curves are a *geometry kind*, not a mesh source: what travels is the
+/// cells USD authored (points, vertex counts, widths, and the tokens that
+/// say how to read them), and the renderer owns every piece of curve
+/// mathematics from there — evaluation, flattening, and the tube sweep
+/// alike (see [`super::curves`]). That is what keeps one groom's worth of
+/// control points on the wire instead of a hundred times as many
+/// triangles, and what leaves room for a native curve primitive to become
+/// a second backend without the scene model noticing.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Curves {
+    /// Where the strands come from.
+    pub source: CurvesSource,
+}
+
+/// A curve batch's payload: cells in the scene file, or a groom read from
+/// a `.hair` file at prep — the same split meshes make between inline
+/// geometry and PLY, for the same reason.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum CurvesSource {
+    /// `BasisCurves` cells, spelled out — the shape a scene-index
+    /// observer's arrays translate into directly.
+    Inline {
+        /// Control vertices of every curve, end to end, meters, object
+        /// space. `curve_vertex_counts` says where each curve's run
+        /// starts and stops.
+        points: Vec<[f32; 3]>,
+        /// How many control vertices each curve holds. Its length is the
+        /// number of curves; what counts are *valid* depends on the type,
+        /// basis, and wrap (see `UsdGeomBasisCurves`' segment table,
+        /// which validation applies verbatim).
+        curve_vertex_counts: Vec<u32>,
+        /// The strands' widths — diameters, not radii, like USD's own.
+        /// Absent means one meter everywhere, which is `UsdGeomCurves`'
+        /// fallback: unmistakable rather than invisible.
+        #[serde(default)]
+        widths: Option<Widths>,
+        /// Whether the vertices are a polyline or a cubic control
+        /// polygon. Default cubic, like USD.
+        #[serde(default)]
+        curve_type: CurveType,
+        /// Which cubic basis the control polygon is read through; ignored
+        /// for linear curves. Default bezier, like USD.
+        #[serde(default)]
+        basis: CurveBasis,
+        /// How the ends behave. Default nonperiodic, like USD.
+        #[serde(default)]
+        wrap: CurveWrap,
+    },
+    /// A groom loaded from a `.hair` file at prep — polylines with a
+    /// width at every point, so no basis applies. Apply only checks the
+    /// file exists; reading it is prep's job.
+    Hair {
+        /// The `.hair` file (absolute once applied, like every path).
+        path: PathBuf,
+    },
+}
+
+impl Default for CurvesSource {
+    /// An empty inline payload — the get-or-create placeholder. It never
+    /// survives an apply: validation rejects curves with no vertices.
+    fn default() -> Self {
+        Self::Inline {
+            points: Vec::new(),
+            curve_vertex_counts: Vec::new(),
+            widths: None,
+            curve_type: CurveType::default(),
+            basis: CurveBasis::default(),
+            wrap: CurveWrap::default(),
+        }
+    }
+}
+
+/// The width stream of a curve batch, with the interpolation that says
+/// how many values it holds and how they spread along a strand.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Widths {
+    /// The widths themselves; how many there must be follows from
+    /// `interpolation` and the topology.
+    pub values: Vec<f32>,
+    /// How they map onto the strands. Default `vertex`, which is
+    /// `UsdGeomCurves`' own fallback when a file leaves it unstated.
+    #[serde(default)]
+    pub interpolation: WidthInterpolation,
+}
+
+/// How a width stream maps onto the curves it belongs to — the four
+/// `UsdGeomPrimvar` interpolations that apply to curves.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WidthInterpolation {
+    /// One value for the whole batch.
+    Constant,
+    /// One value per curve.
+    Uniform,
+    /// One value per segment end, linear across each segment — neither
+    /// per point nor per curve, the shape USD warns implementations
+    /// routinely get wrong.
+    Varying,
+    /// One value per control vertex, interpolated through the curve's own
+    /// basis. The default.
+    #[default]
+    Vertex,
+}
+
+/// Polyline or cubic — `UsdGeomBasisCurves`' `type`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CurveType {
+    /// Vertices are the strand: a segment per consecutive pair.
+    Linear,
+    /// Vertices are a control polygon read through [`CurveBasis`]. The
+    /// default, as in USD.
+    #[default]
+    Cubic,
+}
+
+/// Which cubic basis a control polygon is read through —
+/// `UsdGeomBasisCurves`' `basis`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CurveBasis {
+    /// Interpolating, four vertices per span, window sliding by three.
+    /// The default, as in USD.
+    #[default]
+    Bezier,
+    /// Approximating, window sliding by one — the smooth basis grooms are
+    /// usually authored in.
+    BSpline,
+    /// Interpolating, window sliding by one.
+    CatmullRom,
+}
+
+/// How a curve's ends behave — `UsdGeomBasisCurves`' `wrap`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CurveWrap {
+    /// Open, and the basis is read from the vertices as authored. The
+    /// default, as in USD.
+    #[default]
+    Nonperiodic,
+    /// Open, with a phantom vertex mirrored off each end so the curve
+    /// passes through its first and last vertex — how Houdini writes hair
+    /// under an approximating basis. Meaningless for bezier, which
+    /// already interpolates its ends, and treated as nonperiodic there.
+    Pinned,
+    /// Closed. **Refused at validation**: the renderer sweeps a strand
+    /// from a root, and a loop has none. It is carried by the schema so a
+    /// scene that authors one is told what it authored, rather than
+    /// silently rendered as an open curve.
+    Periodic,
+}
+
+impl fmt::Display for CurveType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Linear => "linear",
+            Self::Cubic => "cubic",
+        })
+    }
+}
+
+impl fmt::Display for CurveBasis {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Bezier => "bezier",
+            Self::BSpline => "bspline",
+            Self::CatmullRom => "catmullRom",
+        })
+    }
+}
+
+impl fmt::Display for CurveWrap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Nonperiodic => "nonperiodic",
+            Self::Pinned => "pinned",
+            Self::Periodic => "periodic",
+        })
+    }
+}
+
+/// What an instance places: geometry of one kind or the other, by name.
+///
+/// The two kinds keep separate maps — their schemas have nothing in
+/// common — so the reference has to say which map it means. Everything
+/// downstream of lowering treats them alike: curves resolve to triangles,
+/// and a resolved batch is a mesh in every way that residency, the BLAS,
+/// and the light table can see.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Geometry {
+    /// A [`Mesh`], by name.
+    Mesh(String),
+    /// A [`Curves`] batch, by name.
+    Curves(String),
+}
+
+impl Geometry {
+    /// The name it references.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Mesh(name) | Self::Curves(name) => name,
+        }
+    }
+
+    /// The `kind.name` stem the GPU debug labels are built from — and,
+    /// through them, the memory ledger's buckets.
+    pub(crate) fn label(&self) -> String {
+        format!("{}.{}", self.kind(), self.name())
+    }
+
+    /// The kind it references — how dirty accounting and validation reach
+    /// the right map.
+    #[must_use]
+    pub fn kind(&self) -> Kind {
+        match self {
+            Self::Mesh(_) => Kind::Mesh,
+            Self::Curves(_) => Kind::Curves,
+        }
+    }
+}
+
+impl Default for Geometry {
+    /// An unnamed mesh — the get-or-create placeholder, which validation
+    /// rejects like any other unset reference.
+    fn default() -> Self {
+        Self::Mesh(String::new())
+    }
+}
+
+impl fmt::Display for Geometry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} \"{}\"", self.kind(), self.name())
+    }
+}
+
+/// One thing standing in the scene: geometry placed zero or more times,
 /// wearing a material — both referenced by name.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Instance {
-    /// Name of the [`Mesh`] this instance places. Every instance must
-    /// name one; the empty default only exists so get-or-create has a
-    /// value, and validation rejects it.
-    pub mesh: String,
+    /// The [`Mesh`] or [`Curves`] this instance places. Every instance
+    /// must name one; the empty default only exists so get-or-create has
+    /// a value, and validation rejects it.
+    pub geometry: Geometry,
     /// Name of the [`Material`] on its surface (same rule as `mesh`).
     pub material: String,
     /// Object-to-world placements, one per copy — the array-instancer
@@ -349,7 +587,7 @@ impl Default for Instance {
     /// stands once at the origin, as it always has.
     fn default() -> Self {
         Self {
-            mesh: String::new(),
+            geometry: Geometry::default(),
             material: String::new(),
             transforms: vec![Transform::default()],
             camera_visible: true,
@@ -761,11 +999,12 @@ impl Default for Settings {
     }
 }
 
-/// The eight object maps — the description's entire contents, split out
+/// The nine object maps — the description's entire contents, split out
 /// so apply can clone, mutate, validate, and swap them atomically.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Objects {
     pub(crate) meshes: BTreeMap<String, Mesh>,
+    pub(crate) curves: BTreeMap<String, Curves>,
     pub(crate) instances: BTreeMap<String, Instance>,
     pub(crate) materials: BTreeMap<String, Material>,
     pub(crate) media: BTreeMap<String, Medium>,
@@ -799,6 +1038,12 @@ impl SceneDescription {
     #[must_use]
     pub fn meshes(&self) -> &BTreeMap<String, Mesh> {
         &self.objects.meshes
+    }
+
+    /// The curve batches, by name.
+    #[must_use]
+    pub fn curves(&self) -> &BTreeMap<String, Curves> {
+        &self.objects.curves
     }
 
     /// The instances, by name.
@@ -863,6 +1108,12 @@ impl SceneDescription {
             Kind::Mesh,
             &self.objects.meshes,
             &new.objects.meshes,
+            &mut dirty,
+        );
+        diff(
+            Kind::Curves,
+            &self.objects.curves,
+            &new.objects.curves,
             &mut dirty,
         );
         diff(

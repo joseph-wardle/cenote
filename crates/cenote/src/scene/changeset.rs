@@ -30,18 +30,21 @@ use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
 use super::description::{
-    Camera, Instance, Light, Medium, Mesh, MeshSource, Objects, SceneDescription, Settings,
-    Texturable, TextureRef, Transform, VolumeSource,
+    Camera, CurveWrap, Curves, CurvesSource, Geometry, Instance, Light, Medium, Mesh, MeshSource,
+    Objects, SceneDescription, Settings, Texturable, TextureRef, Transform, VolumeSource,
+    WidthInterpolation,
 };
 use super::scene_error;
 use crate::error::Result;
 
-/// The eight object kinds a description holds — the closed schema.
+/// The nine object kinds a description holds — the closed schema.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Kind {
     /// Triangle geometry ([`Mesh`]).
     Mesh,
-    /// A placed mesh with a material ([`Instance`]).
+    /// Curve geometry ([`Curves`]) — hair, fur, grass, fiber.
+    Curves,
+    /// Placed geometry with a material ([`Instance`]).
     Instance,
     /// An `OpenPBR` surface ([`Material`](super::description::Material)).
     Material,
@@ -62,6 +65,7 @@ impl fmt::Display for Kind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Mesh => "mesh",
+            Self::Curves => "curves",
             Self::Instance => "instance",
             Self::Material => "material",
             Self::Medium => "medium",
@@ -79,6 +83,8 @@ impl fmt::Display for Kind {
 pub enum Op {
     /// Upsert a mesh.
     Mesh(MeshPatch),
+    /// Upsert a curve batch.
+    Curves(CurvesPatch),
     /// Upsert an instance.
     Instance(InstancePatch),
     /// Upsert a material. Boxed: the patch is an order of magnitude wider
@@ -107,6 +113,7 @@ impl Op {
     pub fn target(&self) -> (Kind, &str) {
         match self {
             Self::Mesh(patch) => (Kind::Mesh, &patch.name),
+            Self::Curves(patch) => (Kind::Curves, &patch.name),
             Self::Instance(patch) => (Kind::Instance, &patch.name),
             Self::Material(patch) => (Kind::Material, &patch.name),
             Self::Medium(patch) => (Kind::Medium, &patch.name),
@@ -129,7 +136,24 @@ pub struct MeshPatch {
     pub source: Option<MeshSource>,
 }
 
+/// Patch for a [`Curves`] batch: the payload replaces wholesale, like a
+/// mesh's.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CurvesPatch {
+    /// Target name.
+    pub name: String,
+    /// New curve payload.
+    pub source: Option<CurvesSource>,
+}
+
 /// Patch for an [`Instance`].
+///
+/// The two geometry references are one field on the target: naming a mesh
+/// clears any curves reference and the other way round, because an
+/// instance places one thing. A patch that names both is refused rather
+/// than resolved by field order — there is no reading of "place this mesh
+/// and these curves" that the scene model can honour.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct InstancePatch {
@@ -137,6 +161,8 @@ pub struct InstancePatch {
     pub name: String,
     /// Mesh reference, by name.
     pub mesh: Option<String>,
+    /// Curves reference, by name — the other spelling of the same field.
+    pub curves: Option<String>,
     /// Material reference, by name.
     pub material: Option<String>,
     /// Object-to-world placements, one per copy; the whole array
@@ -342,6 +368,7 @@ macro_rules! named_patches {
 
 named_patches!(
     MeshPatch,
+    CurvesPatch,
     InstancePatch,
     MaterialPatch,
     MediumPatch,
@@ -390,6 +417,11 @@ impl ChangeSet {
             match op {
                 Op::Mesh(patch) => {
                     if let Some(MeshSource::Ply { path }) = &mut patch.source {
+                        visit(path);
+                    }
+                }
+                Op::Curves(patch) => {
+                    if let Some(CurvesSource::Hair { path }) = &mut patch.source {
                         visit(path);
                     }
                 }
@@ -492,6 +524,14 @@ fn apply_op(objects: &mut Objects, dirty: &mut Dirty, op: &Op) -> Result<()> {
     if name.is_empty() {
         return Err(scene_error(format!("a {kind} op has an empty name")));
     }
+    if let Op::Instance(patch) = op
+        && patch.mesh.is_some()
+        && patch.curves.is_some()
+    {
+        return Err(scene_error(format!(
+            "instance \"{name}\" names both a mesh and a curves batch — an instance places one"
+        )));
+    }
     if let Op::Remove(kind, name) = op {
         if !objects.remove(*kind, name) {
             return Err(scene_error(format!(
@@ -507,9 +547,20 @@ fn apply_op(objects: &mut Objects, dirty: &mut Dirty, op: &Op) -> Result<()> {
         Op::Mesh(patch) => upsert(&mut objects.meshes, &name, |mesh| {
             merge!(mesh, patch; source);
         }),
+        Op::Curves(patch) => upsert(&mut objects.curves, &name, |curves| {
+            merge!(curves, patch; source);
+        }),
         Op::Instance(patch) => upsert(&mut objects.instances, &name, |instance| {
+            // The two references are one field: whichever the patch names
+            // becomes what this instance places.
+            if let Some(mesh) = patch.mesh {
+                instance.geometry = Geometry::Mesh(mesh);
+            }
+            if let Some(curves) = patch.curves {
+                instance.geometry = Geometry::Curves(curves);
+            }
             merge!(instance, patch;
-                mesh, material, transforms, camera_visible, medium, interior_priority);
+                material, transforms, camera_visible, medium, interior_priority);
         }),
         Op::Material(patch) => upsert(&mut objects.materials, &name, |material| {
             merge!(material, patch;
@@ -580,6 +631,7 @@ impl Objects {
     fn remove(&mut self, kind: Kind, name: &str) -> bool {
         match kind {
             Kind::Mesh => self.meshes.remove(name).is_some(),
+            Kind::Curves => self.curves.remove(name).is_some(),
             Kind::Instance => self.instances.remove(name).is_some(),
             Kind::Material => self.materials.remove(name).is_some(),
             Kind::Medium => self.media.remove(name).is_some(),
@@ -596,6 +648,9 @@ impl Objects {
 fn validate(objects: &Objects) -> Result<()> {
     for (name, mesh) in &objects.meshes {
         validate_mesh(name, mesh)?;
+    }
+    for (name, curves) in &objects.curves {
+        validate_curves(name, curves)?;
     }
     for (name, instance) in &objects.instances {
         validate_instance(objects, name, instance)?;
@@ -683,8 +738,87 @@ fn validate_mesh(name: &str, mesh: &Mesh) -> Result<()> {
     }
 }
 
+/// Check a curve batch's cells against `UsdGeomBasisCurves`' own rules:
+/// the vertex counts have to partition the points array, each count has
+/// to be one a segment rule accepts, and the width stream has to hold
+/// exactly as many values as its interpolation says. Periodic curves are
+/// refused here rather than at prep, so the scene is told before anything
+/// is built.
+fn validate_curves(name: &str, curves: &Curves) -> Result<()> {
+    let named = |message: String| scene_error(format!("curves \"{name}\" {message}"));
+    let CurvesSource::Inline {
+        points,
+        curve_vertex_counts,
+        widths,
+        curve_type,
+        basis,
+        wrap,
+    } = &curves.source
+    else {
+        let CurvesSource::Hair { path } = &curves.source else {
+            unreachable!("the source is one of two variants")
+        };
+        return validate_path(&format!("curves \"{name}\""), path);
+    };
+    if curve_vertex_counts.is_empty() {
+        return Err(named("has no curves".to_owned()));
+    }
+    if *wrap == CurveWrap::Periodic {
+        return Err(named(
+            "are periodic; the renderer sweeps a strand from its root, and a closed loop \
+             has none"
+                .to_owned(),
+        ));
+    }
+    let mut vertices = 0usize;
+    let mut varying = 0usize;
+    for (index, &count) in curve_vertex_counts.iter().enumerate() {
+        let count = count as usize;
+        let segments = super::curves::segment_count(count, *curve_type, *basis, *wrap)
+            .map_err(|error| match error {
+                crate::error::Error::Scene(message) => named(format!("hold curve {index}: {message}")),
+                other => other,
+            })?;
+        vertices += count;
+        varying += segments + 1;
+    }
+    if vertices != points.len() {
+        return Err(named(format!(
+            "name {vertices} vertices across {} curves, but carry {} points",
+            curve_vertex_counts.len(),
+            points.len()
+        )));
+    }
+    if let Some(widths) = widths {
+        let expected = match widths.interpolation {
+            WidthInterpolation::Constant => 1,
+            WidthInterpolation::Uniform => curve_vertex_counts.len(),
+            WidthInterpolation::Varying => varying,
+            WidthInterpolation::Vertex => vertices,
+        };
+        if widths.values.len() != expected {
+            return Err(named(format!(
+                "carry {} {} widths, but their topology asks for {expected}",
+                widths.values.len(),
+                match widths.interpolation {
+                    WidthInterpolation::Constant => "constant",
+                    WidthInterpolation::Uniform => "uniform",
+                    WidthInterpolation::Varying => "varying",
+                    WidthInterpolation::Vertex => "vertex",
+                }
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_instance(objects: &Objects, name: &str, instance: &Instance) -> Result<()> {
-    validate_reference(&objects.meshes, "mesh", name, &instance.mesh)?;
+    match &instance.geometry {
+        Geometry::Mesh(mesh) => validate_reference(&objects.meshes, "mesh", name, mesh)?,
+        Geometry::Curves(curves) => {
+            validate_reference(&objects.curves, "curves", name, curves)?;
+        }
+    }
     validate_reference(&objects.materials, "material", name, &instance.material)?;
     if let Some(medium) = &instance.medium
         && !objects.media.contains_key(medium)
@@ -702,10 +836,15 @@ fn validate_instance(objects: &Objects, name: &str, instance: &Instance) -> Resu
         .as_ref()
         .and_then(|medium| objects.media.get(medium))
         .is_some_and(|medium| medium.volume.is_some());
-    let bounds_mesh = objects
-        .meshes
-        .get(&instance.mesh)
-        .is_some_and(|mesh| matches!(mesh.source, MeshSource::MediumBounds));
+    let bounds_mesh = match &instance.geometry {
+        Geometry::Mesh(mesh) => objects
+            .meshes
+            .get(mesh)
+            .is_some_and(|mesh| matches!(mesh.source, MeshSource::MediumBounds)),
+        // A groom is not a shell: the auto-generated cube is the only
+        // geometry a heterogeneous medium accepts.
+        Geometry::Curves(_) => false,
+    };
     if heterogeneous && !bounds_mesh {
         return Err(scene_error(format!(
             "instance \"{name}\" bounds a heterogeneous medium on a user mesh — the grid \
@@ -890,6 +1029,7 @@ fn validate_path(what: &str, path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::description::{CurveBasis, CurveType, Widths};
     use super::*;
 
     /// An absolute path that certainly exists — apply only checks
@@ -1613,5 +1753,249 @@ mod tests {
         assert!(older.removed.contains(&(Kind::Mesh, "a".into())));
         assert!(older.changed.contains(&(Kind::Mesh, "b".into())));
         assert!(older.removed.contains(&(Kind::Mesh, "b".into())));
+    }
+
+    /// A minimal valid curve batch: one four-vertex bezier strand under a
+    /// material and an instance that places it.
+    fn groom_scene() -> ChangeSet {
+        ChangeSet {
+            ops: vec![
+                Op::Curves(CurvesPatch {
+                    source: Some(cells(&[4], 4, None)),
+                    ..CurvesPatch::new("groom")
+                }),
+                Op::Material(Box::new(MaterialPatch::new("gray"))),
+                Op::Instance(InstancePatch {
+                    curves: Some("groom".into()),
+                    material: Some("gray".into()),
+                    ..InstancePatch::new("hair")
+                }),
+            ],
+        }
+    }
+
+    /// `points` bezier control vertices split by `counts`, optionally with
+    /// a width stream.
+    fn cells(counts: &[u32], points: u32, widths: Option<Widths>) -> CurvesSource {
+        CurvesSource::Inline {
+            points: (0..points)
+                .map(|index| [0.0, index as f32, 0.0])
+                .collect(),
+            curve_vertex_counts: counts.to_vec(),
+            widths,
+            curve_type: CurveType::Cubic,
+            basis: CurveBasis::Bezier,
+            wrap: CurveWrap::Nonperiodic,
+        }
+    }
+
+    /// Curves are a kind of their own: an instance places one or the
+    /// other, and the reference resolves in that kind's map.
+    #[test]
+    fn an_instance_places_curves_the_way_it_places_a_mesh() {
+        let mut description = SceneDescription::new();
+        description.apply(&groom_scene()).expect("valid set");
+        assert_eq!(
+            description.instances()["hair"].geometry,
+            Geometry::Curves("groom".into())
+        );
+        let dirty = description.take_dirty();
+        assert!(dirty.changed.contains(&(Kind::Curves, "groom".into())));
+
+        // A later patch naming a mesh moves the same instance across
+        // kinds — the two spellings are one field.
+        description
+            .apply(&ChangeSet {
+                ops: vec![
+                    Op::Mesh(MeshPatch {
+                        source: Some(MeshSource::Inline {
+                            positions: vec![[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                            normals: None,
+                            uvs: None,
+                            triangles: vec![[0, 1, 2]],
+                        }),
+                        ..MeshPatch::new("tri")
+                    }),
+                    Op::Instance(InstancePatch {
+                        mesh: Some("tri".into()),
+                        ..InstancePatch::new("hair")
+                    }),
+                ],
+            })
+            .expect("valid set");
+        assert_eq!(
+            description.instances()["hair"].geometry,
+            Geometry::Mesh("tri".into())
+        );
+    }
+
+    #[test]
+    fn an_instance_naming_both_kinds_is_refused() {
+        let mut description = SceneDescription::new();
+        let mut set = groom_scene();
+        set.ops.push(Op::Instance(InstancePatch {
+            mesh: Some("tri".into()),
+            curves: Some("groom".into()),
+            ..InstancePatch::new("hair")
+        }));
+        let error = description.apply(&set).unwrap_err();
+        assert!(error.to_string().contains("places one"), "{error}");
+    }
+
+    #[test]
+    fn a_curves_reference_that_names_a_mesh_does_not_resolve() {
+        let mut description = SceneDescription::new();
+        let mut set = triangle_scene();
+        set.ops.push(Op::Instance(InstancePatch {
+            curves: Some("tri".into()),
+            material: Some("gray".into()),
+            ..InstancePatch::new("confused")
+        }));
+        let error = description.apply(&set).unwrap_err();
+        assert!(error.to_string().contains("curves \"tri\""), "{error}");
+    }
+
+    /// Removing a curve batch retires it exactly as a mesh removal does —
+    /// and strands its instance, which is what makes the order matter.
+    #[test]
+    fn removing_curves_retires_them() {
+        let mut description = SceneDescription::new();
+        description.apply(&groom_scene()).expect("valid set");
+        description.take_dirty();
+        description
+            .apply(&ChangeSet {
+                ops: vec![Op::Remove(Kind::Curves, "groom".into())],
+            })
+            .expect_err("the instance still names it");
+        description
+            .apply(&ChangeSet {
+                ops: vec![
+                    Op::Remove(Kind::Instance, "hair".into()),
+                    Op::Remove(Kind::Curves, "groom".into()),
+                ],
+            })
+            .expect("valid set");
+        assert!(description.curves().is_empty());
+        let dirty = description.take_dirty();
+        assert!(dirty.removed.contains(&(Kind::Curves, "groom".into())));
+    }
+
+    /// The topology rules are `UsdGeomBasisCurves`', applied before
+    /// anything is built: counts that do not partition the points, a
+    /// vertex count no segment rule accepts, a periodic wrap, and a width
+    /// stream of the wrong length are each refused by name.
+    #[test]
+    fn curve_topology_is_validated_against_the_usd_rules() {
+        let refuse = |source: CurvesSource, expected: &str| {
+            let mut description = SceneDescription::new();
+            let error = description
+                .apply(&ChangeSet {
+                    ops: vec![Op::Curves(CurvesPatch {
+                        source: Some(source),
+                        ..CurvesPatch::new("groom")
+                    })],
+                })
+                .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        };
+        refuse(cells(&[4, 4], 7, None), "carry 7 points");
+        refuse(cells(&[6], 6, None), "cannot have 6 vertices");
+        let CurvesSource::Inline {
+            points,
+            curve_vertex_counts,
+            curve_type,
+            basis,
+            ..
+        } = cells(&[4], 4, None)
+        else {
+            unreachable!("the fixture is inline")
+        };
+        refuse(
+            CurvesSource::Inline {
+                points,
+                curve_vertex_counts,
+                widths: None,
+                curve_type,
+                basis,
+                wrap: CurveWrap::Periodic,
+            },
+            "periodic",
+        );
+        for (interpolation, wrong) in [
+            (WidthInterpolation::Constant, 2),
+            (WidthInterpolation::Uniform, 2),
+            (WidthInterpolation::Varying, 3),
+            (WidthInterpolation::Vertex, 3),
+        ] {
+            refuse(
+                cells(
+                    &[4],
+                    4,
+                    Some(Widths {
+                        values: vec![0.1; wrong],
+                        interpolation,
+                    }),
+                ),
+                "asks for",
+            );
+        }
+        // …and the right lengths pass: one for the batch, one per curve,
+        // one per segment end, one per vertex.
+        let mut description = SceneDescription::new();
+        for (interpolation, right) in [
+            (WidthInterpolation::Constant, 1),
+            (WidthInterpolation::Uniform, 1),
+            (WidthInterpolation::Varying, 2),
+            (WidthInterpolation::Vertex, 4),
+        ] {
+            description
+                .apply(&ChangeSet {
+                    ops: vec![Op::Curves(CurvesPatch {
+                        source: Some(cells(
+                            &[4],
+                            4,
+                            Some(Widths {
+                                values: vec![0.1; right],
+                                interpolation,
+                            }),
+                        )),
+                        ..CurvesPatch::new("groom")
+                    })],
+                })
+                .unwrap_or_else(|error| panic!("{interpolation:?}: {error}"));
+        }
+    }
+
+    /// A groom by reference is a path like any other: rebased at load,
+    /// absolute by the time it applies, and checked to exist.
+    #[test]
+    fn a_hair_reference_is_a_path_like_any_other() {
+        let mut description = SceneDescription::new();
+        let error = description
+            .apply(&ChangeSet {
+                ops: vec![Op::Curves(CurvesPatch {
+                    source: Some(CurvesSource::Hair {
+                        path: "/no/such/groom.hair".into(),
+                    }),
+                    ..CurvesPatch::new("groom")
+                })],
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("groom.hair"), "{error}");
+
+        let mut set = ChangeSet {
+            ops: vec![Op::Curves(CurvesPatch {
+                source: Some(CurvesSource::Hair {
+                    path: "groom.hair".into(),
+                }),
+                ..CurvesPatch::new("groom")
+            })],
+        };
+        set.rebase_paths(Path::new("/scenes"));
+        assert!(matches!(
+            &set.ops[0],
+            Op::Curves(CurvesPatch { source: Some(CurvesSource::Hair { path }), .. })
+                if path == Path::new("/scenes/groom.hair")
+        ));
     }
 }

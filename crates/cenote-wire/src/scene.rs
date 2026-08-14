@@ -21,12 +21,14 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The seven object kinds — mirror of `changeset::Kind`.
+/// The eight object kinds — mirror of `changeset::Kind`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Kind {
     /// Triangle geometry.
     Mesh,
-    /// A placed mesh with a material.
+    /// Curve geometry — hair, fur, grass, fiber.
+    Curves,
+    /// Placed geometry with a material.
     Instance,
     /// An `OpenPBR` surface.
     Material,
@@ -45,6 +47,8 @@ pub enum Kind {
 pub enum Op {
     /// Upsert a mesh.
     Mesh(MeshPatch),
+    /// Upsert a curve batch.
+    Curves(CurvesPatch),
     /// Upsert an instance.
     Instance(InstancePatch),
     /// Upsert a material. Boxed like the original: the patch is an order
@@ -147,6 +151,86 @@ pub enum Transform {
     Matrix([[f32; 4]; 3]),
 }
 
+/// A curve batch's payload — mirror of `description::CurvesSource`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum CurvesSource {
+    /// `BasisCurves` cells, spelled out — what a scene-index observer's
+    /// arrays translate into directly.
+    Inline {
+        /// Control vertices of every curve, end to end, object space.
+        points: Vec<[f32; 3]>,
+        /// How many control vertices each curve holds.
+        curve_vertex_counts: Vec<u32>,
+        /// Widths (diameters), with the interpolation that says how many
+        /// there are; absent means one meter everywhere.
+        widths: Option<Widths>,
+        /// Polyline or cubic control polygon.
+        curve_type: CurveType,
+        /// Which cubic basis, ignored for linear curves.
+        basis: CurveBasis,
+        /// How the ends behave.
+        wrap: CurveWrap,
+    },
+    /// A groom loaded server-side from a `.hair` file.
+    Hair {
+        /// The `.hair` file, absolute.
+        path: String,
+    },
+}
+
+/// A curve batch's width stream — mirror of `description::Widths`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Widths {
+    /// The widths themselves.
+    pub values: Vec<f32>,
+    /// How they map onto the strands.
+    pub interpolation: WidthInterpolation,
+}
+
+/// Mirror of `description::WidthInterpolation`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WidthInterpolation {
+    /// One value for the whole batch.
+    Constant,
+    /// One value per curve.
+    Uniform,
+    /// One value per segment end.
+    Varying,
+    /// One value per control vertex.
+    Vertex,
+}
+
+/// Mirror of `description::CurveType`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CurveType {
+    /// Vertices are the strand.
+    Linear,
+    /// Vertices are a control polygon.
+    Cubic,
+}
+
+/// Mirror of `description::CurveBasis`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CurveBasis {
+    /// Interpolating, window sliding by three.
+    Bezier,
+    /// Approximating, window sliding by one.
+    BSpline,
+    /// Interpolating, window sliding by one.
+    CatmullRom,
+}
+
+/// Mirror of `description::CurveWrap`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CurveWrap {
+    /// Open, read as authored.
+    Nonperiodic,
+    /// Open, with a phantom vertex mirrored off each end.
+    Pinned,
+    /// Closed — carried so the renderer can refuse it by name.
+    Periodic,
+}
+
 /// A mesh's geometry payload — mirror of `description::MeshSource`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum MeshSource {
@@ -198,6 +282,15 @@ pub struct MeshPatch {
     pub source: Option<MeshSource>,
 }
 
+/// Mirror of `changeset::CurvesPatch`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CurvesPatch {
+    /// Target name.
+    pub name: String,
+    /// New curve payload.
+    pub source: Option<CurvesSource>,
+}
+
 /// Mirror of `changeset::InstancePatch`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct InstancePatch {
@@ -205,6 +298,9 @@ pub struct InstancePatch {
     pub name: String,
     /// Mesh reference, by name.
     pub mesh: Option<String>,
+    /// Curves reference, by name — the other spelling of the same field
+    /// on the target; a patch naming both is refused there.
+    pub curves: Option<String>,
     /// Material reference, by name.
     pub material: Option<String>,
     /// Object-to-world placements, one per copy; the whole array
