@@ -473,8 +473,9 @@ struct MediumRecord {
     majorant: u32,
     majorant_bias: [f32; 3],
     majorant_res: u32,
-    /// The largest ceiling anywhere in the lattice: the bound a grid falls
-    /// back to where the tracker walks another grid's lattice.
+    /// The largest ceiling anywhere in the lattice. No shader reads it now
+    /// that every grid draws its flights over its own lattice; the word
+    /// stands until the record is repacked.
     density_max: f32,
     /// The temperature grid's byte offset in the pool, or [`GRID_NONE`] for
     /// a medium that does not emit. It is read through `world_to_index`,

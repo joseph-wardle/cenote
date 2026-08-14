@@ -12,20 +12,25 @@
 // degenerates to ratio tracking exactly and survival stays Russian
 // roulette's job.
 //
-// The majorant is the leading grid's lattice of per-cell density ceilings
-// (prep's `Majorants`), walked cell by cell. A flight is drawn in optical
-// depth rather than in distance: the walk spends that depth cell by cell,
-// so empty space costs one lookup per cell instead of a collision, and one
+// The majorant is a grid's lattice of per-cell density ceilings (prep's
+// `Majorants`), walked cell by cell. A flight is drawn in optical depth
+// rather than in distance: the walk spends that depth cell by cell, so
+// empty space costs one lookup per cell instead of a collision, and one
 // uniform still buys exactly one collision however many cells the flight
 // crosses. A 1³ lattice is the scalar majorant this replaced, and takes the
 // identical sequence of draws.
+//
+// Where grids overlap, each draws its own flight over its *own* lattice and
+// the collision is the nearest of them — see `trackMedia`. Nothing is
+// resampled onto a shared lattice and no two grids ever have to agree about
+// a cell boundary.
 
 #define PNANOVDB_HLSL
 #include "PNanoVDB.h"
 
 import medium;    // MediaSplit
 import pathstate; // MEDIUM_SLOTS
-import rng;       // trackerUniform2, shadowUniform
+import rng;       // trackerUniform2, trackerFlight, shadowUniform
 import scene;     // SceneTable, MediumRecord
 
 // One grid's value at a continuous index-space position, nanovdb
@@ -217,6 +222,34 @@ void readCell(pnanovdb_buf_t buf, inout Walk walk) {
     walk.ceiling = pnanovdb_read_float(buf, addr);
 }
 
+// One grid's cell ceiling at a world point, without a walk — the rate a
+// grid that did not fire was contributing where another one's flight ended.
+// Border-clamped exactly as `readCell` is, so a walk and a lookup name the
+// same ceiling for the same point and the rate the flights were drawn
+// against is the rate the weights divide by.
+//
+// Sound for the density read at that point because `Majorants::raise`
+// dilates each splat by a voxel, so the cell holding a point also bounds
+// the 2×2×2 neighbourhood the trilinear read reaches into — which is what
+// `no_interpolated_density_escapes_its_cell` gates.
+float ceilingAt(pnanovdb_buf_t buf, MediumRecord record, float3 world) {
+    let res = int3(record.majorantRes & 0x3ff, (record.majorantRes >> 10) & 0x3ff,
+                   (record.majorantRes >> 20) & 0x3ff);
+    let at = toIndex(record, world) * record.majorantScale + record.majorantBias;
+    let cell = clamp(int3(floor(at)), int3(0), res - 1);
+    pnanovdb_address_t addr = {
+        record.majorant + 4u * uint((cell.z * res.y + cell.y) * res.x + cell.x)
+    };
+    return pnanovdb_read_float(buf, addr);
+}
+
+// The scalar rate a spectral majorant is sampled against: distances are
+// drawn one at a time, so the channel that bounds them all is the one the
+// flight sees.
+float rateOf(float3 majorant) {
+    return max(majorant.x, max(majorant.y, majorant.z));
+}
+
 // Open the walk where `ray` stands.
 Walk openWalk(MediumRecord record, pnanovdb_buf_t buf, CellRay ray) {
     Walk walk;
@@ -283,8 +316,7 @@ void stepWalk(pnanovdb_buf_t buf, inout Walk walk) {
 bool spendFlight(pnanovdb_buf_t buf, inout Walk walk, float3 constant, float length,
                  float tau, inout float t, inout uint steps, out float m) {
     for (;;) {
-        let majorant = constant + walk.ceiling * walk.sigmaT;
-        m = max(majorant.x, max(majorant.y, majorant.z));
+        m = rateOf(constant + walk.ceiling * walk.sigmaT);
         let end = min(cellExit(walk), length);
         // `m > 0` and not just the depth test: `toUnitFloat` can return
         // exactly 0, making tau exactly 0, and an empty cell (m = 0) is
@@ -355,41 +387,112 @@ public TrackEvent trackMedia<let EMISSIVE : int>(
     event.steps = 0;
 #endif
 
-    // Which grid gets the walk is `split.grids[0]`, the lowest occupied
-    // medium slot — a function of the order the path crossed the shells.
-    // Grids beyond it — an overlap, which prep does not forbid — get no
-    // second walk: their whole-lattice maxima ride along in `constant`,
-    // which is a valid majorant and exactly the bound the scalar tracker
-    // used, so the looser estimator is paid for only where volumes actually
-    // overlap. Delta tracking is unbiased under *any* valid majorant, so
-    // that ordering costs variance, never correctness.
+    // Every grid over this segment draws its own free flight and spends it
+    // over its *own* lattice; the collision is the nearest of them. The
+    // union of independent inhomogeneous Poisson processes with rates
+    // m₁…m_N has rate Σmᵢ and its first arrival is the minimum of theirs, so
+    // this is an exact draw from the combined majorant — no shared lattice,
+    // no reconciliation of two coordinate systems, no agreement between two
+    // grids about where a cell ends. It is the dual of the shadow pass's
+    // rule: transmittance composes by product, distance composes by minimum.
+    //
+    // Slot 0 carries its walk across collisions, and its *flight* with it:
+    // an arrival another grid beat is not discarded, because slot 0's
+    // process does not care what happened in someone else's. Only the grid
+    // that fires redraws. That is what keeps its walk moving down the
+    // segment exactly once — redraw it at every collision and it re-walks
+    // everything in front of it, which with a thin grid beside a dense one
+    // is the whole segment, every time. Measured: 644 lattice steps per
+    // collision, 20.6 ms where this is 4.2.
+    //
+    // The followers open a walk where the path stands and drop it again, so
+    // one walk is live at a time past the first and the register cost is
+    // flat in N. They pay a re-open per collision instead of carrying state;
+    // the cells they cross are the ones between one collision and the next
+    // either way, so what that buys back is bounded and what it costs is a
+    // handful of instructions.
+    //
+    // Slot 0 also carries whatever homogeneous medium fills the space around
+    // the grids — it belongs to exactly one of the processes, and putting it
+    // there is part of what makes a *single* grid's arithmetic, and its
+    // draws, exactly what they were before overlap was handled at all.
     let leading = scene.media[split.grids[0]];
     var walk = openWalk(leading, buf, cellRay(leading, origin, direction, start));
-    // Everything the cell lookup does not move.
-    var constant = split.homogeneous.sigmaT;
-    [unroll]
-    for (uint slot = 1; slot < MEDIUM_SLOTS; slot++) {
-        if (slot < split.gridCount) {
-            let record = scene.media[split.grids[slot]];
-            constant += record.densityMax * record.sigmaT;
-        }
-    }
+    // Everything slot 0's cell lookup does not move.
+    let constant = split.homogeneous.sigmaT;
+    // Slot 0's arrival in hand: where it is, the rate it was drawn against,
+    // and whether the segment holds another one at all.
+    var pending = -1.0;
+    var pendingRate = 0.0;
+    var exhausted = false;
     var t = 0.0;
     var u = uFirst;
     var steps = 0u;
     for (uint collision = 0; collision < TRACKER_CAP; collision++) {
-        float m;
-        let transmitted =
-            spendFlight(buf, walk, constant, tmax, -log(1.0 - u.y), t, steps, m);
+        if (!exhausted && pending < 0.0) {
+            var at = t;
+            if (spendFlight(buf, walk, constant, tmax, -log(1.0 - u.y), at, steps,
+                            pendingRate)) {
+                exhausted = true;
+                if (at < tmax) {
+#ifdef PROBES
+                    event.steps = steps;
+#endif
+                    // The step cap, not the segment's end: the walk gave up,
+                    // and giving up transmits the rest — too little fog, the
+                    // walk's own degradation direction.
+                    return event;
+                }
+            } else {
+                pending = at;
+            }
+        }
+        // Then the followers, each capped at the nearest arrival so far: a
+        // flight not spent by then is one the minimum cannot need, and the
+        // next collision redraws it anyway — the exponential is memoryless,
+        // so a follower's half-spent flight costs nothing but its draw.
+        var d = exhausted ? tmax : min(pending, tmax);
+        var winner = 0u;
+        [unroll]
+        for (uint slot = 1; slot < MEDIUM_SLOTS; slot++) {
+            if (slot >= split.gridCount) {
+                continue;
+            }
+            let record = scene.media[split.grids[slot]];
+            // Anchored where the path stands rather than advanced from the
+            // segment's start, like the shadow pass's walk and for the same
+            // reason: `at + t·perT` spends its precision on the journey.
+            var probe =
+                openWalk(record, buf, cellRay(record, origin, direction, start + t));
+            let tau = -log(1.0 - trackerFlight(pixel, sampleIndex, bounce,
+                                               (crossed << 12) | (collision & 0xfff), slot));
+            var at = 0.0;
+            float rate;
+            if (!spendFlight(buf, probe, float3(0.0), d - t, tau, at, steps, rate)) {
+                d = t + at;
+                winner = slot;
+            }
+        }
 #ifdef PROBES
         // Every exit below is in this iteration, so one assignment carries
         // the count out of all of them.
         event.steps = steps;
 #endif
-        if (transmitted) {
-            return event; // the null weights are the estimate
+        if (winner == 0) {
+            if (exhausted) {
+                return event; // nothing collided: the null weights are the estimate
+            }
+            t = pending;      // slot 0's own arrival, and it is spent
+            pending = -1.0;
+        } else {
+            t = d; // a follower got there first; slot 0's arrival stands
         }
         let x = origin + (start + t) * direction;
+        // Slot 0's ceiling at the collision: the cell its walk stands in
+        // when it fired there, and otherwise read from its lattice, because
+        // its walk is somewhere in front of the path.
+        let ceiling0 = winner == 0 ? walk.ceiling : ceilingAt(buf, leading, x);
+        var m = winner == 0 ? pendingRate : rateOf(constant + ceiling0 * leading.sigmaT);
         var sigmaT = split.homogeneous.sigmaT;
         var sigmaS = split.homogeneous.sigmaS;
         // The homogeneous g is already σ_s-normalized; multiplying it back
@@ -404,13 +507,18 @@ public TrackEvent trackMedia<let EMISSIVE : int>(
                 continue;
             }
             let record = scene.media[split.grids[slot]];
+            // Each grid clamps to the ceiling its own flight was drawn
+            // against — and every follower's rate there joins `m`, because
+            // what the collision arrived at is the sum of the rates, and
+            // that sum is what the weights below divide by.
+            var ceiling = ceiling0;
+            if (slot != 0) {
+                ceiling = ceilingAt(buf, record, x);
+                m += rateOf(ceiling * record.sigmaT);
+            }
             var acc = openGrid(buf, record.grid);
             let index = toIndex(record, x);
-            // Each grid clamps to the ceiling that entered the majorant
-            // above: the walked cell's for the leading grid, the whole
-            // lattice's maximum for any other.
-            let density = sampleDensity(buf, acc, index,
-                                        slot == 0 ? walk.ceiling : record.densityMax);
+            let density = sampleDensity(buf, acc, index, ceiling);
             let extinction = density * record.sigmaT;
             sigmaT += extinction;
             let scatter = density * record.sigmaS;

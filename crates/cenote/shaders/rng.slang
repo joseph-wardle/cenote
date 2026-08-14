@@ -160,6 +160,17 @@ public float2 trackerUniform2(uint pixel, uint sampleIndex, uint bounce, uint ke
     return float2(toUnitFloat(h), toUnitFloat(lowbias32(h ^ 0x3c6ef372u)));
 }
 
+// A follower grid's free flight, where more than one grid covers a segment.
+// Each grid draws its own, so the first keeps the stream above — which is
+// what makes one grid's sequence of draws exactly what it was before any of
+// this — and the rest ride a salt of their own, keyed by slot so no two
+// grids of one collision can draw the same length.
+public float trackerFlight(uint pixel, uint sampleIndex, uint bounce, uint key, uint slot) {
+    var h = lowbias32(pixel ^ lowbias32(sampleIndex ^ 0x510e527fu));
+    h = lowbias32(h ^ (bounce << 16 | key));
+    return toUnitFloat(lowbias32(h ^ (slot * 0x9e3779b9u)));
+}
+
 // The shadow pass's ratio-tracking seed: one connection's crossing of the
 // grid filling one placement. Keyed by the placement rather than by a
 // running counter because the traversal that finds them delivers them in no

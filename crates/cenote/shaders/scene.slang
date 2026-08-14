@@ -62,8 +62,9 @@ public struct MediumRecord {
     public float3 majorantBias;
     // Its cell counts, ten bits per axis with x lowest.
     public uint majorantRes;
-    // The largest ceiling anywhere in the lattice — the bound a grid falls
-    // back to where the tracker walks a different grid's lattice.
+    // The largest ceiling anywhere in the lattice. Nothing reads it now
+    // that every grid draws its flights over its own lattice; the word
+    // stands until the record is repacked.
     public float densityMax;
     // The temperature grid's byte offset in the pool, or GRID_NONE for a
     // medium that does not emit. Read through `worldToIndex`, the density
