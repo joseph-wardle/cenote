@@ -234,7 +234,7 @@ pub(crate) fn resolve(name: &str, curves: &Curves) -> Result<Mesh> {
             *wrap,
         )
         .map_err(named)?,
-        CurvesSource::Hair { path } => crate::hair::read(path).map_err(named)?,
+        CurvesSource::Hair { path } => crate::scene::source::hair::read(path).map_err(named)?,
     };
     if strands.len() == 0 {
         return Err(named(scene_error(

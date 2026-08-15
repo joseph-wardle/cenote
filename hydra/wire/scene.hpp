@@ -309,7 +309,6 @@ struct EnvironmentPatch {
 /// shown, never what the render converges to.
 struct SettingsPatch {
     std::string name;
-    std::optional<std::array<std::uint32_t, 2>> resolution{};
     std::optional<std::uint32_t> spp{};
     std::optional<Reset<float>> noise_threshold{};
     std::optional<std::uint32_t> max_bounces{};

@@ -1,5 +1,9 @@
-//! The scene half of the wire: a full 1:1 mirror of the renderer's
-//! change-set schema (`cenote::scene::changeset`), field for field.
+//! The scene half of the wire: a mirror of the renderer's change-set
+//! schema (`cenote::scene::changeset`), field for field — minus media
+//! (`Kind::Medium`, `Instance.medium`, `Settings.global_medium`, texture
+//! sample-time params), which have no wire spelling yet, and
+//! `Settings.resolution`, which the framebuffer's own `Resize` request
+//! owns end to end.
 //!
 //! Two deliberate spelling differences from the originals, both forced by
 //! the wire itself:
@@ -21,7 +25,8 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The eight object kinds — mirror of `changeset::Kind`.
+/// The object kinds — `changeset::Kind` minus `Medium`, which no wire
+/// client can author yet (the wire has no spelling for media at all).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Kind {
     /// Triangle geometry.
@@ -403,8 +408,6 @@ pub struct EnvironmentPatch {
 pub struct SettingsPatch {
     /// Target name.
     pub name: String,
-    /// Output width × height, pixels.
-    pub resolution: Option<[u32; 2]>,
     /// The sample budget: samples per pixel before the render is done. A
     /// hard cap — `noise_threshold` only ever stops it earlier.
     pub spp: Option<u32>,

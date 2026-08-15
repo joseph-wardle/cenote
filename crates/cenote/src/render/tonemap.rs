@@ -106,10 +106,10 @@ impl Tonemap {
     }
 
     /// Upload a host frame of linear RGBA averages as a buffer
-    /// [`Tonemap::apply`] can read — the road back onto the GPU for a
-    /// frame that left it to be processed on the host, like the viewer's
-    /// denoised beauty.
-    pub fn upload_average(gpu: &Context, name: &str, texels: &[f32]) -> Result<Buffer> {
+    /// [`Tonemap::apply`] can read — the fixture path for the CPU-mirror
+    /// test below.
+    #[cfg(test)]
+    fn upload_average(gpu: &Context, name: &str, texels: &[f32]) -> Result<Buffer> {
         gpu.upload_buffer(
             name,
             bytemuck::cast_slice(texels),
@@ -210,6 +210,20 @@ mod tests {
             [-0.10208, 1.10813, -0.00605],
             [-0.00327, -0.07276, 1.07602],
         ];
+        // The mirror's 3x3 must be the same primaries conversion the host
+        // color module derives — the one independent cross-check between
+        // the two hand-typed spellings of Rec.709-from-ACEScg.
+        let derived = crate::color::rec709_from_acescg();
+        for (row, expected) in SRGB_FROM_ACESCG.iter().enumerate() {
+            let derived_row = [
+                derived.row(row).x,
+                derived.row(row).y,
+                derived.row(row).z,
+            ];
+            for (a, b) in expected.iter().zip(derived_row) {
+                assert!((a - b).abs() < 1e-4, "SRGB_FROM_ACESCG drifted from color.rs");
+            }
+        }
         let v = multiply(&ACES_INPUT, multiply(&SRGB_FROM_ACESCG, acescg));
         let fitted = v.map(|v| {
             (v * (v + 0.024_578_6) - 0.000_090_537) / (v * (0.983_729 * v + 0.432_951) + 0.238_081)

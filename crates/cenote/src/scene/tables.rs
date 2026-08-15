@@ -499,24 +499,31 @@ mod tests {
         f32::from_le_bytes(bytes.try_into().expect("four bytes"))
     }
 
-    /// Rebake `tables/ggx_energy.bin` from the integrand. `--ignored`
-    /// because it takes minutes in a debug build — run release:
-    /// `cargo test -p cenote --release regenerate_closure_tables -- --ignored`
+    /// Rebake `tables/ggx_energy.bin` from the integrand. `--ignored` and
+    /// env-gated because it *writes into the source tree* — a bare
+    /// `--include-ignored` sweep must not mutate the repo. Run release:
+    /// `CENOTE_REGENERATE=1 cargo test -p cenote --release regenerate_closure_tables -- --ignored`
     #[test]
     #[ignore = "regenerates tables/ggx_energy.bin; run explicitly, in release"]
     fn regenerate_closure_tables() {
+        if std::env::var_os("CENOTE_REGENERATE").is_none() {
+            eprintln!("skipping: set CENOTE_REGENERATE=1 to rewrite tables/ggx_energy.bin");
+            return;
+        }
         let blob = bake::ggx_energy_blob();
         let bytes: Vec<u8> = blob.iter().flat_map(|v| v.to_le_bytes()).collect();
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/tables/ggx_energy.bin");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/scene/tables/ggx_energy.bin");
         std::fs::write(path, bytes).expect("write ggx_energy.bin");
     }
 
-    /// A handful of embedded entries re-integrated from scratch: the blob
-    /// must match this kernel's integrand, not just *an* integrand. Runs
-    /// on every entry class (`E`, `E_avg`, glass, inverted glass,
-    /// dielectric) at interior and edge grid points.
+    /// A handful of embedded entries re-integrated through the baker: the
+    /// blob must be a faithful, un-truncated sampling of `bake`'s
+    /// integrand. (The baker itself is pinned by physics only —
+    /// `energy_tables_are_physical` — since no independent spelling of the
+    /// integral exists in-tree.) Runs on every entry class (`E`, `E_avg`,
+    /// glass, inverted glass, dielectric) at interior and edge grid points.
     #[test]
-    fn embedded_tables_match_the_integrand() {
+    fn embedded_tables_match_the_baker() {
         let ggx = GGX_SIZE - 1;
         let glass = GLASS_SIZE - 1;
         let grid2 = |k: usize| k as f32 / ggx as f32;

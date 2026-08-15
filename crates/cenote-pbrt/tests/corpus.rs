@@ -86,6 +86,10 @@ fn corpus_renders_match_goldens() {
     let gpu = match Context::new() {
         Ok(gpu) => gpu,
         Err(err) => {
+            assert!(
+                std::env::var_os("CENOTE_REQUIRE_GPU").is_none(),
+                "CENOTE_REQUIRE_GPU is set but GPU bring-up failed: {err}"
+            );
             eprintln!("skipping: no capable GPU here ({err})");
             return;
         }

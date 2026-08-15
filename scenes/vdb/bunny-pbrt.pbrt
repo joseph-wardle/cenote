@@ -1,0 +1,27 @@
+# Gate 3 oracle: bunny_cloud under a constant white infinite light,
+# mirroring scenes/vdb/bunny-cloud-oracle.ron — gray sigma so color spaces cancel.
+Integrator "volpath" "integer maxdepth" 32
+Sampler "halton" "integer pixelsamples" 512
+Film "rgb" "integer xresolution" 960 "integer yresolution" 540
+    "string filename" "bunny-pbrt.exr"
+
+LookAt -1 19 62   -1 19 1   0 1 0
+Camera "perspective" "float fov" 48
+
+WorldBegin
+
+LightSource "infinite" "rgb L" [1 1 1]
+
+MakeNamedMedium "cloud" "string type" "nanovdb"
+    "string filename" "/home/wardle/Documents/cenote/scenes/vdb/sources/bunny_cloud.vdb.nvdb"
+    "rgb sigma_a" [0.02 0.02 0.02]
+    "rgb sigma_s" [0.35 0.35 0.35]
+    "float g" 0.3
+    "float scale" 1
+
+AttributeBegin
+    Material ""
+    MediumInterface "cloud" ""
+    Translate -0.92 19.12 0.88
+    Shape "sphere" "float radius" 38
+AttributeEnd

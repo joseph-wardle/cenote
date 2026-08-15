@@ -29,17 +29,11 @@ height=${HEIGHT:-1440}
 # Long enough for a stable median, short enough that the whole set is minutes.
 spp=64
 
-# Each scene probes one cost regime; label after the colon.
-scenes=(
-  "$root/scenes/corpus/cornell-box.ron:cornell-box"   # cheapest frame — dispatch-bound
-  "$root/scenes/brass-room.ron:brass-room"            # heavy indirect GI
-  "$root/scenes/many-lights.ron:many-lights"          # NEE-bound
-  "$root/scenes/corpus/bistro.ron:bistro"             # production exterior at scale
-  "$root/scenes/corpus/zero-day.ron:zero-day"         # 283 lights in a dark interior
-)
+# The scene list lives in scenes/manifest.sh, one entry per cost regime.
+source "$root/scenes/manifest.sh"
 
-for entry in "${scenes[@]}"; do
-  scene=${entry%%:*}
+for entry in "${benchmark_scenes[@]}"; do
+  scene=$root/${entry%%:*}
   label=${entry##*:}
   [[ -f $scene ]] || { echo "skipping $label — $scene is not here" >&2; continue; }
   echo "== $label =="

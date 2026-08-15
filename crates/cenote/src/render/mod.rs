@@ -40,7 +40,7 @@ use crate::gpu::{Bindings, Buffer, ComputePipeline, Context, MemoryLocation, Pas
 use crate::scene::Scene;
 use crate::shaders::Kernels;
 use crate::stats::PassTimings;
-use crate::wavefront::{LightSampling, Wavefront};
+use crate::wavefront::Wavefront;
 
 /// Workgroup width/height — must match `[numthreads(8, 8, 1)]` in the film
 /// kernels (`accumulate.slang`, `resolve.slang`, `tonemap.slang`). Named
@@ -166,13 +166,7 @@ impl Renderer {
     /// embedded set, [`Renderer::reload`] with a recompiled one.
     fn from_kernels(gpu: &Context, kernels: &Kernels, max_bounces: u32) -> Result<Self> {
         Ok(Self {
-            wavefront: Wavefront::new(
-                gpu,
-                kernels,
-                Wavefront::DEFAULT_CAPACITY,
-                max_bounces,
-                LightSampling::Mis,
-            )?,
+            wavefront: Wavefront::new(gpu, kernels, Wavefront::DEFAULT_CAPACITY, max_bounces)?,
             accumulate: gpu.create_compute_pipeline(
                 &kernels.accumulate.spirv,
                 kernels.accumulate.entry,
@@ -445,5 +439,7 @@ fn workgroups(width: u32, height: u32) -> [u32; 3] {
     ]
 }
 
+#[cfg(test)]
+mod convergence;
 #[cfg(test)]
 mod tests;

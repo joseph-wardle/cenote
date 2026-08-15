@@ -246,10 +246,17 @@ fn finish_alias(mut records: Vec<LightRecord>) -> Vec<LightRecord> {
 }
 
 /// The list's total selection weight — the same [`power`] measure the
-/// alias table is built from, exposed so scene prep can weigh the whole
-/// list against the environment.
-pub(crate) fn total_power(triangles: &[TriangleLight], deltas: &[DeltaLight]) -> f64 {
-    raw_records(triangles, deltas).iter().map(power).sum()
+/// alias table was built from, summed over the finished records so scene
+/// prep can weigh the whole list against the environment without building
+/// it twice.
+pub(crate) fn power_of(records: &[LightRecord]) -> f64 {
+    records.iter().map(power).sum()
+}
+
+/// [`power_of`] straight from the inputs — the test oracle's spelling.
+#[cfg(test)]
+fn total_power(triangles: &[TriangleLight], deltas: &[DeltaLight]) -> f64 {
+    power_of(&raw_records(triangles, deltas))
 }
 
 /// Every light as a record with geometry, emission, and identity filled
@@ -492,27 +499,7 @@ mod tests {
         assert_eq!(records[0].pdf, 0.0);
         assert!(selection_probability(&records, 0).abs() < 1e-12);
         assert!((selection_probability(&records, 1) - 1.0).abs() < 1e-9);
+        // And an *all*-degenerate list is powerless without being infinite.
+        assert!(total_power(&triangles[..1], &[]).abs() < 1e-12);
     }
-
-    /// An all-dark list builds without dividing by zero; every record is
-    /// unsampleable (prep pins selection to the environment in this case,
-    /// so the table is never drawn from at all).
-    #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "an unsampleable record's pdf is exactly zero"
-    )]
-    fn a_powerless_list_builds_finite() {
-        let triangles = [triangle(
-            [Vec3::ZERO, Vec3::X, Vec3::X * 2.0], // zero area, so zero power
-            Vec3::ONE,
-            0,
-            0,
-        )];
-        let records = build(&triangles, &[]);
-        assert_eq!(records[0].pdf, 0.0);
-        assert!((records[0].alias_threshold - 1.0).abs() < 1e-7);
-        assert!(total_power(&triangles, &[]).abs() < 1e-12);
-    }
-
 }

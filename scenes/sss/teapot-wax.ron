@@ -1,17 +1,19 @@
-// B9's controlled SSS driver, wax tier: the bitterli teapot's tea
-// volume welded closed (sss-teapot.ply — CC0, see the PLY header) as a
-// solid scattering dielectric on a plain table, lit by one small warm
-// quad under a heavily dimmed sky. The rig is deliberately hostile to
-// interior transport: with NEE skipped inside scattering interiors, the
-// small light is only ever found by phase-sampled escape, which is the
-// production regime rung 9-0 exists to measure.
+// The volume-route control for the SSS walk scenes beside it: the
+// bitterli teapot's tea volume welded closed (teapot.ply — CC0, see the
+// PLY header) as a solid *scattering refractive interior* on a plain
+// table, lit by one small warm quad under a heavily dimmed sky. The rig
+// is deliberately hostile to interior transport: with NEE skipped inside
+// scattering interiors, the small light is only ever found by
+// phase-sampled escape. teapot-wax-walk.ron drives the identical
+// interior through the subsurface walk instead — the pair demonstrates
+// route equivalence in regime (the boundaries differ: Lambertian
+// transmission vs refraction, so not per pixel).
 //
-// Three sibling files ladder the density — the body's slab thickness is
-// ~2.3 units, and `transmission_depth` IS the mean free path here because
-// transmission_color is e⁻¹ (σ_t = −ln(color)/depth = 1/depth):
-//   sss-teapot-wax.ron     mfp 0.23  (10% of thickness), albedo 0.95
-//   sss-teapot-marble.ron  mfp 0.069 (3%),               albedo 0.98
-//   sss-teapot-skin.ron    mfp 0.023 (1%),               albedo 0.995
+// Density tiers are parameters, not code paths — the body's slab
+// thickness is ~2.3 units, and `transmission_depth` IS the mean free
+// path here because transmission_color is e⁻¹ (σ_t = −ln(color)/depth =
+// 1/depth): wax is mfp 0.23 (10% of thickness) at albedo 0.95; the
+// denser walk siblings use 0.069/0.98 (marble) and 0.023/0.995 (skin).
 // Achromatic on purpose: one σ_t means the chromatic MIS weights are
 // uniform and the walk-length histogram measures the walk, not the
 // spectral estimator. transmission_scatter = albedo exactly (σ_s·depth).
@@ -34,7 +36,7 @@
         )),
         Environment((
             name: "sky",
-            path: Some(Some("../crates/cenote/assets/kloofendal_puresky.exr")),
+            path: Some(Some("../../crates/cenote/assets/kloofendal_puresky.exr")),
             // Dim enough that the quad dominates; bright enough that the
             // sky still seeds the silhouette.
             tint: Some((0.05, 0.05, 0.05)),
@@ -42,7 +44,7 @@
 
         Mesh((
             name: "solid",
-            source: Some(Ply(path: "sss-teapot.ply")),
+            source: Some(Ply(path: "teapot.ply")),
         )),
         Mesh((
             name: "plane",

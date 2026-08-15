@@ -963,7 +963,7 @@ mod tests {
     /// frame whose dispatches do not account for its wall-clock is one
     /// whose cost is in launching them.
     #[test]
-    fn a_frame_the_dispatches_do_not_account_for_is_cpu_bound() {
+    fn the_bound_verdict_follows_the_unaccounted_share() {
         let frame = Frame {
             cpu: Duration::from_millis(10),
             passes: breakdown(&[("intersect", 1000)]),

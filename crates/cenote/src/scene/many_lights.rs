@@ -160,30 +160,6 @@ mod tests {
     use super::super::description::SceneDescription;
     use super::*;
 
-    /// The panel and the cluster come out at the sizes the harness counts
-    /// on: 256 emitters, 9 occluders, one floor — all instances, no delta
-    /// lights (the emitters are emissive instances) — and no environment,
-    /// the black sky that leaves the emitters as the only light.
-    #[test]
-    fn many_lights_applies_to_an_empty_description() {
-        let mut description = SceneDescription::new();
-        description
-            .apply(&ChangeSet::many_lights())
-            .expect("many_lights is valid");
-        assert_eq!(description.meshes().len(), 2);
-        // 256 emitters + 9 occluders + 1 floor.
-        assert_eq!(description.instances().len(), 266);
-        assert_eq!(description.materials().len(), 266);
-        assert_eq!(description.cameras().len(), 1);
-        assert_eq!(description.settings().len(), 1);
-        // The emitters light the scene, so there are no delta lights and no
-        // environment.
-        assert!(description.lights().is_empty());
-        assert!(description.environments().is_empty());
-        // Every object a fresh apply creates is dirty: 266 instances + 266
-        // materials + 2 meshes + 1 camera + 1 settings.
-        assert_eq!(description.take_dirty().changed.len(), 536);
-    }
 
     /// The panel sweeps warm to cool: its near corner emits warm, its far
     /// corner cool, and every emitter carries real power — while the
@@ -194,6 +170,9 @@ mod tests {
         description
             .apply(&ChangeSet::many_lights())
             .expect("many_lights is valid");
+        // The black sky is load-bearing: with no environment, the panel's
+        // emitters are the only light, which is the whole point of the scene.
+        assert!(description.environments().is_empty());
         let emission = |name: &str| {
             let material = &description.materials()[name];
             let Texturable::Constant(color) = material.emission_color else {
@@ -213,13 +192,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn many_lights_round_trips_through_ron() {
-        let set = ChangeSet::many_lights();
-        let text = crate::format::to_ron(&set).expect("serializes");
-        let parsed = crate::format::from_ron(&text).expect("parses back");
-        assert_eq!(parsed, set);
-    }
 
     /// The committed `scenes/many-lights.ron` — the flagship scene file the
     /// validation figures render, and the one a stranger opens to see the

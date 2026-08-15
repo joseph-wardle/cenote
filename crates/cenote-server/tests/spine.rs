@@ -59,6 +59,10 @@ impl Server {
             // EOF before the port line: the server failed to stand up —
             // on this machine, that means no capable GPU.
             child.wait().expect("reaping the failed spawn");
+            assert!(
+                std::env::var_os("CENOTE_REQUIRE_GPU").is_none(),
+                "CENOTE_REQUIRE_GPU is set but cenote-server could not start"
+            );
             eprintln!("skipping: cenote-server could not start (no GPU?)");
             return None;
         }
@@ -426,5 +430,40 @@ fn a_wrong_token_is_refused() {
     .expect("writing the bad Hello");
     let refused = protocol::read_message::<Response>(&mut stream);
     assert!(refused.is_err(), "a bad token must not be welcomed");
+    server.wait(false);
+}
+
+/// A protocol number this server does not speak is a handshake violation,
+/// not a negotiation: no Welcome, nonzero exit.
+#[test]
+fn a_protocol_mismatch_is_refused() {
+    let Some(server) = Server::spawn() else {
+        return;
+    };
+    let mut stream = server.connect();
+    protocol::write_message(
+        &mut stream,
+        &Request::Hello {
+            protocol: PROTOCOL + 1,
+            token: TOKEN.into(),
+        },
+    )
+    .expect("writing the mismatched Hello");
+    let refused = protocol::read_message::<Response>(&mut stream);
+    assert!(refused.is_err(), "a mismatched protocol must not be welcomed");
+    server.wait(false);
+}
+
+/// Anything before `Hello` is a handshake violation — the first message's
+/// type is part of the contract, not just its contents.
+#[test]
+fn a_request_before_hello_is_refused() {
+    let Some(server) = Server::spawn() else {
+        return;
+    };
+    let mut stream = server.connect();
+    protocol::write_message(&mut stream, &Request::Ping).expect("writing the premature Ping");
+    let refused = protocol::read_message::<Response>(&mut stream);
+    assert!(refused.is_err(), "a pre-Hello request must not be answered");
     server.wait(false);
 }

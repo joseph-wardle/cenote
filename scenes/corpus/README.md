@@ -5,7 +5,7 @@ The scenes the rendering literature measures on, as first-class cenote
 bootstrap, each RON's header telling its own story: provenance, license,
 and every knowing degradation with the feature that unlocks it. All 20 are
 here; 19 render, and `volumetric-caustic` waits as a documented placeholder
-until volumes exist.
+until someone curates it — volumes themselves render now.
 
 Sources are **not** in git (~8.5 GB): `./fetch.sh` materializes them into
 `sources/` — Bitterli zips whole, pbrt-v4-scenes as one sparse partial
@@ -55,9 +55,9 @@ the equal-axis parameters every corpus scene uses, so it is not a gap anywhere.
 | glass-of-water | Bitterli | CC0 (aXel) | none — native oracle is bdpt |
 | coffee | Bitterli | CC BY 3.0 (cekuhnen) | none |
 | spaceship | Bitterli | CC0 (thecali) | none |
-| teapot-full | Bitterli | CC0 | tea medium (M8 volumes); procedural checker curated to the CI-baked PNG |
+| teapot-full | Bitterli | CC0 | tea medium not yet curated (volumes render; the scene predates them); procedural checker curated to the CI-baked PNG |
 | water-caustic | Bitterli | CC0 | none — native oracle is SPPM, so unidirectional PT resolves the caustic slowly (spp, not bias) |
-| volumetric-caustic | Bitterli | CC0 | **placeholder, does not render** — participating media (M8 volumes) |
+| volumetric-caustic | Bitterli | CC0 | **placeholder, not yet curated** — volumes render now; fetched, CC0, awaiting curation |
 | bathroom | Bitterli | CC0 (Mareck) | Floor/Foam displacement dropped — grazing window light makes this the dominant divergence (foam ~1.9×) |
 | kitchen | Bitterli | CC BY 3.0 (Jay-Artist) | window Blinds' diffuse transmission flattened to opaque; Cushion/BreadBin displacement — together the whole divergence (0.053→0.015 with pbrt degraded to match) |
 | zero-day | pbrt-v4-scenes | Beeple's release | film sensor/whitebalance/ISO dropped — native 0.495 is tone, 0.035 against a film-stripped reference; ×0.01 roughness-scale + coat-roughness textures flattened on the 30 RustMixed metals; BASE ROOM displacement |

@@ -54,15 +54,6 @@ struct AuxQueues {
 #endif
 };
 
-#ifdef PROBES
-// A subsurface draw whose entry direction the geometric plane refused —
-// see `PROBE_ENTRY_REJECT_BIN` in wavefront.rs. Its partner, the walk's
-// rejected *exit*, is binned next door by shade_subsurface.slang; the two
-// are counted apart because both leave the same dark pixel behind and
-// only the split says which end of the walk was at fault.
-static const uint PROBE_ENTRY_REJECT_BIN = 512;
-#endif
-
 struct Params {
     Paths paths;
     Queue<uint> hits;

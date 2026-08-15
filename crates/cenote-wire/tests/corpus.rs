@@ -2,7 +2,7 @@
 //! wire's encoded bytes across languages, with Rust as the authority.
 //!
 //! Every case here encodes to a checked-in golden in `tests/golden/`. The
-//! C++ encoder (`hydra/wire/`, once that tree exists) must reproduce each
+//! C++ encoder (`hydra/wire/`) must reproduce each
 //! golden **byte for byte** — that agreement is the compiler-substitute
 //! this project chose in place of gRPC's codegen. Two assertions per case
 //! keep the corpus honest in both directions:
@@ -395,7 +395,9 @@ fn genesis() -> ChangeSet {
             Op::Camera(CameraPatch {
                 name: "cam-set".into(),
                 position: Some([0.0, 1.0, 5.0]),
-                look_at: Some([0.0, 1.0, 0.0]),
+                // Every vector distinct, so a field swap in either encoder
+                // cannot produce identical bytes.
+                look_at: Some([0.0, 1.5, 0.0]),
                 up: Some([0.0, 1.0, 0.0]),
                 vfov_degrees: Some(45.0),
                 focus_distance: Some(Reset::Set(5.0)),
@@ -439,7 +441,6 @@ fn genesis() -> ChangeSet {
             // fourth doubly-optional's three states.
             Op::Settings(SettingsPatch {
                 name: "main".into(),
-                resolution: Some([1920, 1080]),
                 spp: Some(256),
                 noise_threshold: Some(Reset::Set(0.02)),
                 max_bounces: Some(8),
@@ -463,6 +464,35 @@ fn genesis() -> ChangeSet {
 
 fn golden_dir() -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden"))
+}
+
+/// The C++ mirror's version literals, scraped from its headers — the one
+/// wire surface the byte corpus cannot see. A schema change regenerated
+/// into the goldens with a `PROTOCOL` bump on only one side of the
+/// language seam fails here instead of at a customer's handshake.
+#[test]
+fn the_cpp_mirror_agrees_on_the_version_literals() {
+    let scrape = |file: &str, name: &str| -> u32 {
+        let path = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../hydra/wire/"))
+            .join(file);
+        let text = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        let needle = format!("{name} = ");
+        text.lines()
+            .find_map(|line| {
+                let value = line.split(&needle).nth(1)?;
+                value.trim_end_matches(';').trim().parse().ok()
+            })
+            .unwrap_or_else(|| panic!("no `{name} = <int>;` in {}", path.display()))
+    };
+    assert_eq!(
+        scrape("protocol.hpp", "PROTOCOL"),
+        cenote_wire::protocol::PROTOCOL
+    );
+    assert_eq!(
+        scrape("fb.hpp", "LAYOUT_VERSION"),
+        cenote_wire::fb::LAYOUT_VERSION
+    );
 }
 
 /// The guard itself. Under `UPDATE_GOLDENS=1` it rewrites the corpus

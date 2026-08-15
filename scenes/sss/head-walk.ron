@@ -1,23 +1,21 @@
-// B9's skin-density driver: the pbrt-v4-scenes head scan ("Head of
-// Infinite Realities", CC-BY) as a scattering dielectric carrying Jensen's
-// measured skin1 coefficients, under the same small-warm-key + dim-dome
-// rig as the sss-teapot tiers (the source scene's dome-only rig would
-// hand interior transport a light it can find everywhere; rung 9-0 wants
-// the hard case). Camera pose is the source scene's.
+// The skin-density walk driver: the pbrt head with the Jensen skin1
+// interior, driven through the subsurface lobe. The per-channel mean free paths (1.2953, 0.95238, 0.67114) mm
+// land as subsurface_radius = 0.0012954 with radius_scale
+// (1, 0.735138, 0.518146), and skin1's per-channel single-scatter albedo
+// (0.959, 0.838, 0.678) is authored as the multiple-scatter color
+// (0.6251, 0.3835, 0.2394) the van de Hulst inversion maps back onto it.
+// Same boundary caveat as the teapot walk tiers: Lambertian transmission
+// here, refraction in the sibling — same regime, different pixels. No
+// 255-bounce cap: the whole walk is one path bounce.
 //
-// Requires two derived assets: `scenes/corpus/fetch.sh head`, then
-// `python3 scenes/corpus/curate-head.py` — the scan is an open face shell
-// (19 boundary loops; no back of head, no eyeballs), and a
-// membership-counted interior needs the capped, closed ply.
-//
-// Coefficients: head.pbrt gives mfp = 1/σ_t = (1.2953, 0.95238, 0.67114)
-// mm for skin1. With transmission_depth = 1 mm (the mesh is in meters),
-// transmission_color = exp(−σ_t·1mm) = (0.4621, 0.3499, 0.2254) rebuilds
-// exactly those σ_t, and transmission_scatter = σ_s·1mm = (0.740, 0.880,
-// 1.010) is skin1's reduced scattering — per-channel albedo (0.959,
-// 0.838, 0.678), chromatic on purpose: this tier is the real material,
-// the teapot tiers are the controlled ladder. eta and roughness are the
-// source scene's (1.33, 0.05).
+// Requires the same derived asset: `scenes/corpus/fetch.sh head`, then
+// `python3 scenes/corpus/curate-head.py` (the scan is an open face shell;
+// the walk needs the capped, closed ply). What that ply still leaks is
+// the scan's own thin folds and slivers rather than a hole — it is
+// edge-manifold with no degenerate face, and sinking the caps into a dome
+// does not lower the count — so the seams are measured rather than
+// repaired: 1.3e-5 of walks, and no pixel loses more than two of its
+// sixty-four samples.
 (
     version: 2,
     ops: [
@@ -25,9 +23,6 @@
             name: "main",
             resolution: Some((1280, 720)),
             spp: Some(64),
-            // The reference cap; the darkening protocol sweeps --depth
-            // below it.
-            max_bounces: Some(255),
         )),
         Camera((
             name: "main",
@@ -38,13 +33,13 @@
         )),
         Environment((
             name: "sky",
-            path: Some(Some("../crates/cenote/assets/kloofendal_puresky.exr")),
+            path: Some(Some("../../crates/cenote/assets/kloofendal_puresky.exr")),
             tint: Some((0.05, 0.05, 0.05)),
         )),
 
         Mesh((
             name: "head",
-            source: Some(Ply(path: "corpus/head-capped.ply")),
+            source: Some(Ply(path: "../corpus/head-capped.ply")),
         )),
         Mesh((
             name: "plane",
@@ -81,10 +76,10 @@
             name: "skin1",
             specular_ior: Some(1.33),
             specular_roughness: Some(Constant(0.05)),
-            transmission_weight: Some(1.0),
-            transmission_color: Some((0.4621, 0.3499, 0.2254)),
-            transmission_depth: Some(0.001),
-            transmission_scatter: Some((0.740, 0.880, 1.010)),
+            subsurface_weight: Some(Constant(1.0)),
+            subsurface_color: Some(Constant((0.6251, 0.3835, 0.2394))),
+            subsurface_radius: Some(Constant(0.0012954)),
+            subsurface_radius_scale: Some(Constant((1.0, 0.735138, 0.518146))),
         )),
         Material((
             name: "table",

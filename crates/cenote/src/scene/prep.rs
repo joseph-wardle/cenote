@@ -38,7 +38,7 @@ use super::{
 use crate::error::Result;
 use crate::gpu::Context;
 use crate::stats::Phases;
-use crate::texture;
+use crate::scene::source::texture;
 
 impl Scene {
     /// Build `description` into a fresh, traceable scene, consuming its
@@ -120,7 +120,7 @@ impl Scene {
         let tlas = build_scene_tlas(gpu, &placements)?;
         let tabling = Instant::now();
         let media = super::placement_media(&placements);
-        let mut grids = crate::vdb::GridPool::new();
+        let mut grids = crate::scene::source::vdb::GridPool::new();
         let instances = upload_instance_tables(
             gpu,
             &mut grids,
@@ -130,6 +130,7 @@ impl Scene {
             host.global_medium.as_ref(),
         )?;
         drop(placements);
+        let light_power = instances.light_power;
         let resident =
             ResidentBuffers::assemble(gpu, instances, texture_params, marginal, conditional, pdfs)?;
         let env_size = (environment.width(), environment.height());
@@ -140,7 +141,7 @@ impl Scene {
             env_size,
             (spec.to_world, spec.from_world),
             spec.tint,
-            select_probability(tinted_power, host.light_power()),
+            select_probability(tinted_power, light_power),
             host.light_count(),
         )?;
         description.take_dirty();
@@ -155,12 +156,14 @@ impl Scene {
             camera: host.camera.expect("a fresh build always adopts its camera"),
             media,
             grids,
-            env_size,
-            env_power: power,
-            env_source: spec.source.clone(),
-            env_tint: spec.tint,
-            env_to_world: spec.to_world,
-            env_from_world: spec.from_world,
+            env: super::RetainedEnvironment {
+                size: env_size,
+                power,
+                source: spec.source.clone(),
+                tint: spec.tint,
+                to_world: spec.to_world,
+                from_world: spec.from_world,
+            },
         };
         let phases = Phases {
             before,
@@ -203,7 +206,7 @@ impl Scene {
             dirty,
             false,
             &resident_hashes,
-            self.env_source.as_deref(),
+            self.env.source.as_deref(),
         )?;
         let uploading = Instant::now();
         // Only device faults from here on — the untouched-on-Scene-error
@@ -230,13 +233,13 @@ impl Scene {
                 self.resident.env_marginal = env.marginal;
                 self.resident.env_conditional = env.conditional;
                 self.resident.env_pdfs = env.pdfs;
-                self.env_size = (environment.width(), environment.height());
-                self.env_power = env.power;
+                self.env.size = (environment.width(), environment.height());
+                self.env.power = env.power;
             }
-            self.env_source.clone_from(&spec.source);
-            self.env_tint = spec.tint;
-            self.env_to_world = spec.to_world;
-            self.env_from_world = spec.from_world;
+            self.env.source.clone_from(&spec.source);
+            self.env.tint = spec.tint;
+            self.env.to_world = spec.to_world;
+            self.env.from_world = spec.from_world;
         }
         let building = Instant::now();
         let placements = placements(&self.geometry, &host.instances);
@@ -262,10 +265,10 @@ impl Scene {
         self.table = upload_scene_table(
             gpu,
             &self.resident,
-            self.env_size,
-            (self.env_to_world, self.env_from_world),
-            self.env_tint,
-            select_probability(env_power, host.light_power()),
+            self.env.size,
+            (self.env.to_world, self.env.from_world),
+            self.env.tint,
+            select_probability(env_power, self.resident.instances.light_power),
             host.light_count(),
         )?;
         if let Some(camera) = host.camera {
@@ -588,7 +591,7 @@ mod tests {
                 }
             })
             .collect();
-        crate::texture::write_png(&wood, 8, 8, &texels);
+        crate::scene::source::texture::write_png(&wood, 8, 8, &texels);
 
         let mut history = vec![ChangeSet::demo()];
         let mut description = replay(&history);

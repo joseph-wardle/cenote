@@ -24,6 +24,7 @@ use ash::vk;
 
 use crate::error::{Error, Result};
 use crate::gpu::{Buffer, Context, MemoryLocation};
+use crate::scene::source::texture::fnv1a;
 
 /// The `.nvdb` file magic (`"NanoVDB0"`), shared by files written before the
 /// split into per-purpose magics.
@@ -34,9 +35,9 @@ const MAGIC_GRID: u64 = 0x3142_4456_6f6e_614e;
 /// The file-header magic (`"NanoVDB2"`) under the new numbering.
 const MAGIC_FILE: u64 = 0x3242_4456_6f6e_614e;
 
-/// `nanovdb::GridType::Float` — the one type the pipeline handles today.
-/// The rest of the scalar family (`Half`, `Fp4`/`8`/`16`, `FpN`) joins when a rung
-/// needs it; the names here are for error messages.
+/// `nanovdb::GridType::Float` — the one type the pipeline handles.
+/// The rest of the scalar family (`Half`, `Fp4`/`8`/`16`, `FpN`) is
+/// unimplemented; the names here exist for error messages.
 pub const GRID_TYPE_FLOAT: u32 = 1;
 
 /// `nanovdb::GridType` names, indexed by value — error-message material.
@@ -822,14 +823,6 @@ fn source_hash(path: &Path) -> Result<u64> {
     Ok(fnv1a(hash, &PREP_VERSION.to_le_bytes()))
 }
 
-/// `FNV-1a` over `bytes`, continuing from `state` — the DDS cache's hash,
-/// with the same non-cryptographic contract: a collision costs one stale
-/// cache the user can delete.
-fn fnv1a(state: u64, bytes: &[u8]) -> u64 {
-    bytes.iter().fold(state, |hash, &byte| {
-        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
-    })
-}
 
 /// Locate `cenote-vdb-prep`: an explicit `CENOTE_VDB_PREP` wins, then
 /// PATH, then — as a source-checkout convenience, like hot reload's baked
@@ -1555,15 +1548,18 @@ mod tests {
         let mut pool = GridPool::new();
         let first = pool.upload(&gpu, &path_a, "density").expect("upload a");
         assert_eq!(first.grid, 0);
-        // The lattice follows the payload at the next 32-byte boundary.
-        assert_eq!(u64::from(first.majorant), 800);
+        // The lattice follows the payload, 32-byte aligned — the alignment
+        // is the contract, not the fixture's particular byte count.
+        assert!(u64::from(first.majorant) >= payload_a.len() as u64);
+        assert_eq!(first.majorant % 32, 0);
         // Same file, same grid: the existing slots, no growth.
         let again = pool.upload(&gpu, &path_a, "density").expect("re-upload a");
         assert_eq!((again.grid, again.majorant), (first.grid, first.majorant));
         // A second grid grows the pool and lands aligned past the first's
         // four lattice bytes, so the dedup above advanced nothing.
         let second = pool.upload(&gpu, &path_b, "density").expect("upload b");
-        assert_eq!(u64::from(second.grid), 832);
+        assert!(second.grid > first.majorant);
+        assert_eq!(second.grid % 32, 0);
 
         // Both payloads and both lattices survive the growth copy intact.
         let bytes = gpu
@@ -1572,9 +1568,10 @@ mod tests {
         let cell = |at: u32| {
             f32::from_le_bytes(bytes[at as usize..at as usize + 4].try_into().unwrap())
         };
-        assert_eq!(&bytes[..800], &payload_a[..]);
+        let payload = |at: u32, len: usize| &bytes[at as usize..at as usize + len];
+        assert_eq!(payload(first.grid, payload_a.len()), &payload_a[..]);
         assert_eq!(cell(first.majorant), 0.5);
-        assert_eq!(&bytes[832..832 + 800], &payload_b[..]);
+        assert_eq!(payload(second.grid, payload_b.len()), &payload_b[..]);
         assert_eq!(cell(second.majorant), 1.5);
 
         let _ = fs::remove_file(&path_a);

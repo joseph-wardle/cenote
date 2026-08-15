@@ -245,10 +245,20 @@ mod tests {
     #[test]
     fn pitch_never_reaches_the_poles() {
         let mut orbit = OrbitCamera::framing(&demo_pose());
-        orbit.orbit(0.0, -1e6);
-        let _ = orbit.camera().basis(1.0);
-        orbit.orbit(0.0, 1e6);
-        let _ = orbit.camera().basis(1.0);
+        for pitch in [-1e6, 1e6] {
+            orbit.orbit(0.0, pitch);
+            let camera = orbit.camera();
+            let forward = (camera.look_at - camera.position).normalize();
+            // Short of the pole by a workable margin (the clamp leaves
+            // ~1.5°): at the pole itself the view axis is parallel to up
+            // and the basis degenerates.
+            assert!(
+                forward.dot(camera.up).abs() < 0.9999,
+                "pitch {pitch} reached the pole: forward {forward:?}"
+            );
+            let basis = camera.basis(1.0);
+            assert!(basis.forward.is_finite() && basis.up.is_finite() && basis.right.is_finite());
+        }
     }
 
     /// Zoom saturates at the clamps instead of hitting zero (a degenerate

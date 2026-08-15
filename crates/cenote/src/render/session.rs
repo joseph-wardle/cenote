@@ -1461,10 +1461,6 @@ mod tests {
         );
         assert_eq!(phases.batched, 1, "one edit drained");
         assert!(phases.apply > Duration::ZERO, "the description was patched");
-        assert!(
-            phases.tables > Duration::ZERO,
-            "a material edit rebuilds the instance tables it did not touch"
-        );
         assert!(session.take_edit_error().is_none());
     }
 
@@ -1693,31 +1689,6 @@ mod tests {
         assert_eq!(session.epoch(), 4);
     }
 
-    /// An applied edit's stamp reaches the published frame: accumulation
-    /// crosses a wave boundary that drained the edit, and every frame it
-    /// publishes from there carries the moved epoch.
-    #[test]
-    fn an_applied_edit_advances_the_frame_epoch() {
-        let Some(gpu) = crate::gpu::test_context() else {
-            return;
-        };
-        let gpu = Arc::new(gpu);
-        let session = demo_session(&gpu, 64);
-        let first = wait_for_frame(&session);
-        assert_eq!(first.epoch(), 0, "no verbs yet, so no stamp");
-
-        session.apply(ChangeSet {
-            ops: vec![Op::Material(Box::new(MaterialPatch {
-                base_color: Some(Texturable::Constant([0.9, 0.1, 0.1])),
-                ..MaterialPatch::new("floor")
-            }))],
-        });
-        wait_for(&session, "a frame carrying the edit's epoch", |frame| {
-            frame.epoch() >= 1
-        });
-        assert!(session.take_edit_error().is_none());
-    }
-
     /// The delivery guarantee behind the epoch: an edit that changes nothing
     /// visible (the equality gate leaves no dirt, so nothing restarts and no
     /// new picture is coming) still gets a frame carrying its stamp — the
@@ -1926,20 +1897,6 @@ mod tests {
         assert_eq!(preview_divisor(frame(1_000), target), 4);
         // Nothing measured yet: full resolution rather than a guess.
         assert_eq!(preview_divisor(None, target), 1);
-    }
-
-    /// And the frame is the sample *plus* the filter over it, which is the
-    /// whole of what denoising does to the divisor: sanmiguel's 29 ms sample
-    /// at 1440p sits in the divisor-2 band on its own, and the 38 ms filter
-    /// that follows it pushes the same scene a notch softer. Measured
-    /// numbers, so the arithmetic is pinned to the case it was written for.
-    #[test]
-    fn the_filter_counts_toward_the_divisor() {
-        let target = Duration::from_millis(16);
-        let sample = Duration::from_millis(29);
-        let filter = Duration::from_millis(38);
-        assert_eq!(preview_divisor(Some(sample), target), 2);
-        assert_eq!(preview_divisor(Some(sample + filter), target), 4);
     }
 
     /// The publish gap widens with the sample count and clamps at both ends

@@ -315,8 +315,23 @@ impl Context {
         passes: &[Pass],
         timer: Option<&mut PassTimer>,
     ) -> Result<PassTimings> {
+        // Validate every pass; write each distinct pipeline's descriptor
+        // set once. The consistency assert below proves all of a
+        // pipeline's passes bind one scene, so the first occurrence's
+        // write serves them all — a wave re-dispatches the same few
+        // pipelines once per bounce, and a per-pass rewrite would be pure
+        // driver traffic repeating identical contents.
+        let mut written: Vec<*const ComputePipeline> = Vec::new();
         for pass in passes {
-            self.validate_and_write_descriptors(pass, passes);
+            let Some((pipeline, scene)) = Self::validate_pass(pass) else {
+                continue;
+            };
+            let key: *const ComputePipeline = pipeline;
+            if !written.contains(&key) {
+                written.push(key);
+                Self::assert_one_scene_per_pipeline(pipeline, scene, passes);
+                self.write_scene_descriptors(pipeline, scene);
+            }
         }
         // Whether this submission is timed, and how finely, is settled once
         // — here. An empty one has no boundaries worth stamping, so it is
@@ -375,10 +390,11 @@ impl Context {
     }
 
     /// The pre-recording half of [`Context::submit_passes`]: assert the
-    /// pass is well-formed and write the scene descriptors for dispatches
-    /// that carry them. Writing before recording is safe — blocking submits
-    /// mean no set is ever in flight here.
-    fn validate_and_write_descriptors(&self, pass: &Pass, passes: &[Pass]) {
+    /// pass is well-formed and hand back its scene-carrying dispatch pair,
+    /// if any, for the caller's once-per-pipeline descriptor write.
+    /// Writing before recording is safe — blocking submits mean no set is
+    /// ever in flight here.
+    fn validate_pass<'a>(pass: &'a Pass) -> Option<(&'a ComputePipeline, SceneBindings<'a>)> {
         let (pipeline, scene, push_constants) = match *pass {
             Pass::Fill {
                 buffer,
@@ -394,7 +410,7 @@ impl Context {
                     offset + size <= buffer.size(),
                     "fill reaches past the end of the buffer"
                 );
-                return;
+                return None;
             }
             Pass::Dispatch {
                 pipeline,
@@ -426,15 +442,24 @@ impl Context {
             pipeline.scene.is_some(),
             "scene argument doesn't match the pipeline's declared bindings"
         );
-        let Some(scene) = scene else {
-            return;
-        };
+        let scene = scene?;
         assert!(
             scene.textures.len() <= crate::gpu::MAX_SCENE_TEXTURES as usize,
             "scene binds {} textures, the bindless table holds {}",
             scene.textures.len(),
             crate::gpu::MAX_SCENE_TEXTURES
         );
+        Some((pipeline, scene))
+    }
+
+    /// A pipeline has one descriptor set, so every pass dispatching it in
+    /// this submission must bind the same scene — checked once per
+    /// distinct pipeline, right before that set is written.
+    fn assert_one_scene_per_pipeline(
+        pipeline: &ComputePipeline,
+        scene: SceneBindings,
+        passes: &[Pass],
+    ) {
         assert!(
             passes
                 .iter()
@@ -462,7 +487,6 @@ impl Context {
                 }),
             "one pipeline, two scenes — its single descriptor set can hold only one"
         );
-        self.write_scene_descriptors(pipeline, scene);
     }
 
     /// Write one validated [`SceneBindings`] into a pipeline's descriptor

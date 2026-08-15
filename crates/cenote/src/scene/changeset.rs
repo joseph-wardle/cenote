@@ -506,15 +506,64 @@ impl SceneDescription {
     /// degenerate camera or transform, zero-valued settings, or a
     /// referenced file that is relative or missing on disk.
     pub fn apply(&mut self, set: &ChangeSet) -> Result<()> {
-        let mut next = self.objects.clone();
-        let mut dirty = Dirty::default();
-        for op in &set.ops {
-            apply_op(&mut next, &mut dirty, op)?;
+        // Stage only the maps the set's ops can touch; an op mutates
+        // exactly its target kind's map, so untouched maps *move* into the
+        // stage and — on rejection — move straight back. Payload-heavy
+        // maps (inline meshes, grooms) thus cost nothing on a drag that
+        // never names their kind.
+        let touched: BTreeSet<Kind> = set.ops.iter().map(|op| op.target().0).collect();
+        macro_rules! stage {
+            ($field:ident, $kind:expr) => {
+                if touched.contains(&$kind) {
+                    self.objects.$field.clone()
+                } else {
+                    std::mem::take(&mut self.objects.$field)
+                }
+            };
         }
-        validate(&next)?;
-        self.objects = next;
-        self.dirty.merge(dirty);
-        Ok(())
+        let mut next = Objects {
+            meshes: stage!(meshes, Kind::Mesh),
+            curves: stage!(curves, Kind::Curves),
+            instances: stage!(instances, Kind::Instance),
+            materials: stage!(materials, Kind::Material),
+            media: stage!(media, Kind::Medium),
+            lights: stage!(lights, Kind::Light),
+            cameras: stage!(cameras, Kind::Camera),
+            environments: stage!(environments, Kind::Environment),
+            settings: stage!(settings, Kind::Settings),
+        };
+        let mut dirty = Dirty::default();
+        let applied = set
+            .ops
+            .iter()
+            .try_for_each(|op| apply_op(&mut next, &mut dirty, op))
+            .and_then(|()| validate(&next, &dirty.changed));
+        match applied {
+            Ok(()) => {
+                self.objects = next;
+                self.dirty.merge(dirty);
+                Ok(())
+            }
+            Err(error) => {
+                macro_rules! restore {
+                    ($field:ident, $kind:expr) => {
+                        if !touched.contains(&$kind) {
+                            self.objects.$field = next.$field;
+                        }
+                    };
+                }
+                restore!(meshes, Kind::Mesh);
+                restore!(curves, Kind::Curves);
+                restore!(instances, Kind::Instance);
+                restore!(materials, Kind::Material);
+                restore!(media, Kind::Medium);
+                restore!(lights, Kind::Light);
+                restore!(cameras, Kind::Camera);
+                restore!(environments, Kind::Environment);
+                restore!(settings, Kind::Settings);
+                Err(error)
+            }
+        }
     }
 }
 
@@ -643,25 +692,42 @@ impl Objects {
     }
 }
 
-/// Check the post-set state as a whole. Runs before any of it becomes
-/// visible; the first problem aborts the apply.
-fn validate(objects: &Objects) -> Result<()> {
+/// Check the post-set state. Runs before any of it becomes visible; the
+/// first problem aborts the apply.
+///
+/// Two tiers, split by what an edit can invalidate. Per-object checks
+/// (geometry consistency, transforms, file paths) run only over `changed`:
+/// an object that entered through an earlier validated apply cannot have
+/// become internally invalid since, and re-walking every inline mesh's
+/// index array per edit is exactly the cost a drag can't afford.
+/// Cross-object checks — instance references and the medium/shell pairing,
+/// the settings' medium reference — run over everything, because removing
+/// or reshaping one object can strand any of its referrers.
+fn validate(objects: &Objects, changed: &BTreeSet<(Kind, String)>) -> Result<()> {
+    let changed = |kind: Kind, name: &str| changed.contains(&(kind, name.to_owned()));
     for (name, mesh) in &objects.meshes {
-        validate_mesh(name, mesh)?;
+        if changed(Kind::Mesh, name) {
+            validate_mesh(name, mesh)?;
+        }
     }
     for (name, curves) in &objects.curves {
-        validate_curves(name, curves)?;
+        if changed(Kind::Curves, name) {
+            validate_curves(name, curves)?;
+        }
     }
     for (name, instance) in &objects.instances {
-        validate_instance(objects, name, instance)?;
+        validate_instance(objects, name, instance, changed(Kind::Instance, name))?;
     }
     for (name, material) in &objects.materials {
-        for texture in material.textures() {
-            validate_path(&format!("a texture of material \"{name}\""), &texture.path)?;
+        if changed(Kind::Material, name) {
+            for texture in material.textures() {
+                validate_path(&format!("a texture of material \"{name}\""), &texture.path)?;
+            }
         }
     }
     for (name, light) in &objects.lights {
-        if let Light::Distant { direction, .. } = light
+        if changed(Kind::Light, name)
+            && let Light::Distant { direction, .. } = light
             && Vec3::from(*direction) == Vec3::ZERO
         {
             return Err(scene_error(format!(
@@ -670,23 +736,29 @@ fn validate(objects: &Objects) -> Result<()> {
         }
     }
     for (name, camera) in &objects.cameras {
-        validate_camera(name, camera)?;
+        if changed(Kind::Camera, name) {
+            validate_camera(name, camera)?;
+        }
     }
     for (name, environment) in &objects.environments {
-        if let Some(path) = &environment.path {
-            validate_path(&format!("environment \"{name}\""), path)?;
-        }
-        // Sampling maps world directions through the inverse — the same
-        // invertibility instances need for their records.
-        let matrix = environment.transform.to_mat4();
-        if !(matrix.is_finite() && matrix.inverse().is_finite()) {
-            return Err(scene_error(format!(
-                "environment \"{name}\" has a non-invertible transform"
-            )));
+        if changed(Kind::Environment, name) {
+            if let Some(path) = &environment.path {
+                validate_path(&format!("environment \"{name}\""), path)?;
+            }
+            // Sampling maps world directions through the inverse — the same
+            // invertibility instances need for their records.
+            let matrix = environment.transform.to_mat4();
+            if !(matrix.is_finite() && matrix.inverse().is_finite()) {
+                return Err(scene_error(format!(
+                    "environment \"{name}\" has a non-invertible transform"
+                )));
+            }
         }
     }
     for (name, medium) in &objects.media {
-        validate_medium(name, medium)?;
+        if changed(Kind::Medium, name) {
+            validate_medium(name, medium)?;
+        }
     }
     for (name, settings) in &objects.settings {
         validate_settings(objects, name, settings)?;
@@ -808,7 +880,11 @@ fn validate_curves(name: &str, curves: &Curves) -> Result<()> {
     Ok(())
 }
 
-fn validate_instance(objects: &Objects, name: &str, instance: &Instance) -> Result<()> {
+/// The referential and pairing checks always run — any edit can strand a
+/// reference or break the medium/shell pairing from the other end. The
+/// transform walk (`deep`, O(placements)) runs only when this instance
+/// itself changed.
+fn validate_instance(objects: &Objects, name: &str, instance: &Instance, deep: bool) -> Result<()> {
     match &instance.geometry {
         Geometry::Mesh(mesh) => validate_reference(&objects.meshes, "mesh", name, mesh)?,
         Geometry::Curves(curves) => {
@@ -855,12 +931,14 @@ fn validate_instance(objects: &Objects, name: &str, instance: &Instance) -> Resu
     }
     // Element by element — an empty array is a valid instance that places
     // nothing, so there is nothing to check.
-    for (element, transform) in instance.transforms.iter().enumerate() {
-        let matrix = transform.to_mat4();
-        if !(matrix.is_finite() && matrix.inverse().is_finite()) {
-            return Err(scene_error(format!(
-                "instance \"{name}\" has a non-invertible transform (element {element})"
-            )));
+    if deep {
+        for (element, transform) in instance.transforms.iter().enumerate() {
+            let matrix = transform.to_mat4();
+            if !(matrix.is_finite() && matrix.inverse().is_finite()) {
+                return Err(scene_error(format!(
+                    "instance \"{name}\" has a non-invertible transform (element {element})"
+                )));
+            }
         }
     }
     Ok(())
@@ -1995,3 +2073,4 @@ mod tests {
         ));
     }
 }
+

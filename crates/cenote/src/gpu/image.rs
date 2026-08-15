@@ -156,7 +156,7 @@ impl Context {
         let padded = (width.next_multiple_of(4), height.next_multiple_of(4));
         assert_eq!(
             data.len() as u64,
-            u64::from(padded.0 / 4) * u64::from(padded.1 / 4) * crate::texture::block_size(format),
+            u64::from(padded.0 / 4) * u64::from(padded.1 / 4) * crate::scene::source::texture::block_size(format),
             "block data doesn't match the texture's padded dimensions"
         );
         self.upload_image(

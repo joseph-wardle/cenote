@@ -139,6 +139,7 @@ pub fn ground_plane(half_extent: f32) -> Mesh {
 /// carry four vertices each, not one). The shape a bounded volume wants —
 /// a ray crosses it exactly twice, at a thickness the test can predict.
 #[must_use]
+#[cfg(test)]
 pub fn cube(half_extent: f32) -> Mesh {
     let e = half_extent;
     let mut mesh = Mesh {

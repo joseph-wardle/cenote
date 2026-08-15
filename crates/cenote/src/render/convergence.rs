@@ -20,15 +20,25 @@
 //! are margins on fixed numbers, not statistics on noisy ones. Skips cleanly
 //! without a capable GPU, so plain `cargo test` passes everywhere.
 
-use cenote::environment::Environment;
-use cenote::gpu::Context;
-use cenote::material::Material;
-use cenote::render::Renderer;
-use cenote::scene::{Camera, Object, Scene, ground_plane, icosphere};
 use glam::{Mat4, Vec3};
 
-mod common;
-use common::{accumulate, test_context};
+use crate::scene::environment::Environment;
+use crate::gpu::{Context, test_context};
+use crate::scene::material::Material;
+use crate::render::{Film, Renderer};
+use crate::scene::{Camera, Object, Scene, ground_plane, icosphere};
+
+/// Accumulate `spp` samples into a fresh `size`² film and return its
+/// linear beauty average — the image `cenote-cli --spp` writes.
+fn accumulate(gpu: &Context, renderer: &Renderer, scene: &Scene, size: u32, spp: u32) -> Vec<f32> {
+    let mut film = Film::new(gpu, size, size).expect("film");
+    for _ in 0..spp {
+        renderer
+            .accumulate(gpu, scene, &mut film)
+            .expect("accumulate");
+    }
+    film.beauty_average(gpu).expect("average")
+}
 
 /// Convergence-test resolution. Smaller than the goldens' 256²: the metric
 /// is a per-pixel average, and this many pixels already settles it, while

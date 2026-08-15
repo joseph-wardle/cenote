@@ -210,6 +210,7 @@ impl Material {
     /// A dielectric with a full specular layer over its diffuse base —
     /// plastic, ceramic, paint.
     #[must_use]
+    #[cfg(test)]
     pub fn glossy(base_color: Vec3, base_roughness: f32, specular_roughness: f32) -> Self {
         Self {
             specular_weight: 1.0,
@@ -221,6 +222,7 @@ impl Material {
     /// A conductor: `base_color` becomes F0, the normal-incidence
     /// reflectivity.
     #[must_use]
+    #[cfg(test)]
     pub fn metal(base_color: Vec3, specular_roughness: f32) -> Self {
         Self {
             metalness: 1.0,
@@ -233,6 +235,7 @@ impl Material {
     /// Solid rough glass: a fully transmissive dielectric base with an
     /// untinted interior.
     #[must_use]
+    #[cfg(test)]
     pub fn glass(specular_roughness: f32, specular_ior: f32) -> Self {
         Self {
             transmission_weight: 1.0,
@@ -245,6 +248,7 @@ impl Material {
 
     /// A light: pure emitter, scattering nothing (black base).
     #[must_use]
+    #[cfg(test)]
     pub fn emitter(emission: Vec3) -> Self {
         Self {
             emission,
@@ -255,12 +259,14 @@ impl Material {
     /// The same surface at a different conductor blend — how the demo's
     /// grid sweeps its spheres from plastic to metal.
     #[must_use]
+    #[cfg(test)]
     pub fn with_metalness(self, metalness: f32) -> Self {
         Self { metalness, ..self }
     }
 
     /// The same surface under a clear coat.
     #[must_use]
+    #[cfg(test)]
     pub fn with_coat(self, coat_weight: f32, coat_roughness: f32) -> Self {
         Self {
             coat_weight,
@@ -271,6 +277,7 @@ impl Material {
 
     /// The same surface under a fuzz (sheen) layer.
     #[must_use]
+    #[cfg(test)]
     pub fn with_fuzz(self, fuzz_weight: f32, fuzz_roughness: f32) -> Self {
         Self {
             fuzz_weight,
@@ -281,6 +288,7 @@ impl Material {
 
     /// The same surface at a different dielectric IOR.
     #[must_use]
+    #[cfg(test)]
     pub fn with_ior(self, specular_ior: f32) -> Self {
         Self {
             specular_ior,
@@ -290,12 +298,14 @@ impl Material {
 
     /// The same surface at fractional coverage.
     #[must_use]
+    #[cfg(test)]
     pub fn with_opacity(self, opacity: f32) -> Self {
         Self { opacity, ..self }
     }
 
     /// The same surface as a thin-walled shell (no interior).
     #[must_use]
+    #[cfg(test)]
     pub fn thin_walled(self) -> Self {
         Self {
             thin_walled: 1,

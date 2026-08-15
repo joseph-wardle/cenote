@@ -49,18 +49,6 @@ static const uint FLAG_SET = 1 << 25;
 // how it is checked.
 static const uint WALK_CAP = 256;
 
-#ifdef PROBES
-// Bin layout mirrored from `PROBE_*` in wavefront.rs, which owns it: walk
-// lengths at exit sit above the volume stage's 256, the two exitless
-// deaths cap that half, and the rejection and roulette counters are
-// appended above both stages'.
-static const uint PROBE_WALK_BASE = 256;
-static const uint PROBE_WALK_LEAK_BIN = 510;
-static const uint PROBE_WALK_CAP_BIN = 511;
-static const uint PROBE_EXIT_REJECT_BIN = 513;
-static const uint PROBE_ROULETTE_BIN = 514;
-#endif
-
 struct Params {
     Paths paths;
     Queue<uint> walks; // this stage's input, pushed by shade_surface

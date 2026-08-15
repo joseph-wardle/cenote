@@ -32,17 +32,17 @@ mod submit;
 mod timing;
 mod upload;
 
-pub use accel::{AccelerationStructure, TlasInstance};
-pub use buffer::{Buffer, MemoryLocation};
-pub use image::SampledImage;
+pub use buffer::{Buffer, MemoryLocation, Staging};
 pub use overlay::GuiFrame;
-pub use pipeline::{
+pub use present::Presenter;
+pub use timing::PassTimer;
+pub(crate) use accel::{AccelerationStructure, TlasInstance};
+pub(crate) use image::SampledImage;
+pub(crate) use pipeline::{
     Bindings, ComputePipeline, MAX_SCENE_TEXTURES, SceneBindings, TABLE_PLANES, TABLE_VOLUMES,
 };
-pub use present::Presenter;
-pub use submit::Pass;
-pub use timing::PassTimer;
-pub use upload::Upload;
+pub(crate) use submit::Pass;
+pub(crate) use upload::Upload;
 
 use init::DebugMessenger;
 use ledger::Ledger;
@@ -315,7 +315,9 @@ impl Drop for Context {
 
 /// GPU-gated test entry point: `Some(context)` on machines with a capable
 /// GPU, `None` (test passes vacuously, with a note on stderr) everywhere
-/// else, so plain `cargo test` works on GPU-less CI.
+/// else, so plain `cargo test` works on GPU-less CI. `CENOTE_REQUIRE_GPU=1`
+/// turns the skip into a failure — the dev-box ritual sets it, so a broken
+/// driver can't turn the whole GPU suite silently green.
 #[cfg(test)]
 pub(crate) fn test_context() -> Option<Context> {
     // Surface validation-messenger output in tests: run e.g.
@@ -324,6 +326,10 @@ pub(crate) fn test_context() -> Option<Context> {
     match Context::new() {
         Ok(context) => Some(context),
         Err(err) => {
+            assert!(
+                std::env::var_os("CENOTE_REQUIRE_GPU").is_none(),
+                "CENOTE_REQUIRE_GPU is set but GPU bring-up failed: {err}"
+            );
             eprintln!("skipping: no capable GPU here ({err})");
             None
         }

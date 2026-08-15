@@ -211,7 +211,6 @@ fn op(op: wire::Op) -> core::Op {
         wire::Op::Settings(patch) => {
             let wire::SettingsPatch {
                 name,
-                resolution,
                 spp,
                 noise_threshold,
                 max_bounces,
@@ -220,7 +219,8 @@ fn op(op: wire::Op) -> core::Op {
             } = patch;
             core::Op::Settings(core::SettingsPatch {
                 name,
-                resolution,
+                // Resolution rides `Request::Resize`, never a settings op.
+                resolution: None,
                 spp,
                 noise_threshold: noise_threshold.map(|value| reset(value, convert::identity)),
                 max_bounces,
@@ -477,7 +477,7 @@ mod tests {
     /// A translated set survives the renderer's own apply — names,
     /// references, and geometry all meaning what they meant on the wire.
     #[test]
-    fn a_translated_genesis_applies() {
+    fn a_translated_genesis_is_valid_and_reports_dangling_references() {
         let set = change_set(wire::ChangeSet {
             ops: vec![
                 wire::Op::Mesh(wire::MeshPatch {

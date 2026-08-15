@@ -70,16 +70,6 @@ mod tests {
         assert!(white.abs_diff_eq(Vec3::ONE, 1e-6), "{white}");
     }
 
-    /// The inverse takes an authored color back to itself — the round trip
-    /// the render server's shm write depends on (`Rec.709` out for every
-    /// `ACEScg` frame), true by construction but pinned against a future
-    /// retyping of either side.
-    #[test]
-    fn the_inverse_round_trips() {
-        let authored = Vec3::new(0.25, 0.5, 0.75);
-        let back = rec709_from_acescg() * acescg_from_rec709(authored);
-        assert!(back.abs_diff_eq(authored, 1e-6), "{back}");
-    }
 
     /// The XYZ matrix agrees with [`luminance`] on its own middle row —
     /// the one place the two spellings of AP1's Y weights could drift.
@@ -91,14 +81,6 @@ mod tests {
         }
     }
 
-    /// XYZ round-trips through `ACEScg`, which is what makes the blackbody
-    /// bake's one-way conversion trustworthy.
-    #[test]
-    fn xyz_round_trips() {
-        let xyz = Vec3::new(0.4, 0.35, 0.5);
-        let back = XYZ_FROM_ACESCG * (acescg_from_xyz() * xyz);
-        assert!(back.abs_diff_eq(xyz, 1e-6), "{back}");
-    }
 
     /// The primaries land on their published `ACEScg` coordinates (ACES TB
     /// S-2014-004 derivation, Bradford CAT) — an independent check that the

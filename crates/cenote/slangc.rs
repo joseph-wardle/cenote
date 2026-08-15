@@ -26,7 +26,7 @@ pub const KERNELS: [&str; 11] = [
 
 /// Flags shared by every kernel compile. `-fvk-use-entrypoint-name` keeps the
 /// Slang entry-point name in the SPIR-V instead of renaming it to `main` —
-/// load-bearing now that wavefront stages share the `pathstate` module.
+/// load-bearing because wavefront stages share the `pathstate` module.
 pub const SLANGC_ARGS: &[&str] = &["-target", "spirv", "-fvk-use-entrypoint-name"];
 
 /// Compile `src` to SPIR-V at `dst` via the `slangc` subprocess.

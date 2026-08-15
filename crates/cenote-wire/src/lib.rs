@@ -27,7 +27,7 @@
 //! reproduce the goldens byte for byte). Changing anything serializable
 //! here means regenerating the corpus in the same commit —
 //! `UPDATE_GOLDENS=1 cargo test -p cenote-wire` — and mirroring the
-//! change in `hydra/wire/` once that tree exists.
+//! change in `hydra/wire/`.
 
 pub mod fb;
 pub mod protocol;

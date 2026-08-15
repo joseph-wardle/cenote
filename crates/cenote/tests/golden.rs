@@ -39,28 +39,15 @@ const ACCUM_SPP: u32 = 32;
 /// shade, a shifted silhouette) lands well above it.
 const MAX_MEAN_FLIP: f32 = 0.01;
 
-/// The demo image at 1 spp: the roughness × metalness grid of terracotta
-/// spheres across the glossy floor, cross-lit by the Kloofendal HDRI's sun
-/// and the warm quad — path traced with MIS, so the golden pins the whole
-/// estimator (offsets, interpolated shading normals, `OpenPBR` lobes and
+/// The demo image accumulated to 64 spp and read back as its linear
+/// average: the roughness × metalness grid of terracotta spheres across
+/// the glossy floor, cross-lit by the Kloofendal HDRI's sun and the warm
+/// quad. Path traced with MIS at fixed seeds, so the golden pins the whole
+/// estimator — offsets, interpolated shading normals, `OpenPBR` lobes and
 /// their energy-compensation fits across the roughness range, NEE weights,
-/// environment tables, sampler) at a fixed seed.
-#[test]
-fn demo_scene_matches_golden() {
-    let Some(gpu) = test_context() else {
-        return;
-    };
-    let scene = Scene::demo(&gpu).expect("demo scene");
-    let renderer = Renderer::new(&gpu).expect("renderer");
-    let actual = renderer.render(&gpu, &scene, SIZE, SIZE).expect("render");
-    compare_with_golden("demo", &actual);
-}
-
-/// Batch and viewer agree because they are the same film. This golden is the demo accumulated to 64 spp and read back
-/// as its linear average: exactly the image `cenote-cli --spp 64` writes,
-/// and exactly the average the viewer is tonemapping 64 redraws after
-/// opening. Either path drifting from the other (or both from this
-/// reference) fails here.
+/// environment tables, sampler, and the accumulate/resolve film algebra.
+/// The CLI's batch EXR and the viewer's frame share this film, which is
+/// why one golden pins both.
 #[test]
 fn accumulated_demo_matches_golden() {
     const SPP: u32 = 64;

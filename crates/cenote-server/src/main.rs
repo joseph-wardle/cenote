@@ -1,4 +1,4 @@
-//! The out-of-process render server : a loopback-TCP
+//! The out-of-process render server: a loopback-TCP
 //! request/response loop and a shared-memory framebuffer wrapped around
 //! `render::Session`. Spawned per client by a scene-graph host (the
 //! Hydra delegate); driven by the wire vocabulary in `cenote-wire`.
@@ -20,8 +20,7 @@
 //!   identically. A handshake violation — wrong protocol, wrong token,
 //!   anything before `Hello` — is a failure, not a negotiation.
 //! - `CENOTE_SERVER_MAX_SAMPLES` (default 4096) caps accumulation; the
-//!   shm header's `converged` flag reports reaching it. A finer
-
+//!   shm header's `converged` flag reports reaching it.
 //!
 //! Camera ownership: the session's inputs-lane camera overwrites the
 //! scene camera at every wave, so the *only* way to move the view is the
@@ -362,6 +361,12 @@ fn force_samples(set: &mut ChangeSet, forced: Option<u32>) {
 /// nonzero.
 fn pump(state: &Mutex<Shared>, gpu: &cenote::gpu::Context, stop: &AtomicBool, socket: &TcpStream) {
     let matrix = cenote::color::rec709_from_acescg();
+    // Persistent landing buffers and conversion scratch: the pump moves up
+    // to ~75 MB per published frame, so per-frame allocation is the cost —
+    // everything here is grow-only and reused across frames.
+    let mut beauty_staging = cenote::gpu::Staging::default();
+    let mut depth_staging = cenote::gpu::Staging::default();
+    let mut beauty = Vec::new();
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(FRAME_INTERVAL);
         let frame = {
@@ -377,10 +382,10 @@ fn pump(state: &Mutex<Shared>, gpu: &cenote::gpu::Context, stop: &AtomicBool, so
             shared.session.take_frame()
         };
         let Some(frame) = frame else { continue };
-        // The downloads run unlocked: the frame owns its buffers, and the
-        // socket loop must never wait on a PCIe copy.
-        let beauty = match gpu.download_buffer(frame.beauty()) {
-            Ok(bytes) => bytes,
+        // The downloads and the convert run unlocked: the frame owns its
+        // buffers, and the socket loop must never wait on a PCIe copy.
+        match gpu.download_buffer_into(frame.beauty(), &mut beauty_staging, "server.pump.beauty") {
+            Ok(acescg) => rec709_texels(&matrix, acescg, &mut beauty),
             Err(error) => {
                 let mut shared = state.lock().expect("state lock");
                 return fail(
@@ -389,8 +394,12 @@ fn pump(state: &Mutex<Shared>, gpu: &cenote::gpu::Context, stop: &AtomicBool, so
                     format!("downloading the beauty: {error}"),
                 );
             }
-        };
-        let depth = match gpu.download_buffer(frame.depth()) {
+        }
+        let depth = match gpu.download_buffer_into(
+            frame.depth(),
+            &mut depth_staging,
+            "server.pump.depth",
+        ) {
             Ok(bytes) => bytes,
             Err(error) => {
                 let mut shared = state.lock().expect("state lock");
@@ -401,7 +410,6 @@ fn pump(state: &Mutex<Shared>, gpu: &cenote::gpu::Context, stop: &AtomicBool, so
                 );
             }
         };
-        let beauty = rec709_texels(&matrix, &beauty);
         let mut shared = state.lock().expect("state lock");
         // A frame sized for a segment a resize already replaced is simply
         // skipped; the session is rebuilding its film at the new size.
@@ -412,7 +420,7 @@ fn pump(state: &Mutex<Shared>, gpu: &cenote::gpu::Context, stop: &AtomicBool, so
             // would wait for it forever.
             shared.fb.publish(
                 &beauty,
-                &depth,
+                depth,
                 frame.samples(),
                 frame.converged(),
                 frame.epoch(),
@@ -441,8 +449,9 @@ fn fail(shared: &mut Shared, socket: &TcpStream, message: String) {
 /// riddles the frame with `NaN` (the failure the end-to-end golden
 /// surfaced). In-gamut colour is untouched, and highlights above one stay —
 /// only the below-zero out-of-gamut lobe is clipped.
-fn rec709_texels(matrix: &glam::Mat3, acescg: &[u8]) -> Vec<f32> {
-    let mut rec709 = Vec::with_capacity(acescg.len() / 4);
+fn rec709_texels(matrix: &glam::Mat3, acescg: &[u8], rec709: &mut Vec<f32>) {
+    rec709.clear();
+    rec709.reserve(acescg.len() / 4);
     for texel in acescg.chunks_exact(16) {
         let channel = |index: usize| {
             f32::from_le_bytes(
@@ -454,12 +463,63 @@ fn rec709_texels(matrix: &glam::Mat3, acescg: &[u8]) -> Vec<f32> {
         let rgb = (*matrix * Vec3::new(channel(0), channel(1), channel(2))).max(Vec3::ZERO);
         rec709.extend_from_slice(&[rgb.x, rgb.y, rgb.z, channel(3)]);
     }
-    rec709
 }
 
 #[cfg(test)]
 mod tests {
-    use super::rec709_texels;
+    use super::{
+        DEFAULT_MAX_SAMPLES, default_budget, ensure_singletons, force_samples, rec709_texels,
+    };
+    use cenote::scene::changeset::{CameraPatch, ChangeSet, Kind, Op, SettingsPatch};
+
+    /// A genesis without singletons gets both appended; one that carries
+    /// its own passes through untouched — the injected camera would
+    /// otherwise clobber a scene file's authored view for a wave.
+    #[test]
+    fn singletons_are_appended_only_when_absent() {
+        let mut bare = ChangeSet::default();
+        ensure_singletons(&mut bare);
+        assert!(super::touches(&bare, Kind::Camera));
+        assert!(super::touches(&bare, Kind::Settings));
+        assert_eq!(bare.ops.len(), 2);
+
+        let mut authored = ChangeSet {
+            ops: vec![
+                Op::Camera(CameraPatch::new("camera")),
+                Op::Settings(SettingsPatch::new("settings")),
+            ],
+        };
+        ensure_singletons(&mut authored);
+        assert_eq!(authored.ops.len(), 2, "authored singletons pass through");
+    }
+
+    /// The budget precedence chain, bottom to top: the server's default
+    /// fills an open budget, a client's authored budget displaces it, and
+    /// the debug override displaces both.
+    #[test]
+    fn the_budget_precedence_chain_holds() {
+        let settings = |spp| Op::Settings(SettingsPatch {
+            spp,
+            ..SettingsPatch::new("settings")
+        });
+        let spp_of = |set: &ChangeSet| match &set.ops[0] {
+            Op::Settings(patch) => patch.spp,
+            _ => unreachable!(),
+        };
+
+        let mut open = ChangeSet { ops: vec![settings(None)] };
+        default_budget(&mut open);
+        assert_eq!(spp_of(&open), Some(DEFAULT_MAX_SAMPLES));
+
+        let mut authored = ChangeSet { ops: vec![settings(Some(64))] };
+        default_budget(&mut authored);
+        assert_eq!(spp_of(&authored), Some(64), "a stated budget is kept");
+
+        force_samples(&mut authored, Some(7));
+        assert_eq!(spp_of(&authored), Some(7), "the override outranks both");
+        force_samples(&mut authored, None);
+        assert_eq!(spp_of(&authored), Some(7), "no override changes nothing");
+    }
 
     /// One `ACEScg` RGBA texel as the 16 little-endian bytes a download hands us.
     fn texel(rgba: [f32; 4]) -> Vec<u8> {
@@ -475,7 +535,8 @@ mod tests {
     fn saturated_primaries_clamp_to_nonnegative() {
         let matrix = cenote::color::rec709_from_acescg();
         for primary in [[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]] {
-            let out = rec709_texels(&matrix, &texel(primary));
+            let mut out = Vec::new();
+            rec709_texels(&matrix, &texel(primary), &mut out);
             assert!(
                 out[..3].iter().all(|c| *c >= 0.0),
                 "ACEScg {primary:?} left a negative Rec.709 component: {:?}",
@@ -490,7 +551,8 @@ mod tests {
     #[test]
     fn in_gamut_colour_is_unchanged() {
         let matrix = cenote::color::rec709_from_acescg();
-        let out = rec709_texels(&matrix, &texel([0.5, 0.5, 0.5, 1.0]));
+        let mut out = Vec::new();
+        rec709_texels(&matrix, &texel([0.5, 0.5, 0.5, 1.0]), &mut out);
         for c in &out[..3] {
             assert!((c - 0.5).abs() < 1e-5, "grey should survive the conversion: {out:?}");
         }

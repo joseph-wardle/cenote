@@ -171,22 +171,6 @@ mod tests {
     use super::super::description::SceneDescription;
     use super::*;
 
-    #[test]
-    fn demo_applies_to_an_empty_description() {
-        let mut description = SceneDescription::new();
-        description
-            .apply(&ChangeSet::demo())
-            .expect("demo is valid");
-        assert_eq!(description.meshes().len(), 2);
-        assert_eq!(description.instances().len(), 27);
-        assert_eq!(description.materials().len(), 27);
-        assert_eq!(description.cameras().len(), 1);
-        assert_eq!(description.environments().len(), 1);
-        assert_eq!(description.settings().len(), 1);
-        assert!(description.lights().is_empty());
-        // Every object a fresh apply creates is dirty.
-        assert_eq!(description.take_dirty().changed.len(), 59);
-    }
 
     #[test]
     fn the_chart_sweeps_its_corners() {

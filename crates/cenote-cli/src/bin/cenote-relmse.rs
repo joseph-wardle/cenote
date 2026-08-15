@@ -1,8 +1,6 @@
 //! `cenote-relmse`: relative mean-squared error of a render against a
-//! high-sample reference — B7's image oracle, "equal error at equal
-//! samples". `cenote-flip` answers "does it look different"; this answers
-//! "did the estimator get worse", the standing question now that
-//! bit-exactness is no longer the cross-version gate.
+//! high-sample reference. `cenote-flip` answers "does it look different";
+//! this answers "did the estimator get worse at equal samples".
 //!
 //! ```sh
 //! cenote-relmse reference.exr render.exr                  # prints relMSE

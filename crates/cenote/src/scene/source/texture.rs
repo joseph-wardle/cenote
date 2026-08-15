@@ -233,9 +233,39 @@ fn cache_path(path: &Path, usage: Usage, srgb: Option<bool>, channel: Channel) -
 /// prepared result. The channel folds in as its tag — empty for red, so
 /// pre-channel caches keep validating.
 fn cache_hash(bytes: &[u8], usage: Usage, srgb: Option<bool>, channel: Channel) -> u64 {
-    let mut hash = fnv1a(0xcbf2_9ce4_8422_2325, bytes);
+    finish_hash(
+        Stamp {
+            fnv: fnv1a(0xcbf2_9ce4_8422_2325, bytes),
+            radiance: bytes.starts_with(b"#?"),
+        },
+        usage,
+        srgb,
+        channel,
+    )
+}
+
+/// A source file's content identity: its byte hash plus the decode-routing
+/// sniff, the two inputs [`finish_hash`] needs beyond the reference's own
+/// parameters.
+#[derive(Clone, Copy)]
+struct Stamp {
+    fnv: u64,
+    /// Radiance sources take the float decode path; the sniff is part of
+    /// cache identity so the pre-float caches of exactly those files
+    /// retire without invalidating anyone else's.
+    radiance: bool,
+}
+
+/// Fold the reference's parameters over a source stamp — the tail of
+/// [`cache_hash`], split out so [`expected_hash`] can reuse a memoized
+/// stamp without re-reading the file.
+fn finish_hash(stamp: Stamp, usage: Usage, srgb: Option<bool>, channel: Channel) -> u64 {
+    let mut hash = stamp.fnv;
     hash = fnv1a(hash, usage.tag().as_bytes());
     hash = fnv1a(hash, channel.tag().as_bytes());
+    if stamp.radiance {
+        hash = fnv1a(hash, b"radiance-float");
+    }
     hash = fnv1a(
         hash,
         &[
@@ -250,10 +280,60 @@ fn cache_hash(bytes: &[u8], usage: Usage, srgb: Option<bool>, channel: Channel) 
     fnv1a(hash, &MAX_DIM.to_le_bytes())
 }
 
-/// FNV-1a over `bytes`, continuing from `state` — not cryptographic, and
-/// doesn't need to be: a collision costs one stale texture in a cache the
-/// user can delete, never correctness of committed data.
-fn fnv1a(state: u64, bytes: &[u8]) -> u64 {
+/// The hash [`prepare`] would stamp on this reference, computed without
+/// reading the file when its size and mtime match the last look — a stat
+/// instead of a full read + hash per edit tick, the same trade the VDB
+/// prep cache makes (an in-place edit preserving both goes unseen until
+/// either moves). Residency compares this against the resident hash to
+/// skip prep entirely for an unchanged source.
+pub(crate) fn expected_hash(
+    path: &Path,
+    usage: Usage,
+    srgb: Option<bool>,
+    channel: Channel,
+) -> Result<u64> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::SystemTime;
+
+    /// Per-source memo: (size, mtime) validates the recorded stamp.
+    type Stamps = HashMap<PathBuf, (u64, SystemTime, Stamp)>;
+    static STAMPS: Mutex<Option<Stamps>> = Mutex::new(None);
+
+    let meta = fs::metadata(path).map_err(|error| {
+        Error::Scene(format!(
+            "texture \"{}\": can't read: {error}",
+            path.display()
+        ))
+    })?;
+    let (size, mtime) = (meta.len(), meta.modified().unwrap_or(SystemTime::UNIX_EPOCH));
+    let mut stamps = STAMPS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let stamps = stamps.get_or_insert_default();
+    let stamp = match stamps.get(path) {
+        Some(&(seen_size, seen_mtime, stamp)) if (seen_size, seen_mtime) == (size, mtime) => stamp,
+        _ => {
+            let bytes = fs::read(path).map_err(|error| {
+                Error::Scene(format!(
+                    "texture \"{}\": can't read: {error}",
+                    path.display()
+                ))
+            })?;
+            let stamp = Stamp {
+                fnv: fnv1a(0xcbf2_9ce4_8422_2325, &bytes),
+                radiance: bytes.starts_with(b"#?"),
+            };
+            stamps.insert(path.to_path_buf(), (size, mtime, stamp));
+            stamp
+        }
+    };
+    Ok(finish_hash(stamp, usage, srgb, channel))
+}
+
+/// FNV-1a over `bytes`, continuing from `state` — the one hash both
+/// prep caches (DDS and `.nvdb` sidecar) fold with. Not cryptographic,
+/// and doesn't need to be: a collision costs one stale cache the user
+/// can delete, never correctness of committed data.
+pub(crate) fn fnv1a(state: u64, bytes: &[u8]) -> u64 {
     bytes.iter().fold(state, |hash, &byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
     })
@@ -320,6 +400,21 @@ fn decode(path: &Path, bytes: &[u8]) -> Result<Source> {
                 path.display()
             ))
         })?;
+    // A float-decoded source (Radiance HDR) keeps its range — quantizing
+    // through `to_rgba8` would clip it to LDR and apply an sRGB view it
+    // never had.
+    if matches!(
+        image,
+        image::DynamicImage::ImageRgb32F(_) | image::DynamicImage::ImageRgba32F(_)
+    ) {
+        let rgba = image.to_rgba32f();
+        let (width, height) = rgba.dimensions();
+        return Ok(Source::Float {
+            rgba: rgba.into_raw(),
+            width,
+            height,
+        });
+    }
     let rgba = image.to_rgba8();
     let (width, height) = rgba.dimensions();
     Ok(Source::Bytes {
@@ -1073,6 +1168,49 @@ mod tests {
                 .expect("hdr")
                 .format,
             vk::Format::BC6H_UFLOAT_BLOCK
+        );
+
+        // Radiance HDR is a float source too — quantizing it to BC7 would
+        // clip its range and apply an sRGB view RGBE never had.
+        let hdr = dir.join("c.hdr");
+        let mut rgbe = b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 2\n".to_vec();
+        rgbe.extend_from_slice(&[128, 64, 32, 129, 128, 64, 32, 129]);
+        fs::write(&hdr, rgbe).expect("hdr bytes");
+        assert_eq!(
+            prepare(&hdr, Usage::Color, None, Channel::R)
+                .expect("radiance")
+                .format,
+            vk::Format::BC6H_UFLOAT_BLOCK
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The stat-revalidated fast path must agree with the full read: same
+    /// hash as [`prepare`] stamps, stable across the memoized second look,
+    /// and moved by a content edit (which moves size or mtime).
+    #[test]
+    fn the_expected_hash_matches_prepare_without_rereading() {
+        let dir = scratch_dir("stamp");
+        let path = dir.join("s.png");
+        write_png(&path, 2, 2, &[10u8; 2 * 2 * 4]);
+        let first = expected_hash(&path, Usage::Color, None, Channel::R).expect("hash");
+        let prepared = prepare(&path, Usage::Color, None, Channel::R).expect("prep");
+        assert_eq!(first, prepared.hash);
+        assert_eq!(
+            first,
+            expected_hash(&path, Usage::Color, None, Channel::R).expect("memoized")
+        );
+        assert_ne!(
+            first,
+            expected_hash(&path, Usage::Scalar, None, Channel::G).expect("other usage")
+        );
+
+        write_png(&path, 4, 4, &[20u8; 4 * 4 * 4]);
+        let edited = expected_hash(&path, Usage::Color, None, Channel::R).expect("edited");
+        assert_ne!(first, edited);
+        assert_eq!(
+            edited,
+            prepare(&path, Usage::Color, None, Channel::R).expect("prep").hash
         );
         fs::remove_dir_all(&dir).ok();
     }

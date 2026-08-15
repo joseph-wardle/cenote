@@ -23,16 +23,24 @@
 //! path as the demo.
 
 pub mod changeset;
+pub(crate) mod blackbody;
 pub(crate) mod curves;
 mod demo;
 pub mod description;
+pub(crate) mod environment;
+pub(crate) mod lights;
 mod lower;
 mod many_lights;
+pub(crate) mod material;
 mod prep;
 mod shapes;
+pub(crate) mod source;
+pub(crate) mod tables;
 
 pub use curves::segment_count;
-pub use shapes::{cube, ground_plane, icosphere};
+pub(crate) use shapes::{ground_plane, icosphere};
+#[cfg(test)]
+pub(crate) use shapes::cube;
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
@@ -44,13 +52,13 @@ use glam::{Mat3, Mat4, Vec2, Vec3};
 
 use self::description::Geometry;
 use crate::color::luminance;
-use crate::environment::Environment;
+use crate::scene::environment::Environment;
 use crate::error::{Error, Result};
 use crate::gpu::{AccelerationStructure, Buffer, Context, SampledImage, TlasInstance, Upload};
-use crate::lights::{DeltaLight, LIGHT_NONE, TriangleLight};
-use crate::material::{Material, TEXTURE_NONE};
-use crate::tables::BsdfTables;
-use crate::texture;
+use crate::scene::lights::{DeltaLight, LIGHT_NONE, TriangleLight};
+use crate::scene::material::{Material, TEXTURE_NONE};
+use crate::scene::tables::BsdfTables;
+use crate::scene::source::texture;
 
 /// A rejected edit or malformed scene input, as an [`Error::Scene`] — the
 /// one failure the change-set apply and prep paths raise, shared so its
@@ -72,7 +80,7 @@ pub(crate) mod ray_mask {
 
 /// A triangle mesh on the host: tightly packed positions, matching shading
 /// normals, plus index triples.
-pub struct Mesh {
+pub(crate) struct Mesh {
     /// Vertex positions, in meters, in object space.
     pub positions: Vec<Vec3>,
     /// Unit shading normals, one per position, in object space. Shading
@@ -89,7 +97,8 @@ pub struct Mesh {
 }
 
 /// One thing in a scene: a mesh, where it stands, and what its surface is.
-pub struct Object {
+#[cfg(test)]
+pub(crate) struct Object {
     /// The geometry, in object space.
     pub mesh: Mesh,
     /// Object-to-world placement. Must be invertible — normals and ray
@@ -408,7 +417,7 @@ pub struct Medium {
 /// A heterogeneous medium's grid, resolved at lowering from the `.nvdb`
 /// header: everything prep derives the shell and the two sampling
 /// transforms from, with the multi-GiB payload — and the majorant lattice
-/// built out of it — left to the [`crate::vdb::GridPool`] upload.
+/// built out of it — left to the [`crate::scene::source::vdb::GridPool`] upload.
 ///
 /// "Asset space" is the grid's own world space — the space its `.vdb` was
 /// authored in, which the instance transform then places in the scene.
@@ -426,7 +435,7 @@ pub struct GridVolume {
     /// inside the shell — the transform the `MediumBounds` placement bakes.
     pub bounds_to_asset: Mat4,
     /// Cells of the majorant lattice per axis, from
-    /// [`crate::vdb::majorant_resolution`].
+    /// [`crate::scene::source::vdb::majorant_resolution`].
     pub majorant_res: [u32; 3],
     /// Index space → lattice cell coordinates: `cell = index · scale +
     /// bias`. The lattice holds unitless density ceilings, so coefficients
@@ -744,7 +753,7 @@ fn report_emission(field: &str, peak: f32, volume: &GridVolume, record: &MediumR
     // collides, so it settles at nothing — which the division would
     // otherwise say as a NaN.
     let share = (sigma_t - Vec3::from(record.sigma_s)) / sigma_t.max(Vec3::splat(f32::MIN));
-    let core = volume.emission * crate::blackbody::radiance(kelvin) * share;
+    let core = volume.emission * crate::scene::blackbody::radiance(kelvin) * share;
     log::info!(
         "  emission: \"{field}\" peaks at {peak:.4} → {kelvin:.0} K; \
          a thick core there settles at {:.3}",
@@ -763,7 +772,7 @@ fn report_emission(field: &str, peak: f32, volume: &GridVolume, record: &MediumR
 /// cannot miss.
 fn placement_medium(
     placement: &Placement,
-    grids: &HashMap<(PathBuf, String), crate::vdb::ResidentGrid>,
+    grids: &HashMap<(PathBuf, String), crate::scene::source::vdb::ResidentGrid>,
 ) -> Option<MediumRecord> {
     let Some(medium) = placement.medium.as_ref() else {
         return interior(&placement.material);
@@ -883,7 +892,7 @@ struct SceneTable {
     light_count: u32,
     /// What fills the open space between instances, or [`MEDIUM_NONE`].
     global_medium: u32,
-    /// [`crate::blackbody::table`], read only where a medium emits.
+    /// [`crate::scene::blackbody::table`], read only where a medium emits.
     blackbody: vk::DeviceAddress,
     /// Padding, so `camera_media` keeps the alignment below.
     _pad0: [u32; 2],
@@ -897,6 +906,12 @@ struct SceneTable {
 // The Slang side lays these out from its own rules, so the sizes are
 // pinned here: a mirror that drifts reads garbage rather than failing.
 const _: () = assert!(size_of::<SceneTable>() == 224);
+
+/// Where [`SceneTable::camera_media`] sits in the uploaded table — the
+/// camera-seed test reads the words back by this offset rather than
+/// assuming the field stays last.
+#[cfg(test)]
+pub(crate) const CAMERA_MEDIA_OFFSET: usize = std::mem::offset_of!(SceneTable, camera_media);
 
 /// Sample-time parameters of one bindless texture slot: the affine UV
 /// remap and the value multiplier a [`description::TextureRef`] carries
@@ -983,23 +998,27 @@ pub struct Scene {
     /// The `NanoVDB` grid pool: every heterogeneous medium's density grid,
     /// resident for the scene's lifetime. Grow-only and content-keyed, so
     /// edits re-upload nothing; a scene swap drops it.
-    grids: crate::vdb::GridPool,
-    /// The environment's dimensions and emitted power (untinted), retained
-    /// so a light edit can rebuild the scene table (its selection
-    /// probability weighs the light list against the environment) without
-    /// reloading the image.
-    env_size: (u32, u32),
-    env_power: f64,
+    grids: crate::scene::source::vdb::GridPool,
+    /// The environment constants the scene table embeds, retained (minus
+    /// the image) so a light edit can rebuild the table — its selection
+    /// probability weighs the light list against the environment — without
+    /// re-lowering the environment.
+    env: RetainedEnvironment,
+}
+
+/// The environment's scene-table constants, held beside the resident image.
+struct RetainedEnvironment {
+    size: (u32, u32),
+    /// Emitted power, untinted.
+    power: f64,
     /// The image file the resident environment decoded from (`None` for a
     /// constant sky) — the identity that lets a tint or placement edit
     /// keep the decode and the upload.
-    env_source: Option<PathBuf>,
-    /// The environment's `ACEScg` tint and placement (linear part and
-    /// inverse) — scene-table constants, retained beside `env_power` for
-    /// the same table rebuilds.
-    env_tint: Vec3,
-    env_to_world: Mat4,
-    env_from_world: Mat4,
+    source: Option<PathBuf>,
+    /// `ACEScg` tint and placement (linear part and inverse).
+    tint: Vec3,
+    to_world: Mat4,
+    from_world: Mat4,
 }
 
 /// One material texture resident on the GPU, with the content hash of the
@@ -1048,8 +1067,8 @@ impl ResidentBuffers {
     ) -> Result<Self> {
         Ok(Self {
             instances,
-            bsdf_tables: crate::tables::upload(gpu)?,
-            blackbody: crate::blackbody::upload(gpu)?,
+            bsdf_tables: crate::scene::tables::upload(gpu)?,
+            blackbody: crate::scene::blackbody::upload(gpu)?,
             texture_params,
             env_marginal,
             env_conditional,
@@ -1064,7 +1083,8 @@ impl Scene {
     /// estimator tests speak. Production scenes go through
     /// [`Scene::prep`], which builds the same residency from a
     /// [`description::SceneDescription`].
-    pub fn new(
+    #[cfg(test)]
+    pub(crate) fn new(
         gpu: &Context,
         objects: &[Object],
         camera: Camera,
@@ -1073,6 +1093,7 @@ impl Scene {
         Self::new_in_medium(gpu, objects, camera, environment, None)
     }
 
+    #[cfg(test)]
     /// [`Scene::new`] with the open space around the objects filled by
     /// `global` — the procedural spelling of a description's global medium,
     /// which is how the volumetric estimator tests reach it. Crate-only:
@@ -1139,9 +1160,10 @@ impl Scene {
             .collect();
         let tlas = build_scene_tlas(gpu, &placements)?;
         let media = placement_media(&placements);
-        let mut grids = crate::vdb::GridPool::new();
+        let mut grids = crate::scene::source::vdb::GridPool::new();
         let instances =
             upload_instance_tables(gpu, &mut grids, &placements, &triangle_lights, &[], global)?;
+        let light_power = instances.light_power;
         let GpuEnvironment {
             image,
             marginal,
@@ -1169,7 +1191,7 @@ impl Scene {
             env_size,
             (Mat4::IDENTITY, Mat4::IDENTITY),
             Vec3::ONE,
-            select_probability(power, crate::lights::total_power(&triangle_lights, &[])),
+            select_probability(power, light_power),
             light_count,
         )?;
         Ok(Self {
@@ -1187,12 +1209,14 @@ impl Scene {
             camera,
             media,
             grids,
-            env_size,
-            env_power: power,
-            env_source: None,
-            env_tint: Vec3::ONE,
-            env_to_world: Mat4::IDENTITY,
-            env_from_world: Mat4::IDENTITY,
+            env: RetainedEnvironment {
+                size: env_size,
+                power,
+                source: None,
+                tint: Vec3::ONE,
+                to_world: Mat4::IDENTITY,
+                from_world: Mat4::IDENTITY,
+            },
         })
     }
 
@@ -1286,7 +1310,7 @@ impl Scene {
     /// Exact for a neutral tint; a chromatic one lands within the
     /// heuristic's tolerance (the MIS weights stay exact regardless).
     fn tinted_env_power(&self) -> f64 {
-        self.env_power * f64::from(luminance(self.env_tint))
+        self.env.power * f64::from(luminance(self.env.tint))
     }
 
     /// The scene table: the one buffer of addresses kernels reach all
@@ -1490,6 +1514,9 @@ struct InstanceTables {
     /// [`MEDIUM_NONE`]. Interned alongside the interiors, so it is derived
     /// here rather than carried separately.
     global_medium: u32,
+    /// The light list's total selection weight, summed over the records
+    /// just built — the environment weighs against it in the scene table.
+    light_power: f64,
 }
 
 /// Upload one scene table as a shader-addressable buffer. Vulkan forbids
@@ -1516,13 +1543,13 @@ fn upload_table<T: Pod>(gpu: &Context, name: &str, records: &[T]) -> Result<Buff
 /// contiguous primitive order `GeometryRecord.light` depends on.
 fn upload_instance_tables(
     gpu: &Context,
-    pool: &mut crate::vdb::GridPool,
+    pool: &mut crate::scene::source::vdb::GridPool,
     placements: &[Placement],
     triangle_lights: &[TriangleLight],
     delta_lights: &[DeltaLight],
     global: Option<&Medium>,
 ) -> Result<InstanceTables> {
-    let light_records = crate::lights::build(triangle_lights, delta_lights);
+    let light_records = crate::scene::lights::build(triangle_lights, delta_lights);
     assert!(
         placements
             .iter()
@@ -1542,7 +1569,7 @@ fn upload_instance_tables(
     // lattice the tracker never walks — emission is collected at the
     // density's collisions, never sampled against a bound of its own —
     // but its reduction is the peak `report_emission` reports.
-    let mut grids: HashMap<(PathBuf, String), crate::vdb::ResidentGrid> = HashMap::new();
+    let mut grids: HashMap<(PathBuf, String), crate::scene::source::vdb::ResidentGrid> = HashMap::new();
     for placement in placements {
         let Some(volume) = placement.medium.as_ref().and_then(|m| m.volume.as_ref()) else {
             continue;
@@ -1618,6 +1645,7 @@ fn upload_instance_tables(
         media: upload_table(gpu, "scene.media", &media)?,
         lights: upload_table(gpu, "scene.lights", &light_records)?,
         global_medium,
+        light_power: crate::scene::lights::power_of(&light_records),
     })
 }
 
@@ -1740,7 +1768,7 @@ fn upload_environment(gpu: &Context, environment: &Environment) -> Result<GpuEnv
 /// probability that next-event estimation samples the environment rather
 /// than the list. The environment weighs its luminance integral over the
 /// sphere — a flux per unit receiver area, so the comparison implicitly
-/// stands in a ~1 m² receiver — against [`crate::lights::total_power`]'s
+/// stands in a ~1 m² receiver — against [`crate::scene::lights::power_of`]'s
 /// per-kind flux measures. The approximations only steer noise: the MIS
 /// weights stay exact whatever this probability is. The exact-0/exact-1
 /// endpoints *are* load-bearing: the shader walks the light list
@@ -1971,7 +1999,7 @@ mod tests {
     /// material must resolve to vacuum here rather than to a coefficient
     /// that poisons every hit on the instance.
     #[test]
-    fn a_malformed_interior_is_vacuum() {
+    fn malformed_interiors_are_vacuum_or_clamped() {
         let glass = Material::glass(0.1, 1.5);
         for depth in [f32::NAN, -1.0, -0.0] {
             let material = Material {

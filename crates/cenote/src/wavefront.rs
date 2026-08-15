@@ -69,10 +69,9 @@ const QUEUE_HEADER_SIZE: u64 = 16;
 /// Byte offset of that indirect command within a header.
 const INDIRECT_OFFSET: u64 = 4;
 
-/// Byte size of one `ShadowRay` record — sixteen words, counted from
-/// `struct ShadowRay` in `shaders/pathstate.slang`. No mirror struct pins
-/// this (the host never reads a record), so growing the Slang struct
-/// without this constant overruns the shadow queue: grow them together.
+/// Byte size of one `ShadowRay` record — `struct ShadowRay` in
+/// `shaders/pathstate.slang`, pinned against the compiler's own `sizeof`
+/// by `slang_struct_sizes_match_the_host_constants`.
 const SHADOW_RAY_SIZE: u64 = 64;
 
 /// Push-constant bytes every Vulkan implementation guarantees. Several of
@@ -201,7 +200,6 @@ struct IntersectParams {
     volumes: QueueAddrs,
     /// Device address of the scene table — opacity lives in the materials.
     scene: vk::DeviceAddress,
-    /// Which sample of every pixel's sequence this wave traces.
     sample_index: u32,
     /// `ray_mask | bounce << 8 | the flag bits` — see [`pack_intersect`].
     /// Packed because this block sits exactly at [`PUSH_CONSTANT_LIMIT`]:
@@ -366,7 +364,6 @@ struct ShadeSurfaceParams {
     radiance: vk::DeviceAddress,
     /// Device address of the wave's [`AovTable`].
     aov: vk::DeviceAddress,
-    /// Which sample of every pixel's sequence this wave traces.
     sample_index: u32,
     /// `bounce | max_bounces << 8 | light_sampling << 16 | the flag bits`
     /// — see [`pack_shade`].
@@ -429,8 +426,10 @@ struct VolumeQueues {
 /// stage bins scatter events by bounce in `[0, PROBE_VOLUME_BINS)` — one
 /// bin per value the packed bounce byte can hold, indexed unchecked — and
 /// the walk bins walk lengths at exit above it, with its two exitless
-/// deaths on top: leaks in the second-to-last bin, cap kills in the last
-/// (`PROBE_WALK_*` in `shade_subsurface.slang` mirror this split).
+/// deaths on top: leaks in the second-to-last bin, cap kills in the last.
+/// The whole layout mirrors the `PROBE_*` constants in
+/// `shaders/pathstate.slang`, the one Slang authority every instrumented
+/// kernel indexes by.
 #[cfg(feature = "probes")]
 pub const PROBE_VOLUME_BINS: usize = 256;
 
@@ -498,7 +497,6 @@ struct ShadeVolumeParams {
     /// Device address of the wave's [`AovTable`] — a scatter stamps a
     /// first-vertex depth and closes the denoiser guides on the medium.
     aov: vk::DeviceAddress,
-    /// Which sample of every pixel's sequence this wave traces.
     sample_index: u32,
     /// `bounce | max_bounces << 8 | light_sampling << 16 | the flag bits` —
     /// see [`pack_shade`].
@@ -530,7 +528,6 @@ struct ShadeSubsurfaceParams {
     shadows: QueueAddrs,
     scene: vk::DeviceAddress,
     radiance: vk::DeviceAddress,
-    /// Which sample of every pixel's sequence this wave traces.
     sample_index: u32,
     /// `bounce | max_bounces << 8 | light_sampling << 16 | the flag bits`
     /// — see [`pack_shade`].
@@ -813,7 +810,6 @@ impl Queues {
                 bytemuck::bytes_of(&block),
                 vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
             )?;
-            // A concurrent winner just means this allocation drops.
             let _ = self.aux_block_walks.set(buffer);
         }
         Ok(())
@@ -840,7 +836,6 @@ impl Queues {
                 bytemuck::bytes_of(&block),
                 vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
             )?;
-            // A concurrent winner just means this allocation drops.
             let _ = self.volume_block.set(buffer);
         }
         Ok(())
@@ -871,7 +866,7 @@ impl Queues {
 /// 128-byte limit.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct AovTableData {
+struct AovTable {
     albedo: vk::DeviceAddress,
     normal: vk::DeviceAddress,
     depth: vk::DeviceAddress,
@@ -897,7 +892,7 @@ pub struct AovTargets<'a> {
     pub table: &'a Buffer,
 }
 
-/// Upload an [`AovTable`](AovTableData) pointing at the film's per-pixel
+/// Upload an [`AovTable`] pointing at the film's per-pixel
 /// AOV buffers (`albedo`/`normal` RGBA f32, `depth` f32, `guide` RGBA f32
 /// scratch), for [`AovTargets::table`].
 pub(crate) fn upload_aov_table(
@@ -907,7 +902,7 @@ pub(crate) fn upload_aov_table(
     depth: &Buffer,
     guide: &Buffer,
 ) -> Result<Buffer> {
-    let table = AovTableData {
+    let table = AovTable {
         albedo: albedo.device_address(),
         normal: normal.device_address(),
         depth: depth.device_address(),
@@ -943,7 +938,7 @@ pub enum LightSampling {
     NeeOnly = 2,
 }
 
-/// The engine: five stage pipelines over one path pool and its queues.
+/// The engine: the stage pipelines over one path pool and its queues.
 /// Created once and reused across waves — nothing in it depends on the
 /// target size or the scene.
 pub struct Wavefront {
@@ -970,7 +965,7 @@ pub struct Wavefront {
     resolve_camera: ComputePipeline,
     paths: PathPool,
     queues: Queues,
-    /// The all-zero [`AovTableData`] a wave binds when the caller brings
+    /// The all-zero [`AovTable`] a wave binds when the caller brings
     /// no AOV targets — `enabled` 0, so the kernels skip every guide read
     /// and write.
     aov_disabled: Buffer,
@@ -1008,11 +1003,18 @@ impl Wavefront {
     /// where roulette has settled anything real.
     pub const MAX_BOUNCES_LIMIT: u32 = 255;
 
-    /// Build the five stage pipelines and allocate the pool and queues.
-    /// Each wave shades at most `max_bounces` bounces per path and reaches
-    /// lights via `light_sampling` (always [`LightSampling::Mis`] outside
-    /// the MIS-agreement test).
-    pub fn new(
+    /// Build the stage pipelines and allocate the pool and queues.
+    /// Each wave shades at most `max_bounces` bounces per path; lights are
+    /// reached via MIS. The single-strategy estimators exist only for the
+    /// MIS-agreement oracle, through [`Wavefront::with_light_sampling`].
+    pub fn new(gpu: &Context, kernels: &Kernels, capacity: u32, max_bounces: u32) -> Result<Self> {
+        Self::with_light_sampling(gpu, kernels, capacity, max_bounces, LightSampling::Mis)
+    }
+
+    /// [`Wavefront::new`] with a chosen light-sampling strategy — the
+    /// estimator-validation knob (the MIS-agreement tests render the same
+    /// scene under all three and require one mean).
+    pub(crate) fn with_light_sampling(
         gpu: &Context,
         kernels: &Kernels,
         capacity: u32,
@@ -1090,7 +1092,7 @@ impl Wavefront {
             queues: Queues::new(gpu, capacity)?,
             aov_disabled: gpu.upload_buffer(
                 "wavefront.aov.disabled",
-                bytemuck::bytes_of(&AovTableData::zeroed()),
+                bytemuck::bytes_of(&AovTable::zeroed()),
                 vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
             )?,
             capacity,
@@ -1665,8 +1667,8 @@ mod tests {
     use glam::{Mat4, Vec3};
 
     use super::*;
-    use crate::environment::Environment;
-    use crate::material::Material;
+    use crate::scene::environment::Environment;
+    use crate::scene::material::Material;
     use crate::scene::{Camera, Object, ground_plane, icosphere};
 
     fn radiance_buffer(gpu: &Context, width: u32, height: u32) -> Buffer {
@@ -1738,7 +1740,7 @@ mod tests {
                 (interiors, volumes, media)
             );
             let wavefront =
-                Wavefront::new(&gpu, &kernels, 4096, 2, LightSampling::Mis).expect("wavefront");
+                Wavefront::new(&gpu, &kernels, 4096, 2).expect("wavefront");
             let radiance = radiance_buffer(&gpu, width, height);
             wavefront
                 .trace(&gpu, &scene, &radiance, width, height, 0)
@@ -1797,7 +1799,7 @@ mod tests {
             .expect("scene");
             assert_eq!(scene.has_media(), wanted);
             let wavefront =
-                Wavefront::new(&gpu, &kernels, 4096, 2, LightSampling::Mis).expect("wavefront");
+                Wavefront::new(&gpu, &kernels, 4096, 2).expect("wavefront");
             let radiance = radiance_buffer(&gpu, 16, 16);
             wavefront
                 .trace(&gpu, &scene, &radiance, 16, 16, 0)
@@ -1824,7 +1826,7 @@ mod tests {
             return;
         };
         let scene = Scene::demo(&gpu).expect("demo scene");
-        let wavefront = Wavefront::new(&gpu, &Kernels::embedded(), 4096, 1, LightSampling::Mis)
+        let wavefront = Wavefront::new(&gpu, &Kernels::embedded(), 4096, 1)
             .expect("wavefront");
         let (width, height) = (33, 17);
         let radiance = radiance_buffer(&gpu, width, height);
@@ -1864,6 +1866,52 @@ mod tests {
         }
     }
 
+    /// The Slang struct sizes the host mirrors by hand-counted constants,
+    /// read back from the compiler itself via `shaders/layout_test.slang`.
+    /// No Rust mirror struct pins [`SHADOW_RAY_SIZE`] (the host never
+    /// reads a record), so growing `struct ShadowRay` without this
+    /// constant would silently overrun the shadow queue — here it fails.
+    #[test]
+    fn slang_struct_sizes_match_the_host_constants() {
+        #[repr(C)]
+        #[derive(Clone, Copy, Pod, Zeroable)]
+        struct Params {
+            sizes: vk::DeviceAddress,
+        }
+
+        let Some(gpu) = crate::gpu::test_context() else {
+            return;
+        };
+        let spirv = crate::shaders::compile_fixture("layout_test").expect("compile layout_test");
+        let pipeline = gpu
+            .create_compute_pipeline(
+                &spirv,
+                c"layout_test",
+                size_of::<Params>() as u32,
+                Bindings::None,
+            )
+            .expect("pipeline");
+        let sizes = gpu
+            .create_buffer(
+                "test.layout.sizes",
+                8,
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                    | vk::BufferUsageFlags::TRANSFER_SRC,
+                MemoryLocation::GpuOnly,
+            )
+            .expect("sizes buffer");
+        let params = Params {
+            sizes: sizes.device_address(),
+        };
+        gpu.dispatch(&pipeline, None, bytemuck::bytes_of(&params), [1, 1, 1])
+            .expect("dispatch");
+        let reported: Vec<u32> =
+            bytemuck::pod_collect_to_vec(&gpu.download_buffer(&sizes).expect("download"));
+        assert_eq!(u64::from(reported[0]), SHADOW_RAY_SIZE);
+        assert_eq!(u64::from(reported[1]), QUEUE_HEADER_SIZE);
+    }
+
     /// A pool smaller than the target walks pixel ranges inside one
     /// submission; the image must be bitwise identical to a pool that
     /// covers the target in one range.
@@ -1876,7 +1924,7 @@ mod tests {
         let kernels = Kernels::embedded();
         let (width, height) = (33, 17); // 561 pixels → 9 ranges of ≤ 64
         let render = |capacity: u32| {
-            let wavefront = Wavefront::new(
+            let wavefront = Wavefront::with_light_sampling(
                 &gpu,
                 &kernels,
                 capacity,
@@ -1942,7 +1990,7 @@ mod tests {
             &Environment::constant(Vec3::splat(0.4)),
         )
         .expect("scene");
-        let wavefront = Wavefront::new(
+        let wavefront = Wavefront::with_light_sampling(
             &gpu,
             &Kernels::embedded(),
             4096,
@@ -2139,7 +2187,7 @@ mod tests {
                 &Environment::constant(Vec3::splat(0.4)),
             )
             .expect("scene");
-            let wavefront = Wavefront::new(
+            let wavefront = Wavefront::with_light_sampling(
                 &gpu,
                 &kernels,
                 4096,
@@ -2481,7 +2529,7 @@ mod tests {
         // The emitter's map: three brightness levels and a hard zero.
         let glow = dir.join("glow.png");
         #[rustfmt::skip]
-        crate::texture::write_png(&glow, 2, 2, &[
+        crate::scene::source::texture::write_png(&glow, 2, 2, &[
             255, 255, 255, 255,   100, 100, 100, 255,
             180, 180, 180, 255,   0, 0, 0, 255,
         ]);
@@ -2499,7 +2547,7 @@ mod tests {
                 [value, 0, 0, 255]
             })
             .collect();
-        crate::texture::write_png(&holes, 8, 8, &coverage);
+        crate::scene::source::texture::write_png(&holes, 8, 8, &coverage);
 
         let sphere = icosphere(2);
         let plane = |scale: [f32; 3], translate: [f32; 3]| Transform::Trs {
@@ -2647,7 +2695,7 @@ mod tests {
         // real bias rather than tripping on noise.
         let samples: u32 = 256;
         let mean = |light_sampling: LightSampling| -> f64 {
-            let wavefront = Wavefront::new(
+            let wavefront = Wavefront::with_light_sampling(
                 gpu,
                 &kernels,
                 4096,

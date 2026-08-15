@@ -1,0 +1,43 @@
+// The first real groom: Cem Yuksel's `straight.hair` — 10,000 strands,
+// 160,000 points, polylines with the file's default thickness.
+//
+// The groom itself stays untracked: the hair models are free for
+// research with attribution, not to redistribute. Fetch them from
+// http://www.cemyuksel.com/research/hairmodels/ into `scenes/hair/sources/`.
+//
+// The model is Z-up in its own units (the head is about 63 across), so
+// the instance rotates it onto +Y and scales it to a 15 cm skull. The
+// widths scale with it: 0.1 in file units lands near a quarter of a
+// millimetre across, a few times a real fiber but visible at this
+// resolution.
+(
+    version: 2,
+    ops: [
+        Settings((name: "main", resolution: Some((1280, 720)), spp: Some(128))),
+        Camera((
+            name: "main",
+            position: Some((0.0, 0.06, 0.55)),
+            look_at: Some((0.0, 0.06, 0.0)),
+            vfov_degrees: Some(35.0),
+        )),
+        Environment((
+            name: "sky",
+            path: Some(Some("../../crates/cenote/assets/kloofendal_puresky.exr")),
+        )),
+        Curves((name: "hair", source: Some(Hair(path: "sources/straight.hair")))),
+        Material((
+            name: "fiber",
+            base_color: Some(Constant((0.09, 0.045, 0.02))),
+            specular_roughness: Some(Constant(0.2)),
+        )),
+        Instance((
+            name: "hair",
+            curves: Some("hair"),
+            material: Some("fiber"),
+            transforms: Some([Trs(
+                rotate_degrees: (-90.0, 0.0, 0.0),
+                scale: (0.0024, 0.0024, 0.0024),
+            )]),
+        )),
+    ],
+)

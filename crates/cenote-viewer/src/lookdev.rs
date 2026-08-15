@@ -207,6 +207,13 @@ fn full_patch(name: &str, material: &Material) -> MaterialPatch {
         transmission_weight: Some(material.transmission_weight),
         transmission_color: Some(material.transmission_color),
         transmission_depth: Some(material.transmission_depth),
+        transmission_scatter: Some(material.transmission_scatter),
+        transmission_scatter_anisotropy: Some(material.transmission_scatter_anisotropy),
+        subsurface_weight: Some(material.subsurface_weight.clone()),
+        subsurface_color: Some(material.subsurface_color.clone()),
+        subsurface_radius: Some(material.subsurface_radius.clone()),
+        subsurface_radius_scale: Some(material.subsurface_radius_scale.clone()),
+        subsurface_scatter_anisotropy: Some(material.subsurface_scatter_anisotropy.clone()),
         coat_weight: Some(material.coat_weight),
         coat_color: Some(material.coat_color),
         coat_roughness: Some(material.coat_roughness),
@@ -221,5 +228,28 @@ fn full_patch(name: &str, material: &Material) -> MaterialPatch {
         geometry_thin_walled: Some(material.geometry_thin_walled),
         geometry_normal: Some(material.geometry_normal.clone()),
         ..MaterialPatch::new(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cenote::scene::changeset::{ChangeSet, Op};
+    use cenote::scene::description::SceneDescription;
+
+    /// The patch is the whole material: applying it to a fresh description
+    /// reproduces the source exactly. A field added to `Material` and
+    /// forgotten in `full_patch` fails this equality — the panel would
+    /// silently reset that field on every widget drag.
+    #[test]
+    fn full_patch_round_trips_the_whole_material() {
+        let source = Material::default();
+        let mut description = SceneDescription::new();
+        description
+            .apply(&ChangeSet {
+                ops: vec![Op::Material(Box::new(full_patch("m", &source)))],
+            })
+            .expect("a default material is valid");
+        assert_eq!(description.materials()["m"], source);
     }
 }

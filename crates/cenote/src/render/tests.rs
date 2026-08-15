@@ -6,9 +6,10 @@
 use glam::{Mat4, Vec3};
 
 use super::*;
-use crate::environment::Environment;
-use crate::material::Material;
+use crate::scene::environment::Environment;
+use crate::scene::material::Material;
 use crate::scene::{Camera, Object, ground_plane};
+use crate::wavefront::LightSampling;
 
 fn pixel(pixels: &[f32], width: u32, x: u32, y: u32) -> &[f32] {
     let idx = ((y * width + x) * 4) as usize;
@@ -146,7 +147,7 @@ fn traced_sum(
     bounces: u32,
     light_sampling: LightSampling,
 ) -> (Wavefront, Vec<f32>) {
-    let wavefront = Wavefront::new(
+    let wavefront = Wavefront::with_light_sampling(
         gpu,
         &Kernels::embedded(),
         Wavefront::DEFAULT_CAPACITY,
@@ -1169,7 +1170,7 @@ fn constant_grid_fixture_at(
     res: u32,
     voxel: f32,
 ) -> Option<std::path::PathBuf> {
-    let tool = crate::vdb::find_prep_tool()?;
+    let tool = crate::scene::source::vdb::find_prep_tool()?;
     let path =
         std::env::temp_dir().join(format!("cenote-gate-{name}-{}.nvdb", std::process::id()));
     let output = std::process::Command::new(tool)
@@ -1428,7 +1429,7 @@ fn ramp_profile(k: i32) -> f64 {
 
 /// The same 32³ shell as [`constant_grid_fixture`], carrying that profile.
 fn ramp_grid_fixture(name: &str) -> Option<std::path::PathBuf> {
-    let tool = crate::vdb::find_prep_tool()?;
+    let tool = crate::scene::source::vdb::find_prep_tool()?;
     let path =
         std::env::temp_dir().join(format!("cenote-gate-{name}-{}.nvdb", std::process::id()));
     let output = std::process::Command::new(tool)
@@ -1539,7 +1540,7 @@ fn an_emissive_grid_slab_radiates_its_source_integral() {
     let Some(gpu) = crate::gpu::test_context() else {
         return;
     };
-    let Some(tool) = crate::vdb::find_prep_tool() else {
+    let Some(tool) = crate::scene::source::vdb::find_prep_tool() else {
         return;
     };
     let nvdb = std::env::temp_dir().join(format!("cenote-gate-fire-{}.nvdb", std::process::id()));
@@ -1602,7 +1603,7 @@ fn emissive_slab_matches_its_integral(
     let sigma_t = f64::from(GRID_SLAB_DENSITY * (absorption + scattering));
     let share = f64::from(absorption / (absorption + scattering));
     let depth = 1.0 - (-sigma_t * f64::from(GRID_SLAB_EXTENT)).exp();
-    let emitted = crate::blackbody::radiance(GRID_FIRE_KELVIN);
+    let emitted = crate::scene::blackbody::radiance(GRID_FIRE_KELVIN);
     for (channel, mean) in channel_means(&sum, size, samples).iter().enumerate() {
         let expected = f64::from(emitted[channel]) * share * depth;
         assert!(
@@ -2855,13 +2856,7 @@ fn the_camera_seed_names_exactly_what_the_camera_is_inside_of() {
     ];
     let outer = STACK_INTERIOR;
     let inner = 1 | STACK_INTERIOR | (1 << STACK_PRIORITY_SHIFT) | STACK_SCATTERING;
-    let wavefront = Wavefront::new(
-        &gpu,
-        &Kernels::embedded(),
-        Wavefront::DEFAULT_CAPACITY,
-        2,
-        LightSampling::Mis,
-    )
+    let wavefront = Wavefront::new(&gpu, &Kernels::embedded(), Wavefront::DEFAULT_CAPACITY, 2)
     .expect("wavefront");
     let radiance = gpu
         .create_buffer(
@@ -2902,7 +2897,8 @@ fn the_camera_seed_names_exactly_what_the_camera_is_inside_of() {
             .trace(&gpu, &scene, &radiance, 8, 8, 0)
             .expect("trace");
         let table = gpu.download_buffer(scene.table()).expect("download");
-        let seed: [u32; 4] = bytemuck::pod_read_unaligned(&table[table.len() - 16..]);
+        let offset = crate::scene::CAMERA_MEDIA_OFFSET;
+        let seed: [u32; 4] = bytemuck::pod_read_unaligned(&table[offset..offset + 16]);
         let mut entries: Vec<u32> = seed.into_iter().filter(|&e| e != STACK_EMPTY).collect();
         entries.sort_unstable();
         expected.sort_unstable();
@@ -3624,7 +3620,7 @@ fn the_textured_furnace_closes() {
     };
     let dir = fixture_dir("furnace");
     let white = dir.join("white.png");
-    crate::texture::write_png(&white, 8, 8, &[255u8; 8 * 8 * 4]);
+    crate::scene::source::texture::write_png(&white, 8, 8, &[255u8; 8 * 8 * 4]);
     let scene = textured_furnace_scene(
         &gpu,
         &dir,
@@ -3655,7 +3651,7 @@ fn the_textured_furnace_closes() {
 
     let gray = dir.join("gray.png");
     let texel = [128u8, 128, 128, 255];
-    crate::texture::write_png(&gray, 8, 8, &texel.repeat(8 * 8));
+    crate::scene::source::texture::write_png(&gray, 8, 8, &texel.repeat(8 * 8));
     let scene = textured_furnace_scene(
         &gpu,
         &dir,
@@ -3819,7 +3815,7 @@ fn an_emission_map_pins_uv_orientation_and_the_idt() {
     let dir = fixture_dir("probe");
     let map = dir.join("quadrants.png");
     #[rustfmt::skip]
-        crate::texture::write_png(&map, 2, 2, &[
+        crate::scene::source::texture::write_png(&map, 2, 2, &[
             255, 0, 0, 255,    0, 255, 0, 255,
             0, 0, 255, 255,    255, 255, 255, 255,
         ]);
@@ -3921,7 +3917,7 @@ fn a_uv_remap_shifts_the_map_and_the_value_scale_multiplies() {
     let dir = fixture_dir("remap");
     let map = dir.join("quadrants.png");
     #[rustfmt::skip]
-        crate::texture::write_png(&map, 2, 2, &[
+        crate::scene::source::texture::write_png(&map, 2, 2, &[
             255, 0, 0, 255,    0, 255, 0, 255,
             0, 0, 255, 255,    255, 255, 255, 255,
         ]);
@@ -4019,7 +4015,7 @@ fn normal_maps_tilt_shading_and_keep_energy() {
     };
     let dir = fixture_dir("normals");
     let flat = dir.join("flat.png");
-    crate::texture::write_png(&flat, 8, 8, &[128u8, 128, 255, 255].repeat(8 * 8));
+    crate::scene::source::texture::write_png(&flat, 8, 8, &[128u8, 128, 255, 255].repeat(8 * 8));
     let scene = textured_furnace_scene(
         &gpu,
         &dir,
@@ -4049,7 +4045,7 @@ fn normal_maps_tilt_shading_and_keep_energy() {
     // under a light from the axis the tilt faces.
     let tilted = |name: &str, texel: [u8; 4]| {
         let path = dir.join(name);
-        crate::texture::write_png(&path, 8, 8, &texel.repeat(8 * 8));
+        crate::scene::source::texture::write_png(&path, 8, 8, &texel.repeat(8 * 8));
         path
     };
     let mean_under = |map: std::path::PathBuf, travel: [f32; 3]| {
@@ -4132,7 +4128,7 @@ fn textured_opacity_is_per_sample_exact() {
             [if solid { 255u8 } else { 0 }, 0, 0, 255]
         })
         .collect();
-    crate::texture::write_png(&checker, 8, 8, &rgba);
+    crate::scene::source::texture::write_png(&checker, 8, 8, &rgba);
     let scene = textured_furnace_scene(
         &gpu,
         &dir,
@@ -4991,7 +4987,7 @@ fn a_subsurface_map_is_read_where_the_walk_entered() {
             texels.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
         }
     }
-    crate::texture::write_png(&map, SIDE, SIDE, &texels);
+    crate::scene::source::texture::write_png(&map, SIDE, SIDE, &texels);
 
     // The lobe alone: a black diffuse base and no specular interface, so
     // nothing but the walk reaches the film and the colour it carries is

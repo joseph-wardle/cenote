@@ -1,20 +1,14 @@
-// B9's controlled SSS driver, skin-density tier: the bitterli teapot's tea
-// volume welded closed (sss-teapot.ply — CC0, see the PLY header) as a
-// solid scattering dielectric on a plain table, lit by one small warm
-// quad under a heavily dimmed sky. The rig is deliberately hostile to
-// interior transport: with NEE skipped inside scattering interiors, the
-// small light is only ever found by phase-sampled escape, which is the
-// production regime rung 9-0 exists to measure.
-//
-// Three sibling files ladder the density — the body's slab thickness is
-// ~2.3 units, and `transmission_depth` IS the mean free path here because
-// transmission_color is e⁻¹ (σ_t = −ln(color)/depth = 1/depth):
-//   sss-teapot-wax.ron     mfp 0.23  (10% of thickness), albedo 0.95
-//   sss-teapot-marble.ron  mfp 0.069 (3%),               albedo 0.98
-//   sss-teapot-skin.ron    mfp 0.023 (1%),               albedo 0.995
-// Achromatic on purpose: one σ_t means the chromatic MIS weights are
-// uniform and the walk-length histogram measures the walk, not the
-// spectral estimator. transmission_scatter = albedo exactly (σ_s·depth).
+// B9's controlled SSS driver, skin tier, walk-authored: the same
+// teapot, rig, and interior as teapot-wax.ron at skin density, driven through the
+// subsurface lobe instead of a scattering refractive interior. The mean
+// free path is the same (subsurface_radius = 0.023, scale 1), and the
+// tier's single-scatter albedo α = 0.995 is authored as the
+// multiple-scatter color C = 0.849837 that the van de Hulst inversion
+// maps back onto it. The interiors match; the boundaries do not — this
+// surface enters and leaves through the Lambertian transmission, where
+// the sibling refracts — so the two images agree in regime, not per
+// pixel. No 255-bounce cap: the whole walk is one path bounce, which is
+// the point of the architecture this scene exists to measure.
 (
     version: 2,
     ops: [
@@ -22,9 +16,6 @@
             name: "main",
             resolution: Some((1280, 720)),
             spp: Some(64),
-            // The reference cap: rung 9-0's darkening protocol renders
-            // this scene at --depth 12/32/64/128 against this 255.
-            max_bounces: Some(255),
         )),
         Camera((
             name: "main",
@@ -34,7 +25,7 @@
         )),
         Environment((
             name: "sky",
-            path: Some(Some("../crates/cenote/assets/kloofendal_puresky.exr")),
+            path: Some(Some("../../crates/cenote/assets/kloofendal_puresky.exr")),
             // Dim enough that the quad dominates; bright enough that the
             // sky still seeds the silhouette.
             tint: Some((0.05, 0.05, 0.05)),
@@ -42,7 +33,7 @@
 
         Mesh((
             name: "solid",
-            source: Some(Ply(path: "sss-teapot.ply")),
+            source: Some(Ply(path: "teapot.ply")),
         )),
         Mesh((
             name: "plane",
@@ -79,10 +70,10 @@
             name: "skin",
             specular_ior: Some(1.5),
             specular_roughness: Some(Constant(0.08)),
-            transmission_weight: Some(1.0),
-            transmission_color: Some((0.3679, 0.3679, 0.3679)),
-            transmission_depth: Some(0.023),
-            transmission_scatter: Some((0.995, 0.995, 0.995)),
+            subsurface_weight: Some(Constant(1.0)),
+            subsurface_color: Some(Constant((0.849837, 0.849837, 0.849837))),
+            subsurface_radius: Some(Constant(0.023)),
+            subsurface_radius_scale: Some(Constant((1.0, 1.0, 1.0))),
         )),
         Material((
             name: "table",

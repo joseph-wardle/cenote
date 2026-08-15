@@ -26,11 +26,11 @@ use super::description::{
 };
 use super::{Camera, Lens, Mesh, emissive_triangles, scene_error};
 use crate::color::{acescg_from_rec709, luminance};
-use crate::environment::Environment;
+use crate::scene::environment::Environment;
 use crate::error::{Error, Result};
-use crate::lights::{DeltaLight, TriangleLight};
-use crate::material::{Material, TEXTURE_NONE};
-use crate::texture;
+use crate::scene::lights::{DeltaLight, TriangleLight};
+use crate::scene::material::{Material, TEXTURE_NONE};
+use crate::scene::source::texture;
 
 /// Everything prep derives host-side before touching the GPU — the
 /// fallible half, so a rejected description leaves residency untouched.
@@ -77,10 +77,6 @@ impl HostScene {
         (self.triangle_lights.len() + self.delta_lights.len()) as u32
     }
 
-    /// The list's selection weight against the environment.
-    pub(super) fn light_power(&self) -> f64 {
-        crate::lights::total_power(&self.triangle_lights, &self.delta_lights)
-    }
 }
 
 /// One *placement* lowered from the description — element `i` of an
@@ -176,10 +172,16 @@ pub(super) fn host_phase(
     for (key, touched) in referenced {
         let resident = resident_textures.get(&key).copied();
         let prepared = if resident.is_none() || touched {
-            let prepared = texture::prepare(&key.0, key.1, key.2, key.3)?;
             // key.4 (the sample-time params) never reaches prep — the
-            // baked image is transform-independent by design.
-            (resident != Some(prepared.hash)).then_some(prepared)
+            // baked image is transform-independent by design. The expected
+            // hash costs a stat when the source is unchanged, so a drag on
+            // a textured material doesn't re-read its images every tick.
+            if resident == Some(texture::expected_hash(&key.0, key.1, key.2, key.3)?) {
+                None
+            } else {
+                let prepared = texture::prepare(&key.0, key.1, key.2, key.3)?;
+                (resident != Some(prepared.hash)).then_some(prepared)
+            }
         } else {
             None
         };
@@ -754,7 +756,7 @@ fn resolve_mesh(name: &str, mesh: &description::Mesh) -> Result<Mesh> {
             })
         }
         MeshSource::Ply { path } => {
-            let ply = crate::ply::read(path).map_err(|error| match error {
+            let ply = crate::scene::source::ply::read(path).map_err(|error| match error {
                 Error::Scene(message) => scene_error(format!("mesh \"{name}\": {message}")),
                 other => other,
             })?;
@@ -977,7 +979,7 @@ fn emissive_geometry(
                 triangles.clone(),
             )),
             MeshSource::Ply { path } => {
-                let ply = crate::ply::read(path)?;
+                let ply = crate::scene::source::ply::read(path)?;
                 Ok((ply.positions, ply.triangles))
             }
             // A medium shell's material is forced inert, so it never emits
@@ -1104,11 +1106,11 @@ fn same_index_map(left: &[[f32; 4]; 3], right: &[[f32; 4]; 3]) -> bool {
 }
 
 fn lower_volume(source: &description::VolumeSource, emission: Vec3) -> Result<super::GridVolume> {
-    let nvdb = crate::vdb::prepared(&source.path)?;
-    let header = crate::vdb::grid_header(&nvdb, &source.grid)?;
+    let nvdb = crate::scene::source::vdb::prepared(&source.path)?;
+    let header = crate::scene::source::vdb::grid_header(&nvdb, &source.grid)?;
     let mut temperature_grid = source.temperature_grid.clone();
     if let Some(name) = &temperature_grid {
-        let temperature = crate::vdb::grid_header(&nvdb, name)?;
+        let temperature = crate::scene::source::vdb::grid_header(&nvdb, name)?;
         if !same_index_map(&temperature.asset_to_index, &header.asset_to_index) {
             return Err(super::scene_error(format!(
                 "volume \"{}\": temperature grid \"{name}\" maps index space differently from \
@@ -1128,14 +1130,14 @@ fn lower_volume(source: &description::VolumeSource, emission: Vec3) -> Result<su
             temperature_grid = None;
         }
     }
-    let (lo, hi) = crate::vdb::shell_box(&header.meta.index_bbox);
+    let (lo, hi) = crate::scene::source::vdb::shell_box(&header.meta.index_bbox);
     let (lo, hi) = (Vec3::from(lo), Vec3::from(hi));
     // The unit cube maps onto the shell box, and so does the majorant
     // lattice — `res` cells across it, which is what turns an index-space
     // position into the cell coordinate the tracker's walk steps through.
     let bounds_to_index = Mat4::from_translation(lo) * Mat4::from_scale(hi - lo);
     let bounds_to_asset = super::rows_to_mat4(&header.index_to_asset) * bounds_to_index;
-    let res = crate::vdb::majorant_resolution(&header.meta.index_bbox);
+    let res = crate::scene::source::vdb::majorant_resolution(&header.meta.index_bbox);
     let majorant_scale = Vec3::new(res[0] as f32, res[1] as f32, res[2] as f32) / (hi - lo);
     Ok(super::GridVolume {
         nvdb,
@@ -1376,25 +1378,6 @@ mod tests {
         assert_eq!(host.light_count(), 0);
     }
 
-    #[test]
-    fn ply_geometry_is_rejected_by_name() {
-        let mut description = triangle_description();
-        description
-            .apply(&ChangeSet {
-                ops: vec![Op::Mesh(MeshPatch {
-                    source: Some(MeshSource::Ply {
-                        // Apply checks existence, not contents.
-                        path: concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml").into(),
-                    }),
-                    ..MeshPatch::new("tri")
-                })],
-            })
-            .expect("valid data");
-        let error = host_error(&description);
-        assert!(error.to_string().contains("PLY"), "{error}");
-        assert!(error.to_string().contains("tri"), "{error}");
-    }
-
     /// One description instance with N placements lowers to N specs — the
     /// flattened position is the TLAS custom index — and an emissive one
     /// unpacks into per-element lights under per-element identity names.
@@ -1560,6 +1543,7 @@ mod tests {
             .expect("valid data");
         let error = host_error(&description);
         assert!(error.to_string().contains("mesh \"tri\""), "{error}");
+        assert!(error.to_string().contains("PLY"), "{error}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1708,7 +1692,7 @@ mod tests {
         reason = "lowering passes authored closure constants through untouched"
     )]
     fn textured_slots_lower_to_indices_and_closure_params_carry() {
-        use crate::material::TEXTURE_NONE;
+        use crate::scene::material::TEXTURE_NONE;
 
         let source = description::Material {
             base_color: Texturable::Texture(TextureRef {
@@ -1763,7 +1747,7 @@ mod tests {
     /// enter however bright the texel turned out to be.
     #[test]
     fn every_subsurface_slot_textures_without_gating_its_interior() {
-        use crate::material::TEXTURE_NONE;
+        use crate::scene::material::TEXTURE_NONE;
 
         fn map<T>(path: &str) -> Texturable<T> {
             Texturable::Texture(TextureRef {
@@ -1855,7 +1839,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_normals_derive_smooth_and_area_weighted() {
+    fn missing_normals_derive_from_the_face() {
         let positions = [Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::new(5.0, 5.0, 5.0)];
         let normals = smooth_normals(&positions, &[[0, 1, 2]]);
         // Every vertex of a single CCW triangle in the XY plane gets its
@@ -2127,7 +2111,7 @@ mod tests {
     /// last-place drift, not for a real mismatch.
     #[test]
     fn a_temperature_grid_on_its_own_lattice_is_refused() {
-        let Some(tool) = crate::vdb::find_prep_tool() else {
+        let Some(tool) = crate::scene::source::vdb::find_prep_tool() else {
             return;
         };
         let fire = |voxel: &str, tag: &str| {

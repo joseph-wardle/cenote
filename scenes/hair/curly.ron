@@ -1,0 +1,46 @@
+// The hero groom: Cem Yuksel's `wCurly.hair` — 50,000 strands and
+// 3,441,580 points, per-strand segment counts (56 to 72 each), the file's
+// default thickness throughout. Swept three-sided, that is 20.35 million
+// triangles, and it is the asset B12's gates are set against.
+//
+// The groom itself stays untracked: the hair models are free for
+// research with attribution, not to redistribute. Fetch them from
+// http://www.cemyuksel.com/research/hairmodels/ into `scenes/hair/sources/`.
+//
+// Same units and orientation as `straight.ron` — Z-up, a head about 63
+// across — so the same rotate-and-shrink lands it on a 15 cm skull, and
+// the translation drops the tips onto y = 0. The camera frames the groom
+// alone: no ground, no second object, so every millisecond of traversal
+// this scene reports is hair.
+(
+    version: 2,
+    ops: [
+        Settings((name: "main", resolution: Some((2560, 1440)), spp: Some(64))),
+        Camera((
+            name: "main",
+            position: Some((-0.037, 0.147, 0.50)),
+            look_at: Some((-0.037, 0.147, 0.0)),
+            vfov_degrees: Some(35.0),
+        )),
+        Environment((
+            name: "sky",
+            path: Some(Some("../../crates/cenote/assets/kloofendal_puresky.exr")),
+        )),
+        Curves((name: "hair", source: Some(Hair(path: "sources/wCurly.hair")))),
+        Material((
+            name: "fiber",
+            base_color: Some(Constant((0.09, 0.045, 0.02))),
+            specular_roughness: Some(Constant(0.2)),
+        )),
+        Instance((
+            name: "hair",
+            curves: Some("hair"),
+            material: Some("fiber"),
+            transforms: Some([Trs(
+                translate: (0.024, 0.13, 0.0),
+                rotate_degrees: (-90.0, 0.0, 0.0),
+                scale: (0.0024, 0.0024, 0.0024),
+            )]),
+        )),
+    ],
+)

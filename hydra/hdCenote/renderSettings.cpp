@@ -247,9 +247,6 @@ std::string HdCenoteDescribeSettings(const cenote::wire::SettingsPatch& patch) {
 
 HdCenoteResolvedSettings HdCenoteOverlaySettings(HdCenoteResolvedSettings under,
                                                  const HdCenoteResolvedSettings& over) {
-    if (over.patch.resolution) {
-        under.patch.resolution = over.patch.resolution;
-    }
     if (over.patch.spp) {
         under.patch.spp = over.patch.spp;
     }

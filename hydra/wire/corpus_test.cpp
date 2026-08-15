@@ -246,7 +246,9 @@ ChangeSet genesis() {
         CameraPatch{
             .name = "cam-set",
             .position = std::array{0.0f, 1.0f, 5.0f},
-            .look_at = std::array{0.0f, 1.0f, 0.0f},
+            // Every vector distinct, so a field swap in either encoder
+            // cannot produce identical bytes.
+            .look_at = std::array{0.0f, 1.5f, 0.0f},
             .up = std::array{0.0f, 1.0f, 0.0f},
             .vfov_degrees = 45.0f,
             .focus_distance = Set{5.0f},
@@ -284,7 +286,6 @@ ChangeSet genesis() {
         },
         SettingsPatch{
             .name = "main",
-            .resolution = std::array<std::uint32_t, 2>{1920, 1080},
             .spp = 256U,
             .noise_threshold = Set{0.02f},
             .max_bounces = 8U,

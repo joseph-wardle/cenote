@@ -27,12 +27,6 @@ RaytracingAccelerationStructure sceneTlas;
 // accepted error as the march's `MARCH_LEG_CAP`.
 static const uint RESOLVE_LEG_CAP = 32;
 
-// How far past a crossing the next leg starts — `MARCH_NUDGE`'s value and
-// reasoning (shade_volume.slang): relative so it holds at any scene scale,
-// wide enough that re-testing the same triangle cannot return the crossing
-// just made. Two boundaries closer together than this read as one.
-static const float RESOLVE_NUDGE = 1e-6;
-
 // The one direction the walk looks: components distinct and irrational-ish
 // ((1, 2, 3)/√14), so a scene full of axis-aligned boxes — most of them —
 // never sees the ray running inside a face's own plane. A camera sitting
@@ -58,9 +52,9 @@ void resolve_camera() {
     // partners from itself. No instance until the first leg commits.
     var crossedInstance = ~0u;
     for (uint leg = 0; leg < RESOLVE_LEG_CAP; leg++) {
-        // Half the nudge, and what counts as the same distance — the march's
-        // `window`, for the march's reasons (shade_volume.slang).
-        let window = start * RESOLVE_NUDGE + RESOLVE_NUDGE;
+        // What counts as the same distance — the march's `window`, for the
+        // march's reasons (shade_volume.slang).
+        let window = coincidenceWindow(start);
         RayDesc ray;
         ray.Origin = params.position;
         ray.Direction = RESOLVE_DIRECTION;

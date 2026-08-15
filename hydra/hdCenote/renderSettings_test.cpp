@@ -96,7 +96,6 @@ void defaults() {
     check(resolved.patch.max_bounces == 8U, "the default depth is 8 bounces");
     check(resolved.patch.denoise && !*resolved.patch.denoise,
           "and a batch host is handed the estimator's own pixels");
-    check(!resolved.patch.resolution, "resolution is not a setting");
     check(!resolved.patch.seed, "seed is not a setting");
 }
 

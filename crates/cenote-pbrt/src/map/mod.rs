@@ -2122,7 +2122,8 @@ mod tests {
         let world =
             format!("AreaLightSource \"diffuse\" \"rgb L\" [4 2 1] \"float scale\" 3\n{TRIANGLE}");
         import_world("photometric-rgb", &world, |set, _| {
-            let glow = material(set, "pbrt-default-glow-0");
+            let name = instances(set)[0].material.clone().expect("a material");
+            let glow = material(set, &name);
             assert_eq!(
                 glow.emission_color,
                 Some(Texturable::Constant([4.0, 2.0, 1.0]))
@@ -2140,7 +2141,8 @@ mod tests {
             "AreaLightSource \"diffuse\" \"blackbody L\" 3000 \"float scale\" 5\n{TRIANGLE}"
         );
         import_world("photometric-blackbody", &world, |set, _| {
-            let glow = material(set, "pbrt-default-glow-0");
+            let name = instances(set)[0].material.clone().expect("a material");
+            let glow = material(set, &name);
             let Some(Texturable::Constant([r, g, b])) = glow.emission_color else {
                 panic!("expected a constant emission color");
             };
@@ -2190,12 +2192,14 @@ mod tests {
              {TRIANGLE}"
         );
         import_world("roughness", &world, |set, _| {
+            let shapes = instances(set);
+            let named = |index: usize| shapes[index].material.clone().expect("a material");
             assert_eq!(
-                material(set, "conductor-0").specular_roughness,
+                material(set, &named(0)).specular_roughness,
                 Some(Texturable::Constant(0.5))
             );
             assert_eq!(
-                material(set, "conductor-1").specular_roughness,
+                material(set, &named(1)).specular_roughness,
                 Some(Texturable::Constant(0.25))
             );
         });
@@ -2356,9 +2360,11 @@ Translate 1 0 0
                 ),
                 MeshSource::Ply { .. } | MeshSource::MediumBounds => unreachable!(),
             };
-            let (plain, plain_winding) = normal_z(mesh("trianglemesh-0"));
-            let (reversed, reversed_winding) = normal_z(mesh("trianglemesh-1"));
-            let (mirrored, mirrored_winding) = normal_z(mesh("trianglemesh-2"));
+            let shapes = instances(set);
+            let named = |index: usize| shapes[index].mesh.clone().expect("a mesh");
+            let (plain, plain_winding) = normal_z(mesh(&named(0)));
+            let (reversed, reversed_winding) = normal_z(mesh(&named(1)));
+            let (mirrored, mirrored_winding) = normal_z(mesh(&named(2)));
             assert_eq!(plain, 1.0);
             assert_eq!(plain_winding, [0, 1, 2]);
             // ReverseOrientation alone flips…
@@ -2884,6 +2890,53 @@ Translate 1 0 0
         }
     }
 
+    /// Malformed trianglemesh geometry refuses before anything can read
+    /// out of bounds — each with the `file:line` and the token at fault.
+    #[test]
+    fn malformed_meshes_are_refused_by_name() {
+        let cases: &[(&str, &str)] = &[
+            (
+                "Shape \"trianglemesh\" \"point3 P\" [0 0 0  1 0 0  0 1 0] \
+                 \"integer indices\" [0 1 3]",
+                "out of range",
+            ),
+            (
+                "Shape \"trianglemesh\" \"point3 P\" [0 0 0  1 0 0  0 1 0] \
+                 \"integer indices\" [0 1]",
+                "whole triangles",
+            ),
+            (
+                // Four vertices: past pbrt's one-implicit-triangle grace.
+                "Shape \"trianglemesh\" \"point3 P\" [0 0 0  1 0 0  0 1 0  1 1 0]",
+                "indices",
+            ),
+            ("Shape \"trianglemesh\" \"integer indices\" [0 1 2]", "P"),
+        ];
+        for (world, wanted) in cases {
+            let error = import_error("mesh-refusals", world);
+            assert!(error.contains(wanted), "{error}");
+            assert!(error.contains("scene.pbrt:"), "{error}");
+        }
+    }
+
+    /// pbrt-v3 scenes quote their booleans (`"bool b" "false"`); the v4
+    /// bare spelling and the v3 quoted one must read identically.
+    #[test]
+    fn v3_quoted_booleans_read_like_v4_bare_ones() {
+        let world = format!(
+            "Material \"conductor\" \"float roughness\" 0.0625 \"bool remaproughness\" \"false\"\n\
+             {TRIANGLE}"
+        );
+        import_world("v3-boolean", &world, |set, _| {
+            let name = instances(set)[0].material.clone().expect("a material");
+            assert_eq!(
+                material(set, &name).specular_roughness,
+                Some(Texturable::Constant(0.25)),
+                "the quoted \"false\" must disable the remap exactly like bare false"
+            );
+        });
+    }
+
     /// Spheres and disks tessellate at import: analytic normals, sane
     /// bounds, disks sitting at their height.
     #[test]
@@ -3008,9 +3061,12 @@ Translate 1 0 0
         import_files("alpha-cutout", files, |set, warnings| {
             let shapes = instances(set);
             let cutout = shapes[0].material.as_deref().expect("a material");
-            assert_eq!(cutout, "diffuse-0-cutout-0");
+            // The one place the counter-name format is pinned: fork names
+            // land in curated corpus RONs, so the scheme is a serialized
+            // artifact, not an implementation detail.
             assert_eq!(shapes[1].material.as_deref(), Some("diffuse-0"));
-            assert_eq!(shapes[2].material.as_deref(), Some(cutout));
+            assert_ne!(cutout, "diffuse-0", "the mask forks the material");
+            assert_eq!(shapes[2].material.as_deref(), Some(cutout), "same mask, shared fork");
             let patch = material(set, cutout);
             let Some(Texturable::Texture(reference)) = &patch.geometry_opacity else {
                 panic!("no opacity mask: {patch:?}");
@@ -3091,7 +3147,6 @@ Translate 1 0 0
         import_files("alpha-glow", files, |set, _| {
             let shapes = instances(set);
             let name = shapes[0].material.as_deref().expect("a material");
-            assert_eq!(name, "pbrt-default-cutout-0-glow-0");
             let patch = material(set, name);
             assert_eq!(
                 patch.emission_color,

@@ -17,6 +17,13 @@ use crate::gpu::ledger::{Bucket, Ledger};
 
 pub use gpu_allocator::MemoryLocation;
 
+/// A reusable host-visible landing buffer for
+/// [`Context::download_buffer_into`] — grow-only, starts empty.
+#[derive(Default)]
+pub struct Staging {
+    buffer: Option<Buffer>,
+}
+
 /// A `vk::Buffer` bound to its memory, freed on drop.
 pub struct Buffer {
     handle: vk::Buffer,
@@ -315,6 +322,34 @@ impl Context {
         )?;
         self.copy_buffers(&[(buffer, &staging, buffer.size())])?;
         Ok(staging.mapped().to_vec())
+    }
+
+    /// Read a buffer back through a caller-held [`Staging`] landing buffer
+    /// and borrow the bytes in place — the repeated-readback shape (the
+    /// server's frame pump), where [`Context::download_buffer`]'s
+    /// per-call staging allocation and copy-out are the cost. The landing
+    /// buffer grows to the largest download and is reused thereafter.
+    pub fn download_buffer_into<'a>(
+        &self,
+        buffer: &Buffer,
+        staging: &'a mut Staging,
+        name: &str,
+    ) -> Result<&'a [u8]> {
+        if staging
+            .buffer
+            .as_ref()
+            .is_none_or(|landing| landing.size() < buffer.size())
+        {
+            staging.buffer = Some(self.create_buffer(
+                name,
+                buffer.size(),
+                vk::BufferUsageFlags::TRANSFER_DST,
+                MemoryLocation::GpuToCpu,
+            )?);
+        }
+        let landing = staging.buffer.as_ref().expect("just ensured above");
+        self.copy_buffers(&[(buffer, landing, buffer.size())])?;
+        Ok(&landing.mapped()[..buffer.size() as usize])
     }
 
     /// A device-local buffer whose memory another API on this GPU can

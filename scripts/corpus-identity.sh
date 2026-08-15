@@ -5,7 +5,7 @@
 # means the images moved, and the only question left is whether that was
 # intended.
 #
-#   scripts/corpus-identity.sh                    # vs b9-baselines/corpus
+#   scripts/corpus-identity.sh                    # vs baselines/corpus
 #   scripts/corpus-identity.sh <baseline-dir>     # vs some other sweep
 #   scripts/corpus-identity.sh <baseline-dir> <out-dir>
 #
@@ -19,49 +19,23 @@
 #
 # Minting a new sweep is deliberate and separate: render into a fresh
 # directory, review why it moved, and only then point later runs at it.
-# The default moved from the B8-close capture to `b9-baselines/corpus` for
-# exactly that reason — a colour-space correction to watercolor's baked
-# textures was reviewed, attributed, and only then minted, and the head
-# gained its first baseline in the same sweep. Each capture directory
-# carries the account in its own `capture-meta.txt`; the older one stays
-# put rather than being edited under a scene it no longer describes.
-# `kroken` and `watercolor` need their curate scripts run first, and every
-# corpus scene needs `scenes/corpus/fetch.sh`.
+# Each capture directory carries its account in its own
+# `capture-meta.txt`. A scene with no baseline yet is counted loudly as
+# unbaselined, not failed — it joins the gate at its first minted sweep.
+# The scene list lives in scenes/manifest.sh, beside its prerequisites.
 set -uo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 cli=$root/target/release/cenote-cli
-base=${1:-$root/b9-baselines/corpus}
+base=${1:-$root/baselines/corpus}
 out=${2:-$root/corpus-identity}
 
 width=2560
 height=1440
 spp=64
 
-# Every corpus scene that renders, plus brass-room — the hand-authored
-# scene the B8 reuse gate is authored on, which travels with them.
-scenes=(
-  "$root/scenes/corpus/bathroom.ron:bathroom"
-  "$root/scenes/corpus/bistro.ron:bistro"
-  "$root/scenes/corpus/bmw-m6.ron:bmw-m6"
-  "$root/scenes/brass-room.ron:brass-room"
-  "$root/scenes/corpus/coffee.ron:coffee"
-  "$root/scenes/corpus/cornell-box.ron:cornell-box"
-  "$root/scenes/corpus/crown.ron:crown"
-  "$root/scenes/corpus/glass-of-water.ron:glass-of-water"
-  "$root/scenes/corpus/head.ron:head"
-  "$root/scenes/corpus/kitchen.ron:kitchen"
-  "$root/scenes/corpus/kroken.ron:kroken"
-  "$root/scenes/corpus/sanmiguel.ron:sanmiguel"
-  "$root/scenes/corpus/spaceship.ron:spaceship"
-  "$root/scenes/corpus/teapot-full.ron:teapot-full"
-  "$root/scenes/corpus/veach-ajar.ron:veach-ajar"
-  "$root/scenes/corpus/veach-bidir.ron:veach-bidir"
-  "$root/scenes/corpus/veach-mis.ron:veach-mis"
-  "$root/scenes/corpus/water-caustic.ron:water-caustic"
-  "$root/scenes/corpus/watercolor.ron:watercolor"
-  "$root/scenes/corpus/zero-day.ron:zero-day"
-)
+source "$root/scenes/manifest.sh"
+scenes=("${identity_scenes[@]}")
 
 [[ -x $cli ]] || { echo "build it first: cargo build --release -p cenote-cli" >&2; exit 1; }
 mkdir -p "$out"
@@ -70,7 +44,7 @@ fail=0
 compared=0
 unbaselined=0
 for entry in "${scenes[@]}"; do
-  scene=${entry%%:*} label=${entry##*:}
+  scene=$root/${entry%%:*} label=${entry##*:}
   echo "== $label =="
   if [[ ! -f $scene ]]; then
     echo "RESULT $label MISSING-SCENE"

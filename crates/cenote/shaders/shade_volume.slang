@@ -57,20 +57,15 @@ static const uint MARCH_LEG_CAP = 8;
 // bounce ever draw the same key.
 static const uint MARCH_OPACITY_CAP = TRANSPARENT_CAP * (MARCH_LEG_CAP + 1);
 
-// How far past a crossing the next leg starts. Relative, so it holds at any
-// scene scale, and at least eight float32 ulps wide, so re-testing the same
-// triangle cannot return the boundary just crossed. Two boundaries closer
-// together than this read as one — which is why a leg leaving a *null*
-// boundary opens a window's width behind it instead and crosses the whole
-// group at once (see the march). Duplicated shells, volumes sharing a face
-// plane, and a wall standing exactly on a boundary are all ordinary
-// authoring, and losing one crossing of a pair leaves a medium the path is
-// not in — or omits one it is.
+// The march opens `coincidenceWindow` (pathstate.slang) around crossings:
+// a leg leaving a *null* boundary starts a window's width behind it and
+// crosses the whole group at once. Duplicated shells, volumes sharing a
+// face plane, and a wall standing exactly on a boundary are all ordinary
+// authoring.
 //
 // Refractive interfaces keep the plain forward nudge: an opaque one commits
 // in hardware and never reaches a candidate loop to be grouped, so
 // coincident *dielectric* surfaces remain outside the model.
-static const float MARCH_NUDGE = 1e-6;
 
 // The five queues this stage touches, behind one pointer: consuming one and
 // feeding four is more push-constant bytes than Vulkan guarantees. Their
@@ -89,14 +84,6 @@ struct VolumeQueues {
     Atomic<uint>* probes;
 #endif
 };
-
-#ifdef PROBES
-// The tracker's totals — `PROBE_TRACKER_COLLISION_BIN` and the two bins
-// after it in wavefront.rs, which owns the layout.
-static const uint PROBE_TRACKER_COLLISIONS = 515;
-static const uint PROBE_TRACKER_NULLS = 516;
-static const uint PROBE_TRACKER_STEPS = 517;
-#endif
 
 struct Params {
     Paths paths;
@@ -205,9 +192,9 @@ void shadeVolume<let HETERO : int, let EMISSIVE : int>(uint3 tid) {
 #ifdef PROBES
             // Per sub-segment rather than per path: the totals are the same
             // and nothing has to be carried to the exits.
-            params.queues.probes[PROBE_TRACKER_COLLISIONS].add(tracked.collisions);
-            params.queues.probes[PROBE_TRACKER_NULLS].add(tracked.nulls);
-            params.queues.probes[PROBE_TRACKER_STEPS].add(tracked.steps);
+            params.queues.probes[PROBE_TRACKER_COLLISION_BIN].add(tracked.collisions);
+            params.queues.probes[PROBE_TRACKER_NULL_BIN].add(tracked.nulls);
+            params.queues.probes[PROBE_TRACKER_STEP_BIN].add(tracked.steps);
 #endif
         }
         throughput.xyz *= event.weight;
@@ -296,7 +283,7 @@ void shadeVolume<let HETERO : int, let EMISSIVE : int>(uint3 tid) {
         // Behind, not from the crossing itself: a coincident face's `t` can
         // compute marginally nearer than the one that committed, and a
         // one-sided open would cut it.
-        let window = start * MARCH_NUDGE + MARCH_NUDGE;
+        let window = coincidenceWindow(start);
         RayDesc ray;
         ray.Origin = origin;
         ray.Direction = direction;
@@ -319,8 +306,8 @@ void shadeVolume<let HETERO : int, let EMISSIVE : int>(uint3 tid) {
             // to one group loses the second this way, exactly as it does
             // without any of this.) A crossable partner is crossed here and
             // the leg runs on. Anything else — a wall standing on the
-            // boundary — falls through and shades, which the plain forward
-            // nudge used to run straight through.
+            // boundary — falls through and shades rather than being
+            // skipped over by the forward nudge.
             //
             // Partners are never committed, so `TMax` still closes on the
             // first thing that ends the leg, and they are skipped before the

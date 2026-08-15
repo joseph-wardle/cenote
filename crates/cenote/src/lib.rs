@@ -10,16 +10,9 @@
 //! |-------------|------|
 //! | `gpu`       | Unsafe-Vulkan quarantine: device context, buffers, submits, pipelines, acceleration structures, window presentation, the viewer's egui overlay pass. Code outside this module does not touch raw `vk` handles. |
 //! | `shaders`   | Embedded SPIR-V registry, `slangc` runtime recompile, hot-reload watching |
-//! | `scene`     | The scene model — `scene::description` is the typed named-object schema, `scene::changeset` its only edit path — and the prep path that joins it to GPU residency, rebuilding only what an edit dirtied. `scene::curves` owns every piece of curve mathematics: `BasisCurves` cells in, strands out, three-sided tubes onto the ordinary triangle path |
+//! | `scene`     | The whole scene subsystem. `scene::description` is the typed named-object schema and `scene::changeset` its only edit path; the private prep path joins that model to GPU residency, rebuilding only what an edit dirtied. The pipeline it feeds on lives beside it: `scene::source` (PLY meshes, `.hair` grooms, `NanoVDB` grids, texture prep with its DDS cache), `scene::curves` (every piece of curve mathematics), and the GPU-record halves — `scene::material` (`OpenPBR` records), `scene::lights` (the power-proportional alias table), `scene::environment` (equirect CDF tables), `scene::tables` + `scene::blackbody` (the closure's baked LUTs) |
 //! | `format`    | The `.ron` scene-file boundary: versioned RON serialization of change-sets |
-//! | `material`  | `OpenPBR` surface parameters — the host half of the material schema |
-//! | `lights`    | The light list — emissive triangles and delta lights — and its power-proportional alias table, built at prep |
-//! | `environment` | The equirect environment light: EXR load and the CDF sampling tables, built at prep |
 //! | `color`     | Authored `Rec.709` → `ACEScg` conversion at scene prep |
-//! | `ply`       | Hand-rolled PLY reader — the mesh schema's bulk-geometry payload, resolved at prep |
-//! | `hair`      | Reader for Cem Yuksel's `.hair` grooms — the curve schema's bulk payload, resolved at prep into the same strands `BasisCurves` cells evaluate to |
-//! | `tables`    | The closure's baked lookup tables — GGX energy data (regenerable from its own QMC baker) and the vendored LTC sheen fit — embedded, uploaded with the scene's resident buffers |
-//! | `texture`   | Texture prep: decode → mip-cap → BC encode, cached as a DDS beside the source; scene prep uploads the results into the bindless table |
 //! | `wavefront` | The engine core: `SoA` path state, GPU stage queues, indirect dispatch — one [`wavefront::Wavefront::trace`] is one sample per pixel, written pixel-owned so renders are bitwise deterministic |
 //! | `render`    | Frame orchestration: [`render::Renderer`] accumulates samples into a [`render::Film`] and resolves the linear average; [`render::Session`] runs that loop on its own thread, publishes frames to peek at, and lands queued change-sets at wave boundaries; [`render::Tonemap`] is the consumer's downstream view transform |
 //! | `output`    | Linear EXR write + read (read exists for the golden-image tests and the demo environment) |
@@ -43,25 +36,16 @@
 //! between the two surfaces as a failed golden-image test, never as silent
 //! corruption.
 
-mod blackbody;
 pub mod color;
 pub mod denoise;
-pub mod environment;
 pub mod error;
 pub mod format;
 pub mod gpu;
-mod hair;
-pub mod lights;
-pub mod material;
 pub mod output;
-mod ply;
 pub mod render;
 pub mod scene;
 pub mod shaders;
 pub mod stats;
-mod tables;
-mod texture;
-mod vdb;
 pub mod wavefront;
 
 pub use error::{Error, Result};

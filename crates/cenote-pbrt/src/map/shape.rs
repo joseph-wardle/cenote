@@ -190,10 +190,11 @@ pub(super) fn trianglemesh(directive: &Directive, flip: bool) -> Result<MeshSour
             for triple in values.chunks_exact(3) {
                 let mut triangle = [0u32; 3];
                 for (corner, value) in triangle.iter_mut().zip(triple) {
-                    if *value < 0.0 || *value > f64::from(u32::MAX) {
+                    if *value < 0.0 || *value >= positions.len() as f64 {
                         return Err(Error::SceneFormat(format!(
-                            "{}: index {value} is out of range",
-                            param.location
+                            "{}: index {value} is out of range for {} vertices",
+                            param.location,
+                            positions.len()
                         )));
                     }
                     *corner = *value as u32;

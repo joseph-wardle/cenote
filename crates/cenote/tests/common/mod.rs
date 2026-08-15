@@ -7,12 +7,17 @@ use cenote::render::{Film, Renderer};
 use cenote::scene::Scene;
 
 /// GPU gate: `None` skips the calling test with a note on stderr, so GPU-less
-/// machines (and CI) pass cleanly.
+/// machines (and CI) pass cleanly. `CENOTE_REQUIRE_GPU=1` turns the skip into
+/// a failure.
 pub fn test_context() -> Option<Context> {
     let _ = env_logger::builder().is_test(true).try_init();
     match Context::new() {
         Ok(gpu) => Some(gpu),
         Err(err) => {
+            assert!(
+                std::env::var_os("CENOTE_REQUIRE_GPU").is_none(),
+                "CENOTE_REQUIRE_GPU is set but GPU bring-up failed: {err}"
+            );
             eprintln!("skipping: no capable GPU here ({err})");
             None
         }

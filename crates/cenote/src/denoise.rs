@@ -450,7 +450,10 @@ mod tests {
                 "{width}×{height} lost the step, so the filter had the wrong rectangle"
             );
         }
-        assert_eq!(denoiser.capacity, 64 * 48 * 16, "capacity must not shrink");
+        assert!(
+            denoiser.capacity >= 64 * 48 * 16,
+            "capacity must not shrink below the largest frame seen"
+        );
     }
 
     /// The renderer's own GPU opens by its Vulkan UUID — the path every

@@ -1,0 +1,44 @@
+// The heterogeneous-volume unbiasedness oracle: the openvdb.org
+// bunny_cloud under a constant white sky, nothing else in frame — so
+// every path either tracks through the grid or escapes, and next-event
+// estimation (which the tracker skips inside grids) never fires from a
+// surface. The same setup renders in pbrt-v4 (volpath + its nanovdb
+// medium; bunny-pbrt.pbrt beside this file) for a mean-convergence
+// comparison; everything is gray so the Rec.709→ACEScg conversion is the
+// identity on both sides of it.
+//
+// σ_t = 0.37/m against a density that peaks at 2.79 and averages 0.30
+// inside the cloud: mean optical depth a few, albedo 0.946, a lean
+// forward g — a plausible white cloud, not a corner case.
+//
+// Fetch the source first: scenes/vdb/fetch.sh (bunny_cloud is CC-BY).
+(
+    version: 2,
+    ops: [
+        Settings((name: "main", resolution: Some((960, 540)), max_bounces: Some(32))),
+        Camera((
+            name: "main",
+            position: Some((-1.0, 19.0, 62.0)),
+            look_at: Some((-1.0, 19.0, 1.0)),
+            vfov_degrees: Some(48.0),
+        )),
+        // Pathless: the constant white sky is the light source.
+        Environment((name: "sky")),
+
+        Mesh((name: "shell", source: Some(MediumBounds))),
+        Material((name: "inert")),
+        Medium((
+            name: "cloud",
+            absorption: Some((0.02, 0.02, 0.02)),
+            scattering: Some((0.35, 0.35, 0.35)),
+            anisotropy: Some(0.3),
+            volume: Some(Some((path: "sources/bunny_cloud.vdb"))),
+        )),
+        Instance((
+            name: "cloud",
+            mesh: Some("shell"),
+            material: Some("inert"),
+            medium: Some(Some("cloud")),
+        )),
+    ],
+)

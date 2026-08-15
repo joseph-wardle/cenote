@@ -599,7 +599,7 @@ impl Default for Instance {
 
 /// An `OpenPBR` surface. Field names and defaults mirror the `OpenPBR`
 /// v1.1.1 slugs exactly — interop alignment as a commitment. This is the
-/// authoring-side schema; `crate::material::Material` is its GPU-resident
+/// authoring-side schema; `crate::scene::material::Material` is its GPU-resident
 /// counterpart, and prep maps one onto the other (the closure work
 /// widens that mapping lobe by lobe).
 ///

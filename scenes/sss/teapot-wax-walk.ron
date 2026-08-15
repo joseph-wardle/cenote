@@ -1,5 +1,5 @@
 // B9's controlled SSS driver, wax tier, walk-authored: the same
-// teapot, rig, and interior as sss-teapot-wax.ron, driven through the
+// teapot, rig, and interior as teapot-wax.ron, driven through the
 // subsurface lobe instead of a scattering refractive interior. The mean
 // free path is the same (subsurface_radius = 0.23, scale 1), and the
 // tier's single-scatter albedo α = 0.95 is authored as the
@@ -25,7 +25,7 @@
         )),
         Environment((
             name: "sky",
-            path: Some(Some("../crates/cenote/assets/kloofendal_puresky.exr")),
+            path: Some(Some("../../crates/cenote/assets/kloofendal_puresky.exr")),
             // Dim enough that the quad dominates; bright enough that the
             // sky still seeds the silhouette.
             tint: Some((0.05, 0.05, 0.05)),
@@ -33,7 +33,7 @@
 
         Mesh((
             name: "solid",
-            source: Some(Ply(path: "sss-teapot.ply")),
+            source: Some(Ply(path: "teapot.ply")),
         )),
         Mesh((
             name: "plane",

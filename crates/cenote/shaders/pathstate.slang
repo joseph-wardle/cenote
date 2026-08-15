@@ -22,6 +22,39 @@
 // `WORKGROUP_SIZE` in `wavefront.rs`.
 public static const uint WORKGROUP_SIZE = 64;
 
+// How far past a boundary crossing the next leg of a media walk starts.
+// Relative, so it holds at any scene scale, and at least eight float32
+// ulps wide, so re-testing the same triangle cannot return the crossing
+// just made. Two boundaries closer together than this read as one — both
+// walkers (the volume march and the camera resolve) must group everything
+// inside the window into one event, because losing one crossing of such a
+// pair leaves a medium the path is not in, or omits one it is.
+public static const float BOUNDARY_NUDGE = 1e-6;
+
+// The window a leg starting at `start` opens around a crossing — the one
+// spelling both walkers share, so the epsilon logic cannot drift apart.
+public float coincidenceWindow(float start)
+{
+    return start * BOUNDARY_NUDGE + BOUNDARY_NUDGE;
+}
+
+// The probe histogram's layout (measurement builds, `-DPROBES`) — the one
+// Slang authority, mirrored by the `PROBE_*` constants in wavefront.rs
+// that the readback indexes by. The volume stage bins scatter events by
+// bounce in [0, PROBE_VOLUME_BINS); the walk bins exit lengths above that,
+// its last two bins taken by the exitless deaths; the rejection, roulette,
+// and tracker counters append above both halves.
+public static const uint PROBE_VOLUME_BINS = 256;
+public static const uint PROBE_WALK_BASE = PROBE_VOLUME_BINS;
+public static const uint PROBE_WALK_LEAK_BIN = 2 * PROBE_VOLUME_BINS - 2;
+public static const uint PROBE_WALK_CAP_BIN = 2 * PROBE_VOLUME_BINS - 1;
+public static const uint PROBE_ENTRY_REJECT_BIN = 2 * PROBE_VOLUME_BINS;
+public static const uint PROBE_EXIT_REJECT_BIN = PROBE_ENTRY_REJECT_BIN + 1;
+public static const uint PROBE_ROULETTE_BIN = PROBE_EXIT_REJECT_BIN + 1;
+public static const uint PROBE_TRACKER_COLLISION_BIN = PROBE_ROULETTE_BIN + 1;
+public static const uint PROBE_TRACKER_NULL_BIN = PROBE_TRACKER_COLLISION_BIN + 1;
+public static const uint PROBE_TRACKER_STEP_BIN = PROBE_TRACKER_NULL_BIN + 1;
+
 // Where a path's ray stopped, in the re-evaluable form (instance +
 // primitive + barycentrics) that shading recomputes from.
 public struct Hit {
