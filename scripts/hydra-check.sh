@@ -24,7 +24,7 @@ echo "== clang-tidy =="
 find hydra -name '*.cpp' -print0 |
   xargs -0 -P"$(nproc)" -n1 clang-tidy -p build/hydra --quiet
 
-for test in usdrecord_smoke render_settings_test flip_golden interactive_test; do
+for test in usdrecord_smoke render_settings_test curves_test flip_golden interactive_test; do
   echo "== $test =="
   python3 "hydra/tests/$test.py"
 done

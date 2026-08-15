@@ -546,13 +546,12 @@ cenote::wire::MaterialPatch _ReadMaterial(const SdfPath& path, const HdSceneInde
 
 } // namespace
 
-HdCenoteMaterialPrim::HdCenoteMaterialPrim(const SdfPath& path,
-                                           const HdsiPrimManagingSceneIndexObserver* observer,
-                                           cenote::wire::ChangeSet* pending,
-                                           std::shared_ptr<Registry> live,
-                                           std::shared_ptr<const HdCenoteMeshPrim::Registry> meshes)
+HdCenoteMaterialPrim::HdCenoteMaterialPrim(
+    const SdfPath& path, const HdsiPrimManagingSceneIndexObserver* observer,
+    cenote::wire::ChangeSet* pending, std::shared_ptr<Registry> live,
+    std::shared_ptr<const HdCenoteGeometryPrim::Registry> geometry)
     : _path(path), _name(path.GetString()), _pending(pending), _live(std::move(live)),
-      _meshes(std::move(meshes)) {
+      _geometry(std::move(geometry)) {
     const auto [it, inserted] = _live->try_emplace(_path, this);
     if (!inserted) {
         // A resync: inherit the previous translator's ledger and take
@@ -593,15 +592,15 @@ void HdCenoteMaterialPrim::_Dirty(const HdSceneIndexObserver::DirtiedPrimEntry& 
 
 void HdCenoteMaterialPrim::_Reconcile(const HdSceneIndexPrim& prim) {
     const bool born = !_sent;
-    // No identical-patch suppression: like a mesh's no-op edit, a
+    // No identical-patch suppression: like a geometry prim's no-op edit, a
     // byte-identical patch still travels and bumps the epoch (Q9).
     _pending->ops.push_back(_ReadMaterial(_path, prim));
     _sent = true;
     if (born) {
-        // The birth hook: a material arriving after the meshes
-        // that bind it generates no binding dirt, so the waiting meshes
+        // The birth hook: a material arriving after the prims
+        // that bind it generates no binding dirt, so the waiting prims
         // repoint themselves now.
-        _RepointMeshes();
+        _RepointGeometry();
     }
 }
 
@@ -613,14 +612,14 @@ void HdCenoteMaterialPrim::_Withdraw() {
     // walk sees it, and every bound instance lets go before the Remove
     // is appended — one flush, validated post-set, nothing dangles.
     _sent = false;
-    _RepointMeshes();
+    _RepointGeometry();
     _pending->ops.push_back(
         cenote::wire::Remove{.kind = cenote::wire::Kind::Material, .name = _name});
 }
 
-void HdCenoteMaterialPrim::_RepointMeshes() {
-    for (const auto& [path, mesh] : *_meshes) {
-        mesh->ResolveBinding();
+void HdCenoteMaterialPrim::_RepointGeometry() {
+    for (const auto& [path, prim] : *_geometry) {
+        prim->ResolveBinding();
     }
 }
 

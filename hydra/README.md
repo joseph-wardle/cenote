@@ -57,7 +57,7 @@ one release-cycle of 26.05↔25.05 API drift is absorbed in the single
 ## The pre-push gate
 
 ```sh
-scripts/hydra-check.sh   # build, ctest, clang-format, clang-tidy, the four Python tests
+scripts/hydra-check.sh   # build, ctest, clang-format, clang-tidy, the five Python tests
 ```
 
 Formatting and linting are pinned to the clang 22.1.8 PyPI wheels
@@ -66,6 +66,18 @@ clang-format; clang-tidy stays local because it reads the USD build's compile
 database. The Python tests need the USD prefix on `PATH`/`PYTHONPATH` (below), a
 built `cenote-server` (`target/{release,debug}`, or `$CENOTE_SERVER`), and — for
 `interactive_test.py` — a display.
+
+`curves_test.py` holds two accounts of the same groom against each other: what
+the stage authors, read with pxr, and what the server says it resolved, read
+out of its own log. The fixture it drives is Houdini's — `stages/curves-groom.py`
+regenerates it under `hython`, and the delegate has to read the tokens Houdini
+actually writes (an empty `basis` on a linear prim among them). Two prims must
+*not* render — one refused for the name of its wrap, one for a vertex count no
+span can hold — and they share a band of pixels that has to come back black: a
+change set is atomic, so a delegate that forwarded either instead of withdrawing
+it would black out the whole frame instead. Under `--host husk` the leg that
+reads the server's log runs alone, and it is the same numbers Houdini's own USD
+25.05 produces.
 
 `render_settings_test.py` is the one that reads no pixels at all: it names each
 `RenderSettings` prim on its stage in turn and asserts what the render *does* —

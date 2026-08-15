@@ -39,8 +39,8 @@ PXR_NAMESPACE_OPEN_SCOPE
 class HdCenoteDomePrim final : public HdsiPrimManagingSceneIndexObserver::PrimBase {
 public:
     /// Which translator currently answers for each dome path — the same
-    /// resync tie-breaker the mesh translator carries (see
-    /// HdCenoteMeshPrim::Registry), and here also the arbitration order:
+    /// resync tie-breaker the geometry translator carries (see
+    /// HdCenoteGeometryPrim::Registry), and here also the arbitration order:
     /// the map sorts by path, so the first eligible entry is the winner.
     using Registry = std::map<SdfPath, HdCenoteDomePrim*>;
 

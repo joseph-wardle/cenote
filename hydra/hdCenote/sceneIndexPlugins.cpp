@@ -28,7 +28,7 @@ TF_DEFINE_PRIVATE_TOKENS(_tokens, (glslfx));
 
 /// material:binding:preview bindings collapse onto the all-purpose slot
 /// — preview is where assets that split their bindings put the
-/// UsdPreviewSurface look, and the mesh translator reads only the
+/// UsdPreviewSurface look, and the geometry translator reads only the
 /// all-purpose binding. Exactly Storm's block
 /// (hdSt/materialBindingResolvingSceneIndexPlugin.cpp).
 class HdCenoteMaterialBindingResolvingSceneIndexPlugin final : public HdSceneIndexPlugin {
@@ -43,7 +43,8 @@ protected:
 };
 
 /// USD sphere/cube/cone/cylinder/capsule/plane prims become meshes for
-/// free — cenote's one geometry is the triangle mesh.
+/// free — the delegate reads meshes and BasisCurves, and no other prim
+/// type carries a surface.
 class HdCenoteImplicitSurfaceSceneIndexPlugin final : public HdSceneIndexPlugin {
 protected:
     HdSceneIndexBaseRefPtr
@@ -59,7 +60,7 @@ protected:
     }
 };
 
-/// Skinning and friends become plain primvars — the mesh translator
+/// Skinning and friends become plain primvars — the geometry translator
 /// reads points, never runs a computation.
 class HdCenoteExtComputationPrimvarPruningSceneIndexPlugin final : public HdSceneIndexPlugin {
 protected:

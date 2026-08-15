@@ -1,0 +1,188 @@
+#usda 1.0
+(
+    """The curves checkpoint stage: a Houdini groom, every BasisCurves
+    topology the delegate accepts, and one it must refuse.
+
+    The groom is referenced from curves-groom.usda, which nothing here
+    authored — it is whatever Houdini 21 writes for a fur SOP and a
+    hairgen (see curves-groom.py). Its two prims are the two shapes a
+    groom arrives in: cubic b-splines with vertex widths, and linear
+    hairs whose widths taper to exactly zero at the tip.
+
+    The Contract scope is the other half — the rows a DCC will not write
+    but the format allows, one prim per interesting cell of
+    UsdGeomBasisCurves' own table. The two `Refused*` prims are the ones
+    that must not render, one for each way the server refuses a topology:
+    a wrap it will not read, and a vertex count no span can hold. A change
+    set is atomic, so sending either anyway would take the groom, the
+    lights, and the camera down with it — which is exactly what the render
+    proves did not happen.
+
+    Framing puts the groom on the left and the contract row on the right,
+    both in one 35 mm view (tests/curves_test.py)."""
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "Camera"
+    {
+        float focalLength = 35
+        double3 xformOp:translate = (0.15, 0.45, 6.0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DistantLight "Key"
+    {
+        float inputs:intensity = 1.6
+        bool inputs:normalize = 1
+        float3 xformOp:rotateXYZ = (-40, 25, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def DistantLight "Fill"
+    {
+        float inputs:intensity = 0.5
+        bool inputs:normalize = 1
+        float3 xformOp:rotateXYZ = (-10, -70, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    # The Houdini fixture, bound to a real material so the binding path is
+    # proven on curves and not only on meshes.
+    def Xform "Groom" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+        prepend references = @./curves-groom.usda@</groom>
+    )
+    {
+        rel material:binding = </World/Looks/fiber>
+        double3 xformOp:translate = (-1.25, 0.5, 0)
+        double3 xformOp:scale = (0.4, 0.4, 0.4)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    def Scope "Looks"
+    {
+        def Material "fiber"
+        {
+            token outputs:surface.connect = </World/Looks/fiber/surface.outputs:surface>
+
+            def Shader "surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.24, 0.12, 0.05)
+                float inputs:roughness = 0.4
+                token outputs:surface
+            }
+        }
+    }
+
+    # One prim per row of the segment table, left to right. Each stands a
+    # meter tall in its own column, so a render can tell which one went
+    # missing.
+    def Scope "Contract"
+    {
+        # Pinned Catmull-Rom, vertex widths: the groom shape every DCC
+        # that cares about roots writes. Five control vertices, four
+        # segments, and the curve passes through the first and last.
+        def BasisCurves "PinnedCatmullRom"
+        {
+            uniform token type = "cubic"
+            uniform token basis = "catmullRom"
+            uniform token wrap = "pinned"
+            int[] curveVertexCounts = [5]
+            point3f[] points = [(0.4, 0, 0), (0.46, 0.25, 0.05), (0.34, 0.5, -0.05), (0.46, 0.75, 0.05), (0.4, 1, 0)]
+            float[] widths = [0.05, 0.042, 0.034, 0.026, 0.018] (
+                interpolation = "vertex"
+            )
+            color3f[] primvars:displayColor = [(0.8, 0.1, 0.1)]
+        }
+
+        # Bezier, whose vstep of three is the one that does not divide
+        # every vertex count: seven vertices are exactly two spans.
+        def BasisCurves "Bezier"
+        {
+            uniform token type = "cubic"
+            uniform token basis = "bezier"
+            uniform token wrap = "nonperiodic"
+            int[] curveVertexCounts = [7]
+            point3f[] points = [(0.8, 0, 0), (0.92, 0.17, 0), (0.68, 0.33, 0), (0.8, 0.5, 0), (0.92, 0.67, 0), (0.68, 0.83, 0), (0.8, 1, 0)]
+            float[] widths = [0.04] (
+                interpolation = "constant"
+            )
+            color3f[] primvars:displayColor = [(0.85, 0.8, 0.08)]
+        }
+
+        # B-spline with varying widths: one width per segment end, linear
+        # along each segment. Six vertices span three segments, so four
+        # values.
+        def BasisCurves "VaryingWidth"
+        {
+            uniform token type = "cubic"
+            uniform token basis = "bspline"
+            uniform token wrap = "nonperiodic"
+            int[] curveVertexCounts = [6]
+            point3f[] points = [(1.2, 0, 0), (1.32, 0.2, 0), (1.08, 0.4, 0), (1.32, 0.6, 0), (1.08, 0.8, 0), (1.2, 1, 0)]
+            float[] widths = [0.06, 0.045, 0.03, 0.015] (
+                interpolation = "varying"
+            )
+            color3f[] primvars:displayColor = [(0.1, 0.7, 0.15)]
+        }
+
+        # Two linear curves in one prim, one width each: the uniform
+        # interpolation, and the walk that has to keep two cursors apart.
+        def BasisCurves "UniformWidth"
+        {
+            uniform token type = "linear"
+            uniform token basis = ""
+            uniform token wrap = "nonperiodic"
+            int[] curveVertexCounts = [3, 4]
+            point3f[] points = [(1.55, 0, 0), (1.63, 0.5, 0), (1.55, 1, 0), (1.75, 0, 0), (1.83, 0.33, 0), (1.67, 0.67, 0), (1.75, 1, 0)]
+            float[] widths = [0.05, 0.025] (
+                interpolation = "uniform"
+            )
+            color3f[] primvars:displayColor = [(0.1, 0.2, 0.85)]
+        }
+
+        # The two refusals, sharing the gap between the groom and the
+        # contract row so one band of pixels answers for both. Each is
+        # legal USD the server will not accept, and each must be withdrawn
+        # on the way in: a change set is atomic, so one that reached the
+        # wire would fail and take everything else on this stage with it.
+        # The band is black in a passing render, which is a thing the test
+        # can say about pixels rather than about a log.
+        #
+        # A periodic wrap — refused by the name of the token.
+        def BasisCurves "RefusedPeriodic"
+        {
+            uniform token type = "linear"
+            uniform token basis = ""
+            uniform token wrap = "periodic"
+            int[] curveVertexCounts = [4]
+            point3f[] points = [(0.0, 0.3, 0), (0.2, 0.3, 0), (0.2, 0.7, 0), (0.0, 0.7, 0)]
+            float[] widths = [0.05] (
+                interpolation = "constant"
+            )
+            color3f[] primvars:displayColor = [(0.9, 0.9, 0.9)]
+        }
+
+        # Six control vertices on a bezier — refused by arithmetic, since
+        # vstep 3 spans 4, 7, 10… and never 6. The delegate has to mirror
+        # the server's segment table and not merely its vocabulary, and
+        # this is the prim that says which.
+        def BasisCurves "RefusedSpan"
+        {
+            uniform token type = "cubic"
+            uniform token basis = "bezier"
+            uniform token wrap = "nonperiodic"
+            int[] curveVertexCounts = [6]
+            point3f[] points = [(0.02, 0.3, 0), (0.08, 0.4, 0), (0.14, 0.5, 0), (0.18, 0.55, 0), (0.12, 0.65, 0), (0.04, 0.7, 0)]
+            float[] widths = [0.05] (
+                interpolation = "constant"
+            )
+            color3f[] primvars:displayColor = [(0.9, 0.9, 0.9)]
+        }
+    }
+}

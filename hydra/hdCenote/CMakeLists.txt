@@ -6,7 +6,7 @@ add_library(hdCenote MODULE
     instancerPrim.cpp
     lightPrim.cpp
     materialPrim.cpp
-    meshPrim.cpp
+    geometryPrim.cpp
     observer.cpp
     renderBuffer.cpp
     renderDelegate.cpp

@@ -5,7 +5,9 @@ asserting what a user at the viewport would live through. Three legs:
   1. Edit honesty — a real edit through the stage handle drops IsConverged
      (the epoch bar rising past the front frame) and reconverges
      with different pixels; a visually inert edit still travels the wire
-     and comes back converged — a wedged epoch would time out right there.
+     and comes back converged — a wedged epoch would time out right there;
+     and a prim that changes type under one path swaps wire kinds inside
+     one atomic change set, in both directions.
   2. Kill-survive — SIGKILL the spawned cenote-server mid-session: the app
      survives, the client degrades (observed as the corpse being reaped),
      converged reads true so hosts do not spin, and the warning naming the
@@ -34,6 +36,7 @@ from pathlib import Path
 # The stdout lines the viewer half prints and the wrapper half demands.
 MARK_EDIT = "interactive: edit honesty OK"
 MARK_NOOP = "interactive: no-op republish OK"
+MARK_KIND = "interactive: kind change OK"
 MARK_KILL = "interactive: kill-survive OK"
 MARK_TOGGLE = "interactive: toggle-recover OK"
 
@@ -102,6 +105,18 @@ def _silhouette(shot):
     return buckets
 
 
+def _lit(shot):
+    """How many pixels of the viewport carry geometry."""
+    return sum(bucket[0] for bucket in _silhouette(shot))
+
+
+def _settle(view, converged, what):
+    """Wait out one scene edit: convergence has to drop before it returns,
+    or the frame grabbed afterwards is the one from before the edit."""
+    _pump(view, lambda: not converged(), f"convergence to drop for {what}")
+    _pump(view, converged, f"{what} to converge")
+
+
 def _spawned_servers():
     """The cenote-server pids this very process spawned, by /proc walk: the
     delegate's client is in-process, so its child's ppid is our pid."""
@@ -140,8 +155,7 @@ def testUsdviewInputFunction(appController):
     near = stage.GetPrimAtPath("/World/Near")
     _check(near, "/World/Near missing from the stage")
     near.GetAttribute("xformOp:translate").Set(Gf.Vec3d(-1.2, -3.0, 1.2))
-    _pump(view, lambda: not converged(), "convergence to drop after the edit")
-    _pump(view, converged, "reconvergence after the edit")
+    _settle(view, converged, "the edit")
     _check(
         _rgb(view.grabFramebuffer()) != before,
         "the edit reconverged without changing a pixel",
@@ -154,9 +168,61 @@ def testUsdviewInputFunction(appController):
     # republish, where a wedged epoch would stick at never-converged.
     color = near.GetAttribute("primvars:displayColor")
     color.Set(color.Get())
-    _pump(view, lambda: not converged(), "convergence to drop after the no-op edit")
-    _pump(view, converged, "converged to return after the no-op edit")
+    _settle(view, converged, "the no-op edit")
     print(MARK_NOOP, flush=True)
+
+    # Leg 1, the kind change: one path that stops being a mesh and starts
+    # being curves. Both payloads answer to the same server name under
+    # different wire kinds, so the one already resident has to be
+    # withdrawn inside the same atomic change set the new one arrives in.
+    # A translator that inherited only "something is up" would leave the
+    # mesh standing and the instance still pointing at it — so what is
+    # measured is coverage, not difference: the cube's ink has to leave
+    # the frame when the curve replaces it, and come back when it does.
+    # (Difference alone proves nothing; two converged frames of the same
+    # scene do not agree byte for byte.)
+    from pxr import UsdGeom, Vt
+
+    lit_empty = _lit(view.grabFramebuffer())
+    shift = stage.DefinePrim("/World/Shift", "Cube")
+    UsdGeom.Cube(shift).CreateSizeAttr().Set(0.9)
+    # Off to the right of both cubes, so its ink is the only ink that moves.
+    UsdGeom.Xformable(shift).AddTranslateOp().Set(Gf.Vec3d(3.05, 0.0, 0.0))
+    _settle(view, converged, "the new mesh")
+    lit_mesh = _lit(view.grabFramebuffer())
+    _check(lit_mesh > lit_empty, "the new mesh put no ink on the frame")
+    half = lit_empty + (lit_mesh - lit_empty) / 2
+
+    shift.SetTypeName("BasisCurves")
+    curves = UsdGeom.BasisCurves(shift)
+    curves.CreateTypeAttr().Set(UsdGeom.Tokens.linear)
+    curves.CreateWrapAttr().Set(UsdGeom.Tokens.nonperiodic)
+    curves.CreateCurveVertexCountsAttr().Set(Vt.IntArray([2]))
+    curves.CreatePointsAttr().Set(
+        Vt.Vec3fArray([Gf.Vec3f(2.70, 0.0, -0.45), Gf.Vec3f(3.40, 0.0, 0.45)])
+    )
+    curves.CreateWidthsAttr().Set(Vt.FloatArray([0.12]))
+    curves.SetWidthsInterpolation(UsdGeom.Tokens.constant)
+    _settle(view, converged, "the curves")
+    lit_curves = _lit(view.grabFramebuffer())
+    _check(lit_curves > lit_empty, "the curves put no ink on the frame")
+    _check(
+        lit_curves < half,
+        f"the mesh became curves but the frame kept {lit_curves} lit pixels of the mesh's "
+        f"{lit_mesh} — the stale payload was not withdrawn",
+    )
+
+    shift.SetTypeName("Cube")
+    _settle(view, converged, "the mesh to come back")
+    _check(
+        _lit(view.grabFramebuffer()) > half,
+        "the curves became a mesh but the frame kept the curves' coverage",
+    )
+
+    stage.RemovePrim("/World/Shift")
+    _settle(view, converged, "the shifted prim to leave")
+    _check(_lit(view.grabFramebuffer()) < half, "the removed prim left its ink behind")
+    print(MARK_KIND, flush=True)
 
     # Leg 2: kill-survive. SIGKILL the server; the next painted frame's
     # liveness probe must notice the hangup, warn, degrade, and reap the
@@ -256,14 +322,17 @@ def main():
     if done.returncode != 0:
         sys.stderr.write(done.stdout[-2000:] + done.stderr[-2000:])
         fail(f"testusdview exited {done.returncode}")
-    for marker in (MARK_EDIT, MARK_NOOP, MARK_KILL, MARK_TOGGLE):
+    for marker in (MARK_EDIT, MARK_NOOP, MARK_KIND, MARK_KILL, MARK_TOGGLE):
         if marker not in done.stdout:
             sys.stderr.write(done.stdout[-2000:] + done.stderr[-2000:])
             fail(f"missing marker: {marker!r}")
     if KILL_WARNING not in done.stderr:
         sys.stderr.write(done.stderr[-2000:])
         fail("the kill never produced the disconnect warning")
-    print("interactive test: OK — edit honesty, no-op republish, kill-survive, toggle-recover")
+    print(
+        "interactive test: OK — edit honesty, no-op republish, kind change, kill-survive, "
+        "toggle-recover"
+    )
 
 
 # testusdview execs this file with neither __name__ nor __file__ defined,

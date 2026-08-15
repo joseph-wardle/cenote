@@ -1,4 +1,4 @@
-#include "meshPrim.hpp"
+#include "geometryPrim.hpp"
 
 #include "instancerPrim.hpp"
 #include "materialPrim.hpp"
@@ -19,6 +19,8 @@
 #include "pxr/base/tf/staticTokens.h"
 #include "pxr/base/vt/types.h"
 #include "pxr/base/vt/value.h"
+#include "pxr/imaging/hd/basisCurvesSchema.h"
+#include "pxr/imaging/hd/basisCurvesTopologySchema.h"
 #include "pxr/imaging/hd/instancedBySchema.h"
 #include "pxr/imaging/hd/materialBindingSchema.h"
 #include "pxr/imaging/hd/materialBindingsSchema.h"
@@ -160,7 +162,8 @@ std::optional<_Primvar<Array>> _ReadPrimvar(const SdfPath& path, const HdPrimvar
     return _Primvar<Array>{std::move(array), true};
 }
 
-/// points — always vertex, the one primvar geometry cannot do without.
+/// points — always vertex, the one primvar geometry cannot do without,
+/// and the one both payloads read.
 VtVec3fArray _Points(const SdfPath& path, const HdPrimvarsSchema& primvars) {
     const HdSampledDataSourceHandle value = primvars.GetPrimvar(HdTokens->points).GetPrimvarValue();
     if (!value) {
@@ -168,14 +171,14 @@ VtVec3fArray _Points(const SdfPath& path, const HdPrimvarsSchema& primvars) {
     }
     const VtValue sampled = value->GetValue(0.0f);
     if (!sampled.IsHolding<VtVec3fArray>()) {
-        TF_WARN("<%s> has points of type %s, not GfVec3f[]; mesh dropped", path.GetText(),
+        TF_WARN("<%s> has points of type %s, not GfVec3f[]; geometry dropped", path.GetText(),
                 sampled.GetTypeName().c_str());
         return {};
     }
     return sampled.UncheckedGet<VtVec3fArray>();
 }
 
-/// The wire payload: the base cage fan-triangulated by HdMeshUtil,
+/// The wire Mesh payload: the base cage fan-triangulated by HdMeshUtil,
 /// which honors orientation (leftHanded fans come out reversed), so the
 /// triples land counter-clockwise-outward as Inline requires. cenote's
 /// format is single-indexed — attributes live per position — so a
@@ -184,8 +187,7 @@ VtVec3fArray _Points(const SdfPath& path, const HdPrimvarsSchema& primvars) {
 /// value has a position to sit on. Nullopt is "nothing the server would
 /// accept" — an empty mesh is legal USD, but validation rejects a Mesh
 /// without geometry.
-std::optional<cenote::wire::Inline> _ReadGeometry(const SdfPath& path,
-                                                  const HdSceneIndexPrim& prim) {
+std::optional<cenote::wire::Inline> _ReadMesh(const SdfPath& path, const HdSceneIndexPrim& prim) {
     const HdMeshSchema mesh = HdMeshSchema::GetFromParent(prim.dataSource);
     const HdMeshTopologySchema topologySchema = mesh.GetTopology();
     const VtIntArray counts = _IntsOr(topologySchema.GetFaceVertexCounts());
@@ -281,6 +283,243 @@ std::optional<cenote::wire::Inline> _ReadGeometry(const SdfPath& path,
     return source;
 }
 
+/// UsdGeomBasisCurves' vstep: how many control vertices one span of a
+/// cubic curve advances by. Mirror of `CurveBasis::vstep`.
+size_t _VStep(const cenote::wire::CurveBasis basis) {
+    return basis == cenote::wire::CurveBasis::Bezier ? 3 : 1;
+}
+
+/// Whether a wrap actually pins — `pinned` is defined only for the
+/// approximating bases, and a pinned bezier is a nonperiodic bezier.
+/// Mirror of curves.rs' `pinned`.
+bool _Pins(const cenote::wire::CurveWrap wrap, const cenote::wire::CurveBasis basis) {
+    return wrap == cenote::wire::CurveWrap::Pinned && basis != cenote::wire::CurveBasis::Bezier;
+}
+
+/// One curve's segment count, or nullopt for a vertex count no span of
+/// this basis can hold. The arithmetic half of `curves::segment_count`,
+/// the server's single statement of what geometry it accepts; the
+/// periodic wrap it also refuses is refused by name in _ReadCurves,
+/// which is why no branch here reads for it. Duplicated at all because a
+/// ChangeSet is atomic: a prim the server would reject must be withdrawn
+/// rather than emitted, and only this table says which prims those are.
+/// Both refusals are exercised from the fixture stage
+/// (tests/stages/curves-stage.usda), one prim each.
+std::optional<size_t> _SegmentCount(const size_t count, const cenote::wire::CurveType curveType,
+                                    const cenote::wire::CurveBasis basis,
+                                    const cenote::wire::CurveWrap wrap) {
+    if (curveType == cenote::wire::CurveType::Linear || _Pins(wrap, basis)) {
+        return count >= 2 ? std::optional<size_t>(count - 1) : std::nullopt;
+    }
+    const size_t step = _VStep(basis);
+    if (count >= 4 && (count - 4) % step == 0) {
+        return (count - 4) / step + 1;
+    }
+    return std::nullopt;
+}
+
+/// The three topology tokens, each nullopt when it spells something the
+/// wire has no word for (`hermite` and `power`, retired from
+/// UsdGeomBasisCurves, land here) — refused by name rather than
+/// approximated by the nearest basis.
+std::optional<cenote::wire::CurveType> _CurveType(const TfToken& token) {
+    if (token == HdTokens->linear) {
+        return cenote::wire::CurveType::Linear;
+    }
+    if (token == HdTokens->cubic) {
+        return cenote::wire::CurveType::Cubic;
+    }
+    return std::nullopt;
+}
+
+std::optional<cenote::wire::CurveBasis> _CurveBasis(const TfToken& token) {
+    if (token == HdTokens->bezier) {
+        return cenote::wire::CurveBasis::Bezier;
+    }
+    if (token == HdTokens->bSpline) {
+        return cenote::wire::CurveBasis::BSpline;
+    }
+    if (token == HdTokens->catmullRom) {
+        return cenote::wire::CurveBasis::CatmullRom;
+    }
+    return std::nullopt;
+}
+
+std::optional<cenote::wire::CurveWrap> _CurveWrap(const TfToken& token) {
+    if (token == HdTokens->nonperiodic) {
+        return cenote::wire::CurveWrap::Nonperiodic;
+    }
+    if (token == HdTokens->pinned) {
+        return cenote::wire::CurveWrap::Pinned;
+    }
+    if (token == HdTokens->periodic) {
+        return cenote::wire::CurveWrap::Periodic;
+    }
+    return std::nullopt;
+}
+
+/// The width stream, or nullopt for "unauthored" — which the server
+/// reads as UsdGeomCurves' own fallback of one meter everywhere, so an
+/// absent `widths` is a value, not a gap. A stream whose length does not
+/// match what its interpolation asks for is dropped under a warning,
+/// the same rule the mesh side applies to a mis-counted primvar: the
+/// curves still render, at the spec's default width, and the log says
+/// why they look wrong.
+std::optional<cenote::wire::Widths> _ReadWidths(const SdfPath& path,
+                                                const HdPrimvarsSchema& primvars,
+                                                const size_t vertices, const size_t varying,
+                                                const size_t curves) {
+    const HdPrimvarSchema primvar = primvars.GetPrimvar(HdTokens->widths);
+    const HdSampledDataSourceHandle value = primvar.GetPrimvarValue();
+    if (!value) {
+        return std::nullopt;
+    }
+    const TfToken interpolation = _TokenOr(primvar.GetInterpolation(), TfToken());
+    cenote::wire::Widths widths;
+    size_t expected = 0;
+    if (interpolation == HdPrimvarSchemaTokens->constant) {
+        widths.interpolation = cenote::wire::WidthInterpolation::Constant;
+        expected = 1;
+    } else if (interpolation == HdPrimvarSchemaTokens->uniform) {
+        widths.interpolation = cenote::wire::WidthInterpolation::Uniform;
+        expected = curves;
+    } else if (interpolation == HdPrimvarSchemaTokens->varying) {
+        widths.interpolation = cenote::wire::WidthInterpolation::Varying;
+        expected = varying;
+    } else if (interpolation == HdPrimvarSchemaTokens->vertex) {
+        widths.interpolation = cenote::wire::WidthInterpolation::Vertex;
+        expected = vertices;
+    } else {
+        TF_WARN("<%s> interpolates widths as %s, which UsdGeomCurves does not define; dropped, so "
+                "the curves render one meter wide",
+                path.GetText(), interpolation.GetText());
+        return std::nullopt;
+    }
+    const VtValue sampled = value->GetValue(0.0f);
+    if (!sampled.IsHolding<VtFloatArray>()) {
+        TF_WARN("<%s> has widths of type %s, not float[]; dropped, so the curves render one meter "
+                "wide",
+                path.GetText(), sampled.GetTypeName().c_str());
+        return std::nullopt;
+    }
+    const VtFloatArray& values = sampled.UncheckedGet<VtFloatArray>();
+    if (values.size() != expected) {
+        TF_WARN("<%s> carries %zu %s widths, but its topology asks for %zu; dropped, so the curves "
+                "render one meter wide",
+                path.GetText(), values.size(), interpolation.GetText(), expected);
+        return std::nullopt;
+    }
+    widths.values.assign(values.begin(), values.end());
+    return widths;
+}
+
+/// The wire Curves payload: BasisCurves cells passed through as authored.
+/// Nothing is evaluated here — points, counts, and the three topology
+/// tokens travel verbatim, and the server owns the curve mathematics
+/// exactly once (scene/curves.rs). The whole of this function is reading
+/// and refusing.
+///
+/// Nullopt is "nothing the server would accept": no curves, a periodic
+/// wrap, a vertex count no basis can span, counts that do not partition
+/// the points array, or the indexed topology the wire has no room for.
+/// Each is a withdrawal rather than a silent approximation, because a
+/// ChangeSet is atomic — one rejected op would take every other edit in
+/// the flush down with it.
+std::optional<cenote::wire::CurveCells>
+_ReadCurves(const SdfPath& path, const HdSceneIndexPrim& prim, bool& warnedNormals) {
+    const HdBasisCurvesTopologySchema topology =
+        HdBasisCurvesSchema::GetFromParent(prim.dataSource).GetTopology();
+    // UsdGeomBasisCurves' own fallbacks, for a prim that leaves one
+    // unauthored: a cubic bezier that does not close.
+    const TfToken typeToken = _TokenOr(topology.GetType(), HdTokens->cubic);
+    const TfToken basisToken = _TokenOr(topology.GetBasis(), HdTokens->bezier);
+    const TfToken wrapToken = _TokenOr(topology.GetWrap(), HdTokens->nonperiodic);
+    const std::optional<cenote::wire::CurveType> curveType = _CurveType(typeToken);
+    const std::optional<cenote::wire::CurveWrap> wrap = _CurveWrap(wrapToken);
+    // A linear curve has no basis, and Houdini writes the token empty
+    // rather than inventing one. Mapping the basis before the type
+    // would therefore refuse every polyline groom a DCC exports. Bezier
+    // stands in; nothing downstream of Linear consults it.
+    const std::optional<cenote::wire::CurveBasis> basis =
+        curveType == cenote::wire::CurveType::Linear
+            ? std::optional<cenote::wire::CurveBasis>(cenote::wire::CurveBasis::Bezier)
+            : _CurveBasis(basisToken);
+    if (!curveType || !basis || !wrap) {
+        TF_WARN("<%s> is a '%s' '%s' '%s' curve, which cenote does not read; curves dropped",
+                path.GetText(), typeToken.GetText(), basisToken.GetText(), wrapToken.GetText());
+        return std::nullopt;
+    }
+    if (*wrap == cenote::wire::CurveWrap::Periodic) {
+        // The delegate's one statement of the rule, in the server's own
+        // words — _SegmentCount below reads only vertex counts.
+        TF_WARN("<%s> is periodic, and a closed loop has no root to sweep a strand from; curves "
+                "dropped",
+                path.GetText());
+        return std::nullopt;
+    }
+    if (!_IntsOr(topology.GetCurveIndices()).empty()) {
+        // Indexed curve vertices are a Hydra topology the wire has no
+        // spelling for (UsdGeomBasisCurves authors none). De-indexing
+        // would have to guess which primvar domains the indices apply
+        // to, so the honest answer is to say no.
+        TF_WARN("<%s> indexes its curve vertices, which cenote does not read; curves dropped",
+                path.GetText());
+        return std::nullopt;
+    }
+    const VtIntArray counts = _IntsOr(topology.GetCurveVertexCounts());
+    if (counts.empty()) {
+        return std::nullopt;
+    }
+    const HdPrimvarsSchema primvars = HdPrimvarsSchema::GetFromParent(prim.dataSource);
+    const VtVec3fArray points = _Points(path, primvars);
+    if (points.empty()) {
+        return std::nullopt;
+    }
+    // The two totals the width stream is measured against: control
+    // vertices, and segment ends. Walking the counts is also what proves
+    // the topology, one curve at a time, in the server's own words.
+    size_t vertices = 0;
+    size_t varying = 0;
+    for (size_t index = 0; index < counts.size(); ++index) {
+        const int count = counts[index];
+        const std::optional<size_t> segments =
+            count < 0 ? std::nullopt
+                      : _SegmentCount(static_cast<size_t>(count), *curveType, *basis, *wrap);
+        if (!segments) {
+            TF_WARN("<%s> gives curve %zu %d vertices, which its topology cannot span; curves "
+                    "dropped",
+                    path.GetText(), index, count);
+            return std::nullopt;
+        }
+        vertices += static_cast<size_t>(count);
+        varying += *segments + 1;
+    }
+    if (vertices != points.size()) {
+        TF_WARN("<%s> names %zu vertices across %zu curves, but carries %zu points; curves dropped",
+                path.GetText(), vertices, counts.size(), points.size());
+        return std::nullopt;
+    }
+    if (!warnedNormals && primvars.GetPrimvar(HdTokens->normals).GetPrimvarValue()) {
+        warnedNormals = true;
+        TF_WARN("<%s> authors curve normals; cenote sweeps round tubes and ignores them",
+                path.GetText());
+    }
+    cenote::wire::CurveCells cells;
+    cells.curve_type = *curveType;
+    cells.basis = *basis;
+    cells.wrap = *wrap;
+    cells.points.reserve(points.size());
+    for (const GfVec3f& point : points) {
+        cells.points.push_back({point[0], point[1], point[2]});
+    }
+    cells.curve_vertex_counts.reserve(counts.size());
+    for (const int count : counts) {
+        cells.curve_vertex_counts.push_back(static_cast<std::uint32_t>(count));
+    }
+    cells.widths = _ReadWidths(path, primvars, vertices, varying, counts.size());
+    return cells;
+}
+
 /// What the companion material wears: a constant displayColor is used
 /// directly, a vertex one is approximated by its first element — the
 /// wire carries no per-vertex color, so the approximation is the
@@ -331,7 +570,7 @@ bool _ReadVisibility(const HdSceneIndexPrim& prim) {
 }
 
 /// The prim's flattened transform; identity when unauthored. For an
-/// un-instanced mesh this is the world matrix; for a prim inside a point-
+/// un-instanced prim this is the world matrix; for one inside a point-
 /// instancer prototype it is prototype-root relative (the prototype root
 /// carries resetXformStack, so the instancer's placement is never folded
 /// in here — that is ComputePlacements's job).
@@ -362,11 +601,22 @@ std::optional<cenote::wire::Matrix> _WireTransform(const GfMatrix4d& world) {
 
 /// Everything that reshapes the wire Mesh payload: topology plus the
 /// three primvars Inline carries.
-const HdDataSourceLocatorSet& _GeometryLocators() {
+const HdDataSourceLocatorSet& _MeshLocators() {
     static const HdDataSourceLocatorSet locators{
         HdMeshSchema::GetDefaultLocator(), HdPrimvarsSchema::GetPointsLocator(),
         HdPrimvarsSchema::GetDefaultLocator().Append(HdTokens->normals),
         HdPrimvarsSchema::GetDefaultLocator().Append(_tokens->st)};
+    return locators;
+}
+
+/// Everything that reshapes the wire Curves payload: the BasisCurves
+/// topology, the points, and the widths. Authored normals are absent on
+/// purpose — they are dropped on the way in, so an edit to them changes
+/// nothing the server would see.
+const HdDataSourceLocatorSet& _CurveLocators() {
+    static const HdDataSourceLocatorSet locators{
+        HdBasisCurvesSchema::GetDefaultLocator(), HdPrimvarsSchema::GetPointsLocator(),
+        HdPrimvarsSchema::GetDefaultLocator().Append(HdTokens->widths)};
     return locators;
 }
 
@@ -377,7 +627,7 @@ const HdDataSourceLocator& _DisplayColorLocator() {
 }
 
 /// Everything that reshapes the placements array: the flattened transform,
-/// visibility, and instancedBy (the set of instancers that copy this mesh,
+/// visibility, and instancedBy (the set of instancers that copy this prim,
 /// which turns a lone placement into an array and back).
 const HdDataSourceLocatorSet& _PlacementLocators() {
     static const HdDataSourceLocatorSet locators{HdXformSchema::GetDefaultLocator(),
@@ -388,26 +638,30 @@ const HdDataSourceLocatorSet& _PlacementLocators() {
 
 } // namespace
 
-HdCenoteMeshPrim::HdCenoteMeshPrim(const SdfPath& path,
-                                   const HdsiPrimManagingSceneIndexObserver* observer,
-                                   cenote::wire::ChangeSet* pending, std::shared_ptr<Registry> live,
-                                   std::shared_ptr<const MaterialRegistry> materials,
-                                   std::shared_ptr<const InstancerRegistry> instancers)
-    : _path(path), _name(path.GetString()), _material(path.GetString() + "/displayColor"),
-      _pending(pending), _live(std::move(live)), _materials(std::move(materials)),
-      _instancers(std::move(instancers)) {
+HdCenoteGeometryPrim::HdCenoteGeometryPrim(const SdfPath& path, const TfToken& primType,
+                                           const HdsiPrimManagingSceneIndexObserver* observer,
+                                           cenote::wire::ChangeSet* pending,
+                                           std::shared_ptr<Registry> live,
+                                           std::shared_ptr<const MaterialRegistry> materials,
+                                           std::shared_ptr<const InstancerRegistry> instancers)
+    : _path(path), _curves(primType == HdPrimTypeTokens->basisCurves), _name(path.GetString()),
+      _material(path.GetString() + "/displayColor"), _pending(pending), _live(std::move(live)),
+      _materials(std::move(materials)), _instancers(std::move(instancers)) {
     const auto [it, inserted] = _live->try_emplace(_path, this);
     if (!inserted) {
         // A resync: the previous translator still holds server objects.
         // Inherit its ledger — the reconcile below then updates in
         // place — and take the registry slot so its destructor, which
-        // runs after this constructor, goes quietly.
-        _sent = it->second->_sent;
-        _instanceLive = it->second->_instanceLive;
-        _binding = it->second->_binding;
-        _wearsBinding = it->second->_wearsBinding;
-        _warnedElement = it->second->_warnedElement;
+        // runs after this constructor, goes quietly. The inherited
+        // payload may be the other kind; _Reconcile withdraws it.
+        const HdCenoteGeometryPrim& previous = *it->second;
         it->second = this;
+        _payload = previous._payload;
+        _instanceLive = previous._instanceLive;
+        _binding = previous._binding;
+        _wearsBinding = previous._wearsBinding;
+        _warnedElement = previous._warnedElement;
+        _warnedNormals = previous._warnedNormals;
     }
     const HdSceneIndexPrim prim = observer->GetSceneIndex()->GetPrim(_path);
     if (!prim.dataSource) {
@@ -417,7 +671,7 @@ HdCenoteMeshPrim::HdCenoteMeshPrim(const SdfPath& path,
     _Reconcile(prim, _Dirt{.geometry = true, .color = true, .placement = true, .binding = true});
 }
 
-HdCenoteMeshPrim::~HdCenoteMeshPrim() {
+HdCenoteGeometryPrim::~HdCenoteGeometryPrim() {
     const auto it = _live->find(_path);
     if (it == _live->end() || it->second != this) {
         // Superseded by a resync; the successor answers for the path.
@@ -427,14 +681,15 @@ HdCenoteMeshPrim::~HdCenoteMeshPrim() {
     _Withdraw();
 }
 
-void HdCenoteMeshPrim::_Dirty(const HdSceneIndexObserver::DirtiedPrimEntry& entry,
-                              const HdsiPrimManagingSceneIndexObserver* observer) {
+void HdCenoteGeometryPrim::_Dirty(const HdSceneIndexObserver::DirtiedPrimEntry& entry,
+                                  const HdsiPrimManagingSceneIndexObserver* observer) {
     const HdSceneIndexPrim prim = observer->GetSceneIndex()->GetPrim(_path);
     if (!prim.dataSource) {
         return;
     }
     _Reconcile(prim, _Dirt{
-                         .geometry = entry.dirtyLocators.Intersects(_GeometryLocators()),
+                         .geometry = entry.dirtyLocators.Intersects(_curves ? _CurveLocators()
+                                                                            : _MeshLocators()),
                          .color = entry.dirtyLocators.Intersects(_DisplayColorLocator()),
                          .placement = entry.dirtyLocators.Intersects(_PlacementLocators()),
                          .binding = entry.dirtyLocators.Intersects(
@@ -442,26 +697,46 @@ void HdCenoteMeshPrim::_Dirty(const HdSceneIndexObserver::DirtiedPrimEntry& entr
                      });
 }
 
-void HdCenoteMeshPrim::_Reconcile(const HdSceneIndexPrim& prim, const _Dirt dirt) {
+void HdCenoteGeometryPrim::_Reconcile(const HdSceneIndexPrim& prim, const _Dirt dirt) {
     bool born = false;
     if (dirt.geometry) {
-        std::optional<cenote::wire::Inline> source = _ReadGeometry(_path, prim);
-        if (!source) {
+        if (_payload && *_payload != _Kind()) {
+            // The prim changed type under this path, and the payload the
+            // resync handed over shares the name but not the kind. It
+            // goes now, ahead of the adds below and inside the same
+            // atomic ChangeSet — the only order in which a Remove names
+            // an object that exists and an add does not collide.
+            _Withdraw();
+        }
+        // The one place the two kinds part company: what is read, and
+        // which patch carries it.
+        bool read = false;
+        if (_curves) {
+            if (std::optional<cenote::wire::CurveCells> cells =
+                    _ReadCurves(_path, prim, _warnedNormals)) {
+                _pending->ops.push_back(cenote::wire::CurvesPatch{
+                    .name = _name, .source = cenote::wire::CurvesSource{std::move(*cells)}});
+                read = true;
+            }
+        } else if (std::optional<cenote::wire::Inline> source = _ReadMesh(_path, prim)) {
+            _pending->ops.push_back(cenote::wire::MeshPatch{
+                .name = _name, .source = cenote::wire::MeshSource{std::move(*source)}});
+            read = true;
+        }
+        if (!read) {
             _Withdraw();
             return;
         }
-        _pending->ops.push_back(cenote::wire::MeshPatch{
-            .name = _name, .source = cenote::wire::MeshSource{std::move(*source)}});
-        if (!_sent) {
+        if (!_payload) {
             _pending->ops.push_back(cenote::wire::MaterialPatch{
                 .name = _material,
                 .base_color =
                     cenote::wire::Constant<std::array<float, 3>>{_ReadDisplayColor(prim)}});
-            _sent = true;
+            _payload = _Kind();
             born = true;
         }
     }
-    if (!_sent) {
+    if (!_payload) {
         // Nothing on the wire yet; a future geometry dirty re-enters.
         return;
     }
@@ -471,7 +746,7 @@ void HdCenoteMeshPrim::_Reconcile(const HdSceneIndexPrim& prim, const _Dirt dirt
             .base_color = cenote::wire::Constant<std::array<float, 3>>{_ReadDisplayColor(prim)}});
     }
     if (born || dirt.binding) {
-        // Materials flush ahead of meshes (the batching priorities in
+        // Materials flush ahead of geometry (the batching priorities in
         // observer.cpp), so a target this sync cannot see is truly not
         // there — absent from the stage or arriving in a later wave.
         const SdfPath binding = _ReadBinding(prim);
@@ -499,9 +774,9 @@ void HdCenoteMeshPrim::_Reconcile(const HdSceneIndexPrim& prim, const _Dirt dirt
     ResolveBinding();
 }
 
-void HdCenoteMeshPrim::RecomposeInstancing() {
-    if (_instancedBy.empty() || !_sent) {
-        // A mesh no instancer copies ignores instancer pokes, and a mesh
+void HdCenoteGeometryPrim::RecomposeInstancing() {
+    if (_instancedBy.empty() || !_payload) {
+        // A prim no instancer copies ignores instancer pokes, and one
         // whose geometry has not reached the wire has no instance to
         // place. The cached inputs are still current — only the instancer
         // moved — so _Place re-reads nothing.
@@ -510,7 +785,7 @@ void HdCenoteMeshPrim::RecomposeInstancing() {
     _Place();
 }
 
-void HdCenoteMeshPrim::_Place() {
+void HdCenoteGeometryPrim::_Place() {
     std::optional<std::vector<cenote::wire::Transform>> placements = _ComposePlacements();
     if (!placements) {
         _WithdrawInstance();
@@ -518,26 +793,29 @@ void HdCenoteMeshPrim::_Place() {
     }
     if (!_instanceLive) {
         _wearsBinding = _Bindable();
-        _pending->ops.push_back(cenote::wire::InstancePatch{
-            .name = _name,
-            .mesh = _name,
-            .material = _wearsBinding ? _binding.GetString() : _material,
-            .transforms = std::move(placements)});
+        cenote::wire::InstancePatch patch{.name = _name,
+                                          .material =
+                                              _wearsBinding ? _binding.GetString() : _material,
+                                          .transforms = std::move(placements)};
+        // Two spellings of one field on the target; naming both is
+        // refused server-side, so exactly one is filled.
+        (_curves ? patch.curves : patch.mesh) = _name;
+        _pending->ops.push_back(std::move(patch));
         _instanceLive = true;
     } else {
-        // The whole array replaces; the mesh and the binding
+        // The whole array replaces; the geometry and the binding
         // stay put.
         _pending->ops.push_back(
             cenote::wire::InstancePatch{.name = _name, .transforms = std::move(placements)});
     }
 }
 
-std::optional<std::vector<cenote::wire::Transform>> HdCenoteMeshPrim::_ComposePlacements() {
+std::optional<std::vector<cenote::wire::Transform>> HdCenoteGeometryPrim::_ComposePlacements() {
     if (!_visible) {
         return std::nullopt;
     }
     if (_instancedBy.empty()) {
-        // Un-instanced: the mesh stands once at its own transform.
+        // Un-instanced: the prim stands once at its own transform.
         const std::optional<cenote::wire::Matrix> matrix = _WireTransform(_protoXform);
         if (!matrix) {
             TF_WARN("<%s> has a non-invertible transform; instance %s", _path.GetText(),
@@ -553,7 +831,7 @@ std::optional<std::vector<cenote::wire::Transform>> HdCenoteMeshPrim::_ComposePl
         const auto it = _instancers->find(instancer.path);
         if (it == _instancers->end()) {
             // The instancer is not on the registry yet; park until its
-            // birth pokes this mesh. An empty placement would say the
+            // birth pokes this prim. An empty placement would say the
             // opposite — resident, placed nowhere — so honesty is nullopt.
             return std::nullopt;
         }
@@ -572,8 +850,8 @@ std::optional<std::vector<cenote::wire::Transform>> HdCenoteMeshPrim::_ComposePl
     return placements;
 }
 
-std::vector<HdCenoteMeshPrim::_Instancer>
-HdCenoteMeshPrim::_ReadInstancedBy(const HdSceneIndexPrim& prim) const {
+std::vector<HdCenoteGeometryPrim::_Instancer>
+HdCenoteGeometryPrim::_ReadInstancedBy(const HdSceneIndexPrim& prim) const {
     const HdInstancedBySchema schema = HdInstancedBySchema::GetFromParent(prim.dataSource);
     const HdPathArrayDataSourceHandle pathsSource = schema.GetPaths();
     if (!pathsSource) {
@@ -595,7 +873,7 @@ HdCenoteMeshPrim::_ReadInstancedBy(const HdSceneIndexPrim& prim) const {
     return instancers;
 }
 
-void HdCenoteMeshPrim::ResolveBinding() {
+void HdCenoteGeometryPrim::ResolveBinding() {
     if (!_instanceLive) {
         return;
     }
@@ -608,7 +886,7 @@ void HdCenoteMeshPrim::ResolveBinding() {
     _wearsBinding = bindable;
 }
 
-bool HdCenoteMeshPrim::_Bindable() const {
+bool HdCenoteGeometryPrim::_Bindable() const {
     if (_binding.IsEmpty()) {
         return false;
     }
@@ -616,7 +894,7 @@ bool HdCenoteMeshPrim::_Bindable() const {
     return it != _materials->end() && it->second->Published();
 }
 
-void HdCenoteMeshPrim::_WithdrawInstance() {
+void HdCenoteGeometryPrim::_WithdrawInstance() {
     if (_instanceLive) {
         _pending->ops.push_back(
             cenote::wire::Remove{.kind = cenote::wire::Kind::Instance, .name = _name});
@@ -624,14 +902,15 @@ void HdCenoteMeshPrim::_WithdrawInstance() {
     }
 }
 
-void HdCenoteMeshPrim::_Withdraw() {
+void HdCenoteGeometryPrim::_Withdraw() {
     _WithdrawInstance();
-    if (_sent) {
-        _pending->ops.push_back(
-            cenote::wire::Remove{.kind = cenote::wire::Kind::Mesh, .name = _name});
+    if (_payload) {
+        // The kind the ledger recorded, not the kind this translator
+        // publishes: after a type change under one path those differ.
+        _pending->ops.push_back(cenote::wire::Remove{.kind = *_payload, .name = _name});
         _pending->ops.push_back(
             cenote::wire::Remove{.kind = cenote::wire::Kind::Material, .name = _material});
-        _sent = false;
+        _payload.reset();
     }
 }
 

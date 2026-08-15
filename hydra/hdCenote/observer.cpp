@@ -6,10 +6,10 @@
 #include <utility>
 
 #include "domePrim.hpp"
+#include "geometryPrim.hpp"
 #include "instancerPrim.hpp"
 #include "lightPrim.hpp"
 #include "materialPrim.hpp"
-#include "meshPrim.hpp"
 #include "settingsPrim.hpp"
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -41,9 +41,11 @@ public:
 /// Hands each added prim its translator by type — and every type it
 /// does not know gets null, which the observer simply never tracks: how
 /// unknown stays non-fatal forever. Mesh prims (implicits included,
-/// already converted by the registered filter stack) get the mesh
-/// translator; instancers get the instancer translator, which puts
-/// nothing on the wire and only feeds the meshes their placements; five
+/// already converted by the registered filter stack) and BasisCurves
+/// prims share the geometry translator — everything but the payload read
+/// is the same work, and the registry below is one map; instancers get
+/// the instancer translator, which puts nothing on the wire and only
+/// feeds the geometry translators their placements; five
 /// of the six UsdLux types the wire can spell — distant (usdview's camera
 /// light among them), rect, disk, sphere, cylinder — get the
 /// light translator; domes get their own, which arbitrates the one
@@ -56,7 +58,7 @@ public:
     _PrimFactory(cenote::wire::ChangeSet* pending,
                  std::shared_ptr<HdCenoteSettingsPrim::Active> settings)
         : _pending(pending), _settings(std::move(settings)),
-          _meshes(std::make_shared<HdCenoteMeshPrim::Registry>()),
+          _geometry(std::make_shared<HdCenoteGeometryPrim::Registry>()),
           _lights(std::make_shared<HdCenoteLightPrim::Registry>()),
           _domes(std::make_shared<HdCenoteDomePrim::Registry>()),
           _materials(std::make_shared<HdCenoteMaterialPrim::Registry>()),
@@ -65,13 +67,15 @@ public:
     HdsiPrimManagingSceneIndexObserver::PrimBaseHandle
     CreatePrim(const HdSceneIndexObserver::AddedPrimEntry& entry,
                const HdsiPrimManagingSceneIndexObserver* observer) override {
-        if (entry.primType == HdPrimTypeTokens->mesh) {
-            return std::make_shared<HdCenoteMeshPrim>(entry.primPath, observer, _pending, _meshes,
-                                                      _materials, _instancers);
+        if (entry.primType == HdPrimTypeTokens->mesh ||
+            entry.primType == HdPrimTypeTokens->basisCurves) {
+            return std::make_shared<HdCenoteGeometryPrim>(entry.primPath, entry.primType, observer,
+                                                          _pending, _geometry, _materials,
+                                                          _instancers);
         }
         if (entry.primType == HdPrimTypeTokens->instancer) {
             return std::make_shared<HdCenoteInstancerPrim>(entry.primPath, observer, _instancers,
-                                                           _meshes);
+                                                           _geometry);
         }
         if (entry.primType == HdPrimTypeTokens->distantLight ||
             entry.primType == HdPrimTypeTokens->rectLight ||
@@ -86,7 +90,7 @@ public:
         }
         if (entry.primType == HdPrimTypeTokens->material) {
             return std::make_shared<HdCenoteMaterialPrim>(entry.primPath, observer, _pending,
-                                                          _materials, _meshes);
+                                                          _materials, _geometry);
         }
         if (entry.primType == HdPrimTypeTokens->renderSettings) {
             return std::make_shared<HdCenoteSettingsPrim>(entry.primPath, observer, _settings);
@@ -100,7 +104,7 @@ private:
     /// The delegate's slot for the active render settings prim.
     std::shared_ptr<HdCenoteSettingsPrim::Active> _settings;
     /// The translators' resync tie-breakers (see each Registry's doc).
-    std::shared_ptr<HdCenoteMeshPrim::Registry> _meshes;
+    std::shared_ptr<HdCenoteGeometryPrim::Registry> _geometry;
     std::shared_ptr<HdCenoteLightPrim::Registry> _lights;
     std::shared_ptr<HdCenoteDomePrim::Registry> _domes;
     std::shared_ptr<HdCenoteMaterialPrim::Registry> _materials;

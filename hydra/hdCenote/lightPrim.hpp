@@ -36,8 +36,8 @@ PXR_NAMESPACE_OPEN_SCOPE
 class HdCenoteLightPrim final : public HdsiPrimManagingSceneIndexObserver::PrimBase {
 public:
     /// Which translator currently answers for each prim path — the same
-    /// resync tie-breaker the mesh translator carries (see
-    /// HdCenoteMeshPrim::Registry): the newcomer inherits the ledger and
+    /// resync tie-breaker the geometry translator carries (see
+    /// HdCenoteGeometryPrim::Registry): the newcomer inherits the ledger and
     /// the superseded destructor goes quietly.
     using Registry = std::map<SdfPath, HdCenoteLightPrim*>;
 

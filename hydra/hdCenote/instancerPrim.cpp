@@ -218,9 +218,10 @@ std::string _UnsupportedPrimvars(const HdSceneIndexPrim& prim) {
 
 HdCenoteInstancerPrim::HdCenoteInstancerPrim(
     const SdfPath& path, const HdsiPrimManagingSceneIndexObserver* observer,
-    std::shared_ptr<Registry> instancers, std::shared_ptr<const HdCenoteMeshPrim::Registry> meshes)
+    std::shared_ptr<Registry> instancers,
+    std::shared_ptr<const HdCenoteGeometryPrim::Registry> geometry)
     : _path(path), _observer(observer), _instancers(std::move(instancers)),
-      _meshes(std::move(meshes)) {
+      _geometry(std::move(geometry)) {
     const auto [it, inserted] = _instancers->try_emplace(_path, this);
     if (!inserted) {
         // A resync: there is no server-side ledger to inherit — the latch
@@ -231,9 +232,9 @@ HdCenoteInstancerPrim::HdCenoteInstancerPrim(
     }
     const HdSceneIndexPrim prim = observer->GetSceneIndex()->GetPrim(_path);
     if (!prim.dataSource) {
-        // A phantom add: nothing to read, but any mesh already awaiting
+        // A phantom add: nothing to read, but any prim already awaiting
         // this instancer should recompose (and find it absent).
-        _PokeMeshes();
+        _PokeGeometry();
         return;
     }
     _Refresh(prim);
@@ -248,14 +249,14 @@ HdCenoteInstancerPrim::~HdCenoteInstancerPrim() {
     _instancers->erase(it);
     // The dependents must recompose without this instancer — they will
     // find it gone and park.
-    _PokeMeshes();
+    _PokeGeometry();
 }
 
 void HdCenoteInstancerPrim::_Dirty(const HdSceneIndexObserver::DirtiedPrimEntry& /*entry*/,
                                    const HdsiPrimManagingSceneIndexObserver* observer) {
     const HdSceneIndexPrim prim = observer->GetSceneIndex()->GetPrim(_path);
     if (!prim.dataSource) {
-        _PokeMeshes();
+        _PokeGeometry();
         return;
     }
     // Every locator this translator reads — topology, the instance
@@ -276,12 +277,12 @@ void HdCenoteInstancerPrim::_Refresh(const HdSceneIndexPrim& prim) {
                     _path.GetText(), dropped.c_str());
         }
     }
-    _PokeMeshes();
+    _PokeGeometry();
 }
 
-void HdCenoteInstancerPrim::_PokeMeshes() const {
-    for (const auto& [path, mesh] : *_meshes) {
-        mesh->RecomposeInstancing();
+void HdCenoteInstancerPrim::_PokeGeometry() const {
+    for (const auto& [path, prim] : *_geometry) {
+        prim->RecomposeInstancing();
     }
 }
 
@@ -319,7 +320,7 @@ HdCenoteInstancerPrim::ComputePlacements(const SdfPath& prototypeRoot) const {
         const auto it = _instancers->find(parentPath);
         if (it == _instancers->end()) {
             // An ancestor not yet on the registry contributes no copies;
-            // its birth will poke the leaf meshes to recompose.
+            // its birth will poke the leaf prims to recompose.
             continue;
         }
         const std::vector<GfMatrix4d> above = it->second->ComputePlacements(parentRoot);
