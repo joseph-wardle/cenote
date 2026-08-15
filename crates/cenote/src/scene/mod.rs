@@ -31,6 +31,7 @@ mod many_lights;
 mod prep;
 mod shapes;
 
+pub use curves::segment_count;
 pub use shapes::{cube, ground_plane, icosphere};
 
 use std::collections::hash_map::Entry;

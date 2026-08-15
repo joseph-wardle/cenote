@@ -51,3 +51,11 @@ values; the semantics here were verified against pbrt-v4 at
 (2026-07-10).
 
 Heavier scenes live in `scenes/corpus/` — see its README.
+
+## `curve-oracle/`, which is not part of this
+
+The three scenes above are compared against *cenote's own* goldens, which
+pins them against regression and nothing else. `curve-oracle/` is compared
+against pbrt itself. It has its own README and its own driver,
+`scripts/curve-oracle.sh`, and does not run under `cargo test` — it needs
+a pbrt-v4 binary.

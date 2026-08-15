@@ -2,11 +2,121 @@
 //! trianglemesh stream reader and the sphere/disk generators. Geometry
 //! only — the mapper places and materials the result.
 
-use cenote::scene::description::MeshSource;
+use cenote::scene::description::{CurveBasis, CurveType, CurveWrap, MeshSource};
+use cenote::scene::segment_count;
 use cenote::{Error, Result};
 use glam::Vec3;
 
 use crate::parse::Directive;
+
+/// One `Shape "curve"`, in the form a batch accumulates it: the control
+/// vertices still in pbrt's flat `[x, y, z, …]`, the segments they imply,
+/// and the two end widths.
+///
+/// pbrt spells one curve per `Shape` directive — bunny-fur is 1.5 million
+/// of them in a row — so this is the unit the mapper coalesces, and it
+/// borrows rather than copies.
+pub(super) struct CurveShape<'a> {
+    pub points: &'a [f64],
+    pub segments: usize,
+    pub width0: f32,
+    pub width1: f32,
+    /// Cubic bezier or b-spline; the key a batch cannot straddle.
+    pub basis: CurveBasis,
+}
+
+/// Read one `Shape "curve"`.
+///
+/// The semantics are pbrt-v4's own (`shapes.cpp`, `Curve::Create`), and
+/// the two that matter are that `width` is a **diameter** — the
+/// intersector rejects on `ptCurveDist2 > Sqr(hitWidth) * 0.25` — and that
+/// a segment's widths come out as `Lerp(seg / nSegments, width0, width1)`,
+/// which is cenote's `varying` interpolation exactly. Nothing is
+/// approximated: what cenote's curves cannot express is refused.
+pub(super) fn curve(directive: &Directive) -> Result<CurveShape<'_>> {
+    let params = &directive.params;
+    let location = &directive.location;
+
+    // pbrt elevates a quadratic to cubic on the way in. Cenote's bases are
+    // `UsdGeomBasisCurves`', which has no quadratic row, and elevating
+    // silently would be a different curve wearing the same control points.
+    let degree = params.integer("degree")?.unwrap_or(3);
+    if degree != 3 {
+        return Err(Error::SceneFormat(format!(
+            "{location}: curve \"degree\" {degree} is not supported — only cubic (3) curves \
+             have a cenote equivalent"
+        )));
+    }
+    let basis = match params.string("basis")?.unwrap_or("bezier") {
+        "bezier" => CurveBasis::Bezier,
+        "bspline" => CurveBasis::BSpline,
+        other => {
+            return Err(Error::SceneFormat(format!(
+                "{location}: curve \"basis\" \"{other}\" is not a pbrt basis"
+            )));
+        }
+    };
+    // `flat` and `cylinder` are the *same geometry* in pbrt: one
+    // ray-perpendicular projected hit test for both, differing only in the
+    // shading `dpdv` they hand the BSDF, which a swept tube derives from
+    // its own surface. `ribbon` genuinely differs — an oriented flat quad
+    // driven by an authored `N`, which the sweep has no way to honour.
+    match params.string("type")?.unwrap_or("flat") {
+        "flat" | "cylinder" => {}
+        "ribbon" => {
+            return Err(Error::SceneFormat(format!(
+                "{location}: curve \"type\" \"ribbon\" is not supported — an oriented ribbon is \
+                 not a swept tube, and cenote renders every curve round"
+            )));
+        }
+        other => {
+            return Err(Error::SceneFormat(format!(
+                "{location}: curve \"type\" \"{other}\" is not a pbrt curve type"
+            )));
+        }
+    }
+    // A hint to pbrt's own intersector, not a property of the curve.
+    // Consumed so it does not read as a parameter this importer dropped.
+    let _ = params.take("splitdepth", &["integer", "float"])?;
+
+    let param = params
+        .take("P", &["point3", "point"])?
+        .ok_or_else(|| Error::SceneFormat(format!("{location}: curve has no \"point3 P\"")))?;
+    let points = param.as_floats()?;
+    if points.len() % 3 != 0 {
+        return Err(Error::SceneFormat(format!(
+            "{}: curve \"P\" needs whole (x, y, z) triples",
+            param.location
+        )));
+    }
+    let vertices = points.len() / 3;
+    // The renderer's own table, so the importer cannot drift from it — and
+    // resolved here, before the batch is touched, because a curve no span
+    // fits would otherwise poison a batch of a million siblings with an
+    // error naming none of them.
+    let segments = segment_count(vertices, CurveType::Cubic, basis, CurveWrap::Nonperiodic)
+        .map_err(|_| {
+            Error::SceneFormat(format!(
+                "{location}: a cubic {basis} curve cannot have {vertices} control vertices"
+            ))
+        })?;
+
+    let width = params.float("width")?.unwrap_or(1.0);
+    Ok(CurveShape {
+        points,
+        segments,
+        width0: params.float("width0")?.unwrap_or(width),
+        width1: params.float("width1")?.unwrap_or(width),
+        basis,
+    })
+}
+
+/// pbrt's flat `[x, y, z, …]` as the triples every cenote stream holds.
+pub(super) fn triples(floats: &[f64]) -> impl Iterator<Item = [f32; 3]> {
+    floats
+        .chunks_exact(3)
+        .map(|triple| [triple[0] as f32, triple[1] as f32, triple[2] as f32])
+}
 
 /// pbrt inverts `t` at every image-texture lookup (`st[1] = 1 - st[1]`
 /// against top-row-first image memory); cenote samples `v` as stored,
@@ -24,7 +134,7 @@ fn flip_v(uvs: &mut [[f32; 2]]) {
 /// derived normals, so orientation survives either way.
 pub(super) fn trianglemesh(directive: &Directive, flip: bool) -> Result<MeshSource> {
     let params = &directive.params;
-    let triples = |name: &str, types: &[&str]| -> Result<Option<Vec<[f32; 3]>>> {
+    let triples_of = |name: &str, types: &[&str]| -> Result<Option<Vec<[f32; 3]>>> {
         let Some(param) = params.take(name, types)? else {
             return Ok(None);
         };
@@ -35,20 +145,15 @@ pub(super) fn trianglemesh(directive: &Directive, flip: bool) -> Result<MeshSour
                 param.location
             )));
         }
-        Ok(Some(
-            floats
-                .chunks_exact(3)
-                .map(|triple| [triple[0] as f32, triple[1] as f32, triple[2] as f32])
-                .collect(),
-        ))
+        Ok(Some(triples(floats).collect()))
     };
-    let positions = triples("P", &["point3", "point"])?.ok_or_else(|| {
+    let positions = triples_of("P", &["point3", "point"])?.ok_or_else(|| {
         Error::SceneFormat(format!(
             "{}: trianglemesh has no \"point3 P\"",
             directive.location
         ))
     })?;
-    let mut normals = triples("N", &["normal", "normal3"])?;
+    let mut normals = triples_of("N", &["normal", "normal3"])?;
     if flip && let Some(normals) = &mut normals {
         for normal in normals {
             *normal = normal.map(|component| -component);

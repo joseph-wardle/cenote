@@ -34,11 +34,13 @@
 //!   angular term in the same predicate; the evaluator above it does not
 //!   change.
 //! - **Radial.** Three sides, not four or eight: the fewest that never
-//!   let a strand vanish (a triangle seen from its worst angle still
-//!   spans 87% of its width, where a ribbon would disappear outright),
-//!   with the *analytic* radial normal stored at every ring vertex so the
-//!   shading is a cylinder's even though the geometry is a prism. It is
-//!   the icosphere trick from [`super::shapes`], one dimension down.
+//!   let a strand vanish, where a ribbon would disappear outright. A
+//!   polygon is narrower than the circle it stands in from every
+//!   direction, so the ring is widened to [`RING_CIRCUMRADIUS`] and the
+//!   strand covers the width it was authored at in the mean. The
+//!   *analytic* radial normal is stored at every ring vertex, so the
+//!   shading is a cylinder's even though the geometry is a prism — the
+//!   icosphere trick from [`super::shapes`], one dimension down.
 //!
 //! The strand coordinates the tessellation writes are `u` = root-to-tip
 //! arc length and `v` = one random value per strand: the two handles a
@@ -87,6 +89,26 @@ const MAX_SPAN_DEPTH: u32 = MAX_SPAN_SEGMENTS.ilog2();
 /// Sides per tube — see the module docs. Three vertices per ring, six
 /// triangles per segment.
 const SIDES: usize = 3;
+
+/// How far a ring's vertices sit from the strand's axis, per unit of the
+/// strand's true radius.
+///
+/// A regular polygon *inscribed* in the strand's circle is narrower than
+/// the strand from every direction — a triangle spans 0.750 of the width
+/// edge-on to a face and 0.866 onto a vertex. Averaged over all
+/// directions, a convex outline's projected width is its perimeter over π,
+/// so an `n`-gon of circumradius `r` spans `2r · n sin(π/n) / π` where the
+/// circle spans `2r`. Dividing that out circumscribes the ring, which puts
+/// the *mean* projection back on the authored width; the factor is 1.2092
+/// at three sides and falls to 1 as the ring rounds out. The formula, not
+/// the number, is the definition — a unit test re-derives it from
+/// [`SIDES`], so the constant cannot outlive a change to the ring.
+///
+/// It is applied here and deliberately not in [`Strands::radii`]: the
+/// canonical form carries the strand's true radius, which is what a native
+/// curve or capsule backend would sweep. Only the polygon pays for being
+/// one.
+const RING_CIRCUMRADIUS: f32 = 1.209_199_6;
 
 /// The canonical curve representation: strands as polylines, each point
 /// carrying the radius of the tube there.
@@ -414,9 +436,14 @@ fn pinned(wrap: CurveWrap, basis: CurveBasis) -> bool {
 
 /// A curve's segment count, per `UsdGeomBasisCurves`' own table — and, by
 /// the topologies it refuses, the single statement of what geometry the
-/// renderer accepts. Validation and evaluation both come through here, so
-/// neither carries a copy of the rules.
-pub(crate) fn segment_count(
+/// renderer accepts. Validation, evaluation, and the pbrt importer all
+/// come through here, so none of them carries a copy of the rules.
+///
+/// # Errors
+///
+/// [`Error::Scene`](crate::Error) for a periodic wrap, or a vertex count
+/// no segment rule accepts.
+pub fn segment_count(
     count: usize,
     curve_type: CurveType,
     basis: CurveBasis,
@@ -602,7 +629,10 @@ pub(crate) fn tessellate(strands: &Strands) -> Mesh {
             for side in 0..SIDES {
                 let angle = phase + TAU * side as f32 / SIDES as f32;
                 let radial = angle.cos() * across + angle.sin() * up;
-                mesh.positions.push(points[index] + radii[index] * radial);
+                mesh.positions
+                    .push(points[index] + RING_CIRCUMRADIUS * radii[index] * radial);
+                // The normal is the radial direction itself — unscaled,
+                // and the direction the true tube's surface faces there.
                 mesh.normals.push(radial);
                 mesh.uvs.push(Vec2::new(u, v));
             }
@@ -1057,7 +1087,12 @@ mod tests {
         for (position, normal) in mesh.positions.iter().zip(&mesh.normals) {
             // The axis is +Y, so the radial offset is the XZ part.
             let radial = Vec3::new(position.x, 0.0, position.z);
-            assert!((radial.length() - 0.25).abs() < 1e-5, "{position}");
+            // Width 0.5 is a radius of 0.25, circumscribed so the ring's
+            // mean projection is the authored width.
+            assert!(
+                (radial.length() - 0.25 * RING_CIRCUMRADIUS).abs() < 1e-5,
+                "{position}"
+            );
             assert!(normal.is_normalized(), "{normal}");
             assert!(normal.dot(Vec3::Y).abs() < 1e-5, "{normal} leans along +Y");
             assert!(
@@ -1078,6 +1113,53 @@ mod tests {
                 "face {triangle:?} winds inward: {face} against {outward}"
             );
         }
+    }
+
+    /// The ring is circumscribed by exactly the factor that puts a regular
+    /// [`SIDES`]-gon's mean projected width — its perimeter over π — on the
+    /// circle's diameter. The constant is the formula evaluated, so a ring
+    /// of a different order recomputes rather than needing a new number.
+    #[test]
+    fn the_ring_is_circumscribed_to_the_authored_width() {
+        use std::f32::consts::PI;
+        let sides = SIDES as f32;
+        let derived = PI / (sides * (PI / sides).sin());
+        assert_eq!(RING_CIRCUMRADIUS.to_bits(), derived.to_bits(), "{derived}");
+    }
+
+    /// Flattening resolves centerline detail down to [`FLATNESS`] of the
+    /// local radius and no further, which is the limit of what *any*
+    /// downstream check can see: below it the geometry is gone before a
+    /// pixel exists. Displacing a bezier's second control point by `d`
+    /// moves the curve `27/64 · d` off its chord at the quarter point — the
+    /// widest of the three [`flatten`] samples — so the span survives as
+    /// one chord until `d` passes `64/27 · FLATNESS` radii.
+    #[test]
+    fn flattening_is_the_floor_on_centerline_detail() {
+        let bent = |displacement: f32| {
+            let points = [
+                [0.0, 0.0, 0.0],
+                [displacement, 1.0, 0.0],
+                [0.0, 2.0, 0.0],
+                [0.0, 3.0, 0.0],
+            ];
+            evaluate(
+                &points,
+                &[4],
+                Some(&Widths {
+                    values: vec![1.0],
+                    interpolation: WidthInterpolation::Constant,
+                }),
+                CurveType::Cubic,
+                CurveBasis::Bezier,
+                CurveWrap::Nonperiodic,
+            )
+            .expect("valid")
+            .points()
+        };
+        let threshold = 64.0 / 27.0 * FLATNESS * 0.5;
+        assert_eq!(bent(0.9 * threshold), 2, "a bulge the strand covers");
+        assert!(bent(1.1 * threshold) > 2, "a bulge it does not");
     }
 
     /// `u` is arc length root to tip, `v` is one value the strand shares —

@@ -35,7 +35,7 @@
 /scenes/corpus/head-capped.ply
 
 # The curate scripts import field_order.py, and Python caches the bytecode
-/scenes/corpus/__pycache__/
+__pycache__/
 
 # Render output: scripts/benchmark.sh writes EXRs and stats sidecars wherever it
 # is pointed. /restir-baselines/ holds captures from the removed ReSTIR

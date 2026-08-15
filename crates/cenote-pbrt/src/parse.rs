@@ -272,6 +272,8 @@ impl SourceFile {
 /// The directive stream over a scene file and everything it includes.
 pub(crate) struct Parser {
     stack: Vec<SourceFile>,
+    /// The top-level scene file, so the stream can be read again.
+    root: PathBuf,
     /// The top-level scene file's directory: what every relative path in
     /// the scene resolves against (pbrt's search-directory rule).
     search_dir: PathBuf,
@@ -288,9 +290,16 @@ impl Parser {
             .unwrap_or_else(|| Path::new("/"))
             .to_owned();
         Ok(Self {
-            stack: vec![SourceFile::open(absolute)?],
+            stack: vec![SourceFile::open(absolute.clone())?],
+            root: absolute,
             search_dir,
         })
+    }
+
+    /// Start the stream over from the top of the scene file.
+    pub fn rewind(&mut self) -> Result<()> {
+        self.stack = vec![SourceFile::open(self.root.clone())?];
+        Ok(())
     }
 
     /// Resolve a path the pbrt way: relative means relative to the

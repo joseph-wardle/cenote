@@ -46,18 +46,19 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use cenote::scene::changeset::{
-    CameraPatch, ChangeSet, EnvironmentPatch, InstancePatch, LightPatch, MaterialPatch, MeshPatch,
-    Op, SettingsPatch,
+    CameraPatch, ChangeSet, CurvesPatch, EnvironmentPatch, InstancePatch, LightPatch,
+    MaterialPatch, MeshPatch, Op, SettingsPatch,
 };
 use cenote::scene::description::{
-    Channel, ColorSpace, Light, MeshSource, Texturable, TextureRef, Transform, UvTransform,
+    Channel, ColorSpace, CurveBasis, CurveType, CurveWrap, CurvesSource, Light, MeshSource,
+    Texturable, TextureRef, Transform, UvTransform, WidthInterpolation, Widths,
 };
 use cenote::scene::multiple_scatter_color;
 use cenote::{Error, Result};
 use glam::{Mat3, Mat4, Vec3};
 
 use color::{blackbody_rec709, conductor_f0, named_metal_f0};
-use shape::{bilinearmesh, disk_mesh, sphere_mesh, trianglemesh};
+use shape::{bilinearmesh, curve, disk_mesh, sphere_mesh, trianglemesh};
 
 use crate::parse::{Directive, Parser};
 
@@ -244,6 +245,33 @@ struct RecordedShape {
     ctm: Mat4,
 }
 
+/// An unbroken run of `Shape "curve"` directives being gathered into one
+/// [`CurvesSource::Inline`] batch.
+///
+/// pbrt spells one curve per `Shape` — bunny-fur is 1,508,665 of them in a
+/// row and nothing else — so importing them one for one would mean a
+/// million single-strand objects, each with its own instance and its own
+/// acceleration structure. They coalesce instead, for as long as the three
+/// things a single batch cannot straddle hold still: the transform it is
+/// placed by, the material it wears, and the basis its control points are
+/// read through.
+///
+/// `type` is deliberately *not* one of them. pbrt's `flat` and `cylinder`
+/// are the same geometry — one ray-perpendicular projected intersection —
+/// and differ only in the shading `dpdv` handed to the BSDF, which a swept
+/// tube derives from its own surface. Keying on it would split batches
+/// that describe identical strands.
+struct PendingCurves {
+    material: String,
+    ctm: Mat4,
+    basis: CurveBasis,
+    points: Vec<[f32; 3]>,
+    counts: Vec<u32>,
+    /// One width per segment end, which is what pbrt's own per-segment
+    /// `Lerp(seg / nSegments, width0, width1)` amounts to.
+    widths: Vec<f32>,
+}
+
 /// Ordered, deduplicated import warnings.
 #[derive(Default)]
 struct Warnings {
@@ -279,6 +307,8 @@ pub(crate) struct Mapper {
     objects: BTreeMap<String, Vec<RecordedShape>>,
     /// The recording in progress, if any.
     active_object: Option<(String, Vec<RecordedShape>)>,
+    /// The curve batch being gathered, if any.
+    pending_curves: Option<PendingCurves>,
     /// Materials forked to carry a shape `alpha` cutout, keyed by base
     /// material name × mask identity — shapes pairing the same material
     /// with the same mask share one fork. The patch rides along so a
@@ -316,6 +346,7 @@ impl Mapper {
             named_materials: BTreeMap::new(),
             objects: BTreeMap::new(),
             active_object: None,
+            pending_curves: None,
             cutout_forks: BTreeMap::new(),
             counters: BTreeMap::new(),
             conjugation: FLIP_Z,
@@ -330,23 +361,23 @@ impl Mapper {
         // pbrt-v4 creates every named texture and material only once the
         // world block is fully parsed, so a material may legally name a
         // texture declared *later* in the file — watercolor does exactly
-        // this. We honor that deferral by buffering the directive stream
-        // and resolving every `Texture` in a first pass, before any
-        // material or shape can look one up. The buffer is bounded by the
-        // scene's source text; the heavy mesh data lives in external PLY
-        // files referenced by path, so holding the directives costs little.
-        let mut directives = Vec::new();
+        // this. So the stream is read twice: once to resolve every
+        // `Texture`, then again to map everything. Re-reading rather than
+        // buffering, because a groom's geometry *is* its directive stream
+        // — bunny-fur is 1.5 million `Shape "curve"` in a row, which costs
+        // gigabytes to hold and seconds to read a second time.
         while let Some(directive) = self.parser.next_directive()? {
-            directives.push(directive);
-        }
-        for directive in &directives {
             if directive.keyword == "Texture" {
-                self.define_texture(directive)?;
+                self.define_texture(&directive)?;
             }
         }
-        for directive in &directives {
-            self.dispatch(directive)?;
+        self.parser.rewind()?;
+        while let Some(directive) = self.parser.next_directive()? {
+            self.dispatch(&directive)?;
         }
+        // pbrt-v4 ends the world at end of input, so the last batch of a
+        // file that never writes `WorldEnd` closes here.
+        self.flush_curves();
         if !self.in_world {
             return Err(Error::SceneFormat(
                 "the scene never reaches WorldBegin — not a pbrt scene?".into(),
@@ -398,6 +429,14 @@ impl Mapper {
     }
 
     fn dispatch(&mut self, directive: &Directive) -> Result<()> {
+        // A curve batch gathers across an unbroken run of `Shape`
+        // directives and no further: anything else in the stream can move
+        // the transform, the material, or the block the strands belong to,
+        // and a batch carries one of each. `shape_directive` closes it
+        // again for a shape that is not a curve.
+        if directive.keyword != "Shape" {
+            self.flush_curves();
+        }
         match directive.keyword.as_str() {
             // The current transform, in pbrt world space.
             "Identity" => self.state.ctm = Mat4::IDENTITY,
@@ -712,6 +751,10 @@ impl Mapper {
     fn shape_directive(&mut self, directive: &Directive) -> Result<()> {
         self.verify_block(directive, true)?;
         let ty = directive.names[0].as_str();
+        if ty == "curve" {
+            return self.curve_shape(directive);
+        }
+        self.flush_curves();
         // Trap 4, resolved on the renderer's terms: pbrt XORs
         // ReverseOrientation with the CTM's handedness because it bakes
         // world-space vertices and must cancel the mirror out of their
@@ -816,6 +859,90 @@ impl Mapper {
             }));
         }
         Ok(())
+    }
+
+    /// One `Shape "curve"`, appended to the batch being gathered — or to a
+    /// fresh one, if this curve does not belong with the last.
+    fn curve_shape(&mut self, directive: &Directive) -> Result<()> {
+        // `RecordedShape` carries a mesh name, and an object recording is
+        // replayed at every `ObjectInstance` — neither of which a batch
+        // still being gathered can answer for. Refused rather than
+        // dropped: a groom that silently fails to render is the exact
+        // failure this importer exists to make impossible.
+        if self.active_object.is_some() {
+            return Err(Error::SceneFormat(format!(
+                "{}: curves inside ObjectBegin are not supported — declare them at the top \
+                 level, where each batch carries its own transform",
+                directive.location
+            )));
+        }
+        let shape = curve(directive)?;
+        let material = self.shape_material(directive)?;
+        self.warn_unused(directive, "shape \"curve\"");
+
+        let continues = self.pending_curves.as_ref().is_some_and(|pending| {
+            pending.material == material
+                && pending.ctm == self.state.ctm
+                && pending.basis == shape.basis
+        });
+        if !continues {
+            self.flush_curves();
+            self.pending_curves = Some(PendingCurves {
+                material,
+                ctm: self.state.ctm,
+                basis: shape.basis,
+                points: Vec::new(),
+                counts: Vec::new(),
+                widths: Vec::new(),
+            });
+        }
+        let pending = self
+            .pending_curves
+            .as_mut()
+            .expect("a batch was just opened if none continued");
+        pending.counts.push((shape.points.len() / 3) as u32);
+        pending.points.extend(shape::triples(shape.points));
+        // pbrt hands each *segment* the pair `Lerp(seg / nSegments, …)`,
+        // `Lerp((seg + 1) / nSegments, …)`, which is one value per segment
+        // end shared between neighbours — `varying`, exactly.
+        let segments = shape.segments as f32;
+        for end in 0..=shape.segments {
+            let along = end as f32 / segments;
+            pending
+                .widths
+                .push(shape.width0 + along * (shape.width1 - shape.width0));
+        }
+        Ok(())
+    }
+
+    /// Emit the gathered batch, if there is one.
+    fn flush_curves(&mut self) {
+        let Some(pending) = self.pending_curves.take() else {
+            return;
+        };
+        let name = self.fresh("curve");
+        self.ops.push(Op::Curves(CurvesPatch {
+            source: Some(CurvesSource::Inline {
+                points: pending.points,
+                curve_vertex_counts: pending.counts,
+                widths: Some(Widths {
+                    values: pending.widths,
+                    interpolation: WidthInterpolation::Varying,
+                }),
+                // pbrt has no linear curve and no periodic one: every
+                // basis it accepts is cubic and open.
+                curve_type: CurveType::Cubic,
+                basis: pending.basis,
+                wrap: CurveWrap::Nonperiodic,
+            }),
+            ..CurvesPatch::new(&name)
+        }));
+        self.ops.push(Op::Instance(InstancePatch {
+            curves: Some(name.clone()),
+            material: Some(pending.material),
+            transforms: Some(vec![matrix_transform(self.conjugation * pending.ctm)]),
+            ..InstancePatch::new(name)
+        }));
     }
 
     /// The material this shape wears: the current one, pbrt's implicit
@@ -2367,21 +2494,27 @@ Translate 1 0 0
 
     /// pbrt-v4 defers texture creation to after the world block is parsed,
     /// so a material may name a texture declared *later* in the file —
-    /// watercolor does. The pre-pass in [`Mapper::run`] resolves every
-    /// texture before any material looks one up, so the forward reference
-    /// lands on the real image rather than failing "was never declared".
+    /// watercolor does. [`Mapper::run`] reads the stream twice, resolving
+    /// every texture before any material looks one up, so the forward
+    /// reference lands on the real image rather than failing "was never
+    /// declared". The declaration sits behind an `Include` here, because
+    /// the second read has to splice the same files as the first.
     #[test]
     fn a_material_may_name_a_texture_declared_later() {
         let world = format!(
             "MakeNamedMaterial \"planks\" \"string type\" \"diffuse\" \
              \"texture reflectance\" \"wood\"\n\
              NamedMaterial \"planks\"\n{TRIANGLE}\n\
-             Texture \"wood\" \"spectrum\" \"imagemap\" \"string filename\" \"wood.png\"\n"
+             Include \"textures.pbrt\"\n"
         );
         import_files(
             "forward-texture",
             &[
                 ("scene.pbrt", world_scene(&world).as_str()),
+                (
+                    "textures.pbrt",
+                    "Texture \"wood\" \"spectrum\" \"imagemap\" \"string filename\" \"wood.png\"\n",
+                ),
                 ("wood.png", "not-a-real-png"),
             ],
             |set, _| {
@@ -2624,6 +2757,131 @@ Translate 1 0 0
 
     fn world_scene(world: &str) -> String {
         format!("WorldBegin\n{world}\n")
+    }
+
+    /// The message an import that must refuse actually refuses with.
+    fn import_error(test: &str, world: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("cenote-map-{test}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        std::fs::write(dir.join("scene.pbrt"), world_scene(world)).expect("write fixture");
+        let refusal = crate::import(&dir.join("scene.pbrt"), &dir.join("generated"));
+        std::fs::remove_dir_all(&dir).ok();
+        match refusal {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("the import accepted what it cannot render"),
+        }
+    }
+
+    /// The `Inline` curve batches a scene's runs coalesced into, in order.
+    fn curve_batches(set: &ChangeSet) -> Vec<&CurvesSource> {
+        set.ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Curves(patch) => patch.source.as_ref(),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const STRAND: &str = r#""point3 P" [0 0 0  0 1 0  0 2 0  0 3 0]"#;
+
+    /// pbrt spells one curve per `Shape` — bunny-fur is 1.5 million in a
+    /// row — so an unbroken run coalesces into one batch. It breaks on
+    /// anything that is not a `Shape`, because that could move the
+    /// transform or the material a batch carries one of; and within a run,
+    /// on a curve that would be read through a different basis or that
+    /// forked its own material with an `alpha` cutout.
+    #[test]
+    fn a_run_of_curves_coalesces_and_breaks_where_it_must() {
+        let strand = |extra: &str| format!("Shape \"curve\" {extra} {STRAND}\n");
+        let world = format!(
+            "{plain}{plain}Translate 0 0 1\n{plain}{bspline}{cutout}",
+            plain = strand(""),
+            bspline = strand("\"string basis\" \"bspline\""),
+            cutout = strand("\"float alpha\" 0.5"),
+        );
+        import_world("curve-batches", &world, |set, _| {
+            let counts: Vec<&[u32]> = curve_batches(set)
+                .iter()
+                .map(|source| match source {
+                    CurvesSource::Inline {
+                        curve_vertex_counts,
+                        ..
+                    } => curve_vertex_counts.as_slice(),
+                    hair @ CurvesSource::Hair { .. } => {
+                        panic!("expected an inline batch, got {hair:?}")
+                    }
+                })
+                .collect();
+            assert_eq!(counts, [&[4, 4][..], &[4][..], &[4][..], &[4][..]]);
+            let placed = instances(set);
+            assert_eq!(placed.len(), 4);
+            // The cutout fork is the only thing that can change a
+            // material inside a run, and it did.
+            assert_ne!(placed[2].material, placed[3].material);
+        });
+    }
+
+    /// pbrt hands each *segment* the pair `Lerp(seg / nSegments, …)`,
+    /// which is one width per segment end shared between neighbours —
+    /// `varying`, exactly. Seven control vertices are two bezier spans, so
+    /// three ends. `width` is a diameter in both renderers; halving it is
+    /// the evaluator's job, not the importer's.
+    #[test]
+    fn curve_widths_land_on_segment_ends() {
+        let world = r#"Shape "curve" "float width0" 1 "float width1" 3
+            "point3 P" [0 0 0  0 1 0  0 2 0  0 3 0  0 4 0  0 5 0  0 6 0]"#;
+        import_world("curve-widths", world, |set, _| {
+            match curve_batches(set)[0] {
+                CurvesSource::Inline {
+                    curve_vertex_counts,
+                    widths,
+                    basis,
+                    ..
+                } => {
+                    assert_eq!(curve_vertex_counts, &[7]);
+                    assert_eq!(*basis, CurveBasis::Bezier);
+                    let widths = widths.as_ref().expect("authored widths");
+                    assert_eq!(widths.interpolation, WidthInterpolation::Varying);
+                    assert_eq!(widths.values, [1.0, 2.0, 3.0]);
+                }
+                hair @ CurvesSource::Hair { .. } => {
+                    panic!("expected an inline batch, got {hair:?}")
+                }
+            }
+        });
+    }
+
+    /// What cenote's curves cannot express is refused rather than
+    /// approximated: a groom that silently renders wrong is the failure
+    /// this importer exists to prevent. Every refusal names its line,
+    /// which is the only thing that identifies one strand among a
+    /// million.
+    #[test]
+    fn unsupported_curves_are_refused_by_name() {
+        let cases = [
+            (
+                format!("Shape \"curve\" \"string type\" \"ribbon\" {STRAND}"),
+                "ribbon",
+            ),
+            (
+                format!("Shape \"curve\" \"integer degree\" 2 {STRAND}"),
+                "degree",
+            ),
+            (
+                "Shape \"curve\" \"point3 P\" [0 0 0  0 1 0  0 2 0  0 3 0  0 4 0]".to_owned(),
+                "5 control vertices",
+            ),
+            (
+                format!("ObjectBegin \"o\"\nShape \"curve\" {STRAND}\nObjectEnd"),
+                "ObjectBegin",
+            ),
+        ];
+        for (world, wanted) in cases {
+            let error = import_error("curve-refusals", &world);
+            assert!(error.contains(wanted), "{error}");
+            assert!(error.contains("scene.pbrt:"), "{error}");
+        }
     }
 
     /// Spheres and disks tessellate at import: analytic normals, sane
