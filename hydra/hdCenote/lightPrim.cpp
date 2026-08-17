@@ -472,7 +472,7 @@ void HdCenoteLightPrim::_Reconcile(const HdSceneIndexPrim& prim, const _Dirt dir
         // A visibility wobble around objects already standing.
         return;
     }
-    // Total re-read, total resend : any dirt in the lane
+    // Total re-read, total resend: any dirt in the lane
     // rebuilds the whole payload — no per-field diffing, no
     // identical-patch suppression — and a spelling flip (a sphere
     // toggling treatAsPoint) withdraws the old objects in the same

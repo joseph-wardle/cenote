@@ -1170,7 +1170,7 @@ fn constant_grid_fixture_at(
     res: u32,
     voxel: f32,
 ) -> Option<std::path::PathBuf> {
-    let tool = crate::scene::source::vdb::find_prep_tool()?;
+    let tool = crate::scene::source::vdb::test_prep_tool()?;
     let path =
         std::env::temp_dir().join(format!("cenote-gate-{name}-{}.nvdb", std::process::id()));
     let output = std::process::Command::new(tool)
@@ -1429,7 +1429,7 @@ fn ramp_profile(k: i32) -> f64 {
 
 /// The same 32³ shell as [`constant_grid_fixture`], carrying that profile.
 fn ramp_grid_fixture(name: &str) -> Option<std::path::PathBuf> {
-    let tool = crate::scene::source::vdb::find_prep_tool()?;
+    let tool = crate::scene::source::vdb::test_prep_tool()?;
     let path =
         std::env::temp_dir().join(format!("cenote-gate-{name}-{}.nvdb", std::process::id()));
     let output = std::process::Command::new(tool)
@@ -1540,7 +1540,7 @@ fn an_emissive_grid_slab_radiates_its_source_integral() {
     let Some(gpu) = crate::gpu::test_context() else {
         return;
     };
-    let Some(tool) = crate::scene::source::vdb::find_prep_tool() else {
+    let Some(tool) = crate::scene::source::vdb::test_prep_tool() else {
         return;
     };
     let nvdb = std::env::temp_dir().join(format!("cenote-gate-fire-{}.nvdb", std::process::id()));

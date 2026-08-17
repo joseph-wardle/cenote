@@ -68,7 +68,7 @@ private:
 
     /// Re-reads `active` and the namespaced settings, then claims or
     /// releases. Total re-read on any dirt in the renderSettings locator:
-    /// the payload is three numbers, and a partial one would only be a
+    /// the payload is a few scalars, and a partial re-read would only be a
     /// second thing to keep true.
     void _Refresh(const HdSceneIndexPrim& prim);
 

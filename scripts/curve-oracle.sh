@@ -11,7 +11,8 @@
 #
 # Needs a release cenote-cli, `oiiotool`, numpy, and pbrt-v4. Without pbrt it
 # says so and exits 0: this gate proves an agreement with another renderer, and
-# absent that renderer there is no weaker version of it worth running.
+# absent that renderer there is no weaker version of it worth running. Set
+# CENOTE_REQUIRE_ORACLES=1 where that skip must not read as a pass.
 #
 # What it does *not* claim: that a tessellated tube and pbrt's procedural curve
 # make the same pixels. They do not, and the scenes are built so the ways they
@@ -26,6 +27,10 @@ pbrt=${PBRT:-pbrt}
 
 if ! command -v "$pbrt" >/dev/null 2>&1; then
   echo "curve-oracle: SKIPPED — no pbrt-v4 (\`$pbrt\`); set PBRT=/path/to/pbrt"
+  # A skip and a pass are the same exit code to anything reading this
+  # script, so the ritual that must not skip says so: CENOTE_REQUIRE_ORACLES
+  # is to the external gates what CENOTE_REQUIRE_GPU is to the Rust ones.
+  [[ -n ${CENOTE_REQUIRE_ORACLES-} ]] && exit 1
   exit 0
 fi
 [ -x "$cli" ] || { echo "curve-oracle: build cenote-cli --release first"; exit 1; }

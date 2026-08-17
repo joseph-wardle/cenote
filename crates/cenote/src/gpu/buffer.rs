@@ -161,7 +161,7 @@ impl Context {
     ///
     /// [`Error::Vulkan`] on buffer creation/bind failure, [`Error::Allocation`]
     /// if memory can't be allocated.
-    pub fn create_buffer(
+    pub(crate) fn create_buffer(
         &self,
         name: &str,
         size: vk::DeviceSize,
@@ -340,6 +340,10 @@ impl Context {
             .as_ref()
             .is_none_or(|landing| landing.size() < buffer.size())
         {
+            // Free the old landing buffer before cutting the new one: held
+            // together they peak at both sizes at once, which at 4K is a
+            // quarter gigabyte of host-visible memory for no reason.
+            staging.buffer = None;
             staging.buffer = Some(self.create_buffer(
                 name,
                 buffer.size(),

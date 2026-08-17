@@ -292,7 +292,7 @@ void HdCenoteDomePrim::_Refresh(const HdSceneIndexPrim& prim, const _Dirt dirt, 
     _eligible = _ReadVisibility(prim);
     const bool rebuilt = born || dirt.light;
     if (rebuilt) {
-        // Total re-read, total resend : any dirt in the
+        // Total re-read, total resend: any dirt in the
         // lane rebuilds the whole payload, every field explicitly set —
         // path included, Set or Clear, so a de-authored texture really
         // clears server-side.

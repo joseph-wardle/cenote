@@ -5,8 +5,8 @@
 // defaults sensibly stays defaulted: GetRenderParam() is nullptr,
 // capability flags are stock.
 //
-// It does export three render settings (renderSettings.hpp) — the sample
-// budget, the noise threshold, the bounce limit. They travel to the server
+// It does export the `cenote:` render settings, which renderSettings.hpp
+// names and defaults. They travel to the server
 // as scene data, not as delegate state: Update() resolves them into one
 // wire SettingsPatch whenever either source has moved, and the patch rides
 // out with everything else the same frame. Two sources, merged here and

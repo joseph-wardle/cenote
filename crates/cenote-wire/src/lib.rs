@@ -4,10 +4,11 @@
 //!
 //! Three pieces, one per module:
 //!
-//! - [`scene`] — a **full 1:1 mirror** of the renderer's `Op` and its
-//!   seven patches. The wire's contract is exactly "a serialized
-//!   `ChangeSet`": total (every edit the scene API can express) and
-//!   Hydra-agnostic. The mirror is deliberately a second set of types
+//! - [`scene`] — a mirror of the renderer's `Op` and its patches, one
+//!   for one except for `Medium`, which the wire has no spelling for at
+//!   all (so participating media are the one edit a host cannot author).
+//!   The wire's contract is otherwise exactly "a serialized `ChangeSet`",
+//!   and Hydra-agnostic. The mirror is deliberately a second set of types
 //!   rather than a re-export — this crate must never depend on the
 //!   renderer — and the wire→`Op` translation in `cenote-server`
 //!   exhaustively destructures every struct here, so a field added on

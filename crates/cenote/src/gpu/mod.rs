@@ -32,7 +32,8 @@ mod submit;
 mod timing;
 mod upload;
 
-pub use buffer::{Buffer, MemoryLocation, Staging};
+pub use buffer::{Buffer, Staging};
+pub(crate) use buffer::MemoryLocation;
 pub use overlay::GuiFrame;
 pub use present::Presenter;
 pub use timing::PassTimer;

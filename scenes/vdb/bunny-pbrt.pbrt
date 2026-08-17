@@ -13,7 +13,7 @@ WorldBegin
 LightSource "infinite" "rgb L" [1 1 1]
 
 MakeNamedMedium "cloud" "string type" "nanovdb"
-    "string filename" "/home/wardle/Documents/cenote/scenes/vdb/sources/bunny_cloud.vdb.nvdb"
+    "string filename" "sources/bunny_cloud.vdb.nvdb"
     "rgb sigma_a" [0.02 0.02 0.02]
     "rgb sigma_s" [0.35 0.35 0.35]
     "float g" 0.3

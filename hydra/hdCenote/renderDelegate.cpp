@@ -208,7 +208,7 @@ void HdCenoteRenderDelegate::SetTerminalSceneIndex(
 // server's own fallback budget never fires. Both are re-resolved and
 // re-merged whichever one moved: the merge is per key, so an answer that
 // came from the map has to be recomputed when the prim that was
-// overriding it goes away, and re-reading a map of three numbers is not
+// overriding it goes away, and re-reading a map this small is not
 // worth an incremental scheme.
 //
 // Resolution is pure (renderSettings.hpp); posting the complaints is this

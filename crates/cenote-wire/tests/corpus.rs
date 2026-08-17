@@ -472,25 +472,40 @@ fn golden_dir() -> PathBuf {
 /// language seam fails here instead of at a customer's handshake.
 #[test]
 fn the_cpp_mirror_agrees_on_the_version_literals() {
-    let scrape = |file: &str, name: &str| -> u32 {
+    // The needle carries the declared type, and the match must be unique:
+    // `fb.hpp` spells the layout version and the byte offset that points at
+    // it with the same name in two namespaces, so a bare name would read
+    // whichever came first in the file.
+    let scrape = |file: &str, decl: &str| -> u32 {
         let path = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../hydra/wire/"))
             .join(file);
         let text = fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-        let needle = format!("{name} = ");
-        text.lines()
-            .find_map(|line| {
+        let needle = format!("{decl} = ");
+        let values: Vec<u32> = text
+            .lines()
+            .filter_map(|line| {
                 let value = line.split(&needle).nth(1)?;
-                value.trim_end_matches(';').trim().parse().ok()
+                // Trim before stripping: a trailing space or comment would
+                // otherwise leave the `;` on and drop the line silently.
+                value.trim().trim_end_matches(';').trim().parse().ok()
             })
-            .unwrap_or_else(|| panic!("no `{name} = <int>;` in {}", path.display()))
+            .collect();
+        assert_eq!(
+            values.len(),
+            1,
+            "`{decl} = <int>;` matched {} lines in {}",
+            values.len(),
+            path.display()
+        );
+        values[0]
     };
     assert_eq!(
-        scrape("protocol.hpp", "PROTOCOL"),
+        scrape("protocol.hpp", "std::uint32_t PROTOCOL"),
         cenote_wire::protocol::PROTOCOL
     );
     assert_eq!(
-        scrape("fb.hpp", "LAYOUT_VERSION"),
+        scrape("fb.hpp", "std::uint32_t LAYOUT_VERSION"),
         cenote_wire::fb::LAYOUT_VERSION
     );
 }

@@ -50,11 +50,16 @@ __pycache__/
 # Where scripts/corpus-identity.sh renders the sweep it byte-compares.
 /corpus-identity/
 
-# Historical per-milestone capture dirs (b7…b12): closed-rung residue with
-# no reader; safe to delete locally. b12-baselines also holds Cem Yuksel's
-# hair models — free for research *with attribution*, not to redistribute
-# (http://www.cemyuksel.com/research/hairmodels/) — so anything derived
-# from them stays local too.
+# Historical per-milestone capture dirs (b7…b12): closed-rung captures the
+# gates no longer read, once `baselines/` holds what they do. Two hold
+# inputs and not just output, so check before deleting either:
+# b12-baselines/sources/ is the only local copy of the grooms
+# scenes/hair/*.ron name, and b9-baselines/{reference,quality} seeded
+# baselines/walk/. The grooms are Cem Yuksel's, free for research *with
+# attribution* and not to redistribute
+# (http://www.cemyuksel.com/research/hairmodels/): the models and anything
+# derived from their geometry stay local, while a RON that merely names one
+# is our own description and is tracked.
 /b7-baselines/
 /b8-baselines/
 /b9-baselines/

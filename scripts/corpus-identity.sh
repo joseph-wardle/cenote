@@ -59,9 +59,6 @@ for entry in "${scenes[@]}"; do
     continue
   fi
   if [[ ! -f $base/$label.exr ]]; then
-    # A scene the baseline predates — the head, until a sweep is minted
-    # that includes it. Loud, counted, and not a failure: there is no
-    # earlier image for it to differ from.
     echo "RESULT $label NO-BASELINE"
     unbaselined=$((unbaselined + 1))
   elif cmp -s "$out/$label.exr" "$base/$label.exr"; then
@@ -78,6 +75,15 @@ done
 # scene is new — the one way this gate could pass by accident.
 if [[ $compared == 0 ]]; then
   echo "no scene had a baseline in $base — wrong directory?"
+  fail=1
+fi
+
+# A lost baseline and a never-minted one look identical from here: both are
+# just a file that isn't there. So an unbaselined scene fails by default,
+# and minting is the deliberate act that says otherwise.
+if [[ $unbaselined != 0 && -z ${ALLOW_UNBASELINED-} ]]; then
+  echo "$unbaselined scene(s) had no baseline in $base — a deleted baseline"
+  echo "looks exactly like a new scene. ALLOW_UNBASELINED=1 to mint one."
   fail=1
 fi
 

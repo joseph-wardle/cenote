@@ -31,13 +31,14 @@ identity_scenes=(
   "scenes/corpus/water-caustic.ron:water-caustic"
   "scenes/corpus/watercolor.ron:watercolor"
   "scenes/corpus/zero-day.ron:zero-day"
-  # The feature scenes the sweep was blind to before: homogeneous and
-  # priority-nested interiors, the subsurface walk, curves, and the two
+  # The feature scenes: homogeneous and priority-nested interiors, both
+  # routes through one subsurface interior, curves, and the two
   # heterogeneous-volume scenes. A byte-level regression in any of those
   # subsystems is invisible without them.
   "scenes/milk-glass.ron:milk-glass"
   "scenes/nested-glass.ron:nested-glass"
   "scenes/sss/teapot-wax-walk.ron:sss-wax-walk"
+  "scenes/sss/teapot-wax.ron:sss-wax-volume"
   "scenes/curves.ron:curves"
   "scenes/vdb/bunny-cloud-oracle.ron:bunny-cloud-oracle"
   "scenes/vdb/explosion.ron:explosion"

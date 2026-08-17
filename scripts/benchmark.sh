@@ -48,8 +48,8 @@ done
 # records the skip and moves on, so the walk is the same length everywhere.
 echo
 echo "== edit latency =="
-for entry in "${scenes[@]}"; do
-  scene=${entry%%:*}
+for entry in "${benchmark_scenes[@]}"; do
+  scene=$root/${entry%%:*}
   label=${entry##*:}
   [[ -f $scene ]] || { echo "skipping $label — $scene is not here" >&2; continue; }
   "$cli" edit-latency "$scene" \

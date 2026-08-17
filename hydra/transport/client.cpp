@@ -264,9 +264,8 @@ void Client::check_liveness() {
     }
     // Strict request/response: between calls the server never
     // speaks, so a readable or hung-up socket is death or a protocol
-    // violation — degraded either way. Recovery is a fresh spawn
-    //: destroying and recreating the delegate replays the whole
-    // stage.
+    // violation — degraded either way. Recovery is a fresh spawn:
+    // destroying and recreating the delegate replays the whole stage.
     TF_WARN("cenote-server hung up outside a request; the picture is frozen — toggle the "
             "renderer or reload the stage to spawn a fresh server");
     shut_down();
@@ -480,7 +479,7 @@ bool Client::connect_socket() {
     const int nodelay = 1;
     ::setsockopt(socket_, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof nodelay);
     // A reply slower than the response window means the server is gone
-    // or wedged; recv fails and the client degrades 
+    // or wedged; recv fails and the client degrades
     // instead of freezing the host.
     const struct timeval window = {.tv_sec = static_cast<time_t>(RESPONSE_TIMEOUT.count()),
                                    .tv_usec = 0};

@@ -499,7 +499,12 @@ mod tests {
         assert_eq!(records[0].pdf, 0.0);
         assert!(selection_probability(&records, 0).abs() < 1e-12);
         assert!((selection_probability(&records, 1) - 1.0).abs() < 1e-9);
-        // And an *all*-degenerate list is powerless without being infinite.
+        // And an *all*-degenerate list is powerless without being infinite:
+        // its total is the divisor every pdf and alias threshold is built
+        // from, so a zero there must land on a finite table, not a NaN one.
         assert!(total_power(&triangles[..1], &[]).abs() < 1e-12);
+        let dark = build(&triangles[..1], &[]);
+        assert_eq!(dark[0].pdf, 0.0);
+        assert!((dark[0].alias_threshold - 1.0).abs() < 1e-7);
     }
 }

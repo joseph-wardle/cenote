@@ -823,7 +823,6 @@ fn source_hash(path: &Path) -> Result<u64> {
     Ok(fnv1a(hash, &PREP_VERSION.to_le_bytes()))
 }
 
-
 /// Locate `cenote-vdb-prep`: an explicit `CENOTE_VDB_PREP` wins, then
 /// PATH, then — as a source-checkout convenience, like hot reload's baked
 /// shader paths — the conventional build tree next to this crate.
@@ -847,6 +846,24 @@ pub(crate) fn find_prep_tool() -> Option<PathBuf> {
             .join("../../build/vdb-prep/cenote-vdb-prep");
         checkout.is_file().then_some(checkout)
     })
+}
+
+/// [`find_prep_tool`] for the gates that synthesize fixture grids through
+/// it: `None` skips them where it isn't built, with a note on stderr, and
+/// `CENOTE_REQUIRE_GPU=1` turns that skip into a failure — the same gate
+/// [`crate::gpu::test_context`] carries. Without it a tool that fell off
+/// `PATH` retires every heterogeneous-volume test silently green.
+#[cfg(test)]
+pub(crate) fn test_prep_tool() -> Option<PathBuf> {
+    let tool = find_prep_tool();
+    if tool.is_none() {
+        assert!(
+            std::env::var_os("CENOTE_REQUIRE_GPU").is_none(),
+            "CENOTE_REQUIRE_GPU is set but cenote-vdb-prep was not found"
+        );
+        eprintln!("skipping: no cenote-vdb-prep here");
+    }
+    tool
 }
 
 /// Chunk size below which the scan stays on one thread: spawning is only
@@ -1548,18 +1565,22 @@ mod tests {
         let mut pool = GridPool::new();
         let first = pool.upload(&gpu, &path_a, "density").expect("upload a");
         assert_eq!(first.grid, 0);
-        // The lattice follows the payload, 32-byte aligned — the alignment
-        // is the contract, not the fixture's particular byte count.
-        assert!(u64::from(first.majorant) >= payload_a.len() as u64);
-        assert_eq!(first.majorant % 32, 0);
+        // The lattice follows the payload at the *first* 32-byte boundary
+        // past it. Derived from the rule rather than from the handle the
+        // pool just returned: `>= payload && aligned` would also hold if
+        // every allocation were rounded to a page, which is the packing
+        // regression this pool exists to avoid.
+        let align_up = |offset: usize| offset.next_multiple_of(32) as u32;
+        assert_eq!(first.majorant, align_up(payload_a.len()));
         // Same file, same grid: the existing slots, no growth.
         let again = pool.upload(&gpu, &path_a, "density").expect("re-upload a");
         assert_eq!((again.grid, again.majorant), (first.grid, first.majorant));
-        // A second grid grows the pool and lands aligned past the first's
-        // four lattice bytes, so the dedup above advanced nothing.
+        // A second grid grows the pool and lands at the first boundary past
+        // the first's four lattice bytes, so the dedup above advanced
+        // nothing.
         let second = pool.upload(&gpu, &path_b, "density").expect("upload b");
-        assert!(second.grid > first.majorant);
-        assert_eq!(second.grid % 32, 0);
+        assert_eq!(second.grid, align_up(first.majorant as usize + 4));
+        assert_eq!(second.majorant, align_up(second.grid as usize + payload_b.len()));
 
         // Both payloads and both lattices survive the growth copy intact.
         let bytes = gpu

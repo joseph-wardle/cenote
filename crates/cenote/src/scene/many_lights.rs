@@ -160,7 +160,6 @@ mod tests {
     use super::super::description::SceneDescription;
     use super::*;
 
-
     /// The panel sweeps warm to cool: its near corner emits warm, its far
     /// corner cool, and every emitter carries real power — while the
     /// occluders emit nothing, so only the panel lights the scene.
@@ -191,7 +190,6 @@ mod tests {
             "occluders must not emit"
         );
     }
-
 
     /// The committed `scenes/many-lights.ron` — the flagship scene file the
     /// validation figures render, and the one a stranger opens to see the

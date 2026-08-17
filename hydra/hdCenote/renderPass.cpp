@@ -40,8 +40,8 @@ HdCenoteRenderPass::HdCenoteRenderPass(HdRenderIndex* index, HdRprimCollection c
                                        cenote::transport::Client* client)
     : HdRenderPass(index, collection), _client(client) {}
 
-// Convergence, read live from the shm header and qualified by the epoch
-//: settled counts only once the front frame has incorporated
+// Convergence, read live from the shm header and qualified by the epoch:
+// settled counts only once the front frame has incorporated
 // everything this client sent, so a stale picture never claims to be
 // final — or the client is degraded and the picture will never improve.
 // The bound buffers answer the same question with a resize guard on top.
@@ -84,8 +84,8 @@ void HdCenoteRenderPass::_UpdateCamera(HdRenderPassStateSharedPtr const& renderP
     }
     // The vertical field of view comes from the *conformed* projection —
     // the same matrix the depth remap reads — so the frame the
-    // server renders and the depth read back from it share one camera
-    //. HdCamera still supplies what a projection cannot: the
+    // server renders and the depth read back from it share one camera.
+    // HdCamera still supplies what a projection cannot: the
     // transform, the perspective check, and the lens (focus distance,
     // fStop, focal length — the last only to turn f-number into an
     // aperture radius).

@@ -65,7 +65,7 @@ private:
     /// resend  — so they share a lane.
     struct _Dirt {
         bool light;      //< params or transform → the whole spelling resends
-        bool visibility; //< visible ⟺ the objects exist 
+        bool visibility; //< visible ⟺ the objects exist
     };
 
     /// One-shot latches for the approximations that degrade under a

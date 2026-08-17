@@ -2901,6 +2901,14 @@ Translate 1 0 0
                 "out of range",
             ),
             (
+                // Below the range, not above it: `-1.0 as u32` saturates to
+                // zero in Rust, so a dropped lower bound is a silently
+                // *valid-looking* mesh rather than a crash.
+                "Shape \"trianglemesh\" \"point3 P\" [0 0 0  1 0 0  0 1 0] \
+                 \"integer indices\" [0 1 -1]",
+                "out of range",
+            ),
+            (
                 "Shape \"trianglemesh\" \"point3 P\" [0 0 0  1 0 0  0 1 0] \
                  \"integer indices\" [0 1]",
                 "whole triangles",

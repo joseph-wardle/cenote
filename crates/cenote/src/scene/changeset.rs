@@ -1203,6 +1203,58 @@ mod tests {
         assert!(description.take_dirty().is_empty());
     }
 
+    /// Every object a fresh apply creates lands in `changed`. That set is
+    /// what `validate` walks its per-object checks over, so an object
+    /// missing from it is an object nothing ever checks — an invariant, not
+    /// just a hint to re-prep.
+    #[test]
+    fn a_fresh_apply_dirties_every_object_it_creates() {
+        let mut description = SceneDescription::new();
+        description.apply(&triangle_scene()).expect("valid set");
+        let named: BTreeSet<(Kind, String)> = [
+            (Kind::Instance, "thing"),
+            (Kind::Material, "gray"),
+            (Kind::Mesh, "tri"),
+        ]
+        .into_iter()
+        .map(|(kind, name)| (kind, name.to_owned()))
+        .collect();
+        assert_eq!(description.take_dirty().changed, named);
+    }
+
+    /// A rejected set gives back the maps it moved out. The description has
+    /// to be populated first: with every map empty, staging moves nothing
+    /// and a rollback that dropped the lot would still look right.
+    #[test]
+    fn a_rejected_set_leaves_a_populated_description_alone() {
+        let mut description = SceneDescription::new();
+        description.apply(&triangle_scene()).expect("valid set");
+        description.take_dirty();
+        // Only `Kind::Camera` is touched, so every other map is moved into
+        // the staging copy and has to be moved back.
+        let error = description
+            .apply(&ChangeSet {
+                ops: vec![Op::Camera(CameraPatch {
+                    position: Some([1.0, 2.0, 3.0]),
+                    look_at: Some([1.0, 2.0, 3.0]),
+                    ..CameraPatch::new("main")
+                })],
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("coincide"), "{error}");
+        assert!(
+            description.meshes().contains_key("tri"),
+            "the untouched mesh map came back empty"
+        );
+        assert!(description.materials().contains_key("gray"));
+        assert!(description.instances().contains_key("thing"));
+        assert!(description.cameras().is_empty(), "the rejected camera landed");
+        assert!(
+            description.take_dirty().is_empty(),
+            "a rejected set recorded dirt"
+        );
+    }
+
     #[test]
     fn a_rejected_set_changes_nothing() {
         let mut description = SceneDescription::new();
@@ -2073,4 +2125,3 @@ mod tests {
         ));
     }
 }
-

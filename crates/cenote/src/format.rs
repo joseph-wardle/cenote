@@ -7,7 +7,7 @@
 //!
 //! The version field leads the file; when the full parse fails, it is
 //! recovered by a bounded scan of the leading lines, so a file from a
-//! different format generation fails with "version 3, this build reads 1"
+//! different format generation fails with "version 3, this build reads 2"
 //! instead of a field-level parse error. (The scan replaces a serde probe
 //! of the whole file: ron's skipped-value path re-searches the remaining
 //! source for `..` at every number — quadratic, an hour of parsing on a

@@ -227,7 +227,11 @@ fn full_patch(name: &str, material: &Material) -> MaterialPatch {
         geometry_opacity: Some(material.geometry_opacity.clone()),
         geometry_thin_walled: Some(material.geometry_thin_walled),
         geometry_normal: Some(material.geometry_normal.clone()),
-        ..MaterialPatch::new(name)
+        // Spelled out rather than `..MaterialPatch::new(name)`: the literal
+        // is exhaustive, so a field added to the patch stops this compiling
+        // instead of silently arriving as `None` and resetting itself on
+        // the next drag.
+        name: name.to_owned(),
     }
 }
 
@@ -237,19 +241,51 @@ mod tests {
     use cenote::scene::changeset::{ChangeSet, Op};
     use cenote::scene::description::SceneDescription;
 
-    /// The patch is the whole material: applying it to a fresh description
-    /// reproduces the source exactly. A field added to `Material` and
-    /// forgotten in `full_patch` fails this equality — the panel would
-    /// silently reset that field on every widget drag.
+    /// Every scalar lands in the field it was read from. That the patch is
+    /// *complete* is the exhaustive literal's job, enforced by the
+    /// compiler; what a test can still catch is a value wired to the wrong
+    /// neighbour, so the source carries a distinct value per field and a
+    /// swap shows up as an inequality. A default-valued source would prove
+    /// nothing: `apply` creates from `Material::default()`, so an omitted
+    /// field would equal the source no matter what.
     #[test]
-    fn full_patch_round_trips_the_whole_material() {
-        let source = Material::default();
-        let mut description = SceneDescription::new();
-        description
+    fn full_patch_round_trips_every_value() {
+        let authored = MaterialPatch {
+            base_diffuse_roughness: Some(0.11),
+            specular_weight: Some(0.22),
+            specular_ior: Some(1.33),
+            transmission_weight: Some(0.44),
+            transmission_color: Some([0.51, 0.52, 0.53]),
+            transmission_depth: Some(0.66),
+            transmission_scatter: Some([0.71, 0.72, 0.73]),
+            transmission_scatter_anisotropy: Some(0.18),
+            coat_weight: Some(0.88),
+            coat_color: Some([0.91, 0.92, 0.93]),
+            coat_roughness: Some(0.19),
+            coat_ior: Some(1.21),
+            coat_darkening: Some(0.23),
+            fuzz_weight: Some(0.24),
+            fuzz_color: Some([0.25, 0.26, 0.27]),
+            fuzz_roughness: Some(0.28),
+            emission_luminance: Some(29.0),
+            geometry_thin_walled: Some(true),
+            ..MaterialPatch::new("m")
+        };
+        let mut authored_scene = SceneDescription::new();
+        authored_scene
+            .apply(&ChangeSet {
+                ops: vec![Op::Material(Box::new(authored))],
+            })
+            .expect("the authored material is valid");
+        let source = authored_scene.materials()["m"].clone();
+        assert_ne!(source, Material::default(), "the fixture must not be default");
+
+        let mut round_tripped = SceneDescription::new();
+        round_tripped
             .apply(&ChangeSet {
                 ops: vec![Op::Material(Box::new(full_patch("m", &source)))],
             })
-            .expect("a default material is valid");
-        assert_eq!(description.materials()["m"], source);
+            .expect("the round-tripped material is valid");
+        assert_eq!(round_tripped.materials()["m"], source);
     }
 }

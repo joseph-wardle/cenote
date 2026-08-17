@@ -70,7 +70,6 @@ mod tests {
         assert!(white.abs_diff_eq(Vec3::ONE, 1e-6), "{white}");
     }
 
-
     /// The XYZ matrix agrees with [`luminance`] on its own middle row —
     /// the one place the two spellings of AP1's Y weights could drift.
     #[test]
@@ -80,7 +79,6 @@ mod tests {
             assert!((luminance(primary) - y).abs() < 1e-7, "{primary} -> {y}");
         }
     }
-
 
     /// The primaries land on their published `ACEScg` coordinates (ACES TB
     /// S-2014-004 derivation, Bradford CAT) — an independent check that the

@@ -92,9 +92,7 @@ std::string HdCenoteDescribeSettings(const cenote::wire::SettingsPatch& patch);
 /// first. This one function is the whole precedence rule between the two
 /// sources — per key, never wholesale, so a prim that names only the
 /// bounce limit still leaves the map's budget standing. Every field of the
-/// patch overlays, not only the three the surface currently authors: the
-/// rule belongs to the patch, and a fourth key should not have to
-/// remember to come back here.
+/// patch overlays, including the ones no descriptor advertises.
 HdCenoteResolvedSettings HdCenoteOverlaySettings(HdCenoteResolvedSettings under,
                                                  const HdCenoteResolvedSettings& over);
 

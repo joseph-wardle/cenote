@@ -39,7 +39,10 @@ pub(crate) const MAX_DIM: u32 = 4096;
 
 /// Bumping this invalidates every DDS cache — the knob to turn when the
 /// prep pipeline itself changes (filters, encoder settings, layout).
-const PIPELINE_VERSION: u32 = 1;
+/// Caches are written beside their sources and never tracked, so a bump
+/// costs one re-prep and nothing else. Version 2 retired the caches of
+/// float-decoded sources, which used to be quantized to LDR.
+const PIPELINE_VERSION: u32 = 2;
 
 /// What a texture feeds, which decides its channel count, encoding, and
 /// default color space. Part of the cache identity: one source image used
@@ -192,13 +195,36 @@ pub(crate) fn prepare(
     srgb: Option<bool>,
     channel: Channel,
 ) -> Result<Prepared> {
-    let bytes = fs::read(path).map_err(|error| {
+    // One open, not an open and a stat: the stamp comes off the handle the
+    // read is about to use, so warming the memo costs no extra path walk.
+    // Taken before the read rather than after — if the file moves in
+    // between, the memo holds a stale stat against fresh bytes, which the
+    // next look re-reads; the other order would hold a fresh stat against
+    // stale bytes and never notice.
+    let read = |path: &Path| -> std::io::Result<(Option<Stamp>, Vec<u8>)> {
+        use std::io::Read;
+        let mut file = fs::File::open(path)?;
+        let stamp = file.metadata().ok().map(|meta| {
+            (
+                meta.len(),
+                meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+            )
+        });
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok((stamp, bytes))
+    };
+    let (stamp, bytes) = read(path).map_err(|error| {
         Error::Scene(format!(
             "texture \"{}\": can't read: {error}",
             path.display()
         ))
     })?;
-    let hash = cache_hash(&bytes, usage, srgb, channel);
+    let fnv = fnv1a(0xcbf2_9ce4_8422_2325, &bytes);
+    if let Some(stamp) = stamp {
+        remember(path, stamp, fnv);
+    }
+    let hash = finish_hash(fnv, usage, srgb, channel);
     let cache = cache_path(path, usage, srgb, channel);
     if let Some(prepared) = read_cache(&cache, hash) {
         return Ok(prepared);
@@ -229,43 +255,14 @@ fn cache_path(path: &Path, usage: Usage, srgb: Option<bool>, channel: Channel) -
     path.with_file_name(name)
 }
 
-/// The cache-validity hash: source bytes plus everything that changes the
-/// prepared result. The channel folds in as its tag — empty for red, so
-/// pre-channel caches keep validating.
-fn cache_hash(bytes: &[u8], usage: Usage, srgb: Option<bool>, channel: Channel) -> u64 {
-    finish_hash(
-        Stamp {
-            fnv: fnv1a(0xcbf2_9ce4_8422_2325, bytes),
-            radiance: bytes.starts_with(b"#?"),
-        },
-        usage,
-        srgb,
-        channel,
-    )
-}
-
-/// A source file's content identity: its byte hash plus the decode-routing
-/// sniff, the two inputs [`finish_hash`] needs beyond the reference's own
-/// parameters.
-#[derive(Clone, Copy)]
-struct Stamp {
-    fnv: u64,
-    /// Radiance sources take the float decode path; the sniff is part of
-    /// cache identity so the pre-float caches of exactly those files
-    /// retire without invalidating anyone else's.
-    radiance: bool,
-}
-
-/// Fold the reference's parameters over a source stamp — the tail of
-/// [`cache_hash`], split out so [`expected_hash`] can reuse a memoized
-/// stamp without re-reading the file.
-fn finish_hash(stamp: Stamp, usage: Usage, srgb: Option<bool>, channel: Channel) -> u64 {
-    let mut hash = stamp.fnv;
+/// Fold the reference's parameters over a source's byte hash: everything
+/// beyond the bytes that changes the prepared result. The channel folds in
+/// as its tag — empty for red, so pre-channel caches keep validating. Split
+/// from the byte hash so a memoized one can be reused without a re-read.
+fn finish_hash(fnv: u64, usage: Usage, srgb: Option<bool>, channel: Channel) -> u64 {
+    let mut hash = fnv;
     hash = fnv1a(hash, usage.tag().as_bytes());
     hash = fnv1a(hash, channel.tag().as_bytes());
-    if stamp.radiance {
-        hash = fnv1a(hash, b"radiance-float");
-    }
     hash = fnv1a(
         hash,
         &[
@@ -292,41 +289,56 @@ pub(crate) fn expected_hash(
     srgb: Option<bool>,
     channel: Channel,
 ) -> Result<u64> {
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-    use std::time::SystemTime;
-
-    /// Per-source memo: (size, mtime) validates the recorded stamp.
-    type Stamps = HashMap<PathBuf, (u64, SystemTime, Stamp)>;
-    static STAMPS: Mutex<Option<Stamps>> = Mutex::new(None);
-
-    let meta = fs::metadata(path).map_err(|error| {
+    let stamp = stat_of(path).ok_or_else(|| {
+        Error::Scene(format!("texture \"{}\": can't read", path.display()))
+    })?;
+    if let Some(fnv) = recall(path, stamp) {
+        return Ok(finish_hash(fnv, usage, srgb, channel));
+    }
+    let bytes = fs::read(path).map_err(|error| {
         Error::Scene(format!(
             "texture \"{}\": can't read: {error}",
             path.display()
         ))
     })?;
-    let (size, mtime) = (meta.len(), meta.modified().unwrap_or(SystemTime::UNIX_EPOCH));
+    let fnv = fnv1a(0xcbf2_9ce4_8422_2325, &bytes);
+    remember(path, stamp, fnv);
+    Ok(finish_hash(fnv, usage, srgb, channel))
+}
+
+/// The file identity the memo validates against: size and mtime, the same
+/// pair the `.nvdb` sidecar trusts.
+type Stamp = (u64, std::time::SystemTime);
+
+/// [`Stamp`] by path. `None` when the file can't be statted.
+fn stat_of(path: &Path) -> Option<Stamp> {
+    let meta = fs::metadata(path).ok()?;
+    Some((
+        meta.len(),
+        meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+    ))
+}
+
+/// Per-source memo of the byte hash, keyed by path and validated by the
+/// stamp. [`prepare`] fills it from the read it was doing anyway, so the
+/// first edit that names an already-prepped texture costs a stat rather
+/// than a re-read.
+static STAMPS: std::sync::Mutex<Option<std::collections::HashMap<PathBuf, (Stamp, u64)>>> =
+    std::sync::Mutex::new(None);
+
+fn recall(path: &Path, stamp: Stamp) -> Option<u64> {
     let mut stamps = STAMPS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let stamps = stamps.get_or_insert_default();
-    let stamp = match stamps.get(path) {
-        Some(&(seen_size, seen_mtime, stamp)) if (seen_size, seen_mtime) == (size, mtime) => stamp,
-        _ => {
-            let bytes = fs::read(path).map_err(|error| {
-                Error::Scene(format!(
-                    "texture \"{}\": can't read: {error}",
-                    path.display()
-                ))
-            })?;
-            let stamp = Stamp {
-                fnv: fnv1a(0xcbf2_9ce4_8422_2325, &bytes),
-                radiance: bytes.starts_with(b"#?"),
-            };
-            stamps.insert(path.to_path_buf(), (size, mtime, stamp));
-            stamp
-        }
-    };
-    Ok(finish_hash(stamp, usage, srgb, channel))
+    stamps
+        .get(path)
+        .and_then(|&(seen, fnv)| (seen == stamp).then_some(fnv))
+}
+
+fn remember(path: &Path, stamp: Stamp, fnv: u64) {
+    let mut stamps = STAMPS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    stamps
+        .get_or_insert_default()
+        .insert(path.to_path_buf(), (stamp, fnv));
 }
 
 /// FNV-1a over `bytes`, continuing from `state` — the one hash both
@@ -1118,8 +1130,8 @@ mod tests {
         assert!(
             dds::parse(
                 &fs::read(&cache).expect("read"),
-                cache_hash(
-                    &fs::read(&path).expect("read"),
+                finish_hash(
+                    fnv1a(0xcbf2_9ce4_8422_2325, &fs::read(&path).expect("read")),
                     Usage::Color,
                     None,
                     Channel::R
@@ -1200,10 +1212,23 @@ mod tests {
             first,
             expected_hash(&path, Usage::Color, None, Channel::R).expect("memoized")
         );
-        assert_ne!(
-            first,
-            expected_hash(&path, Usage::Scalar, None, Channel::G).expect("other usage")
-        );
+        // One dimension at a time: moved together, either fold alone could
+        // account for the difference and the other could be dropped
+        // unnoticed. `srgb` matters most — `None` and `Some(false)` pick
+        // different residencies (BC7 sRGB against BC7 unorm), so a cache
+        // that collided them would hand back an sRGB view of a linear map.
+        for (label, usage, srgb, channel) in [
+            ("usage", Usage::Scalar, None, Channel::R),
+            ("channel", Usage::Color, None, Channel::G),
+            ("srgb linear", Usage::Color, Some(false), Channel::R),
+            ("srgb encoded", Usage::Color, Some(true), Channel::R),
+        ] {
+            assert_ne!(
+                first,
+                expected_hash(&path, usage, srgb, channel).expect(label),
+                "{label} does not reach the hash"
+            );
+        }
 
         write_png(&path, 4, 4, &[20u8; 4 * 4 * 4]);
         let edited = expected_hash(&path, Usage::Color, None, Channel::R).expect("edited");

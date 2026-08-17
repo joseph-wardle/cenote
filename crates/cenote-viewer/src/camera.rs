@@ -245,8 +245,19 @@ mod tests {
     #[test]
     fn pitch_never_reaches_the_poles() {
         let mut orbit = OrbitCamera::framing(&demo_pose());
-        for pitch in [-1e6, 1e6] {
+        // Both signs, and magnitudes that stay inside one turn as well as
+        // ones that would wrap: a drag large enough to wrap can land back
+        // near the horizon on its own, so it cannot on its own prove the
+        // clamp is there.
+        for pitch in [-1e6, -1e3, -200.0, 200.0, 1e3, 1e6] {
             orbit.orbit(0.0, pitch);
+            // The clamped value itself — a missing or one-sided clamp fails
+            // here even when the wrapped angle happens to look harmless.
+            assert!(
+                orbit.pitch.abs() <= MAX_PITCH,
+                "drag {pitch} left pitch at {} rad, past the ±{MAX_PITCH} clamp",
+                orbit.pitch
+            );
             let camera = orbit.camera();
             let forward = (camera.look_at - camera.position).normalize();
             // Short of the pole by a workable margin (the clamp leaves

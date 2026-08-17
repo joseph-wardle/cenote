@@ -153,8 +153,8 @@ void _Unknown(const HdRenderSettingsMap& settings, std::vector<std::string>* war
 
 HdRenderSettingDescriptorList HdCenoteSettingDescriptors() {
     // The budget is advertised under Hydra's own token, not ours: it is
-    // the one of the three that every host already has a name for, and a
-    // host setting the standard key should not have to learn a second.
+    // the one every host already has a name for, and a host setting the
+    // standard key should not have to learn a second.
     return {
         {"Samples Per Pixel", HdRenderSettingsTokens->convergedSamplesPerPixel,
          VtValue(kDefaultSamplesPerPixel)},

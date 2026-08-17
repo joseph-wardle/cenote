@@ -171,7 +171,6 @@ mod tests {
     use super::super::description::SceneDescription;
     use super::*;
 
-
     #[test]
     fn the_chart_sweeps_its_corners() {
         let mut description = SceneDescription::new();

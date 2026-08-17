@@ -198,3 +198,8 @@ QT_QPA_PLATFORM=xcb usdrecord <stage> out.png
   Qt-on-xcb, so the usdview HUD dies with "Attempt to retrieve context when no
   valid context"; `PYOPENGL_PLATFORM=glx` pins it. (usdrecord doesn't use
   PyOpenGL.)
+- The distro's `OpenImageIO` python module (which `curves_test.py` reads EXRs
+  with) pulls in the system `libopenvdb`, built against a different oneTBB than
+  the one this prefix links; importing it after `pxr` fails with an undefined
+  `tbb::detail::r1::get_thread_reference_vertex`. `LD_PRELOAD=/lib64/libtbb.so.12`
+  resolves the symbol to the system build and the tests run.

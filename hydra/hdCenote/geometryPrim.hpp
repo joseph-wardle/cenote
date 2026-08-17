@@ -82,7 +82,7 @@ public:
     /// bound material when it is live on the wire, the companion
     /// otherwise — and no-ops when nothing changed. The material
     /// lifecycle hooks call this on birth and death (Hydra emits no
-    /// binding dirt for either,  and every reconcile ends here.
+    /// binding dirt for either), and every reconcile ends here.
     void ResolveBinding();
 
     /// Recomposes the placements array from the cached inputs (its own

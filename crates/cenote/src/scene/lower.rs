@@ -170,20 +170,24 @@ pub(super) fn host_phase(
     }
     let mut textures: BTreeMap<texture::Key, Option<texture::Prepared>> = BTreeMap::new();
     for (key, touched) in referenced {
-        let resident = resident_textures.get(&key).copied();
-        let prepared = if resident.is_none() || touched {
-            // key.4 (the sample-time params) never reaches prep — the
-            // baked image is transform-independent by design. The expected
-            // hash costs a stat when the source is unchanged, so a drag on
-            // a textured material doesn't re-read its images every tick.
-            if resident == Some(texture::expected_hash(&key.0, key.1, key.2, key.3)?) {
-                None
-            } else {
-                let prepared = texture::prepare(&key.0, key.1, key.2, key.3)?;
-                (resident != Some(prepared.hash)).then_some(prepared)
+        // key.4 (the sample-time params) never reaches prep — the baked
+        // image is transform-independent by design.
+        let prepared = match resident_textures.get(&key).copied() {
+            // Nothing resident: prep reads the file either way, so asking
+            // first for the hash it would stamp would read it twice.
+            None => Some(texture::prepare(&key.0, key.1, key.2, key.3)?),
+            Some(_) if !touched => None,
+            // A dirty material named it, so the source may have been
+            // repainted: the expected hash costs a stat, and only a source
+            // that actually moved gets read.
+            Some(hash) => {
+                if hash == texture::expected_hash(&key.0, key.1, key.2, key.3)? {
+                    None
+                } else {
+                    let prepared = texture::prepare(&key.0, key.1, key.2, key.3)?;
+                    (hash != prepared.hash).then_some(prepared)
+                }
             }
-        } else {
-            None
         };
         textures.insert(key, prepared);
     }
@@ -2111,7 +2115,7 @@ mod tests {
     /// last-place drift, not for a real mismatch.
     #[test]
     fn a_temperature_grid_on_its_own_lattice_is_refused() {
-        let Some(tool) = crate::scene::source::vdb::find_prep_tool() else {
+        let Some(tool) = crate::scene::source::vdb::test_prep_tool() else {
             return;
         };
         let fire = |voxel: &str, tag: &str| {

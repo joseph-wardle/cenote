@@ -450,9 +450,10 @@ mod tests {
                 "{width}×{height} lost the step, so the filter had the wrong rectangle"
             );
         }
-        assert!(
-            denoiser.capacity >= 64 * 48 * 16,
-            "capacity must not shrink below the largest frame seen"
+        assert_eq!(
+            denoiser.capacity,
+            64 * 48 * 16,
+            "capacity is the largest frame seen — exactly, or a downsize re-cut buffers"
         );
     }
 
